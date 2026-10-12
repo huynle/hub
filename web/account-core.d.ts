@@ -90,6 +90,8 @@ export const AUDIT_ACTIONS: Readonly<Record<string, string>>
 export function isAdmin(me: Me | undefined): boolean
 export function account(me: Me | undefined): Account
 export function menuItems(me: Me | undefined): MenuItem[]
+export type AdminTab = "users" | "machines" | "approvals" | "audit"
+export function adminTabs(me: Me | undefined): Array<readonly [AdminTab, string]>
 export function speechTabs(me: Me | undefined, settings: { scope?: string } | undefined): Array<"user" | "default">
 export function signInURL(auth: AuthInfo | undefined, next: string | undefined | null): string | undefined
 export function speechInheritance(settings: unknown): SpeechInheritance | undefined

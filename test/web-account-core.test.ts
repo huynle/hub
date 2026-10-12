@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test"
 import {
   account,
   adminError,
+  adminTabs,
   approveOwner,
   auditLabel,
   auditRows,
@@ -44,6 +45,15 @@ describe("menuItems", () => {
     expect(menuItems(alice).map((i) => i.id)).toEqual(["devices", "speech", "admin", "signout"])
     expect(menuItems(bob).map((i) => i.id)).toEqual(["devices", "speech", "signout"])
     expect(menuItems(bob)[0]).toEqual({ id: "devices", label: "My devices" })
+  })
+})
+
+describe("adminTabs", () => {
+  test("oidc admins manage users too; pairing mode has no Users tab; users get none", () => {
+    expect(adminTabs(alice).map(([id]) => id)).toEqual(["users", "machines", "approvals", "audit"])
+    expect(adminTabs(local).map(([id]) => id)).toEqual(["machines", "approvals", "audit"])
+    expect(adminTabs(bob)).toEqual([])
+    expect(adminTabs(alice)[3]).toEqual(["audit", "Audit log"])
   })
 })
 

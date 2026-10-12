@@ -67,6 +67,19 @@ export function menuItems(me) {
   ]
 }
 
+const ADMIN_TABS = Object.freeze([
+  ["users", "Users"],
+  ["machines", "Machines"],
+  ["approvals", "Approvals"],
+  ["audit", "Audit log"],
+])
+
+/** Admin screens: none for users; no Users tab in pairing mode (one implicit owner). */
+export function adminTabs(me) {
+  if (!isAdmin(me)) return []
+  return ADMIN_TABS.filter(([id]) => id !== "users" || me?.auth === "oidc")
+}
+
 /** Speech settings tabs: the user's own, plus the server default for admins on a per-user hub. */
 export function speechTabs(me, settings) {
   return isAdmin(me) && settings?.scope === "user" ? ["user", "default"] : ["user"]
