@@ -1,5 +1,6 @@
 // The background service's session listing for the phone's session browser: the most recent root
-// sessions (no subagent children, nothing archived), each with the workspace it belongs to.
+// sessions (no subagent children, nothing archived) within the history window, plus sessions that must
+// always be listed (open in a terminal, running, ...), each with the workspace it belongs to.
 import path from "node:path"
 
 export interface RawSession {
@@ -24,6 +25,8 @@ export interface RawProject {
 export interface ListingClient {
   readonly session: {
     list(input: { limit?: number; parentID?: null; cursor?: string }): Promise<{ data: readonly RawSession[]; cursor: { next?: string | null } }>
+    /** One session by ID (for always-included sessions outside the window). */
+    get?(input: { sessionID: string }): Promise<RawSession>
   }
   readonly project: { list(): Promise<readonly RawProject[]> }
 }
@@ -43,7 +46,16 @@ export interface ListingOptions {
   readonly pageSize?: number
   /** Pages read at most, so a long run of filtered-out sessions cannot loop for long (default 20). */
   readonly maxPages?: number
+  /** History window: only sessions updated in the last `days` days (default: no limit). */
+  readonly days?: number
+  readonly now?: number
+  /** Session IDs listed even outside the window or over `max` (fetched one by one when missing). */
+  readonly include?: readonly string[]
 }
+
+/** Most always-included sessions fetched one by one per listing. */
+export const INCLUDE_FETCH_MAX = 50
+const DAY_MS = 86_400_000
 
 /** Workspace root and name of a session: its project, else its directory minus its subpath. */
 export function workspaceOf(session: RawSession, projects: ReadonlyMap<string, RawProject>): { project: string; projectName: string } {
@@ -67,16 +79,30 @@ export async function listServiceSessions(client: ListingClient, options: Listin
   } catch {
     // workspaces fall back to directories
   }
+  const cutoff = options.days !== undefined ? (options.now ?? Date.now()) - options.days * DAY_MS : -Infinity
+  const listed = (s: RawSession): ListedSession => ({ id: s.id, title: s.title ?? "", directory: s.location.directory, updated: s.time.updated, ...workspaceOf(s, projects) })
   const out: ListedSession[] = []
   let cursor: string | undefined
-  for (let page = 0; page < maxPages && out.length < max; page++) {
+  // Sessions come newest first: the first one older than the window ends the listing.
+  let ended = false
+  for (let page = 0; page < maxPages && out.length < max && !ended; page++) {
     const result = await client.session.list({ limit: pageSize, parentID: null, ...(cursor ? { cursor } : {}) })
     for (const s of result.data) {
       if (s.parentID || s.time.archived || out.length >= max) continue
-      out.push({ id: s.id, title: s.title ?? "", directory: s.location.directory, updated: s.time.updated, ...workspaceOf(s, projects) })
+      if (s.time.updated < cutoff) {
+        ended = true
+        break
+      }
+      out.push(listed(s))
     }
     cursor = result.cursor.next ?? undefined
     if (!cursor || result.data.length === 0) break
+  }
+  const have = new Set(out.map((s) => s.id))
+  const missing = [...new Set(options.include ?? [])].filter((id) => !have.has(id)).slice(0, INCLUDE_FETCH_MAX)
+  if (missing.length && client.session.get) {
+    const fetched = await Promise.all(missing.map((sessionID) => client.session.get!({ sessionID }).catch(() => undefined)))
+    for (const s of fetched) if (s && s.id && !s.parentID && !s.time?.archived && s.location?.directory) out.push(listed(s))
   }
   return out
 }

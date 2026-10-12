@@ -27,10 +27,17 @@ const PROJECTS = [
 ]
 
 /** A fake client paging `sessions` (already newest first) `pageSize` at a time. */
-function fakeClient(sessions: Raw[], options: { pageSize?: number; projects?: unknown[]; projectsFail?: boolean } = {}) {
+function fakeClient(sessions: Raw[], options: { pageSize?: number; projects?: unknown[]; projectsFail?: boolean; extra?: Raw[] } = {}) {
   const calls: Array<Record<string, unknown>> = []
+  const gets: string[] = []
   const client: ListingClient = {
     session: {
+      get: async ({ sessionID }) => {
+        gets.push(sessionID)
+        const found = [...sessions, ...(options.extra ?? [])].find((s) => s.id === sessionID)
+        if (!found) throw new Error("not found")
+        return found
+      },
       list: async (input) => {
         calls.push({ ...input })
         const size = Math.min(input.limit ?? 50, options.pageSize ?? 1000)
@@ -48,7 +55,7 @@ function fakeClient(sessions: Raw[], options: { pageSize?: number; projects?: un
       },
     },
   }
-  return { client, calls }
+  return { client, calls, gets }
 }
 
 describe("workspaceOf", () => {
@@ -115,5 +122,44 @@ describe("listServiceSessions", () => {
     expect(await listServiceSessions(client)).toEqual([
       { id: "ses_a", title: "T ses_a", directory: "/u/voice/web", updated: 100, project: "/u/voice", projectName: "voice" },
     ])
+  })
+
+  test("history window: only sessions updated in the last `days` days, at most `max`, newest first", async () => {
+    const DAY = 86_400_000
+    const now = 100 * DAY
+    const sessions = [
+      raw("ses_today", { time: { updated: now - 1000 } }),
+      raw("ses_week", { time: { updated: now - 6 * DAY } }),
+      raw("ses_month", { time: { updated: now - 29 * DAY } }),
+      raw("ses_old", { time: { updated: now - 31 * DAY } }),
+      raw("ses_older", { time: { updated: now - 90 * DAY } }),
+    ]
+    const { client, calls } = fakeClient(sessions, { pageSize: 2 })
+    expect((await listServiceSessions(client, { days: 30, max: 100, now, pageSize: 2 })).map((s) => s.id)).toEqual(["ses_today", "ses_week", "ses_month"])
+    // Sessions come newest first: paging stops at the first one older than the window.
+    expect(calls.length).toBe(2)
+    expect((await listServiceSessions(client, { days: 7, max: 1, now })).map((s) => s.id)).toEqual(["ses_today"])
+  })
+
+  test("always-included sessions are fetched when the window misses them; children, archived and unknown ones are skipped", async () => {
+    const DAY = 86_400_000
+    const now = 100 * DAY
+    const { client, gets } = fakeClient(
+      [raw("ses_new", { time: { updated: now } }), raw("ses_old", { title: "Old but open", time: { updated: 1 } })],
+      {
+        extra: [
+          raw("ses_kid", { parentID: "ses_old", time: { updated: 1 } }),
+          raw("ses_gone", { time: { updated: 1, archived: 2 } }),
+          raw("ses_other", { projectID: "p_webshop", location: { directory: "/u/webshop" }, time: { updated: 5 } }),
+        ],
+      },
+    )
+    const sessions = await listServiceSessions(client, { days: 30, max: 1, now, include: ["ses_new", "ses_old", "ses_kid", "ses_gone", "ses_missing", "ses_other"] })
+    expect(sessions).toEqual([
+      { id: "ses_new", title: "T ses_new", directory: "/u/voice", updated: now, project: "/u/voice", projectName: "voice" },
+      { id: "ses_old", title: "Old but open", directory: "/u/voice", updated: 1, project: "/u/voice", projectName: "voice" },
+      { id: "ses_other", title: "T ses_other", directory: "/u/webshop", updated: 5, project: "/u/webshop", projectName: "Web Shop" },
+    ])
+    expect(gets.sort()).toEqual(["ses_gone", "ses_kid", "ses_missing", "ses_old", "ses_other"])
   })
 })
