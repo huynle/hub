@@ -821,7 +821,7 @@ const server = Bun.serve({
       if (action === "utterance" && m === "POST") return Response.json({ inboxID: `inb_${++inbox}` }, { status: 202 })
       if (action === "interrupt" && m === "POST") return new Response(null, { status: 204 })
     }
-    if (p === "/api/prefs/view" && m === "GET") return Response.json(prefsOf(user.id))
+    if (p === "/api/prefs/view" && m === "GET") return Response.json({ prefs: prefsOf(user.id) })
     if (p === "/api/prefs/view" && m === "PUT") {
       const body = await json()
       last().body = body
@@ -830,7 +830,7 @@ const server = Bun.serve({
       const bad = applyPrefs(user.id, body)
       if (bad) return Response.json({ error: bad }, { status: 400 })
       emit({ type: "prefs", userID: user.id })
-      return Response.json(prefsOf(user.id))
+      return Response.json({ prefs: prefsOf(user.id) })
     }
     if (p === "/api/push/prefs" && m === "GET") return Response.json({ prefs: pushPrefs })
     if (p === "/api/push/prefs" && m === "PUT") {
