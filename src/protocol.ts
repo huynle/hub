@@ -27,6 +27,35 @@ export interface SessionInfo {
   readonly project?: string
   readonly projectName?: string
   readonly archived?: boolean
+  /** Open in a terminal right now (a Herdr pane or an OpenCode TUI showing it). */
+  readonly open?: boolean
+  readonly terminal?: TerminalInfo
+}
+
+export interface TerminalInfo {
+  /** Where "open" was detected. */
+  readonly source: "herdr" | "tui"
+  /** Herdr workspace ID and label (e.g. "hindsight"), when open in Herdr. */
+  readonly workspaceID?: string
+  readonly workspace?: string
+  /** Pane/terminal title, e.g. "OC | Fix the login redirect". */
+  readonly title?: string
+  /** Herdr's agent status for the pane. */
+  readonly status?: "idle" | "working" | "blocked" | "done" | "unknown"
+}
+
+/** A Herdr workspace on this machine (a target for new sessions). */
+export interface HerdrWorkspace {
+  readonly id: string
+  readonly label: string
+  /** Folders of the panes in this workspace, most used first (lets the phone suggest a directory). */
+  readonly directories: readonly string[]
+}
+
+/** Machine-level terminal context, sent by one spoke per machine (the service spoke, else a standalone). */
+export interface Terminals {
+  readonly t: "terminals"
+  readonly herdr?: { readonly workspaces: readonly HerdrWorkspace[] }
 }
 
 /** Subset of OpenCode events the spoke forwards (see FORWARDED_EVENTS). */
@@ -118,7 +147,11 @@ export type ServerRequest =
   /** Enable or disable voice for one session (adds/removes it from the machine config's session list). */
   | { readonly op: "expose"; readonly sessionID: string; readonly on: boolean }
   /** Create a session in a workspace directory the spoke already reported. */
-  | { readonly op: "create"; readonly directory: string; readonly title?: string }
+  /**
+   * Create a session in a workspace directory the spoke already reported. With `herdrWorkspace`, also open
+   * it in a new tab of that Herdr workspace (`opencode --session <id>` in the directory).
+   */
+  | { readonly op: "create"; readonly directory: string; readonly title?: string; readonly herdrWorkspace?: string }
 
 export type TurnResult =
   | { readonly outcome: "succeeded"; readonly reply: string }
@@ -137,7 +170,7 @@ export interface ResultFor {
   interrupt: Record<string, never>
   conversation: { readonly agent: string }
   expose: { readonly exposed: boolean }
-  create: { readonly sessionID: string }
+  create: { readonly sessionID: string; readonly openedIn?: "herdr" }
 }
 
 // ---------- both directions ----------
@@ -161,7 +194,7 @@ export interface Bye {
   readonly reason: string
 }
 
-export type SpokeMessage = Hello | Sessions | Event | Req<SpokeRequest> | Res | Bye
+export type SpokeMessage = Hello | Sessions | Terminals | Event | Req<SpokeRequest> | Res | Bye
 export type ServerMessage = Welcome | Req<ServerRequest> | Res | Bye
 
 // ---------- validation ----------
@@ -185,7 +218,31 @@ function isSession(v: unknown): v is SessionInfo {
     (v.exposed === undefined || typeof v.exposed === "boolean") &&
     (v.project === undefined || str(v.project)) &&
     (v.projectName === undefined || str(v.projectName)) &&
-    (v.archived === undefined || typeof v.archived === "boolean")
+    (v.archived === undefined || typeof v.archived === "boolean") &&
+    (v.open === undefined || typeof v.open === "boolean") &&
+    (v.terminal === undefined || isTerminal(v.terminal))
+  )
+}
+
+const TERMINAL_STATUS = new Set(["idle", "working", "blocked", "done", "unknown"])
+
+function isTerminal(v: unknown): v is TerminalInfo {
+  return (
+    isObj(v) &&
+    (v.source === "herdr" || v.source === "tui") &&
+    (v.workspaceID === undefined || str(v.workspaceID)) &&
+    (v.workspace === undefined || str(v.workspace)) &&
+    (v.title === undefined || str(v.title)) &&
+    (v.status === undefined || TERMINAL_STATUS.has(v.status as string))
+  )
+}
+
+function isHerdrInfo(v: unknown): boolean {
+  return (
+    isObj(v) &&
+    Array.isArray(v.workspaces) &&
+    v.workspaces.length <= 200 &&
+    v.workspaces.every((w) => isObj(w) && nonEmpty(w.id) && str(w.label) && Array.isArray(w.directories) && w.directories.every(str))
   )
 }
 
@@ -213,7 +270,13 @@ function isServerRequest(v: unknown): v is ServerRequest {
     case "expose":
       return nonEmpty(v.sessionID) && typeof v.on === "boolean"
     case "create":
-      return nonEmpty(v.directory) && v.directory.startsWith("/") && v.directory.length <= 4096 && (v.title === undefined || (str(v.title) && v.title.length <= 200))
+      return (
+        nonEmpty(v.directory) &&
+        v.directory.startsWith("/") &&
+        v.directory.length <= 4096 &&
+        (v.title === undefined || (str(v.title) && v.title.length <= 200)) &&
+        (v.herdrWorkspace === undefined || (nonEmpty(v.herdrWorkspace) && v.herdrWorkspace.length <= 100))
+      )
     default:
       return false
   }
@@ -252,6 +315,8 @@ export function parseSpokeMessage(raw: string | Buffer): SpokeMessage | undefine
         : undefined
     case "sessions":
       return Array.isArray(m.sessions) && m.sessions.every(isSession) ? (m as unknown as Sessions) : undefined
+    case "terminals":
+      return m.herdr === undefined || isHerdrInfo(m.herdr) ? (m as unknown as Terminals) : undefined
     case "event":
       return isObj(m.event) && nonEmpty(m.event.type) && FORWARDED_EVENTS.has(m.event.type) && isObj(m.event.data)
         ? (m as unknown as Event)

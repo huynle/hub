@@ -137,3 +137,22 @@ describe("session browser ops", () => {
     expect(parseSpokeMessage(JSON.stringify({ t: "sessions", sessions: [{ ...s, exposed: "no" }] }))).toBeUndefined()
   })
 })
+
+describe("open-in-terminal fields", () => {
+  test("sessions carry open + terminal info; bad terminal info is rejected", () => {
+    const s = { id: "ses_1", title: "a", directory: "/d", updated: 1, owned: false, open: true, terminal: { source: "herdr", workspaceID: "w7", workspace: "hindsight", title: "OC | x", status: "working" } }
+    expect(parseSpokeMessage(JSON.stringify({ t: "sessions", sessions: [s] }))).toBeDefined()
+    expect(parseSpokeMessage(JSON.stringify({ t: "sessions", sessions: [{ ...s, terminal: { source: "tmux" } }] }))).toBeUndefined()
+  })
+  test("terminals frame lists Herdr workspaces", () => {
+    const ok = { t: "terminals", herdr: { workspaces: [{ id: "w7", label: "hindsight", directories: ["/home/user/projects/hindsight"] }] } }
+    expect(parseSpokeMessage(JSON.stringify(ok))).toBeDefined()
+    expect(parseSpokeMessage(JSON.stringify({ t: "terminals" }))).toBeDefined()
+    expect(parseSpokeMessage(JSON.stringify({ t: "terminals", herdr: { workspaces: [{ id: "w7" }] } }))).toBeUndefined()
+  })
+  test("create may target a Herdr workspace", () => {
+    const r = (req: unknown) => JSON.stringify({ t: "req", id: "c", req })
+    expect(parseServerMessage(r({ op: "create", directory: "/home/user/p", herdrWorkspace: "w7" }))).toBeDefined()
+    expect(parseServerMessage(r({ op: "create", directory: "/home/user/p", herdrWorkspace: "" }))).toBeUndefined()
+  })
+})
