@@ -23,6 +23,7 @@ describe("centralConfig", () => {
       maxSpeechChars: 800,
       turnTimeoutMs: 600_000,
       vapidSubject: "mailto:opencode-voice@localhost",
+      auth: { mode: "pairing" },
     })
   })
 

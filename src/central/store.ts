@@ -7,6 +7,38 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSy
 import path from "node:path"
 import type { StoredSpeech } from "./speech/settings"
 
+/** Owner of everything in pairing mode, and of records from before 0.3.0. */
+export const LOCAL_USER = "local"
+/** Audit entries kept (oldest dropped first). */
+export const AUDIT_LIMIT = 500
+/** Audit entries returned by auditLog(). */
+export const AUDIT_VIEW_LIMIT = 200
+
+export type Role = "admin" | "user"
+
+export interface UserRecord {
+  /** "local" for the pairing-mode owner; random base64url otherwise. */
+  id: string
+  /** Lowercased; absent for "local". */
+  email?: string
+  name?: string
+  role: Role
+  created: number
+  lastSeen: number
+  disabled?: boolean
+  /** Per-user speech settings (same shape as the server default in StateData.speech). */
+  speech?: StoredSpeech
+}
+
+export interface AuditEntry {
+  at: number
+  /** User ID or "system". */
+  actor: string
+  action: string
+  target?: string
+  detail?: string
+}
+
 export interface MachineRecord {
   id: string
   name: string
@@ -14,6 +46,7 @@ export interface MachineRecord {
   created: number
   lastSeen: number
   revoked?: boolean
+  ownerID: string
 }
 
 /** Which notifications a device wants. */
@@ -34,6 +67,7 @@ export interface DeviceRecord {
   created: number
   lastSeen: number
   pushPrefs?: Partial<PushPrefs>
+  ownerID: string
 }
 
 export interface VapidKeys {
@@ -58,7 +92,16 @@ export interface StateData {
   devices: DeviceRecord[]
   vapid?: VapidKeys
   push: PushSubscriptionRecord[]
+  /** Server default speech settings (below each user's own, above hub.json and the env). */
   speech?: StoredSpeech
+  users: UserRecord[]
+  /** Newest last, at most AUDIT_LIMIT. */
+  audit: AuditEntry[]
+}
+
+export interface StoreOptions {
+  /** pairing: the local user is (re-)enabled as admin on open. */
+  readonly mode?: "pairing" | "oidc"
 }
 
 /** Writes of lastSeen alone are throttled to this interval. */
@@ -69,6 +112,7 @@ const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "obj
 export const newToken = (): string => randomBytes(32).toString("base64url")
 export const hashToken = (token: string): string => createHash("sha256").update(token).digest("hex")
 export const newID = (prefix: string): string => `${prefix}_${randomBytes(9).toString("base64url")}`
+const newUserID = (): string => randomBytes(12).toString("base64url")
 
 /** Constant-time comparison of two hex digests. */
 function sameHash(a: string, b: string): boolean {
@@ -93,11 +137,11 @@ export class Store {
     private readonly now: () => number,
   ) {}
 
-  static open(dir: string, now: () => number = Date.now): Store {
+  static open(dir: string, now: () => number = Date.now, options: StoreOptions = {}): Store {
     mkdirSync(dir, { recursive: true, mode: 0o700 })
     chmodSync(dir, 0o700)
     const file = path.join(dir, "state.json")
-    let state: StateData = { machines: [], devices: [], push: [] }
+    let state: StateData = { machines: [], devices: [], push: [], users: [], audit: [] }
     if (existsSync(file)) {
       try {
         const raw = JSON.parse(readFileSync(file, "utf8")) as Partial<StateData>
@@ -107,11 +151,14 @@ export class Store {
           ...(raw.vapid ? { vapid: raw.vapid } : {}),
           push: Array.isArray(raw.push) ? raw.push : [],
           ...(isRecord(raw.speech) ? { speech: raw.speech } : {}),
+          users: Array.isArray(raw.users) ? raw.users : [],
+          audit: Array.isArray(raw.audit) ? raw.audit : [],
         }
       } catch (cause) {
         throw new Error(`Cannot read ${file}: ${cause instanceof Error ? cause.message : cause}. Fix or move it away.`)
       }
     }
+    migrate(state, now(), options)
     const store = new Store(file, state, now)
     store.save()
     return store
@@ -129,10 +176,10 @@ export class Store {
     return this.state.devices
   }
 
-  addMachine(name: string): { machine: MachineRecord; token: string } {
+  addMachine(name: string, ownerID: string = LOCAL_USER): { machine: MachineRecord; token: string } {
     const token = newToken()
     const t = this.now()
-    const machine: MachineRecord = { id: newID("mch"), name, tokenHash: hashToken(token), created: t, lastSeen: t }
+    const machine: MachineRecord = { id: newID("mch"), name, tokenHash: hashToken(token), created: t, lastSeen: t, ownerID }
     this.state.machines.push(machine)
     this.save()
     return { machine, token }
@@ -158,10 +205,10 @@ export class Store {
     this.touch(this.state.machines.find((m) => m.id === id))
   }
 
-  addDevice(name: string): { device: DeviceRecord; token: string } {
+  addDevice(name: string, ownerID: string = LOCAL_USER): { device: DeviceRecord; token: string } {
     const token = newToken()
     const t = this.now()
-    const device: DeviceRecord = { id: newID("dev"), name, tokenHash: hashToken(token), created: t, lastSeen: t }
+    const device: DeviceRecord = { id: newID("dev"), name, tokenHash: hashToken(token), created: t, lastSeen: t, ownerID }
     this.state.devices.push(device)
     this.save()
     return { device, token }
@@ -257,6 +304,95 @@ export class Store {
     this.save()
   }
 
+  // ---------- users ----------
+
+  users(): readonly UserRecord[] {
+    return this.state.users
+  }
+
+  user(id: string): UserRecord | undefined {
+    return this.state.users.find((u) => u.id === id)
+  }
+
+  userByEmail(email: string): UserRecord | undefined {
+    const wanted = email.trim().toLowerCase()
+    return this.state.users.find((u) => u.email === wanted)
+  }
+
+  /**
+   * Creates the user for a (verified, lowercased) email, or updates its name and lastSeen. Role
+   * "admin" promotes an existing user (admins come from the config); "user" never demotes.
+   */
+  upsertUser(input: { email: string; name?: string; role: Role }): UserRecord {
+    const email = input.email.trim().toLowerCase()
+    const t = this.now()
+    let user = this.userByEmail(email)
+    if (!user) {
+      user = { id: newUserID(), email, ...(input.name ? { name: input.name } : {}), role: input.role, created: t, lastSeen: t }
+      this.state.users.push(user)
+    } else {
+      if (input.name) user.name = input.name
+      if (input.role === "admin") user.role = "admin"
+      user.lastSeen = t
+    }
+    this.save()
+    return user
+  }
+
+  setUser(id: string, change: { role?: Role; disabled?: boolean }): UserRecord | undefined {
+    const user = this.user(id)
+    if (!user) return undefined
+    if (change.role) user.role = change.role
+    if (change.disabled === true) user.disabled = true
+    else if (change.disabled === false) delete user.disabled
+    this.save()
+    return user
+  }
+
+  touchUser(id: string): void {
+    this.touch(this.user(id))
+  }
+
+  /**
+   * First admin sign-in in oidc mode: every record owned by "local" moves to the admin and "local" is
+   * disabled. False (nothing changed) once done.
+   */
+  migrateLocal(adminID: string): boolean {
+    const local = this.user(LOCAL_USER)
+    if (!local || local.disabled || adminID === LOCAL_USER) return false
+    for (const record of [...this.state.machines, ...this.state.devices]) if (record.ownerID === LOCAL_USER) record.ownerID = adminID
+    local.disabled = true
+    this.audit({ actor: "system", action: "migrate.local", target: adminID })
+    return true
+  }
+
+  // ---------- audit ----------
+
+  /** Appends an audit entry. Never pass tokens, codes, keys or session content. */
+  audit(entry: Omit<AuditEntry, "at">): void {
+    this.state.audit.push({ at: this.now(), ...entry })
+    if (this.state.audit.length > AUDIT_LIMIT) this.state.audit.splice(0, this.state.audit.length - AUDIT_LIMIT)
+    this.save()
+  }
+
+  /** Newest first, at most AUDIT_VIEW_LIMIT. */
+  auditLog(): AuditEntry[] {
+    return this.state.audit.slice(-AUDIT_VIEW_LIMIT).reverse().map((entry) => ({ ...entry }))
+  }
+
+  // ---------- per-user speech ----------
+
+  userSpeech(id: string): StoredSpeech {
+    return structuredClone(this.user(id)?.speech ?? {})
+  }
+
+  setUserSpeech(id: string, settings: StoredSpeech): void {
+    const user = this.user(id)
+    if (!user) return
+    user.speech = structuredClone(settings)
+    this.save()
+  }
+
   touchDevice(id: string): void {
     this.touch(this.state.devices.find((d) => d.id === id))
   }
@@ -274,5 +410,22 @@ export class Store {
     writeFileSync(tmp, `${JSON.stringify(this.state, null, 2)}\n`, { mode: 0o600 })
     chmodSync(tmp, 0o600)
     renameSync(tmp, this.file)
+  }
+}
+
+/** Idempotent upgrade of older states: the local user exists, every machine and device has an owner. */
+function migrate(state: StateData, t: number, options: StoreOptions): void {
+  let local = state.users.find((u) => u.id === LOCAL_USER)
+  if (!local) {
+    local = { id: LOCAL_USER, role: "admin", created: t, lastSeen: t }
+    state.users.unshift(local)
+  }
+  if (options.mode === "pairing") {
+    // Pairing mode has exactly one owner, and it must be able to sign in and manage the hub.
+    local.role = "admin"
+    delete local.disabled
+  }
+  for (const record of [...state.machines, ...state.devices]) {
+    if (typeof record.ownerID !== "string" || !record.ownerID) record.ownerID = LOCAL_USER
   }
 }

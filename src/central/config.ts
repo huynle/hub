@@ -4,7 +4,40 @@
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
+import { isLoopbackHost } from "../loopback"
 import { updateSpeech, type StoredSpeech } from "./speech/settings"
+
+export const GOOGLE_ISSUER = "https://accounts.google.com"
+
+/** How browsers get access: pairing codes only (one owner), or OpenID Connect sign-in (several users). */
+export type AuthConfig =
+  | { readonly mode: "pairing" }
+  | {
+      readonly mode: "oidc"
+      /** Without a trailing slash; discovery at <issuer>/.well-known/openid-configuration. */
+      readonly issuer: string
+      readonly clientId: string
+      /** Non-enumerable: never serialized or printed with the config. */
+      readonly clientSecret: string
+      /** Lowercased emails and @domain entries. */
+      readonly allowed: readonly string[]
+      /** Lowercased admin emails (also allowed). */
+      readonly admins: readonly string[]
+      /** Dev only (VOICE_OIDC_INSECURE_ISSUER=1): the issuer is plain http on loopback. */
+      readonly insecureIssuer?: true
+    }
+
+export type OidcConfig = Extract<AuthConfig, { mode: "oidc" }>
+
+/** hub.json `auth`, validated (lists already split and lowercased). */
+export interface HubAuth {
+  readonly mode?: "pairing" | "oidc"
+  readonly issuer?: string
+  readonly clientId?: string
+  readonly clientSecret?: string
+  readonly allowed?: readonly string[]
+  readonly admins?: readonly string[]
+}
 
 export interface CentralConfig {
   readonly host: string
@@ -23,6 +56,7 @@ export interface CentralConfig {
   readonly vapidSubject: string
   /** Speech settings from hub.json (below the phone's saved settings, above the env). */
   readonly speech?: StoredSpeech
+  readonly auth: AuthConfig
 }
 
 /** hub.json, validated. */
@@ -32,11 +66,29 @@ export interface HubFile {
   readonly publicURL?: string
   readonly stateDir?: string
   readonly speech?: StoredSpeech
+  readonly auth?: HubAuth
 }
 
 type Env = Readonly<Record<string, string | undefined>>
 
-const HUB_KEYS = new Set(["host", "port", "publicURL", "stateDir", "speech"])
+const HUB_KEYS = new Set(["host", "port", "publicURL", "stateDir", "speech", "auth"])
+const AUTH_KEYS = new Set(["mode", "issuer", "clientId", "clientSecret", "allowed", "admins"])
+const EMAIL = /^[^\s@,]+@[^\s@,]+\.[^\s@,]+$/
+const DOMAIN = /^@[^\s@,]+\.[^\s@,]+$/
+
+/** Splits a comma list (or takes an array), trims and lowercases; empty entries dropped. */
+function emailList(value: string | readonly string[] | undefined): string[] {
+  const items = typeof value === "string" ? value.split(",") : (value ?? [])
+  return items.map((item) => item.trim().toLowerCase()).filter(Boolean)
+}
+
+/** True when the (verified) email is an admin or on the allow-list: exact email or `@domain` (no subdomains). */
+export function emailAllowed(auth: { readonly allowed: readonly string[]; readonly admins: readonly string[] }, email: string): boolean {
+  const e = email.trim().toLowerCase()
+  if (!EMAIL.test(e)) return false
+  const domain = e.slice(e.lastIndexOf("@"))
+  return auth.admins.includes(e) || auth.allowed.includes(e) || auth.allowed.includes(domain)
+}
 
 function int(value: string | undefined, fallback: number, min = 1): number {
   if (value === undefined || value.trim() === "") return fallback
@@ -105,6 +157,7 @@ export function readHubFile(file: string, home: string = homedir()): { file?: Hu
     if (typeof raw.stateDir !== "string" || !raw.stateDir.trim()) fail("stateDir must be a non-empty string")
     hub.stateDir = expandHome((raw.stateDir as string).trim(), home)
   }
+  if (raw.auth !== undefined) hub.auth = readHubAuth(raw.auth, file, warnings, fail)
   if (raw.speech !== undefined) {
     if (!isObj(raw.speech)) fail("speech must be an object with stt and/or tts")
     const speech = { ...(raw.speech as Record<string, unknown>) }
@@ -119,6 +172,81 @@ export function readHubFile(file: string, home: string = homedir()): { file?: Hu
     }
   }
   return { file: hub, warnings }
+}
+
+function readHubAuth(raw: unknown, file: string, warnings: string[], fail: (message: string) => never): HubAuth {
+  if (!isObj(raw)) fail("auth must be an object")
+  const input = raw as Record<string, unknown>
+  for (const key of Object.keys(input)) if (!AUTH_KEYS.has(key)) warnings.push(`${file}: unknown key "auth.${key}" ignored`)
+  const auth: { -readonly [K in keyof HubAuth]: HubAuth[K] } = {}
+  if (input.mode !== undefined) {
+    if (input.mode !== "pairing" && input.mode !== "oidc") fail('auth.mode must be "pairing" or "oidc"')
+    auth.mode = input.mode as "pairing" | "oidc"
+  }
+  for (const key of ["issuer", "clientId", "clientSecret"] as const) {
+    const value = input[key]
+    if (value === undefined) continue
+    if (typeof value !== "string" || !value.trim()) fail(`auth.${key} must be a non-empty string`)
+    auth[key] = (value as string).trim()
+  }
+  for (const key of ["allowed", "admins"] as const) {
+    const value = input[key]
+    if (value === undefined) continue
+    const ok = typeof value === "string" || (Array.isArray(value) && value.every((v) => typeof v === "string"))
+    if (!ok) fail(`auth.${key} must be a list of emails (array of strings or a comma list)`)
+    auth[key] = emailList(value as string | string[])
+  }
+  if (auth.clientSecret !== undefined && (statSync(file).mode & 0o044) !== 0) {
+    delete auth.clientSecret
+    warnings.push(`${file} is readable by other users, so its auth.clientSecret is ignored. Fix it with: chmod 600 ${file}`)
+  }
+  return auth
+}
+
+/** Validates the OIDC issuer: https, or plain http on loopback when the dev flag is set. No trailing slash. */
+function issuerURL(raw: string, insecure: boolean): string {
+  let url: URL
+  try {
+    url = new URL(raw)
+  } catch {
+    throw new Error(`VOICE_OIDC_ISSUER (auth.issuer) must be a URL, got ${JSON.stringify(raw)}`)
+  }
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error("VOICE_OIDC_ISSUER (auth.issuer) must not contain credentials, a query or a fragment")
+  }
+  if (url.protocol === "http:" && insecure) {
+    if (!isLoopbackHost(url.hostname)) throw new Error("VOICE_OIDC_INSECURE_ISSUER only allows a plain http issuer on loopback (dev only)")
+  } else if (url.protocol !== "https:") {
+    throw new Error(`VOICE_OIDC_ISSUER (auth.issuer) must be an https:// URL, got ${JSON.stringify(raw)}`)
+  }
+  return url.toString().replace(/\/+$/, "")
+}
+
+/** Auth settings from env over hub.json. Throws (without echoing secrets) when oidc is incomplete. */
+function authConfig(env: Env, file: HubAuth = {}): AuthConfig {
+  const mode = (env.VOICE_AUTH?.trim() || file.mode || "pairing").toLowerCase()
+  if (mode === "pairing") return { mode: "pairing" }
+  if (mode !== "oidc") throw new Error(`VOICE_AUTH must be "pairing" or "oidc", got ${JSON.stringify(env.VOICE_AUTH)}`)
+  const insecure = env.VOICE_OIDC_INSECURE_ISSUER === "1"
+  const issuer = issuerURL(env.VOICE_OIDC_ISSUER?.trim() || file.issuer || GOOGLE_ISSUER, insecure)
+  const required = (value: string | undefined, name: string): string => {
+    if (!value) throw new Error(`${name} is required for VOICE_AUTH=oidc`)
+    return value
+  }
+  const clientId = required(env.VOICE_OIDC_CLIENT_ID?.trim() || file.clientId, "VOICE_OIDC_CLIENT_ID (auth.clientId)")
+  const clientSecret = required(env.VOICE_OIDC_CLIENT_SECRET?.trim() || file.clientSecret, "VOICE_OIDC_CLIENT_SECRET (auth.clientSecret)")
+  const allowed = emailList(env.VOICE_OIDC_ALLOWED ?? file.allowed)
+  const admins = emailList(env.VOICE_ADMIN_EMAILS ?? file.admins)
+  if (allowed.length === 0) throw new Error("VOICE_OIDC_ALLOWED (auth.allowed) is required for VOICE_AUTH=oidc: list emails and/or @domain entries")
+  if (admins.length === 0) throw new Error("VOICE_ADMIN_EMAILS (auth.admins) needs at least one admin email for VOICE_AUTH=oidc")
+  const bad = allowed.find((entry) => !EMAIL.test(entry) && !DOMAIN.test(entry))
+  if (bad !== undefined) throw new Error(`VOICE_OIDC_ALLOWED (auth.allowed): ${JSON.stringify(bad)} is not an email or @domain`)
+  const badAdmin = admins.find((entry) => !EMAIL.test(entry))
+  if (badAdmin !== undefined) throw new Error(`VOICE_ADMIN_EMAILS (auth.admins): ${JSON.stringify(badAdmin)} is not an email`)
+  const auth = { mode: "oidc" as const, issuer, clientId, allowed, admins, ...(insecure ? { insecureIssuer: true as const } : {}) }
+  // A getter: printed as [Getter], skipped by JSON.stringify.
+  Object.defineProperty(auth, "clientSecret", { get: () => clientSecret, enumerable: false })
+  return auth as unknown as OidcConfig
 }
 
 export function centralConfig(env: Env = process.env, home: string = homedir(), file: HubFile = {}): CentralConfig {
@@ -145,6 +273,7 @@ export function centralConfig(env: Env = process.env, home: string = homedir(), 
     // Push services want a contact: an https URL or mailto. The public URL works for hosted hubs.
     vapidSubject: env.VOICE_VAPID_SUBJECT || (publicURL.startsWith("https://") ? publicURL : "mailto:opencode-voice@localhost"),
     ...(file.speech ? { speech: file.speech } : {}),
+    auth: authConfig(env, file.auth),
   }
 }
 
