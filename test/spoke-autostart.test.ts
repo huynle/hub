@@ -160,6 +160,27 @@ describe("auto-start on connection failure", () => {
   })
 })
 
+describe("cooldown timer", () => {
+  test("a cooldown timer that fires a little early (Linux) still retries", async () => {
+    // Timers may fire a moment before Date.now() reaches the deadline. Simulate that with a wall clock
+    // running at half the timers' speed, so every cooldown timer fires "early".
+    const realNow = Date.now
+    const t0 = realNow()
+    Date.now = () => t0 + (realNow() - t0) / 2
+    cleanups.push(() => (Date.now = realNow))
+    const s = starter()
+    let fail = true
+    const start = s.next
+    s.next = async (server) => (fail ? ((fail = false), { status: "failed", error: "nope" }) : start(server))
+    const { spoke } = setup(
+      { server: `http://127.0.0.1:${freePort()}`, mode: "always", token: "tok" },
+      { localHub: s.fn, backoff: { minMs: 10, maxMs: 20 }, localHubRetryMs: 100 },
+    )
+    await until(() => spoke.status().connection === "connected", 3000)
+    expect(s.calls.length).toBeGreaterThanOrEqual(2)
+  })
+})
+
 describe("enroll with a local server", () => {
   test("starts the hub when nothing answers, then enrolls (even from a standalone process)", async () => {
     const s = starter()

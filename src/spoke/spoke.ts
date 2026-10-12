@@ -492,6 +492,10 @@ export class Spoke {
       const wait = this.hub.cooldown
       this.hub.nextAt = Date.now() + wait
       this.hub.timer = setTimeout(() => {
+        // The cooldown is over when this fires. Timers can fire slightly before Date.now() reaches
+        // nextAt (seen on Linux); re-checking the clock would drop the retry for good, because the
+        // connection reports no new state change while it stays in error.
+        this.hub.nextAt = 0
         if (this.connection && this.connection.state !== "connected") this.maybeStartLocalHub(server)
       }, wait)
       ;(this.hub.timer as { unref?: () => void }).unref?.()
