@@ -8,8 +8,9 @@ Talk to your [OpenCode](https://opencode.ai) sessions by voice, from your phone 
   subagents on your full model.
 - **See what's happening**: live activity (tool calls, subagents, streamed replies), progress cues, and
   push notifications when a session needs you.
-- **Every session on every machine**: a session browser grouped by workspace, with search, filters and
-  pins; start new sessions from the phone.
+- **What's open in your terminals first**: the phone lists the sessions open in Herdr or the OpenCode
+  TUI, grouped like Herdr's sidebar, with the rest under Recent; pin and hide in sync across devices;
+  start new sessions from the phone, opened in a Herdr workspace.
 - **Bring your own speech**: OpenRouter or any OpenAI-compatible STT/TTS service (including self-hosted).
 - **Runs where you want**: a hub on your computer with nothing extra to install, or your own voice server
   for phones anywhere.
@@ -275,28 +276,45 @@ screen-off listening), Speech (STT/TTS providers), notification preferences, dev
   see the list of pending requests; everyone else approves by the code OpenCode shows.
 - A session link that is not yours (or is gone) shows **Session not found** with a link home.
 
-**Session browser** (`/`; pure logic in `web/browser-core.js`, tested with bun). Per machine:
+**Session browser** (`/`; contract in [docs/session-view.md](docs/session-view.md); pure logic in
+`web/view-core.js` and `web/browser-core.js`, tested with bun). Three tabs with counts:
 
-- **Pinned** (when any), **Needs you** (permission or question blockers, with the blocker and an Open
-  button), **Active now** (working sessions with their now line, e.g. `shell · bun test`, `Thinking…`).
-- **Workspaces**: sessions of the background service grouped by `project` (or `directory`), sorted by last
-  activity with pinned workspaces first. Worktrees and subfolders (`directory` ≠ `project`) are nested
-  under their repo with the relative path. Each header shows the name, count, an aggregate state
-  (blocked > working > error > idle) and last activity. Groups that are pinned, active, blocked or changed
-  within a day start open; opening/closing is remembered. Only open groups render rows, 50 at a time
-  ("Show more"). Rows: pinned, then state, then most recent.
-- **Standalone**: each standalone process with its sessions.
-- Search (title, project name, directory; case- and diacritic-insensitive, all words must match, matches
-  highlighted; opens every group) and filter chips All · Active · Needs you · Today · Voice on · Enabled.
-  Pins (sessions and workspaces), open/closed groups and the filter are stored per device in
-  `localStorage`. Live updates keep scroll position, focus and the search.
+- **Open** (default): what is open in your terminals right now, like Herdr's sidebar. A **Needs you**
+  strip first (blocked sessions from every machine, open or not, with the blocker and an Open button),
+  then one group per Herdr workspace (in Herdr's order), then one per project folder for sessions open in
+  an OpenCode TUI. Rows are compact: status dot (Herdr's agent status combined with the session state:
+  blocked > working > error > idle), **workspace** · title, and `opencode · folder` or what it is doing
+  now (`shell · bun test`, `Thinking…`). Within a group: pinned, then blocked, working, idle, then most
+  recent; pinned groups come first. Sessions that are not open but working or in conversation mode are
+  listed under **Not in a terminal**. With nothing open: "No sessions open in a terminal" with links to
+  Recent and New session. Machine headers appear only when several machines are online; offline machines
+  are one line at the end.
+- **Recent**: everything else the machine reported (its history window), grouped by workspace with
+  nested worktrees and subfolders, with search (title, project name, directory; case- and
+  diacritic-insensitive, all words must match, matches highlighted; opens every group) and filter chips
+  All · Active · Needs you · Today · Voice on · Enabled. Groups that are pinned, active, blocked or changed
+  within a day start open; only open groups render rows, 50 at a time ("Show more"). A **Standalone**
+  section lists standalone processes.
+- **Hidden**: hidden workspaces (with how many sessions they hide) and hidden sessions, each with Unhide.
+- **Menus**: ⋯ on a row (or long-press / right-click it): Open, Pin to top / Unpin, Hide / Unhide. ⋯ on a
+  group: New session here, Pin / Unpin workspace, Hide / Unhide workspace (and Collapse / Expand in
+  Recent). Hiding a workspace hides the sessions in it: a Herdr workspace (`herdr:<id>`), a project
+  folder, or a nested folder such as a worktree.
+- **Synced view settings**: pins and hides are per user on the hub (`GET`/`PUT /api/prefs/view`), shown at
+  once, reverted with a message if the hub refuses, with Undo after a hide. Other devices update live
+  (SSE `prefs`). Pins from 0.3 (stored on the device) are moved into them once. With an older hub
+  without `/api/prefs/view`, they stay on the device. Open/closed groups and the filter stay per device.
 - **Voice off** sessions (`exposed: false`, mode `session`) are greyed with an "Enable voice" button
   (`POST /api/sessions/:id/expose {on:true}`; shown at once, reverted on error); tapping one explains
   and offers "Enable voice and open". A session page answered with 403 `not_exposed` shows "Enable
   voice for this session" instead of the conversation.
-- **New session here** (+ on a workspace or worktree header, also in its ⋯ menu): optional title, then
-  `POST /api/machines/:id/sessions {directory, title?}` and the new session opens with an offer to
-  start conversation mode. 409 (background service not connected) is shown in the sheet.
+- **New session** (+ in the header, + on any group, or a group's ⋯ menu): machine (when several are
+  online), workspace (Herdr workspaces first, then known folders), folder (a Herdr workspace's pane
+  folders, most used first), optional title, and **Open in Herdr** (shown when the machine runs Herdr; on
+  by default for a Herdr workspace). Sends `POST /api/machines/:id/sessions {directory, title?,
+  herdrWorkspace?}`; the new session opens with an offer to start conversation mode. "Opened in Herdr ·
+  <workspace>" confirms the new tab; if Herdr failed, the session still exists and the hub's `warning`
+  is shown. 409 (background service not connected) is shown in the sheet.
 
 **Notifications** (web push, VAPID keys generated once and stored in the state file): hand-offs from the
 terminal and blocked sessions are on by default, "finished" (a root session's run succeeded or failed,
@@ -535,9 +553,13 @@ it again, say "pause listening", or leave the page to turn it off. Leaving the p
   (queue transcripts with `POST /mock/transcripts`, push SSE messages with `POST /mock/emit`, set the
   status tree with `POST /mock/status {sessions}`, add activity with `POST /mock/activity {sessionID?, item}`,
   read calls from `GET /mock/log`). It also fakes presence, push prefs and the speech settings API, and
-  the session browser: ~45 sessions in 6 workspaces (worktrees, blocked, working, voice-off ones, a
-  standalone process, an offline machine), expose, create and 403 `not_exposed`. `POST /mock/session
-  {id, ...patch}` changes a session live, `POST /mock/fail {expose?, create?, models?}` makes those calls fail,
+  the session browser: ~55 sessions in 8 workspaces (worktrees, blocked, working, voice-off ones, a
+  standalone process, an offline machine), 14 of them open (Herdr workspaces general, api-server, research,
+  ops; one in a TUI), expose, create (with `herdrWorkspace`) and 403 `not_exposed`, and the view prefs
+  (`GET`/`PUT /api/prefs/view`, SSE `prefs`). `POST /mock/prefs {…lists}` acts as another device changing
+  prefs, `POST /mock/herdr {on?, fail?}` removes Herdr or makes opening in Herdr fail (201 with a `warning`).
+  `POST /mock/session {id, ...patch}` changes a session live, `POST /mock/fail {expose?, create?, models?,
+  prefs?}` makes those calls fail,
   `POST /mock/service {connected}` disconnects the service (create answers 409). `POST /mock/stream {sessionID?,
   kind: "text" | "reasoning", messageID, text}` streams text in chunks; `POST /mock/scenario` plays a run of
   `ses_mock` (reasoning, a shell tool, two subagents streaming output, reply text with `say` in conversation
