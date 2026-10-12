@@ -4,7 +4,8 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import { defaults, readConfig, writeConfig, type VoiceConfig } from "../src/config"
 import { PROTOCOL_VERSION } from "../src/protocol"
-import { detectKind, Spoke, SpokeError, type SpokeHost } from "../src/spoke/spoke"
+import type { HerdrRunner } from "../src/spoke/herdr"
+import { detectKind, Spoke, SpokeError, type SpokeHost, type SpokeOptions } from "../src/spoke/spoke"
 import { EventQueue, fakeCentral, until, type FakeCentral } from "./spoke-fake"
 
 type Ev = { type: string; data: Record<string, unknown>; created?: number }
@@ -64,7 +65,10 @@ function fakeHost() {
   return { host, calls, messages, agents, known, models }
 }
 
-function setup(config: Partial<VoiceConfig>, opts: { server?: FakeCentral; kind?: "service" | "standalone"; listRecent?: SpokeHost["listRecent"] } = {}) {
+function setup(
+  config: Partial<VoiceConfig>,
+  opts: { server?: FakeCentral; kind?: "service" | "standalone"; listRecent?: SpokeHost["listRecent"]; herdr?: HerdrRunner; options?: Partial<SpokeOptions> } = {},
+) {
   const dir = mkdtempSync(path.join(tmpdir(), "voice-spoke-"))
   const file = path.join(dir, "config.json")
   const server = opts.server ?? fakeCentral()
@@ -84,6 +88,8 @@ function setup(config: Partial<VoiceConfig>, opts: { server?: FakeCentral; kind?
     seedDebounceMs: 10,
     pollMs: 20,
     backoff: { minMs: 10, maxMs: 50 },
+    ...(opts.herdr ? { herdr: opts.herdr, herdrPollMs: { agents: 20, workspaces: 40 }, herdrSettleMs: 0 } : {}),
+    ...opts.options,
   })
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
   cleanups.push(() => server.stop())
@@ -583,3 +589,173 @@ describe("Spoke", () => {
     await until(() => spoke.subagent() === "explore")
   })
 })
+
+// ---------- 0.4: open sessions first ----------
+
+const herdrAgent = (sessionID: string, extra: Record<string, unknown> = {}) => ({
+  agent: "opencode",
+  agent_session: { agent: "opencode", kind: "id", source: "herdr:opencode", value: sessionID },
+  agent_status: "working",
+  cwd: "/home/user/app",
+  pane_id: "w5:p1",
+  tab_id: "w5:t1",
+  terminal_title_stripped: "OC | Fix login",
+  workspace_id: "w5",
+  ...extra,
+})
+
+/** A fake `herdr` answering list commands from mutable state and recording every call. */
+function fakeHerdr(state: { agents: unknown[]; down?: boolean; tab?: string | Error; start?: string | Error }) {
+  const calls: string[][] = []
+  const run: HerdrRunner = async (args) => {
+    calls.push(args)
+    if (state.down) throw new Error("herdr server is not running")
+    const key = `${args[0]} ${args[1]}`
+    if (key === "agent list") return JSON.stringify({ result: { agents: state.agents, type: "agent_list" } })
+    if (key === "workspace list")
+      return JSON.stringify({ result: { workspaces: [{ workspace_id: "w5", label: "app", number: 1 }, { workspace_id: "w7", label: "notes", number: 2 }] } })
+    if (key === "pane list") return JSON.stringify({ result: { panes: [{ workspace_id: "w5", cwd: "/home/user/app" }, { workspace_id: "w7", cwd: "/home/user/notes" }] } })
+    const answer = key === "tab create" ? state.tab : key === "agent start" ? state.start : undefined
+    if (answer instanceof Error) throw answer
+    if (answer !== undefined) return answer
+    throw new Error(`unexpected herdr ${args.join(" ")}`)
+  }
+  return { run, calls }
+}
+
+const lastTerminals = (server: FakeCentral) => server.frames.filter((f) => f.t === "terminals").at(-1) as any
+
+describe("open sessions (0.4)", () => {
+  test("the service marks sessions open in Herdr, fetches open sessions outside the window, and sends the workspaces", async () => {
+    const herdr = fakeHerdr({ agents: [herdrAgent("ses_open")] })
+    const listings: unknown[] = []
+    const listRecent: SpokeHost["listRecent"] = async (options) => {
+      listings.push(options)
+      const include = options?.include ?? []
+      return [
+        { id: "ses_recent", title: "Recent", directory: "/home/user/app", updated: 10, project: "/home/user/app", projectName: "app" },
+        ...(include.includes("ses_open") ? [{ id: "ses_open", title: "Old but open", directory: "/home/user/app", updated: 1, project: "/home/user/app", projectName: "app" }] : []),
+      ]
+    }
+    const { spoke, server } = setup({ mode: "always", token: "tok", list: { days: 7, max: 20 } }, { kind: "service", listRecent, herdr: herdr.run })
+    await until(() => spoke.status().connection === "connected")
+    await until(() => lastSessions(server)?.sessions.some((s) => s.id === "ses_open") === true)
+    expect(lastSessions(server)?.sessions.find((s) => s.id === "ses_open")).toMatchObject({
+      open: true,
+      terminal: { source: "herdr", workspaceID: "w5", workspace: "app", title: "Fix login", status: "working" },
+    })
+    expect(lastSessions(server)?.sessions.find((s) => s.id === "ses_recent")).not.toHaveProperty("open")
+    expect(listings.at(-1)).toMatchObject({ days: 7, max: 20, include: ["ses_open"] })
+    await until(() => lastTerminals(server) !== undefined)
+    expect(lastTerminals(server)).toEqual({
+      t: "terminals",
+      herdr: {
+        workspaces: [
+          { id: "w5", label: "app", directories: ["/home/user/app"] },
+          { id: "w7", label: "notes", directories: ["/home/user/notes"] },
+        ],
+      },
+    })
+  })
+
+  test("closing the Herdr pane or losing Herdr clears open and the terminals", async () => {
+    const state: { agents: unknown[]; down?: boolean } = { agents: [herdrAgent("ses_a")] }
+    const herdr = fakeHerdr(state)
+    const { spoke, server, host } = setup({ mode: "always", token: "tok" }, { kind: "service", herdr: herdr.run })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    await until(() => lastSessions(server)?.sessions.find((s) => s.id === "ses_a")?.open === true)
+    state.agents = []
+    await until(() => lastSessions(server)?.sessions.find((s) => s.id === "ses_a")?.open === undefined)
+    state.down = true
+    await until(() => lastTerminals(server)?.herdr === undefined)
+    expect(lastTerminals(server)).toEqual({ t: "terminals" })
+  })
+
+  test("standalone processes never run herdr; config herdr:false turns the service's reader off", async () => {
+    const standalone = fakeHerdr({ agents: [herdrAgent("ses_a")] })
+    const a = setup({ mode: "always", token: "tok" }, { herdr: standalone.run })
+    const off = fakeHerdr({ agents: [herdrAgent("ses_a")] })
+    const b = setup({ mode: "always", token: "tok", herdr: false }, { kind: "service", herdr: off.run })
+    await until(() => a.spoke.status().connection === "connected" && b.spoke.status().connection === "connected")
+    await Bun.sleep(100)
+    expect(standalone.calls).toEqual([])
+    expect(off.calls).toEqual([])
+    expect(a.server.frames.some((f) => f.t === "terminals")).toBe(false)
+  })
+
+  test("TUI presence marks sessions open (source tui), fetches unknown ones, and a new report replaces the old", async () => {
+    const { spoke, server, host, calls } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    await until(() => lastSessions(server)?.sessions.length === 1)
+    spoke.presence(["ses_a", "ses_unknown", "bogus"], "tui_1")
+    await until(() => lastSessions(server)?.sessions.length === 2)
+    const sessions = lastSessions(server)!.sessions
+    expect(sessions.find((s) => s.id === "ses_a")).toMatchObject({ open: true, terminal: { source: "tui" } })
+    expect(sessions.find((s) => s.id === "ses_unknown")).toMatchObject({ title: "Fetched ses_unknown", open: true, owned: false })
+    expect(calls.get).toContain("ses_unknown")
+    spoke.presence(["ses_unknown"], "tui_1")
+    await until(() => lastSessions(server)?.sessions.find((s) => s.id === "ses_a")?.open === undefined)
+  })
+
+  test("Herdr wins over TUI presence", async () => {
+    const herdr = fakeHerdr({ agents: [herdrAgent("ses_a")] })
+    const { spoke, server, host } = setup({ mode: "always", token: "tok" }, { kind: "service", herdr: herdr.run })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    spoke.presence(["ses_a"], "tui_1")
+    await until(() => lastSessions(server)?.sessions.find((s) => s.id === "ses_a")?.open === true)
+    await Bun.sleep(60)
+    expect((lastSessions(server)?.sessions.find((s) => s.id === "ses_a") as any).terminal.source).toBe("herdr")
+  })
+
+  test("the listing keeps conversation, session-mode and running sessions and asks for them by ID", async () => {
+    const listings: Array<{ include?: readonly string[] }> = []
+    const listRecent: SpokeHost["listRecent"] = async (options) => {
+      listings.push(options ?? {})
+      return []
+    }
+    const { spoke, host } = setup({ mode: "session", token: "tok", sessions: ["ses_shared"] }, { kind: "service", listRecent, options: { seedIntervalMs: 30 } })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_run"))
+    host.push({ type: "session.execution.started", data: { sessionID: "ses_run" } })
+    await until(() => (listings.at(-1)?.include ?? []).includes("ses_run"))
+    expect(listings.at(-1)?.include).toContain("ses_shared")
+  })
+
+  test("create opens the session in a new Herdr tab; a Herdr pane folder is a valid directory", async () => {
+    const herdr = fakeHerdr({
+      agents: [],
+      tab: JSON.stringify({ result: { type: "tab_created", tab: { tab_id: "w7:t9" }, root_pane: { pane_id: "w7:p9" } } }),
+      start: JSON.stringify({ result: { type: "agent_started" } }),
+    })
+    const { spoke, server, calls } = setup({ mode: "always", token: "tok" }, { kind: "service", listRecent: async () => [], herdr: herdr.run })
+    await until(() => spoke.status().connection === "connected")
+    await until(() => lastTerminals(server)?.herdr !== undefined)
+    const res = await server.request({ op: "create", directory: "/home/user/notes", title: "Notes idea", herdrWorkspace: "w7" })
+    expect(res).toMatchObject({ ok: true, result: { sessionID: "ses_new1", openedIn: "herdr" } })
+    expect(calls.create).toEqual([{ directory: "/home/user/notes", title: "Notes idea" }])
+    expect(herdr.calls.find((c) => c[0] === "tab")).toEqual(["tab", "create", "--workspace", "w7", "--cwd", "/home/user/notes", "--label", "Notes idea", "--no-focus"])
+    expect(herdr.calls.find((c) => c[0] === "agent" && c[1] === "start")?.slice(-3)).toEqual(["--", "--session", "ses_new1"])
+    const plain = await server.request({ op: "create", directory: "/home/user/app" })
+    expect(plain).toMatchObject({ ok: true, result: { sessionID: "ses_new2" } })
+    expect((plain.result as any).openedIn).toBeUndefined()
+  })
+
+  test("when Herdr fails the session still exists: no openedIn, a warning", async () => {
+    const herdr = fakeHerdr({ agents: [], tab: new Error("workspace_not_found") })
+    const { spoke, server, calls } = setup({ mode: "always", token: "tok" }, { kind: "service", listRecent: async () => [], herdr: herdr.run })
+    await until(() => spoke.status().connection === "connected")
+    await until(() => lastTerminals(server)?.herdr !== undefined)
+    const res = await server.request({ op: "create", directory: "/home/user/app", herdrWorkspace: "w5" })
+    expect(res.ok).toBe(true)
+    expect(res.result).toMatchObject({ sessionID: "ses_new1" })
+    expect((res.result as any).openedIn).toBeUndefined()
+    expect((res.result as any).warning).toMatch(/herdr/i)
+    expect(calls.create).toHaveLength(1)
+    const unknown = await server.request({ op: "create", directory: "/home/user/app", herdrWorkspace: "w99" })
+    expect((unknown.result as any).warning).toMatch(/w99|workspace/i)
+  })
+})
+

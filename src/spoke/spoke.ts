@@ -4,13 +4,25 @@
 import path from "node:path"
 import { readConfig, setSession, withServer, writeConfig, type Mode, type VoiceConfig, explicitVariant, formatModelRef, parseModelRef, plainModelRef, type ModelRef } from "../config"
 import { isLoopbackURL } from "../loopback"
-import { compactActivity, type PermissionDecision, type ProcessKind, type ResultFor, type ServerRequest, type SpokeRequest, type TurnResult } from "../protocol"
+import {
+  compactActivity,
+  type HerdrWorkspace,
+  type PermissionDecision,
+  type ProcessKind,
+  type ResultFor,
+  type ServerRequest,
+  type SpokeRequest,
+  type TerminalInfo,
+  type TurnResult,
+} from "../protocol"
 import { extractReply } from "../reply"
 import { TurnTracker } from "../turns"
 import { SpokeConnection, type Backoff, type ConnectionState } from "./client"
 import { VOICE_AGENT } from "./conversation"
 import { pollEnrollment, startEnrollment } from "./enroll"
+import { HerdrWatcher, openInHerdr, type HerdrRunner } from "./herdr"
 import type { LocalHubResult } from "./localhub"
+import { PresenceBook } from "./presence"
 import { browserSessions, isExposed, SessionTracker, shouldForward, type EventLike, type SessionDetails } from "./tracker"
 import { watchConfig, type ConfigWatcher } from "./watch"
 
@@ -57,8 +69,11 @@ export interface SpokeHost {
   hasAgent(id: string): Promise<boolean>
   /** The agent a session without an explicit selection runs with. */
   defaultAgent(): Promise<string | undefined>
-  /** Recent root sessions from the local service with their workspace (service processes only). */
-  listRecent?(): Promise<Array<{ id: string } & SessionDetails>>
+  /**
+   * Recent root sessions from the local service with their workspace (service processes only): those in
+   * the history window (`days`, at most `max`), plus `include` (always listed: open, running, ...).
+   */
+  listRecent?(options?: { days: number; max: number; include: readonly string[] }): Promise<Array<{ id: string } & SessionDetails>>
   /** Creates a session in a directory (service processes only). */
   createSession?(input: { directory: string; title?: string }): Promise<{ id: string }>
 }
@@ -88,6 +103,17 @@ export interface SpokeOptions {
   readonly localHubDelayMs?: number
   /** Minimum time between attempts; doubles after each failure up to 15 min (default 30 s). */
   readonly localHubRetryMs?: number
+  /**
+   * Runs the `herdr` CLI. Only the service process reads Herdr (one reader per machine; standalone
+   * processes never do), and only while the machine config's `herdr` is on.
+   */
+  readonly herdr?: HerdrRunner
+  /** Herdr poll intervals (default 5 s agents, 30 s workspaces). */
+  readonly herdrPollMs?: { readonly agents?: number; readonly workspaces?: number }
+  /** Pause between creating a Herdr tab and starting OpenCode in it (default 500 ms). */
+  readonly herdrSettleMs?: number
+  /** How often expired TUI presence is checked (default 5 s). */
+  readonly presenceCheckMs?: number
 }
 
 export type EnrollmentState = "pending" | "approved" | "denied" | "expired" | "error"
@@ -168,6 +194,14 @@ export class Spoke {
   private intervals: Array<ReturnType<typeof setInterval>> = []
   private enrollment?: { state: EnrollmentState; abort: AbortController }
   private started = false
+  /** Sessions shown by OpenCode TUIs (voice.presence). */
+  private readonly presenceBook = new PresenceBook()
+  /** Herdr reader (service process only, while config.herdr is on). */
+  private herdr?: HerdrWatcher
+  /** Open sessions as last reported, to notice changes. */
+  private openKey = ""
+  /** The last terminals frame sent on the current connection. */
+  private terminalsKey = ""
   /** Local hub auto-start: one attempt at a time, spaced by a cooldown. */
   private readonly hub: {
     pending: boolean
@@ -199,6 +233,7 @@ export class Spoke {
     void this.listen()
     this.apply(this.config)
     this.every(this.options.snapshotIntervalMs ?? 30_000, () => this.sendSnapshot())
+    this.every(this.options.presenceCheckMs ?? 5000, () => this.checkOpen())
     if (this.options.kind === "service" && this.host.listRecent) {
       void this.seed()
       this.every(this.options.seedIntervalMs ?? 60_000, () => void this.seed())
@@ -217,6 +252,8 @@ export class Spoke {
     clearTimeout(this.snapshotTimer)
     clearTimeout(this.seedTimer)
     this.seedTimer = undefined
+    this.herdr?.stop()
+    this.herdr = undefined
     this.connection?.stop()
     this.connection = undefined
     this.connectionKey = ""
@@ -240,6 +277,87 @@ export class Spoke {
 
   subagent(): string {
     return this.config.subagent
+  }
+
+  /**
+   * TUI presence (RPC voice.presence): the sessions a TUI shows right now (its route and open tabs).
+   * `reporter` identifies the TUI; its report replaces its previous one.
+   */
+  presence(sessionIDs: readonly string[], reporter?: string): void {
+    this.presenceBook.report(sessionIDs, Date.now(), reporter)
+    this.checkOpen()
+  }
+
+  /** Where a session is open right now: a Herdr pane wins over a TUI. */
+  private terminal(sessionID: string, tui = this.presenceBook.open(Date.now())): TerminalInfo | undefined {
+    return this.herdr?.open().get(sessionID) ?? (tui.has(sessionID) ? { source: "tui" } : undefined)
+  }
+
+  /** Open sessions → where. */
+  private openSessions(): Map<string, TerminalInfo> {
+    const out = new Map(this.herdr?.open() ?? [])
+    for (const id of this.presenceBook.open(Date.now())) if (!out.has(id)) out.set(id, { source: "tui" })
+    return out
+  }
+
+  /** Re-reports sessions when what is open changed; brings in open sessions this process does not know yet. */
+  private checkOpen(): void {
+    const open = this.openSessions()
+    const key = JSON.stringify([...open])
+    if (key === this.openKey) return
+    this.openKey = key
+    const unknown = [...open.keys()].filter((id) => !this.tracker.has(id))
+    if (unknown.length && this.options.kind === "service" && this.host.listRecent) this.scheduleSeed()
+    else if (unknown.length) {
+      for (const id of unknown) this.tracker.ensure(id, Date.now())
+      void this.fetchInfo()
+    }
+    this.scheduleSnapshot()
+  }
+
+  /** Sessions the listing must keep regardless of its window. */
+  private keep(): Set<string> {
+    return new Set([
+      ...this.openSessions().keys(),
+      ...this.tracker.active(),
+      ...this.conversations.keys(),
+      ...(this.config.mode === "session" ? this.config.sessions : []),
+    ])
+  }
+
+  /** Starts or stops the Herdr reader to match the config (service process with a runner only). */
+  private applyHerdr(config: VoiceConfig): void {
+    const run = this.options.herdr
+    const wanted = this.started && this.options.kind === "service" && run !== undefined && config.herdr
+    if (wanted && !this.herdr) {
+      this.herdr = new HerdrWatcher({
+        run: run!,
+        agentsMs: this.options.herdrPollMs?.agents,
+        workspacesMs: this.options.herdrPollMs?.workspaces,
+        onChange: () => {
+          this.checkOpen()
+          this.sendTerminals()
+        },
+      })
+      this.herdr.start()
+    } else if (!wanted && this.herdr) {
+      this.herdr.stop()
+      this.herdr = undefined
+      this.checkOpen()
+      this.sendTerminals()
+    }
+  }
+
+  /** The machine's terminal context (service process only); unchanged frames are not re-sent. */
+  private sendTerminals(force = false): void {
+    if (this.options.kind !== "service" || !this.options.herdr) return
+    const workspaces = this.herdr?.workspaces()
+    const frame = { t: "terminals" as const, ...(workspaces ? { herdr: { workspaces: limitWorkspaces(workspaces) } } : {}) }
+    const key = JSON.stringify(frame)
+    if (!force && key === this.terminalsKey) return
+    if (this.connection?.state !== "connected") return
+    this.terminalsKey = key
+    this.connection.send(frame)
   }
 
   /**
@@ -430,6 +548,8 @@ export class Spoke {
       if (active) this.connect(config)
     }
     if (previous.sessions.join() !== config.sessions.join()) this.scheduleSnapshot()
+    this.applyHerdr(config)
+    if (previous.list.days !== config.list.days || previous.list.max !== config.list.max) this.scheduleSeed()
   }
 
   private connect(config: VoiceConfig): void {
@@ -447,7 +567,10 @@ export class Spoke {
         pluginVersion: this.options.pluginVersion,
       }),
       handle: (req) => this.handle(req),
-      onWelcome: () => this.sendSnapshot(),
+      onWelcome: () => {
+        this.sendSnapshot()
+        this.sendTerminals(true)
+      },
       onState: (state, error) => {
         if (state === "revoked") console.error("[opencode-voice] this machine was revoked by the voice server")
         else if (state === "error" && error) console.error(`[opencode-voice] ${error}; retrying`)
@@ -570,7 +693,7 @@ export class Spoke {
   private async handle(req: ServerRequest): Promise<unknown> {
     // Session browser ops are not gated by exposure: they are how a session gets exposed.
     if (req.op === "expose") return this.expose(req.sessionID, req.on)
-    if (req.op === "create") return this.create(req.directory, req.title)
+    if (req.op === "create") return this.create(req.directory, req.title, req.herdrWorkspace)
     if (!isExposed(this.config, this.tracker, req.sessionID)) throw new Error(NOT_SHARED)
     switch (req.op) {
       case "turn":
@@ -605,13 +728,18 @@ export class Spoke {
     return { exposed: isExposed(this.config, this.tracker, sessionID) }
   }
 
-  /** Creates a session in a workspace or session directory this (service) process reported. */
-  private async create(directory: string, title?: string): Promise<ResultFor["create"]> {
+  /**
+   * Creates a session in a workspace or session directory this (service) process reported, or a folder
+   * of a Herdr pane. With `herdrWorkspace`, also opens it in a new tab of that Herdr workspace; if that
+   * fails the session still exists and the result carries a warning instead of `openedIn`.
+   */
+  private async create(directory: string, title?: string, herdrWorkspace?: string): Promise<ResultFor["create"] & { warning?: string }> {
     if (this.options.kind !== "service" || !this.host.createSession) {
       throw new Error("Only the background service creates sessions")
     }
     const target = path.resolve(directory)
-    const workspace = this.workspaces().get(target)
+    const workspace =
+      this.workspaces().get(target) ?? (this.herdr?.hasDirectory(target) ? { project: target, projectName: path.basename(target) || target } : undefined)
     if (!workspace) throw new Error("unknown workspace")
     const session = await this.host.createSession({ directory: target, ...(title ? { title } : {}) })
     const now = Date.now()
@@ -619,7 +747,25 @@ export class Spoke {
     this.tracker.setInfo(session.id, { title: title ?? "", directory: target, updated: now, ...workspace })
     if (this.config.mode === "session") this.setSession(session.id, true)
     this.sendSnapshot()
-    return { sessionID: session.id }
+    if (!herdrWorkspace) return { sessionID: session.id }
+    const warning = await this.openInHerdr(herdrWorkspace, target, session.id, title)
+    return warning ? { sessionID: session.id, warning } : { sessionID: session.id, openedIn: "herdr" }
+  }
+
+  /** Opens a session in a new Herdr tab; returns a warning when that did not work. */
+  private async openInHerdr(workspaceID: string, directory: string, sessionID: string, title?: string): Promise<string | undefined> {
+    const herdr = this.herdr
+    const run = this.options.herdr
+    if (!herdr || !run) return "Herdr is not available on this machine; the session was created but not opened"
+    if (!herdr.hasWorkspace(workspaceID)) return `Herdr workspace ${workspaceID} not found; the session was created but not opened`
+    try {
+      await openInHerdr(run, { workspaceID, directory, sessionID, ...(title ? { title } : {}) }, { settleMs: this.options.herdrSettleMs })
+      void herdr.refresh()
+      return undefined
+    } catch (cause) {
+      console.error(`[opencode-voice] could not open ${sessionID} in Herdr`, errorText(cause))
+      return `Could not open the session in Herdr: ${errorText(cause)}`
+    }
   }
 
   /** Normalized workspace roots and session directories this process knows → their workspace. */
@@ -715,8 +861,10 @@ export class Spoke {
 
   private async seed(): Promise<void> {
     try {
-      const sessions = (await this.host.listRecent?.()) ?? []
-      if (this.tracker.applyListing(sessions, Date.now())) this.scheduleSnapshot()
+      const keep = this.keep()
+      const { days, max } = this.config.list
+      const sessions = (await this.host.listRecent?.({ days, max, include: [...keep] })) ?? []
+      if (this.tracker.applyListing(sessions, Date.now(), keep)) this.scheduleSnapshot()
     } catch (cause) {
       console.error("[opencode-voice] could not list recent sessions", errorText(cause))
     }
@@ -739,7 +887,8 @@ export class Spoke {
   }
 
   private sendSnapshot(): void {
-    this.connection?.send({ t: "sessions", sessions: browserSessions(this.config, this.tracker, Date.now()) })
+    const tui = this.presenceBook.open(Date.now())
+    this.connection?.send({ t: "sessions", sessions: browserSessions(this.config, this.tracker, Date.now(), { terminal: (id) => this.terminal(id, tui) }) })
   }
 
   private every(ms: number, run: () => void): void {
@@ -747,6 +896,11 @@ export class Spoke {
     ;(interval as { unref?: () => void }).unref?.()
     this.intervals.push(interval)
   }
+}
+
+/** Keeps the terminals frame within the protocol's limits. */
+function limitWorkspaces(workspaces: readonly HerdrWorkspace[]): HerdrWorkspace[] {
+  return workspaces.slice(0, 200).map((w) => ({ id: w.id, label: w.label, directories: w.directories.slice(0, 20) }))
 }
 
 function sameModel(a: ModelRef, b: ModelRef): boolean {
