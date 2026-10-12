@@ -77,9 +77,14 @@ export function groupKey(s) {
   return isHerdr(s) ? `herdr:${s.terminal.workspaceID}` : folderKey(s)
 }
 
-/** Hidden by its ID, its Herdr workspace or its project folder. */
+/** Whether a hidden workspace key covers a session: its project folder, its own folder, or its Herdr workspace. */
+const inWorkspace = (s, key) => folderKey(s) === key || trimSlash(s.directory) === key || (isHerdr(s) && groupKey(s) === key)
+
+/** Hidden by its ID, or by a hidden workspace (project folder, nested folder such as a worktree, Herdr workspace). */
 function isHidden(s, hidden) {
-  return hidden.sessions.has(s.id) || hidden.workspaces.has(folderKey(s)) || (isHerdr(s) && hidden.workspaces.has(groupKey(s)))
+  if (hidden.sessions.has(s.id)) return true
+  for (const key of hidden.workspaces) if (inWorkspace(s, key)) return true
+  return false
 }
 
 /** Two reports of one session (several processes): the latest wins; live flags and terminal from any copy. */
@@ -228,13 +233,16 @@ export function recentMachine(machine, prefs) {
 export function hiddenView(machines, prefs) {
   const all = (machines ?? []).flatMap((m) => roots(m).map((s) => ({ s, m })))
   const workspaces = (prefs?.hiddenWorkspaces ?? []).map((key) => {
-    const inside = all.filter(({ s }) => folderKey(s) === key || (isHerdr(s) && groupKey(s) === key))
+    const inside = all.filter(({ s }) => inWorkspace(s, key))
     let name
     if (key.startsWith("herdr:")) {
       const id = key.slice(6)
       const known = (machines ?? []).flatMap(herdrWorkspaces).find((w) => w.id === id)
       name = known?.label || inside[0]?.s.terminal?.workspace || `Herdr workspace ${id}`
-    } else name = inside.find(({ s }) => folderKey(s) === key)?.s.projectName || basename(key)
+    } else {
+      const s = inside.find(({ s }) => folderKey(s) === key || trimSlash(s.directory) === key)?.s
+      name = !s ? basename(key) : folderKey(s) === key ? s.projectName || basename(key) : whereOf(s)
+    }
     return { key, name, count: inside.length }
   })
   const ids = new Set(prefs?.hiddenSessions ?? [])

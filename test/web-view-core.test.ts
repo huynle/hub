@@ -210,6 +210,17 @@ describe("home view: hidden sessions and workspaces", () => {
     expect(recent.processes[0].sessions.map((s: S) => s.id)).toEqual([e.id])
   })
 
+  test("hiding a nested folder (worktree group in Recent) hides the sessions in that folder only", () => {
+    const wt = `${P}/blog/.worktrees/dark`
+    const inWorktree = ses({ directory: wt, project: `${P}/blog`, projectName: "blog" })
+    const atRoot = ses({ directory: `${P}/blog`, project: `${P}/blog`, projectName: "blog" })
+    const prefs = normalizePrefs({ hiddenWorkspaces: [wt] })
+    const v = homeView([machine([inWorktree, atRoot])], prefs, { now: NOW })
+    expect(v.counts).toEqual({ open: 0, recent: 1, hidden: 1 })
+    expect(recentMachine(machine([inWorktree, atRoot]), prefs).processes[0].sessions.map((s: S) => s.id)).toEqual([atRoot.id])
+    expect(hiddenView([machine([inWorktree, atRoot])], prefs).workspaces).toEqual([{ key: wt, name: "blog › .worktrees/dark", count: 1 }])
+  })
+
   test("recentMachine keeps root history only (no open, hidden or child sessions) and the machine fields", () => {
     const root = ses()
     const kid = ses({ parentID: root.id })
