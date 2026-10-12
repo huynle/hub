@@ -15,7 +15,7 @@ describe("conversation mode assets", () => {
     h = harness({ webDir: WEB })
     const html = await (await fetch(`${h.url}/s/ses_1`)).text()
     expect(html).toContain('<script type="module" src="/app.js">')
-    for (const file of ["/app.js", "/conversation.js", "/conversation-core.js", "/feedback-core.js", "/browser-core.js", "/picker-core.js", "/cues.js", "/vad-worklet.js"]) {
+    for (const file of ["/app.js", "/conversation.js", "/conversation-core.js", "/feedback-core.js", "/browser-core.js", "/picker-core.js", "/account-core.js", "/cues.js", "/vad-worklet.js"]) {
       const res = await fetch(`${h.url}${file}`)
       expect(res.status).toBe(200)
       expect(res.headers.get("content-type")).toBe("text/javascript; charset=utf-8")

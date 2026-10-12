@@ -436,3 +436,57 @@ mark { background: color-mix(in srgb, var(--accent) 38%, transparent); color: in
 .toast.show { opacity: 1; pointer-events: auto; }
 .toast.err { border-color: var(--bad); }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* ---------- multi-user: sign-in, account menu, admin ---------- */
+.account-btn .avatar {
+  display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 50%;
+  background: var(--panel-2); border: 1px solid var(--line); font-size: 14px; font-weight: 700;
+}
+.account-btn.admin .avatar { border-color: var(--accent); color: var(--accent); }
+.avatar.large {
+  display: inline-grid; place-items: center; flex: none; width: 44px; height: 44px; border-radius: 50%;
+  background: var(--panel-2); border: 1px solid var(--line); font-size: 19px; font-weight: 700;
+}
+.account-card { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.account-card .small { overflow-wrap: anywhere; }
+.account-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.menu { display: grid; gap: 8px; }
+.badge-pill.role { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 60%, var(--line)); }
+.badge-pill.off { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 60%, var(--line)); }
+.list .name .badge-pill { margin-left: 6px; vertical-align: 1px; }
+.btn.signin { min-height: 52px; font-size: 16px; justify-self: stretch; }
+.g-tile { display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: #fff; }
+.g-tile svg { width: 18px; height: 18px; }
+.pair-more { padding: 0; }
+.pair-more > summary { min-height: 48px; display: flex; align-items: center; padding: 10px 14px; cursor: pointer; font-weight: 600; }
+.pair-more[open] > summary { border-bottom: 1px solid var(--line); }
+.pair-more > p { margin: 12px 14px 0; }
+.pair-more > form { border: 0; background: transparent; }
+.inherit { margin: 0; color: var(--muted); font-size: 13px; }
+.inherit::before { content: "↳ "; color: var(--accent); }
+.key-summary.inherit { font-size: 15px; }
+.reset-row { justify-content: space-between; }
+.reset-row .grow { flex: 1; min-width: 10ch; }
+.owner-note { margin: 0; font-weight: 600; }
+.not-found { justify-items: start; }
+.not-found h2 { margin: 0; font-size: 18px; }
+.not-found p { margin: 0; }
+.dot.off { background: var(--muted); }
+.chip .count { margin-left: 6px; padding: 0 6px; border-radius: 9px; background: var(--warn); color: #111; font-size: 11px; }
+.admin-panel > .btn:first-child { justify-self: start; }
+.admin-notice:empty { display: none; }
+.admin-notice { margin: 0; padding: 10px 12px; border: 1px solid var(--bad); border-radius: 12px; }
+.admin-tools { display: grid; gap: 8px; }
+.admin-search {
+  width: 100%; min-height: 44px; padding: 8px 12px; font-size: 16px;
+  border-radius: 12px; border: 1px solid var(--line); background: var(--bg);
+}
+.admin-selects select { flex: 1; width: auto; min-width: 0; }
+.admin-list li { align-items: flex-start; flex-wrap: wrap; }
+.admin-list .name { white-space: normal; }
+.admin-list .small { overflow-wrap: anywhere; }
+.user-actions { margin-left: auto; justify-content: flex-end; }
+.user-row.disabled .name { color: var(--muted); }
+.audit time { flex: none; white-space: nowrap; }
+.user-row .grow { flex-basis: 100%; }
+.user-row .user-actions { margin-left: 0; justify-content: flex-start; }

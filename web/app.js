@@ -1,4 +1,5 @@
 // OpenCode Voice PWA. No build step, no dependencies. Routes: / (sessions), /s/:id (talk), /pair, /approve.
+// Account menu, per-user speech and the admin screens live in the settings sheet (multi-user hub, docs/multi-user.md).
 // Loaded as an ES module (strict mode, deferred).
 import { Conversation } from "./conversation.js"
 import { reconcileSay, statusNotes } from "./conversation-core.js"
@@ -20,6 +21,23 @@ import {
 import { filterPicker, pickerOptions, stepActive } from "./picker-core.js"
 import { applyRate } from "./cues.js"
 import { FILTERS, groupOpen, highlight, machineView as browseMachine, page, parseChoices, parseSet, toggleIn } from "./browser-core.js"
+import {
+  USER_FILTERS,
+  USER_SORTS,
+  account,
+  adminError,
+  adminTabs,
+  approveOwner,
+  auditRows,
+  isAdmin,
+  menuItems,
+  resetPatch,
+  signInURL,
+  speechInheritance,
+  speechTabs,
+  userActions,
+  usersView,
+} from "./account-core.js"
 
 const MAX_RECORD_MS = 60_000
 const PRESENCE_MS = 30_000
@@ -57,7 +75,8 @@ const view = $("view")
 const player = $("player")
 
 const state = {
-  me: undefined, // { device, publicURL, version }
+  me: undefined, // { device, user: { id, email?, name?, role }, auth: "pairing" | "oidc", publicURL, version }
+  auth: undefined, // GET /api/auth: { mode, signIn } (null when the hub does not say)
   speechReady: undefined, // `ready` from GET /api/settings/speech: { stt, tts, reason? }; null when unknown
   machines: undefined, // catalog from SSE
   enrollments: [],
@@ -68,7 +87,11 @@ const state = {
   enrollmentsLoaded: false,
   approved: new Map(), // userCode → result text shown on /approve
   feeds: new Map(), // root session ID → ActivityFeed
-  sheetPanel: "main", // "main" | "speech"
+  sheetPanel: "main", // "main" | "speech" | "admin"
+  sheetFocus: undefined, // section of the main panel to show and focus after rendering ("devices")
+  speechScope: "user", // "user" | "default" (server default, admins)
+  speechTabbed: false, // the hub has per-user speech and this user may edit the server default
+  admin: { tab: "users", query: "", filter: "all", sort: "role", notice: "", users: undefined, machines: undefined },
   offerConversation: undefined, // session ID just created from the phone: offer conversation mode once
   browser: {
     query: "",
@@ -171,7 +194,7 @@ const getJSON = async (path) => (await api(path)).json()
 
 function parseRoute(url = new URL(location.href)) {
   const p = url.pathname
-  if (p === "/pair") return { name: "pair", next: safeNext(url.searchParams.get("next")) }
+  if (p === "/pair") return { name: "pair", next: safeNext(url.searchParams.get("next")), error: url.searchParams.get("error") || "" }
   if (p === "/approve") return { name: "approve", code: url.searchParams.get("code") || "" }
   const m = /^\/s\/([^/]+)$/.exec(p)
   if (m) return { name: "session", id: decodeURIComponent(m[1]) }
@@ -219,6 +242,7 @@ async function render() {
   if (route.name === "pair") return renderPair(route)
   if (!(await ensureMe())) return
   $("settings").hidden = false
+  updateAccount()
   startEvents()
   updateNotifyButton()
   if (state.speechReady === undefined) void loadSpeechReady()
@@ -399,11 +423,13 @@ function scheduleHomeRender() {
 }
 
 async function loadEnrollments() {
-  try {
-    state.enrollments = (await getJSON("/api/enrollments")).enrollments
-  } catch {
-    state.enrollments = []
-  }
+  if (isAdmin(state.me)) {
+    try {
+      state.enrollments = (await getJSON("/api/enrollments")).enrollments ?? []
+    } catch {
+      state.enrollments = []
+    }
+  } else state.enrollments = [] // users approve their own machines through /approve?code= only
   state.enrollmentsLoaded = true
   const badge = $("settings-badge")
   badge.hidden = state.enrollments.length === 0
@@ -412,6 +438,7 @@ async function loadEnrollments() {
   if (state.route?.name === "home") renderHome()
   if (state.route?.name === "approve") renderApprove(state.route)
   if ($("sheet").open) renderSheet()
+  if (state.sheetPanel === "admin" && state.admin.tab === "approvals") refreshAdmin()
 }
 
 // ---------- session state helpers ----------
@@ -847,17 +874,54 @@ function defaultDeviceName() {
   return `${model.trim()}${browser ? ` · ${browser}` : ""}`.slice(0, 64)
 }
 
+/** GET /api/auth once: { mode, signIn }; null when the hub does not answer it (older hubs only pair). */
+async function loadAuth() {
+  if (state.auth !== undefined) return state.auth
+  try {
+    const res = await fetch("/api/auth", { credentials: "same-origin" })
+    state.auth = res.ok ? await res.json() : null
+  } catch {
+    return null // offline: ask again next time
+  }
+  return state.auth
+}
+
+/** The four-color Google "G" on a white tile (decorative). */
+function googleMark() {
+  const ns = "http://www.w3.org/2000/svg"
+  const svg = document.createElementNS(ns, "svg")
+  svg.setAttribute("viewBox", "0 0 18 18")
+  svg.setAttribute("aria-hidden", "true")
+  svg.setAttribute("class", "g-mark")
+  for (const [fill, d] of [
+    ["#4285F4", "M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62z"],
+    ["#34A853", "M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.8.54-1.83.86-3.04.86-2.34 0-4.33-1.58-5.04-3.71H.96v2.33A9 9 0 0 0 9 18z"],
+    ["#FBBC05", "M3.96 10.71A5.41 5.41 0 0 1 3.68 9c0-.59.1-1.17.28-1.71V4.96H.96A9 9 0 0 0 0 9c0 1.45.35 2.83.96 4.04l3-2.33z"],
+    ["#EA4335", "M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58A9 9 0 0 0 .96 4.96l3 2.33C4.67 5.16 6.66 3.58 9 3.58z"],
+  ]) {
+    const path = document.createElementNS(ns, "path")
+    path.setAttribute("d", d)
+    path.setAttribute("fill", fill)
+    path.setAttribute("stroke", "none")
+    svg.append(path)
+  }
+  return h("span", { class: "g-tile" }, svg)
+}
+
 async function renderPair(route) {
   $("heading").textContent = "Pair this device"
   $("settings").hidden = true
+  $("account").hidden = true
   $("notify").hidden = true
   setConn("", "not paired")
   // Already paired? Go on.
-  const me = await fetch("/api/me", { credentials: "same-origin" }).catch(() => undefined)
+  const [me, auth] = await Promise.all([fetch("/api/me", { credentials: "same-origin" }).catch(() => undefined), loadAuth()])
   if (me?.ok) {
     state.me = await me.json()
     return navigate(route.next, { replace: true })
   }
+  if (state.route?.name !== "pair") return
+  const google = signInURL(auth ?? undefined, route.next)
   const error = h("p", { class: "error", role: "alert" })
   const code = h("input", { id: "pair-code", class: "code", type: "text", inputmode: "numeric", autocomplete: "one-time-code", pattern: "[0-9]{6}", maxlength: "6", required: true, "aria-describedby": "pair-help" })
   const name = h("input", { id: "pair-name", type: "text", maxlength: "64", value: defaultDeviceName(), autocomplete: "off" })
@@ -890,6 +954,26 @@ async function renderPair(route) {
       code.select()
     }
   })
+  if (google) {
+    // Sign-in hub: Google first, the pairing code as the secondary way in.
+    $("heading").textContent = "Sign in"
+    setConn("", "signed out")
+    const signIn = h("a", { class: "btn primary signin", href: google }, googleMark(), "Sign in with Google")
+    const more = h("details", { class: "card pair-more" },
+      h("summary", {}, "Have a pairing code?"),
+      h("p", { class: "small muted" }, "A code from /voice → Pair a phone signs this browser in as the owner of that computer."),
+      form)
+    more.addEventListener("toggle", () => more.open && code.focus())
+    if (route.error) more.open = true
+    view.replaceChildren(h("div", { class: "stack" },
+      h("p", { class: "muted" }, "Sign in to see and talk to your own OpenCode sessions."),
+      route.error ? h("p", { class: "error", role: "alert" }, `Sign-in did not work: ${route.error}`) : null,
+      signIn,
+      more))
+    signIn.focus()
+    return
+  }
+  if (route.error) error.textContent = `Sign-in did not work: ${route.error}`
   view.replaceChildren(h("div", { class: "stack" },
     h("p", { class: "muted" }, "Pair this browser with your voice server to see and talk to your OpenCode sessions."),
     h("p", { class: "small muted" }, "On the computer itself, /voice → Open voice UI signs this browser in without a code."),
@@ -899,43 +983,58 @@ async function renderPair(route) {
 
 // ---------- machine approval ----------
 
+/**
+ * /approve?code=: admins see the pending request (machine name) from GET /api/enrollments; everyone else approves
+ * by code alone (the list is admin-only). The approver becomes the machine's owner.
+ */
 function renderApprove(route) {
   $("heading").textContent = "Approve machine"
   const code = route.code.toUpperCase()
+  const admin = isAdmin(state.me)
   const pending = state.enrollments.find((e) => e.userCode === code)
   const result = h("p", { role: "status" })
   const done = state.approved.get(code)
+  const home = () => h("a", { class: "btn", href: "/", "data-link": true }, "Back to sessions")
+  const gone = `No pending request with code ${code}. It may have expired or been answered already.`
   if (done) {
-    view.replaceChildren(h("div", { class: "card stack" }, h("p", { role: "status" }, done), h("a", { class: "btn", href: "/", "data-link": true }, "Back to sessions")))
+    view.replaceChildren(h("div", { class: "card stack" }, h("p", { role: "status" }, done), home()))
     return
   }
-  if (!pending && !state.enrollmentsLoaded) {
+  if (!code) {
+    view.replaceChildren(h("div", { class: "card stack" }, h("p", {}, "No code given."), home()))
+    return
+  }
+  if (admin && !pending && !state.enrollmentsLoaded) {
     view.replaceChildren(h("p", { class: "empty" }, "Loading…"))
     return
   }
-  if (!pending) {
-    view.replaceChildren(
-      h("div", { class: "card stack" },
-        h("p", {}, code ? `No pending request with code ${code}. It may have expired or been answered already.` : "No code given."),
-        h("a", { class: "btn", href: "/", "data-link": true }, "Back to sessions")),
-    )
+  if (admin && !pending) {
+    view.replaceChildren(h("div", { class: "card stack" }, h("p", {}, gone), home()))
     return
   }
+  const name = pending?.machineName
   const decide = async (action) => {
     for (const b of view.querySelectorAll("button")) b.disabled = true
     try {
       await api(`/api/enrollments/${encodeURIComponent(code)}/${action}`, { method: "POST", json: {} })
-      state.approved.set(code, action === "approve" ? `${pending.machineName} is approved. It will connect in a few seconds.` : `Denied ${pending.machineName}.`)
+      state.approved.set(code, action === "approve"
+        ? `${name ?? "The machine"} is approved and belongs to you. It will connect in a few seconds.`
+        : `Denied ${name ?? `the request with code ${code}`}.`)
       if (state.route?.name === "approve") renderApprove(state.route)
     } catch (e) {
-      result.textContent = e.message
+      result.textContent = e.status === 404 ? gone : e.message
       for (const b of view.querySelectorAll("button")) b.disabled = false
     }
   }
   view.replaceChildren(
     h("div", { class: "card stack" },
-      h("p", {}, h("strong", {}, pending.machineName), " wants to connect to this voice server."),
-      h("p", { class: "small muted" }, `Code ${pending.userCode} · requested ${ago(pending.created)}. Approve only if this code matches the one shown in OpenCode.`),
+      name
+        ? h("p", {}, h("strong", {}, name), " wants to connect to this voice server.")
+        : h("p", {}, "A machine showing code ", h("strong", { class: "mono" }, code), " wants to connect to this voice server."),
+      h("p", { class: "small muted" }, pending
+        ? `Code ${pending.userCode} · requested ${ago(pending.created)}. Approve only if this code matches the one shown in OpenCode.`
+        : "Approve only if this code matches the one shown in OpenCode."),
+      h("p", { class: "owner-note" }, approveOwner(state.me)),
       h("div", { class: "row" },
         h("button", { class: "btn primary", type: "button", onclick: () => decide("approve") }, "Approve"),
         h("button", { class: "btn danger", type: "button", onclick: () => decide("deny") }, "Deny")),
@@ -956,8 +1055,26 @@ function leaveSession() {
   player.pause()
   clearInterval(s.presenceTimer)
   clearInterval(s.pulseTimer)
-  postPresence(s.id, false)
+  if (!s.notFound) postPresence(s.id, false)
   state.session = undefined
+}
+
+/**
+ * The hub answered 404 for a session this account cannot see (someone else's, or gone): a plain "Session not
+ * found" page instead of the talk view. It comes back by itself if the catalog starts reporting the session.
+ */
+function sessionNotFound(s) {
+  if (state.session !== s || s.notFound || findSession(s.id)) return
+  s.notFound = true
+  clearInterval(s.presenceTimer)
+  clearInterval(s.pulseTimer)
+  $("heading").textContent = "Session not found"
+  const home = h("a", { class: "btn primary", href: "/", "data-link": true }, "Back to sessions")
+  view.replaceChildren(h("div", { class: "card stack not-found" },
+    h("h2", {}, "Session not found"),
+    h("p", { class: "muted" }, "It may belong to another account, or it no longer exists."),
+    home))
+  home.focus()
 }
 
 // ---------- presence ----------
@@ -1121,8 +1238,9 @@ async function loadActivity(s) {
     feed.load(info.activity ?? [])
     if (info.status) feed.status(info.status)
     renderFeed()
-  } catch {
-    // no backlog: the feed fills from live events
+  } catch (e) {
+    if (e.status === 404) sessionNotFound(s)
+    // otherwise no backlog: the feed fills from live events
   }
 }
 
@@ -1231,6 +1349,10 @@ function updateSessionHeader() {
   const s = state.session
   if (!s) return
   const info = findSession(s.id)
+  if (s.notFound) {
+    if (info) renderSession(state.route) // it showed up after all
+    return
+  }
   $("heading").textContent = info?.title || (state.machines ? "Unknown session" : "Loading…")
   updateConversationHint(s)
   if (!info) {
@@ -1337,6 +1459,7 @@ async function loadTranscript() {
       s.loading = false
       return updateSessionHeader()
     }
+    if (e.status === 404 && !findSession(s.id)) return sessionNotFound(s)
     note(e.status === 409 ? e.message : `Could not load the conversation: ${e.message}`, "err")
   } finally {
     s.loading = false
@@ -1785,6 +1908,10 @@ async function renderSheet() {
     if (!body.querySelector(".speech-panel")) renderSpeech()
     return
   }
+  if (state.sheetPanel === "admin") {
+    if (!body.querySelector(".admin-panel")) renderAdmin()
+    return
+  }
   $("sheet-title").textContent = "Settings"
   const [prefsRes, devicesRes] = await Promise.all([getJSON("/api/push/prefs").catch(() => undefined), getJSON("/api/devices").catch(() => undefined)])
   const sub = await currentSubscription().catch(() => undefined)
@@ -1831,6 +1958,7 @@ async function renderSheet() {
     notif.append(list)
   }
   sections.unshift(voiceSection(), speechEntry())
+  if (isAdmin(state.me)) sections.push(adminEntry())
   sections.push(notif)
 
   // Pending machine requests
@@ -1848,7 +1976,7 @@ async function renderSheet() {
   // Machines
   const machines = state.machines ?? []
   sections.push(
-    h("div", { class: "section" }, h("h3", {}, "Machines"),
+    h("div", { class: "section" }, h("h3", { id: "sheet-machines", tabindex: "-1" }, "My machines"),
       machines.length
         ? h("ul", { class: "list" }, machines.map((m) =>
             h("li", {},
@@ -1862,7 +1990,7 @@ async function renderSheet() {
   // Devices
   if (devicesRes) {
     sections.push(
-      h("div", { class: "section" }, h("h3", {}, "Paired devices"),
+      h("div", { class: "section" }, h("h3", { id: "sheet-devices", tabindex: "-1" }, "My devices"),
         h("ul", { class: "list" }, devicesRes.devices.map((d) =>
           h("li", {},
             h("div", { class: "grow" },
@@ -1874,6 +2002,20 @@ async function renderSheet() {
   sections.push(h("p", { class: "small muted" }, `Server ${state.me?.publicURL ?? location.origin} · v${state.me?.version ?? "?"}`))
   if (state.sheetPanel !== "main") return // switched panels while loading
   body.replaceChildren(...sections)
+  const focus = state.sheetFocus && $(`sheet-${state.sheetFocus}`)
+  state.sheetFocus = undefined
+  if (focus) {
+    focus.scrollIntoView({ block: "start" })
+    focus.focus({ preventScroll: true })
+  }
+}
+
+/** Settings, opening the sheet first when it is closed; `section` ("devices") is scrolled to and focused. */
+function openSettings(section) {
+  state.sheetPanel = "main"
+  state.sheetFocus = section
+  if (!$("sheet").open) $("sheet").showModal()
+  renderSheet()
 }
 
 /** A labeled checkbox row stored in localStorage; `onChange` gets the new value. */
@@ -1905,14 +2047,21 @@ function speechEntry() {
     h("button", { class: "btn small wide", type: "button", onclick: () => openSpeech() }, "Speech-to-text and text-to-speech providers ›"))
 }
 
+function adminEntry() {
+  return h("div", { class: "section" }, h("h3", {}, "Admin"),
+    h("button", { class: "btn small wide", type: "button", onclick: () => openAdmin() }, "Users, all machines, approvals, audit log ›"))
+}
+
 function openSpeech() {
   state.sheetPanel = "speech"
+  state.speechScope = "user"
   renderSpeech()
 }
 
 /** Settings → Speech, opening the sheet first when it is closed. */
 function openSpeechSettings() {
   state.sheetPanel = "speech"
+  state.speechScope = "user"
   renderSpeech()
   if (!$("sheet").open) $("sheet").showModal()
 }
@@ -1964,40 +2113,74 @@ function applySpeechGate(s) {
 // ---------- settings: speech providers ----------
 
 const PROVIDERS = [["openrouter", "OpenRouter"], ["openai-compatible", "OpenAI-compatible"]]
-const KEY_SOURCE = { settings: "from settings", config: "from hub.json", env: "from env" }
+const KEY_SOURCE = { settings: "from settings", config: "from hub.json", env: "from env", user: "yours" }
+const SPEECH_URL = { user: "/api/settings/speech", default: "/api/settings/speech/default" }
+const KIND_LABEL = { stt: "Speech-to-text", tts: "Text-to-speech" }
 
-async function renderSpeech() {
+/** "Your speech settings" | "Server default" switch (admins on a per-user hub). */
+function speechScopeChips() {
+  if (!state.speechTabbed) return null
+  const chips = [["user", "Yours"], ["default", "Server default"]].map(([scope, label]) =>
+    h("button", { type: "button", class: "chip", "data-key": `scope:${scope}`, "aria-pressed": String(state.speechScope === scope), onclick: () => {
+      if (state.speechScope === scope) return
+      state.speechScope = scope
+      renderSpeech({ focus: `scope:${scope}` })
+    } }, label))
+  return h("div", { class: "chips", role: "group", "aria-label": "Which speech settings" }, chips)
+}
+
+async function renderSpeech({ focus } = {}) {
   const body = $("sheet-body")
-  $("sheet-title").textContent = "Speech"
+  const scope = state.speechScope
+  $("sheet-title").textContent = scope === "default" ? "Speech · server default" : "Speech"
   const back = h("button", { class: "btn small", type: "button", onclick: () => {
     state.sheetPanel = "main"
     renderSheet()
     $("settings").focus()
   } }, "‹ Settings")
-  const panel = h("div", { class: "speech-panel stack" }, back, h("p", { class: "muted" }, "Loading…"))
+  const chips = speechScopeChips()
+  const panel = h("div", { class: "speech-panel stack" }, back, chips, h("p", { class: "muted" }, "Loading…"))
   body.replaceChildren(panel)
-  back.focus()
+  ;((focus && panel.querySelector(`[data-key="${CSS.escape(focus)}"]`)) || back).focus()
   let settings
   try {
-    settings = await getJSON("/api/settings/speech")
+    settings = await getJSON(SPEECH_URL[scope])
   } catch (e) {
-    panel.replaceChildren(back, h("p", { class: "error", role: "alert" },
-      e.status === 403 ? "Only the owner device can change speech settings." : e.status === 404 ? "This voice server does not support speech settings yet." : `Could not load speech settings: ${e.message}`))
+    if (state.sheetPanel !== "speech" || state.speechScope !== scope) return
+    panel.replaceChildren(...[back, chips, h("p", { class: "error", role: "alert" },
+      e.status === 403
+        ? scope === "default" ? "Only admins can change the server default." : "This account cannot change speech settings."
+        : e.status === 404 ? "This voice server does not support speech settings yet." : `Could not load speech settings: ${e.message}`)].filter(Boolean))
     return
   }
-  if (state.sheetPanel !== "speech") return
-  speechEditor(panel, back, settings)
+  if (state.sheetPanel !== "speech" || state.speechScope !== scope) return
+  if (scope === "user") {
+    const tabbed = speechTabs(state.me, settings).length > 1
+    if (tabbed !== state.speechTabbed) {
+      state.speechTabbed = tabbed
+      return renderSpeech({ focus }) // the scope switch appears (first visit)
+    }
+  }
+  speechEditor(panel, back, settings, scope)
+  if (focus) panel.querySelector(`[data-key="${CSS.escape(focus)}"]`)?.focus()
 }
 
-function speechEditor(panel, back, settings) {
+function speechEditor(panel, back, settings, scope = "user") {
   let form = speechForm(settings)
-  const setup = speechSetup(settings.ready, state.me?.publicURL)
+  const inherit = scope === "user" ? speechInheritance(settings) : undefined
+  const setup = scope === "user" ? speechSetup(settings.ready, state.me?.publicURL) : undefined
+  const chips = speechScopeChips()
   const intro = setup
     ? h("div", { class: "card banner speech-setup" }, h("div", { class: "stack-tight" },
         h("strong", {}, "Speech is not set up yet"), h("p", { class: "small" }, setup.reason),
         h("p", { class: "small muted" }, "OpenRouter covers both directions with one key (openrouter.ai/keys). Or point both at your own OpenAI-compatible servers."),
         setup.storage ? h("p", { class: "small muted" }, setup.storage) : null))
     : null
+  const lead = scope === "default"
+    ? h("p", { class: "small muted" }, "The server default is used by everyone on this hub for whatever they have not set themselves. Their own keys stay private.")
+    : inherit
+      ? h("p", { class: "small muted" }, "Your speech settings. Anything you leave alone uses the server default.")
+      : null
   const status = h("p", { class: "small", role: "status" })
   const errorEls = new Map() // "stt.model" → <p>
   const inputs = new Map() // "stt.model" → input
@@ -2009,9 +2192,11 @@ function speechEditor(panel, back, settings) {
     const err = h("p", { class: "field-error", id: `${id}-err` })
     errorEls.set(key, err)
     inputs.set(key, control)
-    control.setAttribute("aria-describedby", [help ? `${id}-help` : "", `${id}-err`].filter(Boolean).join(" "))
+    const inh = inherit?.[kind]?.[name]
+    const note = inh?.inherited ? h("p", { class: "small inherit", id: `${id}-inh` }, inh.note) : null
+    control.setAttribute("aria-describedby", [help ? `${id}-help` : "", note ? `${id}-inh` : "", `${id}-err`].filter(Boolean).join(" "))
     return h("div", { class: "field", hidden },
-      h("label", { for: id }, label), control,
+      h("label", { for: id }, label), control, note,
       help ? h("p", { class: "small muted field-help", id: `${id}-help` }, help) : null, err)
   }
   const text = (kind, name, attrs = {}) => {
@@ -2116,8 +2301,36 @@ function speechEditor(panel, back, settings) {
     }
     fields.push(keyField(kind, info.apiKey ?? { set: false, source: "none" }))
     return h("fieldset", { class: "card speech-card" },
-      h("legend", {}, kind === "stt" ? "Speech-to-text" : "Text-to-speech"),
+      h("legend", {}, KIND_LABEL[kind]),
+      inherit ? resetRow(kind) : null,
       ...fields)
+  }
+
+  /** "Reset to server default" for one section: drops the user's own values and key (PUT with nulls). */
+  const resetRow = (kind) => {
+    const own = inherit.own[kind]
+    const button = h("button", { class: "btn small", type: "button", disabled: own === 0, "aria-describedby": `sp-${kind}-own`, onclick: async () => {
+      if (!confirm(`Reset ${KIND_LABEL[kind].toLowerCase()} to the server default? Your own ${KIND_LABEL[kind].toLowerCase()} settings${inherit[kind].apiKey.inherited ? "" : " and key"} are removed.`)) return
+      button.disabled = true
+      try {
+        const next = await (await api(SPEECH_URL.user, { method: "PUT", json: resetPatch(kind) })).json().catch(() => ({}))
+        const fresh = next?.stt && next?.tts ? next : await getJSON(SPEECH_URL.user)
+        setSpeechReady(fresh.ready)
+        if (state.sheetPanel !== "speech" || state.speechScope !== "user") return
+        speechEditor(panel, back, fresh, "user")
+        const status = panel.querySelector('p[role="status"]')
+        status.textContent = `${KIND_LABEL[kind]} uses the server default again.`
+        status.className = "small ok"
+        panel.querySelector(`#sp-${kind}-provider`)?.focus()
+        toast(`${KIND_LABEL[kind]} reset to the server default`)
+      } catch (e) {
+        button.disabled = false
+        toast(`Could not reset: ${e.message}`, "err")
+      }
+    } }, "Reset to server default")
+    return h("div", { class: "row reset-row" },
+      h("span", { class: "small muted grow", id: `sp-${kind}-own` }, own ? `${own} of your own setting${own === 1 ? "" : "s"}` : "All from the server default"),
+      button)
   }
 
   const keyField = (kind, key) => {
@@ -2144,35 +2357,39 @@ function speechEditor(panel, back, settings) {
         input.focus()
         return
       }
+      const inherited = inherit?.[kind]?.apiKey
       const summary = edit.action === "clear"
         ? "Key will be removed when you save."
-        : key.set ? `Key set${key.last4 ? ` ••••${key.last4}` : ""} (${KEY_SOURCE[key.source] ?? key.source})` : "No key set"
+        : inherited?.inherited
+          ? inherited.note
+          : key.set ? `Key set${key.last4 ? ` ••••${key.last4}` : ""} (${KEY_SOURCE[key.source] ?? key.source})` : "No key set"
       const buttons = [h("button", { class: "btn small", type: "button", "aria-describedby": `${id}-label ${id}-summary`, onclick: () => {
         form[kind].apiKey = { action: "set", value: "" }
         draw()
         dirty()
-      } }, key.set ? "Replace" : "Add key")]
+      } }, inherited?.inherited ? "Use your own key" : key.set ? "Replace" : "Add key")]
+      const clearable = inherit ? !inherited?.inherited && key.set : key.set && key.source === "settings"
       if (edit.action === "clear") {
         buttons.push(h("button", { class: "btn small", type: "button", onclick: () => {
           form[kind].apiKey = { action: "keep", value: "" }
           draw()
           dirty()
         } }, "Undo"))
-      } else if (key.set && key.source === "settings") {
+      } else if (clearable) {
         buttons.push(h("button", { class: "btn small danger", type: "button", "aria-describedby": `${id}-label`, onclick: () => {
           form[kind].apiKey = { action: "clear", value: "" }
           draw()
           dirty()
         } }, "Clear"))
       }
-      box.replaceChildren(label, h("p", { class: "key-summary", id: `${id}-summary` }, summary), h("div", { class: "row" }, ...buttons), err)
+      box.replaceChildren(label, h("p", { class: `key-summary${inherited?.inherited && edit.action !== "clear" ? " inherit" : ""}`, id: `${id}-summary` }, summary), h("div", { class: "row" }, ...buttons), err)
     }
     draw()
     return box
   }
 
   const save = h("button", { class: "btn primary", type: "submit" }, "Save")
-  const preview = h("button", { class: "btn", type: "button", "data-preview": true, onclick: () => previewVoice(preview, status, () => Object.keys(speechPatch(settings, form)).length > 0) }, "Preview voice")
+  const preview = scope === "user" ? h("button", { class: "btn", type: "button", "data-preview": true, onclick: () => previewVoice(preview, status, () => Object.keys(speechPatch(settings, form)).length > 0) }, "Preview voice") : null
   const formEl = h("form", { class: "stack", novalidate: true }, card("stt"), card("tts"), h("div", { class: "row" }, save, preview), status)
 
   function dirty() {
@@ -2207,16 +2424,17 @@ function speechEditor(panel, back, settings) {
     status.textContent = "Saving…"
     status.className = "small muted"
     try {
-      const res = await (await api("/api/settings/speech", { method: "PUT", json: patch })).json().catch(() => ({}))
-      const next = res?.stt && res?.tts ? res : await getJSON("/api/settings/speech")
-      const nowReady = !!next.ready?.tts && !settings.ready?.tts
-      setSpeechReady(next.ready)
-      if (state.sheetPanel !== "speech") return
-      speechEditor(panel, back, next)
+      const res = await (await api(SPEECH_URL[scope], { method: "PUT", json: patch })).json().catch(() => ({}))
+      const next = res?.stt && res?.tts ? res : await getJSON(SPEECH_URL[scope])
+      const nowReady = scope === "user" && !!next.ready?.tts && !settings.ready?.tts
+      if (scope === "user") setSpeechReady(next.ready)
+      else void loadSpeechReady() // the default may have changed what this user gets
+      if (state.sheetPanel !== "speech" || state.speechScope !== scope) return
+      speechEditor(panel, back, next, scope)
       const done = panel.querySelector('p[role="status"]')
       done.textContent = nowReady ? "Saved. Now test your voice: press Test voice." : "Saved."
       done.className = "small ok"
-      toast("Speech settings saved")
+      toast(scope === "default" ? "Server default saved" : "Speech settings saved")
       if (nowReady) {
         const test = panel.querySelector("[data-preview]")
         if (test) {
@@ -2232,7 +2450,7 @@ function speechEditor(panel, back, settings) {
       status.className = "small error"
     }
   })
-  panel.replaceChildren(...[back, intro, formEl].filter(Boolean))
+  panel.replaceChildren(...[back, chips, lead, intro, formEl].filter(Boolean))
 }
 
 // ---------- option picker (full-height sheet with search) ----------
@@ -2391,7 +2609,7 @@ async function previewVoice(button, status, unsaved) {
 async function decideEnrollment(e, action) {
   try {
     await api(`/api/enrollments/${encodeURIComponent(e.userCode)}/${action}`, { method: "POST", json: {} })
-    toast(action === "approve" ? `${e.machineName} approved` : "Request denied")
+    toast(action === "approve" ? `${e.machineName} approved; it belongs to you` : "Request denied")
   } catch (err) {
     toast(err.message, "err")
   }
@@ -2431,16 +2649,258 @@ async function revokeDevice(d) {
   renderSheet()
 }
 
+// ---------- account menu ----------
+
+/** The header avatar button: initial, and who is signed in for screen readers. */
+function updateAccount() {
+  const acc = account(state.me)
+  const button = $("account")
+  button.hidden = false
+  $("account-initial").textContent = acc.initial
+  button.classList.toggle("admin", !!acc.badge)
+  button.setAttribute("aria-label", `Account: ${acc.title}${acc.badge ? `, ${acc.badge.toLowerCase()}` : ""}`)
+}
+
+function openAccountMenu() {
+  const acc = account(state.me)
+  const who = h("div", { class: "account-card" },
+    h("span", { class: "avatar large", "aria-hidden": "true" }, acc.initial),
+    h("div", { class: "stack-tight" },
+      h("div", { class: "account-title" }, h("strong", {}, acc.title), acc.badge ? h("span", { class: "badge-pill role" }, acc.badge) : null),
+      acc.subtitle ? h("span", { class: "small muted" }, acc.subtitle) : null,
+      acc.mode === "pairing" ? h("span", { class: "small muted" }, `This device: ${state.me?.device?.name ?? "paired"}`) : null))
+  const items = menuItems(state.me).map((item) =>
+    h("button", { class: `btn wide${item.id === "signout" ? " danger" : ""}`, type: "button", onclick: () => menuAction(item.id) },
+      h("span", {}, item.label), item.id === "signout" ? null : h("span", { "aria-hidden": "true" }, "›")))
+  miniSheet("Account", [who, h("nav", { class: "menu", "aria-label": "Account" }, items)])
+}
+
+function menuAction(id) {
+  if (id !== "signout") miniReturn = undefined // focus moves into the settings sheet
+  closeMini()
+  if (id === "devices") return openSettings("devices")
+  if (id === "speech") return openSpeechSettings()
+  if (id === "admin") return openAdmin()
+  if (id === "signout") return signOut()
+}
+
+/** POST /api/logout (removes this device), then reload: the hub shows the sign-in or pairing screen. */
+async function signOut() {
+  if (account(state.me).mode === "pairing" && !confirm("Sign out this device? You will need a new pairing code.")) return
+  const sub = await currentSubscription().catch(() => undefined)
+  await sub?.unsubscribe().catch(() => {})
+  await api("/api/logout", { method: "POST", json: {} }).catch(() => {})
+  state.source?.close()
+  location.reload()
+}
+
+// ---------- admin (users, all machines, approvals, audit) ----------
+
+const listOf = (res, key) => (Array.isArray(res) ? res : Array.isArray(res?.[key]) ? res[key] : [])
+const userLabel = (u) => (u.id === "local" ? "Hub owner (pairing)" : u.name || u.email || u.id)
+let adminEls // { content, notice } of the rendered admin panel
+
+function openAdmin(tab) {
+  state.sheetPanel = "admin"
+  if (tab) state.admin.tab = tab
+  state.admin.notice = ""
+  if (!$("sheet").open) $("sheet").showModal()
+  renderAdmin()
+}
+
+/** The admin panel frame (back, section chips, notice) and the current section. */
+function renderAdmin({ focus } = {}) {
+  const a = state.admin
+  const tabs = adminTabs(state.me)
+  if (!tabs.some(([id]) => id === a.tab)) a.tab = tabs[0]?.[0] ?? "machines"
+  $("sheet-title").textContent = "Admin"
+  const back = h("button", { class: "btn small", type: "button", onclick: () => {
+    state.sheetPanel = "main"
+    renderSheet()
+    $("settings").focus()
+  } }, "‹ Settings")
+  const chips = h("div", { class: "chips", role: "group", "aria-label": "Admin sections" },
+    tabs.map(([id, label]) => h("button", { type: "button", class: "chip", "data-key": `tab:${id}`, "aria-pressed": String(a.tab === id), onclick: () => {
+      if (a.tab === id) return
+      a.tab = id
+      a.notice = ""
+      renderAdmin({ focus: `tab:${id}` })
+    } }, label, id === "approvals" && state.enrollments.length ? h("span", { class: "count" }, String(state.enrollments.length)) : null)))
+  const notice = h("p", { class: "error admin-notice", role: "alert" })
+  const content = h("div", { class: "admin-body stack" }, h("p", { class: "muted" }, "Loading…"))
+  adminEls = { content, notice }
+  $("sheet-body").replaceChildren(h("div", { class: "admin-panel stack" }, back, chips, notice, content))
+  ;((focus && chips.querySelector(`[data-key="${CSS.escape(focus)}"]`)) || back).focus()
+  refreshAdmin()
+}
+
+/** Reloads the current admin section, keeping keyboard focus (by data-key) and showing the last error. */
+async function refreshAdmin() {
+  if (state.sheetPanel !== "admin" || !adminEls?.content.isConnected) return
+  const a = state.admin
+  const tab = a.tab
+  const { content, notice } = adminEls
+  const focused = $("sheet").contains(document.activeElement) ? document.activeElement.dataset?.key : undefined
+  let nodes
+  try {
+    nodes = await ADMIN_SECTIONS[tab]()
+  } catch (e) {
+    nodes = [h("p", { class: "error" }, `Could not load: ${adminError(e)}`)]
+  }
+  if (state.sheetPanel !== "admin" || a.tab !== tab || adminEls?.content !== content) return
+  content.replaceChildren(...nodes)
+  if (notice.textContent !== a.notice) notice.textContent = a.notice
+  if (focused && !content.contains(document.activeElement)) content.querySelector(`[data-key="${CSS.escape(focused)}"]`)?.focus()
+}
+
+/** Runs an admin change: the server's message (e.g. last-admin protection) is shown when it refuses. */
+async function adminChange(run, done) {
+  try {
+    await run()
+    state.admin.notice = ""
+    if (done) toast(done)
+  } catch (e) {
+    state.admin.notice = adminError(e)
+    toast(state.admin.notice, "err")
+  }
+}
+
+const ADMIN_SECTIONS = {
+  async users() {
+    const a = state.admin
+    a.users = listOf(await getJSON("/api/admin/users"), "users")
+    const list = h("ul", { class: "list admin-list" })
+    const count = h("p", { class: "sr-only", role: "status" })
+    const draw = () => {
+      const shown = usersView(a.users, { query: a.query, filter: a.filter, sort: a.sort })
+      list.replaceChildren(...(shown.length ? shown.map(userRow) : [h("li", { class: "muted" }, "No users match.")]))
+      count.textContent = `${shown.length} of ${a.users.length} users`
+    }
+    const search = h("input", { type: "search", class: "admin-search", placeholder: "Search by email or name", "aria-label": "Search users", autocomplete: "off", autocapitalize: "off", spellcheck: "false", "data-key": "users:search" })
+    search.value = a.query
+    search.addEventListener("input", () => {
+      a.query = search.value
+      draw()
+    })
+    const select = (key, label, options, value) => {
+      const el = h("select", { "aria-label": label, "data-key": `users:${key}` }, options.map(([v, text]) => h("option", { value: v }, text)))
+      el.value = value
+      el.addEventListener("change", () => {
+        a[key] = el.value
+        draw()
+      })
+      return el
+    }
+    draw()
+    return [
+      h("div", { class: "admin-tools" }, search,
+        h("div", { class: "row admin-selects" }, select("filter", "Show", USER_FILTERS, a.filter), select("sort", "Sort by", USER_SORTS, a.sort))),
+      count,
+      list,
+    ]
+  },
+
+  async machines() {
+    const machines = listOf(await getJSON("/api/admin/machines"), "machines")
+    state.admin.machines = machines
+    if (!machines.length) return [h("p", { class: "muted" }, "No machines are connected to this hub yet.")]
+    const mine = state.me?.user?.id
+    return [h("ul", { class: "list admin-list" }, machines.map((m) => {
+      const owner = m.ownerEmail ?? m.owner?.email ?? (m.ownerID === "local" ? "hub owner" : m.ownerID) ?? "unknown"
+      return h("li", {},
+        h("div", { class: "grow" },
+          h("div", { class: "name" }, h("span", { class: `dot ${m.online ? "idle" : "off"}`, "aria-hidden": "true" }), " ", m.name),
+          h("div", { class: "small muted" }, `${owner}${m.ownerID && m.ownerID === mine ? " (you)" : ""}`),
+          h("div", { class: "small muted" }, m.online ? "online" : `offline · seen ${ago(m.lastSeen)}`)),
+        h("button", { class: "btn small danger", type: "button", "data-key": `machine:${m.id}`, "aria-label": `Revoke machine ${m.name} of ${owner}`, onclick: async () => {
+          if (!confirm(`Revoke ${m.name} (${owner})? Its OpenCode processes disconnect and it must be connected again.`)) return
+          await adminChange(() => api(`/api/admin/machines/${enc(m.id)}`, { method: "DELETE" }), `${m.name} revoked`)
+          refreshAdmin()
+        } }, "Revoke"))
+    }))]
+  },
+
+  async approvals() {
+    if (!state.enrollmentsLoaded) await loadEnrollments()
+    const lead = h("p", { class: "small muted" }, `Approving a machine makes it yours (${account(state.me).subtitle ?? account(state.me).title}). Someone else's machine: let them approve it from their phone with the code OpenCode shows (/approve?code=…).`)
+    if (!state.enrollments.length) return [lead, h("p", { class: "muted" }, "No machines are waiting for approval.")]
+    return [lead, h("ul", { class: "list admin-list" }, state.enrollments.map((e) =>
+      h("li", {},
+        h("div", { class: "grow" }, h("div", { class: "name" }, e.machineName), h("div", { class: "small muted" }, `Code ${e.userCode} · requested ${ago(e.created)}`)),
+        h("div", { class: "row" },
+          h("button", { class: "btn small primary", type: "button", "data-key": `approve:${e.userCode}`, "aria-label": `Approve ${e.machineName}`, onclick: () => decideEnrollment(e, "approve") }, "Approve"),
+          h("button", { class: "btn small danger", type: "button", "data-key": `deny:${e.userCode}`, "aria-label": `Deny ${e.machineName}`, onclick: () => decideEnrollment(e, "deny") }, "Deny")))))]
+  },
+
+  async audit() {
+    const a = state.admin
+    const [res, users, machines] = await Promise.all([
+      getJSON("/api/admin/audit"),
+      getJSON("/api/admin/users").then((r) => listOf(r, "users"), () => a.users ?? []),
+      getJSON("/api/admin/machines").then((r) => listOf(r, "machines"), () => a.machines ?? []),
+    ])
+    const names = [...users.map((u) => ({ id: u.id, email: u.id === "local" ? "hub owner" : u.email, name: u.name })), ...machines.map((m) => ({ id: m.id, name: m.name }))]
+    const rows = auditRows(listOf(res, "audit").length ? listOf(res, "audit") : listOf(res, "entries"), names)
+    if (!rows.length) return [h("p", { class: "muted" }, "Nothing recorded yet.")]
+    return [h("ol", { class: "list admin-list audit" }, rows.map((r) =>
+      h("li", {},
+        h("div", { class: "grow" },
+          h("div", { class: "name" }, r.action),
+          h("div", { class: "small muted" }, r.actor, r.target ? ` → ${r.target}` : "", r.detail ? ` · ${r.detail}` : "")),
+        h("time", { class: "small muted", datetime: new Date(r.at).toISOString(), title: new Date(r.at).toLocaleString() }, ago(r.at)))))]
+  },
+}
+
+function userRow(u) {
+  const users = state.admin.users ?? []
+  const mine = state.me?.user?.id
+  const actions = userActions(u, users, mine)
+  return h("li", { class: `user-row${u.disabled ? " disabled" : ""}` },
+    h("div", { class: "grow" },
+      h("div", { class: "name" }, userLabel(u),
+        u.role === "admin" ? h("span", { class: "badge-pill role" }, "Admin") : null,
+        u.disabled ? h("span", { class: "badge-pill off" }, "Disabled") : null,
+        u.id === mine ? h("span", { class: "badge-pill" }, "You") : null),
+      u.name && u.email ? h("div", { class: "small muted" }, u.email) : null,
+      h("div", { class: "small muted" }, `${plural(u.machines ?? 0, "machine")} · ${plural(u.devices ?? 0, "device")} · seen ${ago(u.lastSeen) || "never"}`)),
+    h("div", { class: "row user-actions" }, actions.map((act, i) =>
+      h("button", { class: `btn small${act.danger ? " danger" : ""}`, type: "button", "data-key": `user:${u.id}:${i}`, "aria-label": `${act.label}: ${userLabel(u)}`, onclick: () => changeUser(u, act) }, act.label))))
+}
+
+async function changeUser(u, act) {
+  if (!confirm(act.confirm)) return
+  const self = u.id === state.me?.user?.id
+  let ok = false
+  await adminChange(async () => {
+    await api(`/api/admin/users/${enc(u.id)}`, { method: "PUT", json: act.change })
+    ok = true
+  }, `${userLabel(u)}: ${act.label.toLowerCase()} done`)
+  if (ok && self) {
+    // Own role or access changed: reload who we are (and leave the admin screens if that is over).
+    state.me = undefined
+    if (!(await ensureMe())) return
+    updateAccount()
+    if (!isAdmin(state.me)) {
+      state.sheetPanel = "main"
+      return renderSheet()
+    }
+  }
+  refreshAdmin()
+}
+
 // ---------- wiring ----------
 
 $("back").addEventListener("click", () => (state.pushed > 0 ? history.back() : navigate("/")))
 $("notify").addEventListener("click", enableNotifications)
+$("account").addEventListener("click", openAccountMenu)
 $("settings").addEventListener("click", () => {
   renderSheet()
   $("sheet").showModal()
 })
 $("sheet-close").addEventListener("click", () => $("sheet").close())
-$("sheet").addEventListener("close", () => (state.sheetPanel = "main"))
+$("sheet").addEventListener("close", () => {
+  if (!$("sheet").open) state.sheetPanel = "main" // not when it was opened again (e.g. from the account menu) meanwhile
+})
 $("sheet").addEventListener("click", (event) => {
   if (event.target === $("sheet")) $("sheet").close() // backdrop tap
 })

@@ -138,11 +138,12 @@ const mockSession = () => ({
   status,
 })
 let pushPrefs: Record<string, boolean> = { handoff: true, blocked: true, finished: false, say: false }
-const keys: Record<string, string | undefined> = { stt: "sk-or-v1-mock-stt-1234", tts: undefined }
-let speech = {
+let keys: Record<string, string | undefined> = { stt: "sk-or-v1-mock-stt-1234", tts: undefined }
+const seedSpeech = () => ({
   stt: { provider: "openrouter", model: "openai/whisper-1", language: "en" as string | undefined, baseURL: undefined as string | undefined },
   tts: { provider: "openai-compatible", model: "tts-1", voice: "alloy", baseURL: "http://kokoro:8880/v1" as string | undefined, speed: undefined as number | undefined },
-}
+})
+let speech = seedSpeech()
 const voiceHints = { "tts-": ["alloy", "echo", "fable", "onyx", "nova", "shimmer"], "gpt-4o-mini-tts": ["alloy", "coral", "sage"], kokoro: ["af_bella", "am_adam"] }
 const keyInfo = (kind: "stt" | "tts") => {
   const key = keys[kind]
@@ -557,6 +558,8 @@ const server = Bun.serve({
       audit = seedAudit()
       enrollments = seedEnrollments()
       userSpeech = new Map()
+      speech = seedSpeech()
+      keys = { stt: "sk-or-v1-mock-stt-1234", tts: undefined }
       emitCatalog()
       return Response.json({ ok: true })
     }
