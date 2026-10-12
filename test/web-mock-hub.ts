@@ -24,6 +24,13 @@
 // per-user speech (GET/PUT /api/settings/speech with scope/default/user) and the server default
 // (/api/settings/speech/default, admin), admin users/machines/devices/audit, admin-only GET /api/enrollments with
 // two pending machines, and GET /auth/callback?error=… rendering the hub's error page.
+// Session view (0.4.0, docs/session-view.md): "laptop" reports Herdr (machine.terminals.herdr: general, api-server,
+// research, ops, scratch) and 14 open sessions (13 in Herdr panes, one in a TUI) besides ~40 history sessions;
+// blocked ones open and in history. GET/PUT /api/prefs/view per user (PUT emits SSE {type:"prefs", prefs} to that
+// user's clients); POST /api/machines/:id/sessions accepts herdrWorkspace (201 {sessionID, openedIn:"herdr"}, or with
+// a warning and no openedIn when Herdr fails). Control: POST /mock/prefs {…lists} (another device changed prefs:
+// stored and emitted), POST /mock/herdr {on?, fail?} (machine without Herdr; Herdr tab creation fails),
+// POST /mock/fail {prefs?} (PUT /api/prefs/view answers 502).
 import { existsSync, readFileSync, statSync } from "node:fs"
 import path from "node:path"
 
@@ -59,6 +66,8 @@ type Fixture = {
   state: string
   blockers: Array<Record<string, unknown>>
   now?: { kind: string; tool?: string; summary?: string }
+  open?: boolean
+  terminal?: { source: "herdr" | "tui"; workspaceID?: string; workspace?: string; title?: string; status?: string }
 }
 const HOME = "/home/user/projects"
 const WORKSPACES: Array<[string, string]> = [
@@ -68,21 +77,38 @@ const WORKSPACES: Array<[string, string]> = [
   [`${HOME}/infra`, "infra"],
   [`${HOME}/pcb-designs`, "pcb-designs"],
   [`${HOME}/cafe-blog`, "café-blog"],
+  [`${HOME}/api-server`, "api-server"],
+  ["/home/user/research", "research"],
 ]
+/** Herdr workspaces on "laptop", in Herdr's order (its sidebar numbers). */
+const HERDR = [
+  { id: "w_gen", label: "general", directories: [`${HOME}/opencode-voice`, "/home/user/dotfiles"] },
+  { id: "w_api", label: "api-server", directories: [`${HOME}/api-server`, `${HOME}/api-server/.worktrees/feat-auth`] },
+  { id: "w_res", label: "research", directories: ["/home/user/research"] },
+  { id: "w_ops", label: "ops", directories: [`${HOME}/infra`] },
+  { id: "w_scr", label: "scratch", directories: [] },
+]
+const herdrStatus = (state: string) => (state === "working" ? "working" : state === "blocked" ? "blocked" : "idle")
+/** Marks a fixture as open in a Herdr pane of workspace `id` (status follows the session state). */
+const inHerdr = (id: string, title?: string) => (f: Fixture): Partial<Fixture> => ({
+  open: true,
+  terminal: { source: "herdr", workspaceID: id, workspace: HERDR.find((w) => w.id === id)!.label, title: title ?? f.title, status: herdrStatus(f.state) },
+})
 const projectOf = (dir: string) => WORKSPACES.find(([root]) => dir === root || dir.startsWith(`${root}/`))
 function fixtures(): Fixture[] {
   const t = Date.now()
   const out: Fixture[] = []
-  const add = (dir: string, title: string, minutes: number, extra: Partial<Fixture> = {}) => {
+  const add = (dir: string, title: string, minutes: number, extra: Partial<Fixture> = {}, open?: (f: Fixture) => Partial<Fixture>) => {
     const ws = projectOf(dir)
-    out.push({ id: `ses_${String(out.length + 1).padStart(2, "0")}`, title, directory: dir, project: ws?.[0], projectName: ws?.[1], updated: t - minutes * 60_000, exposed: true, state: "idle", blockers: [], ...extra })
+    const f: Fixture = { id: `ses_${String(out.length + 1).padStart(2, "0")}`, title, directory: dir, project: ws?.[0], projectName: ws?.[1], updated: t - minutes * 60_000, exposed: true, state: "idle", blockers: [], ...extra }
+    out.push(open ? { ...f, ...open(f) } : f)
   }
   const ov = `${HOME}/opencode-voice`
-  add(ov, "Session browser on the phone", 3, { state: "blocked", blockers: [{ id: "per_1", kind: "permission", summary: "shell: rm -rf web/dist" }] })
-  add(ov, "Hub SSE reconnect", 40)
+  add(ov, "Session browser on the phone", 3, { state: "blocked", blockers: [{ id: "per_1", kind: "permission", summary: "shell: rm -rf web/dist" }] }, inHerdr("w_gen"))
+  add(ov, "Hub SSE reconnect", 40, {}, inHerdr("w_gen"))
   add(ov, "README local-only section", 60 * 20)
   add(ov, "", 60 * 30)
-  add(`${ov}/.worktrees/feat-voice-feedback`, "Voice speed slider", 1, { state: "working", conversation: true, now: { kind: "tool", tool: "shell", summary: "bun test" } })
+  add(`${ov}/.worktrees/feat-voice-feedback`, "Voice speed slider", 1, { state: "working", conversation: true, now: { kind: "tool", tool: "shell", summary: "bun test" } }, () => ({ open: true, terminal: { source: "tui" } }))
   add(`${ov}/.worktrees/feat-voice-feedback`, "Progress cues", 90)
   add(`${ov}/.worktrees/feat-voice-feedback`, "Screen-off listening", 60 * 26)
   add(`${ov}/.worktrees/fix-sse`, "Fix SSE keepalive", 15, { state: "working", now: { kind: "thinking" } })
@@ -90,7 +116,7 @@ function fixtures(): Fixture[] {
   add(`${ov}/web`, "PWA icons", 60 * 72, { exposed: false })
   const shop = `${HOME}/webshop`
   for (const [i, title] of ["Checkout migration", "Search ranking", "Cart bug", "Image resizing", "Orders API", "CLI polish"].entries()) {
-    add(shop, title, 7 + i * 95, i === 1 ? { state: "working", now: { kind: "tool", tool: "edit", summary: "internal/search/rank.go" } } : i >= 4 ? { exposed: false } : {})
+    add(shop, title, 7 + i * 95, i === 1 ? { state: "working", now: { kind: "tool", tool: "edit", summary: "internal/search/rank.go" } } : i === 2 ? { state: "blocked", blockers: [{ id: "q_cart", kind: "question", summary: "Keep the old cart cookie for a release?" }] } : i >= 4 ? { exposed: false } : {})
   }
   add(`${shop}/.worktrees/feat-x`, "Feature X spike", 25)
   add(`${shop}/.worktrees/feat-x`, "Feature X tests", 200, { exposed: false })
@@ -98,8 +124,9 @@ function fixtures(): Fixture[] {
     add("/home/user/dotfiles", title, 60 * (2 + i * 9), i > 1 ? { exposed: false } : {})
   }
   const infra = `${HOME}/infra`
-  add(infra, "Reverse proxy route for dashboard", 12, { state: "blocked", blockers: [{ id: "q_1", kind: "question", summary: "Which subdomain should the dashboard use?" }] })
-  add(infra, "Nightly backup job", 60 * 5)
+  add(infra, "Reverse proxy route for dashboard", 12, { state: "blocked", blockers: [{ id: "q_1", kind: "question", summary: "Which subdomain should the dashboard use?" }] }, inHerdr("w_ops"))
+  add(infra, "Nightly backup job", 60 * 5, {}, inHerdr("w_ops"))
+  add(infra, "Grafana alert rules", 8, { state: "working", now: { kind: "tool", tool: "edit", summary: "alerts/disk.yaml" } }, inHerdr("w_ops"))
   add(infra, "DNS server upgrade", 60 * 30, { exposed: false })
   add(`${infra}/ansible`, "Inventory cleanup", 60 * 8)
   add(infra, "Snapshot audit", 60 * 100)
@@ -113,12 +140,44 @@ function fixtures(): Fixture[] {
   add(site, "Dark mode", 60 * 36)
   add(site, "Static deploy", 60 * 80)
   for (let i = 0; i < 6; i++) add(`${ov}/test-project`, `Test project run ${i + 1}`, 60 * (100 + i * 12), { exposed: i % 2 === 0 })
+  const api = `${HOME}/api-server`
+  add(api, "Rate limiter migration", 2, { state: "blocked", blockers: [{ id: "per_api", kind: "permission", summary: "shell: psql -f migrations/042_rate_limits.sql" }] }, inHerdr("w_api"))
+  add(`${api}/.worktrees/feat-auth`, "Auth middleware", 1, { state: "working", now: { kind: "tool", tool: "shell", summary: "go test ./internal/auth/..." } }, inHerdr("w_api"))
+  add(api, "OpenAPI docs", 55, {}, inHerdr("w_api"))
+  add(api, "", 70, {}, inHerdr("w_api", "Pagination bug"))
+  add(api, "Request logging", 60 * 30)
+  add(api, "Health check endpoint", 60 * 60)
+  const research = "/home/user/research"
+  add(research, "Vector DB comparison", 4, { state: "working", now: { kind: "thinking" } }, inHerdr("w_res"))
+  add(research, "Paper notes: retrieval", 35, {}, inHerdr("w_res"))
+  add(research, "Benchmark harness", 120, {}, inHerdr("w_res"))
+  add(research, "Reading list", 60 * 200)
   return out
 }
 let sessions = fixtures()
 let created = 0
-let fail = { expose: false, create: false, models: false }
+let fail = { expose: false, create: false, models: false, prefs: false }
 let serviceConnected = true
+let herdr = { on: true, fail: false }
+type ViewPrefs = { hiddenSessions: string[]; hiddenWorkspaces: string[]; pinnedSessions: string[]; pinnedWorkspaces: string[] }
+const PREF_LISTS = ["hiddenSessions", "hiddenWorkspaces", "pinnedSessions", "pinnedWorkspaces"] as const
+const emptyPrefs = (): ViewPrefs => ({ hiddenSessions: [], hiddenWorkspaces: [], pinnedSessions: [], pinnedWorkspaces: [] })
+let viewPrefs = new Map<string, ViewPrefs>()
+const prefsOf = (userID: string) => {
+  if (!viewPrefs.has(userID)) viewPrefs.set(userID, emptyPrefs())
+  return viewPrefs.get(userID)!
+}
+/** Applies a partial prefs body; returns an error message for invalid input. */
+function applyPrefs(userID: string, body: Record<string, unknown>): string | undefined {
+  const prefs = prefsOf(userID)
+  for (const list of PREF_LISTS) {
+    const value = body[list]
+    if (value === undefined) continue
+    if (!Array.isArray(value) || value.length > 500 || !value.every((x) => typeof x === "string" && x.length <= 4096)) return `${list} must be a list of at most 500 strings`
+  }
+  for (const list of PREF_LISTS) if (body[list] !== undefined) prefs[list] = [...new Set(body[list] as string[])]
+  return undefined
+}
 const NOT_EXPOSED = { error: "Voice is not enabled for this session. Enable it from the session list.", code: "not_exposed" }
 const fixtureStatus = (s: Fixture) => [{ id: s.id, title: s.title, state: s.state, blockers: s.blockers }]
 const catalogSession = (s: Fixture) => ({ ...s, owned: false, busy: false, conversation: !!s.conversation, status: fixtureStatus(s) })
@@ -136,6 +195,8 @@ const mockSession = () => ({
   state: status[0]?.state ?? "idle",
   blockers: status[0]?.blockers ?? [],
   status,
+  open: true,
+  terminal: { source: "herdr", workspaceID: "w_gen", workspace: "general", title: "Mock session", status: herdrStatus(status[0]?.state ?? "idle") },
 })
 let pushPrefs: Record<string, boolean> = { handoff: true, blocked: true, finished: false, say: false }
 let keys: Record<string, string | undefined> = { stt: "sk-or-v1-mock-stt-1234", tts: undefined }
@@ -213,6 +274,8 @@ const emit = (message: object) => {
   for (const c of clients) {
     if (m.type === "catalog") c.send(catalog(c.user))
     else if (m.type === "enrollment" && c.user.role !== "admin") continue
+    else if (m.type === "prefs" && (m as { userID?: string }).userID !== c.user.id) continue
+    else if (m.type === "prefs") c.send({ type: "prefs", prefs: prefsOf(c.user.id) })
     else if (m.sessionID && !canSee(c.user, m.rootID ?? m.sessionID)) continue
     else c.send(message)
   }
@@ -329,6 +392,7 @@ const mainMachines = () => [
       created: Date.now(),
       lastSeen: Date.now(),
       online: true,
+      terminals: herdr.on ? { herdr: { workspaces: HERDR } } : {},
       processes: [
         ...(serviceConnected
           ? [{ id: "proc_1", kind: "service", directory: "/home/user", pid: 4242, sessions: [mockSession(), ...sessions.map(catalogSession)] }]
@@ -530,6 +594,20 @@ const server = Bun.serve({
       fail = { ...fail, ...(await json()) }
       return Response.json(fail)
     }
+    if (p === "/mock/prefs" && m === "POST") {
+      const body = await json()
+      const as = typeof body.as === "string" ? body.as : mainOwner()
+      const bad = applyPrefs(as, body)
+      if (bad) return Response.json({ error: bad }, { status: 400 })
+      emit({ type: "prefs", userID: as })
+      return Response.json({ prefs: prefsOf(as), clients: clients.size })
+    }
+    if (p === "/mock/herdr" && m === "POST") {
+      const body = await json()
+      herdr = { on: typeof body.on === "boolean" ? body.on : herdr.on, fail: typeof body.fail === "boolean" ? body.fail : herdr.fail }
+      emitCatalog()
+      return Response.json(herdr)
+    }
     if (p === "/mock/service" && m === "POST") {
       serviceConnected = !!(await json()).connected
       emitCatalog()
@@ -542,7 +620,7 @@ const server = Bun.serve({
       emitCatalog()
       return Response.json({ mode: authMode, as: loginAs })
     }
-    if (p === "/mock/log") return Response.json({ log, transcripts, conversation, pushPrefs, speech, keys, users, audit, enrollments, userSpeech: Object.fromEntries(userSpeech) })
+    if (p === "/mock/log") return Response.json({ log, transcripts, conversation, pushPrefs, speech, keys, users, audit, enrollments, userSpeech: Object.fromEntries(userSpeech), viewPrefs: Object.fromEntries(viewPrefs), herdr })
     if (p === "/mock/reset" && m === "POST") {
       scenarioRun++
       log = []
@@ -550,8 +628,10 @@ const server = Bun.serve({
       activity = []
       status = [{ id: SESSION, title: "Mock session", state: "idle", blockers: [] }]
       sessions = fixtures()
-      fail = { expose: false, create: false, models: false }
+      fail = { expose: false, create: false, models: false, prefs: false }
       serviceConnected = true
+      herdr = { on: true, fail: false }
+      viewPrefs = new Map()
       users = seedUsers()
       extraMachines = seedMachines()
       devices = seedDevices()
@@ -697,9 +777,21 @@ const server = Bun.serve({
       if (typeof body.directory !== "string" || !body.directory.startsWith("/")) return Response.json({ error: "directory must be absolute" }, { status: 400 })
       const ws = projectOf(body.directory)
       const id = `ses_new_${++created}`
-      sessions.push({ id, title: typeof body.title === "string" && body.title.trim() ? body.title.trim() : "", directory: body.directory, project: ws?.[0], projectName: ws?.[1], updated: Date.now(), exposed: true, state: "idle", blockers: [] })
+      const title = typeof body.title === "string" && body.title.trim() ? body.title.trim() : ""
+      const fixture: Fixture = { id, title, directory: body.directory, project: ws?.[0], projectName: ws?.[1], updated: Date.now(), exposed: true, state: "idle", blockers: [] }
+      let result: Record<string, unknown> = { sessionID: id }
+      if (typeof body.herdrWorkspace === "string") {
+        const target = HERDR.find((w) => w.id === body.herdrWorkspace)
+        if (!herdr.on || herdr.fail || !target) {
+          result = { sessionID: id, warning: herdr.fail ? "Herdr could not open a tab: herdr server is not running" : `Herdr workspace ${body.herdrWorkspace} not found` }
+        } else {
+          Object.assign(fixture, inHerdr(target.id, title || "New session")(fixture))
+          result = { sessionID: id, openedIn: "herdr" }
+        }
+      }
+      sessions.push(fixture)
       emitCatalog()
-      return Response.json({ sessionID: id }, { status: 201 })
+      return Response.json(result, { status: 201 })
     }
     if ((match = /^\/api\/sessions\/([^/]+)(?:\/([a-z]+))?$/.exec(p)) && decodeURIComponent(match[1]!) !== SESSION) {
       const id = decodeURIComponent(match[1]!)
@@ -728,6 +820,17 @@ const server = Bun.serve({
       if (action === "turn" && m === "POST") return Response.json({ outcome: "succeeded", reply: `You said: ${(await json()).text}` })
       if (action === "utterance" && m === "POST") return Response.json({ inboxID: `inb_${++inbox}` }, { status: 202 })
       if (action === "interrupt" && m === "POST") return new Response(null, { status: 204 })
+    }
+    if (p === "/api/prefs/view" && m === "GET") return Response.json(prefsOf(user.id))
+    if (p === "/api/prefs/view" && m === "PUT") {
+      const body = await json()
+      last().body = body
+      await Bun.sleep(200)
+      if (fail.prefs) return Response.json({ error: "The hub could not save your view settings" }, { status: 502 })
+      const bad = applyPrefs(user.id, body)
+      if (bad) return Response.json({ error: bad }, { status: 400 })
+      emit({ type: "prefs", userID: user.id })
+      return Response.json(prefsOf(user.id))
     }
     if (p === "/api/push/prefs" && m === "GET") return Response.json({ prefs: pushPrefs })
     if (p === "/api/push/prefs" && m === "PUT") {

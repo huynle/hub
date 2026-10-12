@@ -20,7 +20,8 @@ import {
 } from "./feedback-core.js"
 import { filterPicker, pickerOptions, stepActive } from "./picker-core.js"
 import { applyRate } from "./cues.js"
-import { FILTERS, groupOpen, highlight, machineView as browseMachine, page, parseChoices, parseSet, toggleIn } from "./browser-core.js"
+import { FILTERS, groupOpen, highlight, machineView as browseMachine, page, parseChoices } from "./browser-core.js"
+import { createBody, hiddenView, homeView, migratePins, newSessionTargets, normalizePrefs, recentMachine, setPref } from "./view-core.js"
 import {
   USER_FILTERS,
   USER_SORTS,
@@ -47,8 +48,8 @@ const PREF_SPEED = "voice.speed"
 const PREF_CUES = "voice.cues"
 const PREF_BACKGROUND = "voice.background"
 const PREF_FEED_OPEN = "voice.feedOpen"
-const PREF_PINS = "voice.pins" // pinned session IDs (JSON array)
-const PREF_PINNED_WS = "voice.pinnedWorkspaces" // pinned workspace/worktree directories (JSON array)
+const PREF_PINS = "voice.pins" // 0.3 pinned session IDs (JSON array); migrated into the synced view prefs
+const PREF_PINNED_WS = "voice.pinnedWorkspaces" // 0.3 pinned workspace/worktree directories; migrated likewise
 const PREF_GROUPS = "voice.groups" // workspace key → open (JSON object)
 const PREF_FILTER = "voice.filter"
 const PAGE = 50 // rows per group before "Show more"
@@ -96,7 +97,12 @@ const state = {
   browser: {
     query: "",
     filter: FILTERS.some(([id]) => id === localStorage.getItem(PREF_FILTER)) ? localStorage.getItem(PREF_FILTER) : "all",
-    pins: { sessions: parseSet(localStorage.getItem(PREF_PINS)), workspaces: parseSet(localStorage.getItem(PREF_PINNED_WS)) },
+    tab: "open", // "open" | "recent" | "hidden"
+    prefs: normalizePrefs({}), // synced view prefs: hidden/pinned sessions and workspaces (GET/PUT /api/prefs/view)
+    prefsSource: "unknown", // "hub" | "local" (older hub: kept on this device) | "error" | "reload" | "unknown"
+    prefsLoading: false,
+    prefsPending: 0, // PUTs in flight
+    prefsStale: false, // SSE prefs arrived during a PUT: reload when it settles
     groups: parseChoices(localStorage.getItem(PREF_GROUPS)),
     limits: new Map(), // group key → rows shown
     exposed: new Map(), // session ID → optimistic exposed value until the catalog agrees
@@ -160,7 +166,7 @@ function toast(message, kind = "", action) {
   el.replaceChildren(message, action ? h("span", {}, " ", action) : "")
   el.className = `toast show ${kind}`
   clearTimeout(toastTimer)
-  toastTimer = setTimeout(() => (el.className = "toast"), action ? 8000 : 4000)
+  toastTimer = setTimeout(() => (el.className = "toast"), action || kind === "warn" ? 8000 : 4000)
 }
 
 class HttpError extends Error {
@@ -238,6 +244,7 @@ async function render() {
   if (previous?.name === "home" && route.name !== "home") state.browser.scroll = window.scrollY
 
   $("back").hidden = route.name === "home" || route.name === "pair"
+  $("new-session").hidden = route.name !== "home"
   $("heading").textContent = "OpenCode Voice"
   if (route.name === "pair") return renderPair(route)
   if (!(await ensureMe())) return
@@ -289,7 +296,10 @@ function startEvents() {
   setConn("", "connecting")
   const source = new EventSource("/api/events", { withCredentials: true })
   state.source = source
-  source.onopen = () => setConn("live", "live")
+  source.onopen = () => {
+    setConn("live", "live")
+    void loadViewPrefs() // no-op once loaded; retries after an error
+  }
   source.onerror = async () => {
     setConn("down", "offline")
     // EventSource hides the status code; check whether the device was revoked.
@@ -351,6 +361,9 @@ function onEvent(message) {
       break
     case "enrollment":
       loadEnrollments()
+      break
+    case "prefs":
+      onPrefs(message.prefs)
       break
     case "handoff": {
       const s = findSession(message.sessionID)
@@ -558,11 +571,116 @@ $("mini").addEventListener("close", () => {
   if (target?.isConnected) target.focus()
 })
 $("mini-close").addEventListener("click", closeMini)
+$("new-session").addEventListener("click", () => openNewSession())
 $("mini").addEventListener("click", (event) => {
   if (event.target === $("mini")) closeMini()
 })
 
 // ---------- home (session browser) ----------
+// Tabs Open (default) · Recent · Hidden (docs/session-view.md). Open lists sessions open in a terminal, grouped by
+// Herdr workspace like Herdr's sidebar; Recent is the history window with search and filter chips; Hidden lists what
+// the user hid. Pins and hides are synced per user through /api/prefs/view (SSE "prefs" from other devices).
+
+const TABS = [["open", "Open"], ["recent", "Recent"], ["hidden", "Hidden"]]
+const PREF_VIEW_LOCAL = "voice.viewPrefs" // view prefs on this device when the hub has no /api/prefs/view (older hubs)
+const LONG_PRESS_MS = 550
+
+const pinSets = () => ({ sessions: new Set(state.browser.prefs.pinnedSessions), workspaces: new Set(state.browser.prefs.pinnedWorkspaces) })
+const prefsReady = () => state.browser.prefsSource === "hub" || state.browser.prefsSource === "local"
+
+/** GET /api/prefs/view once per page load (again after an error), then migrates 0.3 local pins into it. */
+async function loadViewPrefs() {
+  const b = state.browser
+  if (prefsReady() || b.prefsLoading) return
+  b.prefsLoading = true
+  try {
+    b.prefs = normalizePrefs(await getJSON("/api/prefs/view"))
+    b.prefsSource = "hub"
+  } catch (e) {
+    if (e.status === 404) {
+      let local
+      try {
+        local = JSON.parse(localStorage.getItem(PREF_VIEW_LOCAL) ?? "null")
+      } catch {}
+      b.prefs = normalizePrefs(local)
+      b.prefsSource = "local"
+    } else b.prefsSource = "error"
+  } finally {
+    b.prefsLoading = false
+  }
+  if (prefsReady()) await migrateLocalPins()
+  scheduleHomeRender()
+}
+
+/** 0.3 kept pins on the device: merge them into the synced prefs once, then drop the local keys. */
+async function migrateLocalPins() {
+  const b = state.browser
+  const { clear, patch } = migratePins(localStorage.getItem(PREF_PINS), localStorage.getItem(PREF_PINNED_WS), b.prefs)
+  if (!clear) return
+  if (patch) {
+    b.prefs = { ...b.prefs, ...patch }
+    if (!(await savePrefs(patch)).ok) return // keep the local pins; the next load tries again
+  }
+  localStorage.removeItem(PREF_PINS)
+  localStorage.removeItem(PREF_PINNED_WS)
+}
+
+/** PUT a partial prefs patch (or store locally on older hubs). SSE prefs that arrive meanwhile trigger a reload. */
+async function savePrefs(patch) {
+  const b = state.browser
+  if (b.prefsSource === "local") {
+    localStorage.setItem(PREF_VIEW_LOCAL, JSON.stringify(b.prefs))
+    return { ok: true }
+  }
+  b.prefsPending++
+  try {
+    const saved = await (await api("/api/prefs/view", { method: "PUT", json: patch })).json().catch(() => undefined)
+    if (b.prefsPending === 1 && saved && !b.prefsStale) b.prefs = normalizePrefs(saved)
+    return { ok: true }
+  } catch (error) {
+    return { ok: false, error }
+  } finally {
+    b.prefsPending--
+    if (!b.prefsPending && b.prefsStale) {
+      b.prefsStale = false
+      b.prefsSource = "reload"
+      void loadViewPrefs()
+    }
+  }
+}
+
+/** SSE {type:"prefs"}: another device (or this one) changed the view prefs. */
+function onPrefs(prefs) {
+  const b = state.browser
+  if (b.prefsSource !== "hub") return
+  if (b.prefsPending) {
+    b.prefsStale = true
+    return
+  }
+  b.prefs = normalizePrefs(prefs)
+  scheduleHomeRender()
+}
+
+/** Optimistic pin/hide: shows the result at once, saves, reverts (with a toast) if the hub refuses. */
+function changePref(list, key, on, { message, undo = false } = {}) {
+  const b = state.browser
+  if (!prefsReady()) {
+    toast("Your view settings are still loading. Try again in a moment.", "err")
+    void loadViewPrefs()
+    return
+  }
+  const { prefs, patch } = setPref(b.prefs, list, key, on)
+  if (!patch) return
+  b.prefs = prefs
+  renderHomeList()
+  if (message) toast(message, "", undo ? h("button", { class: "btn small", type: "button", onclick: () => changePref(list, key, !on) }, "Undo") : undefined)
+  void savePrefs(patch).then(({ ok, error }) => {
+    if (ok) return renderHomeList()
+    b.prefs = setPref(b.prefs, list, key, !on).prefs
+    renderHomeList()
+    toast(`Could not save that change: ${error?.message ?? "unknown error"}`, "err")
+  })
+}
 
 function renderHome() {
   $("heading").textContent = "Sessions"
@@ -580,7 +698,7 @@ function renderHome() {
   if (fresh) window.scrollTo(0, b.scroll)
 }
 
-/** Search box, filter chips and the list container; built once per visit so typing survives live updates. */
+/** Tabs, search box, filter chips and the list container; built once per visit so typing survives live updates. */
 function buildHome() {
   const b = state.browser
   const input = h("input", {
@@ -611,12 +729,51 @@ function buildHome() {
   } }, icon(SEARCH_ICON), input)
   const chips = h("div", { class: "chips", role: "group", "aria-label": "Filter sessions" },
     FILTERS.map(([id, label]) => h("button", { type: "button", class: "chip", "data-filter": id, "aria-pressed": String(b.filter === id), onclick: () => setFilter(id) }, label)))
+  const tabs = h("div", { class: "tabs", role: "tablist", "aria-label": "Session lists" },
+    TABS.map(([id, label]) => h("button", {
+      type: "button", role: "tab", id: `tab-${id}`, class: "tab", "aria-controls": "home-list", "data-tab": id,
+      onclick: () => setTab(id), onkeydown: onTabKey,
+    }, label, h("span", { class: "tab-count" }))))
+  const recentTools = h("div", { class: "recent-tools" }, search, chips)
   const count = h("p", { class: "sr-only", role: "status", "aria-live": "polite" })
   const banners = h("div", { class: "stack banners" })
-  const list = h("div", { id: "home-list", class: "home-list" })
-  const root = h("div", { class: "home" }, banners, h("div", { class: "home-tools" }, search, chips), count, list)
-  b.els = { root, input, chips, count, banners, list }
+  const list = h("div", { id: "home-list", class: "home-list", role: "tabpanel", tabindex: "-1" })
+  const root = h("div", { class: "home" }, banners, h("div", { class: "home-tools" }, tabs, recentTools), count, list)
+  b.els = { root, input, chips, count, banners, list, tabs, recentTools }
   view.replaceChildren(root)
+}
+
+function setTab(id, { focus = false } = {}) {
+  const b = state.browser
+  if (b.tab !== id) {
+    b.tab = id
+    window.scrollTo(0, 0)
+  }
+  renderHomeList({ announce: true })
+  if (focus) $(`tab-${id}`)?.focus()
+}
+
+/** Arrow keys, Home and End move between tabs (WAI-ARIA tabs pattern, automatic activation). */
+function onTabKey(event) {
+  const ids = TABS.map(([id]) => id)
+  const at = ids.indexOf(state.browser.tab)
+  const next = { ArrowRight: at + 1, ArrowLeft: at - 1, Home: 0, End: ids.length - 1 }[event.key]
+  if (next === undefined) return
+  event.preventDefault()
+  setTab(ids[(next + ids.length) % ids.length], { focus: true })
+}
+
+function updateTabs(counts) {
+  const b = state.browser
+  for (const tab of b.els.tabs.querySelectorAll("[role=tab]")) {
+    const id = tab.dataset.tab
+    const selected = id === b.tab
+    tab.setAttribute("aria-selected", String(selected))
+    tab.tabIndex = selected ? 0 : -1
+    tab.querySelector(".tab-count").textContent = String(counts[id] ?? 0)
+  }
+  b.els.list.setAttribute("aria-labelledby", `tab-${b.tab}`)
+  b.els.recentTools.hidden = b.tab !== "recent"
 }
 
 function setFilter(id) {
@@ -629,46 +786,249 @@ function setFilter(id) {
 
 const filtering = () => !!state.browser.query.trim() || state.browser.filter !== "all"
 
-/** Re-renders the machine sections, keeping scroll position and keyboard focus (by data-key). */
+/** Re-renders the current tab, keeping scroll position and keyboard focus (by data-key). */
 function renderHomeList({ announce = false } = {}) {
   const b = state.browser
   if (!b.els || state.route?.name !== "home") return
   const { list, count } = b.els
   if (!state.machines) return list.replaceChildren(h("p", { class: "empty" }, "Loading…"))
   if (state.machines.length === 0) {
+    updateTabs({})
     return list.replaceChildren(
       h("div", { class: "empty" },
         h("p", {}, "No machines yet."),
         h("p", { class: "small" }, "In OpenCode run /voice → Connect this machine, then approve it here.")),
     )
   }
-  const options = { query: b.query, filter: b.filter, pins: b.pins, now: Date.now() }
-  const views = state.machines.map((m) => browseMachine(withPending(m), options))
+  const machines = state.machines.map(withPending)
+  const hv = homeView(machines, b.prefs)
+  updateTabs(hv.counts)
   const focused = list.contains(document.activeElement) ? document.activeElement.dataset.key : undefined
   const scroll = window.scrollY
-  list.replaceChildren(...views.map(machineSection))
-  window.scrollTo(0, scroll)
-  if (focused) list.querySelector(`[data-key="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true })
-  if (announce) {
+  let announcement
+  if (b.tab === "recent") {
+    const options = { query: b.query, filter: b.filter, pins: pinSets(), now: Date.now() }
+    const views = machines.map((m) => browseMachine(recentMachine(m, b.prefs), options))
     const shown = views.reduce((n, v) => n + v.shown, 0)
     const total = views.reduce((n, v) => n + v.total, 0)
-    count.textContent = filtering() ? `${shown} of ${total} sessions match` : `${total} sessions`
+    list.replaceChildren(...(total || filtering() ? views.map(machineSection) : [emptyState("No recent sessions", "Sessions from the last days that aren't open in a terminal show up here.")]))
+    announcement = filtering() ? `${shown} of ${total} recent sessions match` : `${plural(total, "recent session")}`
+  } else if (b.tab === "hidden") {
+    list.replaceChildren(...hiddenTab(machines))
+    announcement = `${hv.counts.hidden} hidden`
+  } else {
+    list.replaceChildren(...openTab(hv))
+    announcement = `${plural(hv.counts.open, "open session")}${hv.needs.length ? `, ${hv.needs.length} need you` : ""}`
   }
+  window.scrollTo(0, scroll)
+  if (focused) list.querySelector(`[data-key="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true })
+  if (announce) count.textContent = announcement
 }
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`
 const mark = (text) => highlight(String(text ?? ""), state.browser.query).map((seg) => (seg.hit ? h("mark", {}, seg.text) : seg.text))
 const domID = (...parts) => parts.join("-").replace(/[^A-Za-z0-9_-]+/g, "_")
+const emptyState = (title, text, ...actions) =>
+  h("div", { class: "empty" }, h("p", { class: "empty-title" }, title), text ? h("p", { class: "small" }, text) : null, actions.length ? h("div", { class: "row center" }, actions) : null)
+
+// ----- Open tab -----
+
+function openTab(hv) {
+  const parts = []
+  if (hv.needs.length) {
+    parts.push(h("section", { class: "block needs", "aria-labelledby": "needs-title" },
+      h("h2", { id: "needs-title", class: "block-title" }, "Needs you", h("span", { class: "count" }, String(hv.needs.length))),
+      h("div", { class: "group flat" }, h("ul", { class: "sessions" }, hv.needs.map((r) => openRow(r, "needs"))))))
+  }
+  const online = hv.machines.filter((mv) => mv.online)
+  let open = 0
+  for (const mv of online) {
+    const groups = mv.open.groups.map((g) => openGroup(mv, g))
+    open += groups.length
+    if (mv.open.background.length) {
+      const id = domID("bg", mv.id)
+      groups.push(h("section", { class: "og background", "aria-labelledby": id },
+        h("div", { class: "og-head" }, h("h3", { id, class: "og-name" }, h("span", { class: "group-label" }, "Not in a terminal"), h("span", { class: "og-count" }, String(mv.open.background.length)))),
+        h("ul", { class: "sessions" }, mv.open.background.map((r) => openRow(r, "background")))))
+    }
+    if (online.length < 2) {
+      parts.push(...groups)
+      continue
+    }
+    const id = domID("m", mv.id)
+    parts.push(h("section", { class: "machine", "aria-labelledby": id },
+      h("div", { class: "machine-head" }, h("h2", { id }, mv.name), h("span", { class: "small muted" }, plural(mv.open.groups.reduce((n, g) => n + g.rows.length, 0), "open session"))),
+      groups.length ? groups : h("p", { class: "small muted hint" }, "Nothing open in a terminal.")))
+  }
+  if (!open) {
+    parts.push(emptyState("No sessions open in a terminal",
+      "Sessions open in Herdr or the OpenCode TUI show up here.",
+      hv.counts.recent ? h("button", { class: "btn small", type: "button", onclick: () => setTab("recent", { focus: true }) }, `See Recent (${hv.counts.recent})`) : null,
+      h("button", { class: "btn small primary", type: "button", onclick: () => openNewSession() }, icon(PLUS_ICON), "New session")))
+  }
+  for (const mv of hv.machines.filter((m) => !m.online)) {
+    parts.push(h("p", { class: "small muted hint offline-line" }, h("strong", {}, mv.name), ` · offline · seen ${ago(mv.lastSeen)}`))
+  }
+  return parts
+}
+
+/** A Herdr workspace (or a project folder outside Herdr) with its open sessions, like Herdr's sidebar. */
+function openGroup(mv, g) {
+  const id = domID("og", mv.id, g.key)
+  const menu = () => workspaceMenu({ machineID: mv.id, key: g.key, name: g.name, directory: g.directory, pinned: g.pinned, kind: g.kind })
+  return h("section", { class: `og${g.pinned ? " pinned" : ""}`, "aria-labelledby": id },
+    h("div", { class: "og-head" },
+      h("h3", { id, class: "og-name" },
+        g.pinned ? h("span", { class: "pin-mark", "aria-hidden": "true" }, "★") : null,
+        h("span", { class: "group-label" }, g.name),
+        h("span", { class: "og-count" }, String(g.rows.length)),
+        h("span", { class: "og-kind" }, g.kind === "herdr" ? "Herdr" : "folder"),
+        h("span", { class: "sr-only" }, `, ${STATE_LABEL[g.state]}${g.pinned ? ", pinned" : ""}`)),
+      h("button", { class: "icon-btn small", type: "button", "aria-label": `New session in ${g.name}`, "aria-haspopup": "dialog", "data-key": `new:${mv.id}:${g.key}`, onclick: () => openNewSession({ machineID: mv.id, key: g.key, directory: g.directory }) }, icon(PLUS_ICON)),
+      h("button", { class: "icon-btn small", type: "button", "aria-label": `More actions for ${g.name}`, "aria-haspopup": "dialog", "data-key": `menu:${mv.id}:${g.key}`, onclick: menu }, icon(MORE_ICON))),
+    h("ul", { class: "sessions" }, g.rows.map((r) => openRow(r, "open"))))
+}
+
+/** What a working session is doing now (live activity feed first, else the catalog's `now`). */
+function liveNow(r) {
+  if (r.state !== "working") return undefined
+  const feed = state.feeds.get(r.id)
+  const pulse = feed?.pulse()
+  return pulse?.busy && pulse.label !== "Working" ? pulse.label : feed?.now() ?? r.nowText ?? "Working"
+}
+
+const blockerLine = (b) => (b ? `${b.kind === "permission" ? "Permission" : "Question"}: ${b.summary}` : "")
+
+/** Compact Herdr-like row: dot, **workspace** · title, then "opencode · folder" or what it is doing now. */
+function openRow(r, context) {
+  const nowText = liveNow(r)
+  const blocker = r.blockers[0]
+  const source = r.open ? (r.terminal?.source === "tui" ? "opencode tui" : "opencode") : "not open"
+  const sub = `${source} · ${r.where}`
+  const label = [
+    `${r.workspace} · ${r.title}`,
+    STATE_LABEL[r.state],
+    r.pinned ? "pinned" : "",
+    r.conversation ? "voice conversation on" : "",
+    r.exposed ? "" : "voice off",
+    nowText ? `now: ${nowText}` : "",
+    blockerLine(blocker),
+    sub,
+    ago(r.updated),
+  ].filter(Boolean).join(", ")
+  const key = `${context}:${r.id}`
+  const content = [
+    h("span", { class: `dot ${r.state}`, "aria-hidden": "true" }),
+    h("span", { class: "session-title" }, r.pinned ? h("span", { class: "pin-mark" }, "★ ") : null, h("b", { class: "ws" }, r.workspace), h("span", { class: "sep" }, " · "), r.title),
+    h("span", { class: "session-when" }, ago(r.updated)),
+    h("span", { class: `session-meta${nowText ? " now" : blocker ? " warn" : ""}` },
+      nowText ? [h("span", { class: "spinner small", "aria-hidden": "true" }), nowText] : blocker ? `⚠ ${blockerLine(blocker)}` : sub),
+    r.conversation || !r.exposed
+      ? h("span", { class: "badges" },
+          r.conversation ? h("span", { class: "badge-pill voice" }, icon(MIC_ICON), "voice") : null,
+          r.exposed ? null : h("span", { class: "badge-pill off" }, "voice off"))
+      : null,
+  ]
+  return rowItem(r, key, label, content, context)
+}
+
+/** The <li> of a session row: link (or Enable-voice button), long-press menu, ⋯ button. */
+function rowItem(r, key, label, content, context) {
+  const main = r.exposed
+    ? h("a", { class: "session-link", href: `/s/${enc(r.id)}`, "data-link": true, "aria-label": label, "data-key": `row:${key}` }, content)
+    : h("button", { class: "session-link", type: "button", "aria-haspopup": "dialog", "aria-label": `${label}. Voice is off`, "data-key": `row:${key}`, onclick: () => openEnableSheet(r) }, content)
+  longPress(main, () => rowMenu(r))
+  return h("li", { class: `session-item${r.exposed ? "" : " unexposed"}` },
+    main,
+    r.exposed ? null : h("button", { class: "btn small enable", type: "button", "aria-label": `Enable voice for ${r.title}`, "data-key": `enable:${key}`, onclick: () => setExposed(r.id, true) }, "Enable voice"),
+    h("div", { class: "row-actions" },
+      context === "needs" && r.exposed ? h("a", { class: "btn small primary", href: `/s/${enc(r.id)}`, "data-link": true, "aria-label": `Open ${r.title} to answer` }, "Open") : null,
+      h("button", { class: "icon-btn small", type: "button", "aria-haspopup": "dialog", "aria-label": `More actions for ${r.title}`, "data-key": `more:${key}`, onclick: () => rowMenu(r) }, icon(MORE_ICON))))
+}
+
+/** Opens `menu` on long-press (touch) or right-click; the click that ends a long-press does not navigate. */
+function longPress(el, menu) {
+  let timer
+  let fired = false
+  const cancel = () => clearTimeout(timer)
+  const open = () => {
+    if (fired) return
+    fired = true
+    menu()
+  }
+  el.addEventListener("contextmenu", (e) => {
+    e.preventDefault()
+    cancel()
+    open()
+  })
+  el.addEventListener("touchstart", () => {
+    fired = false
+    cancel()
+    timer = setTimeout(open, LONG_PRESS_MS)
+  }, { passive: true })
+  el.addEventListener("touchmove", cancel, { passive: true })
+  el.addEventListener("touchcancel", cancel)
+  el.addEventListener("touchend", (e) => {
+    cancel()
+    if (fired) e.preventDefault()
+  })
+  el.addEventListener("click", (e) => {
+    if (!fired) return
+    fired = false
+    e.preventDefault()
+    e.stopPropagation()
+  }, true)
+  el.addEventListener("mousedown", () => (fired = false))
+}
+
+// ----- menus -----
+
+const menuButton = (label, fn, cls = "") => h("button", { class: `btn wide ${cls}`, type: "button", onclick: () => {
+  miniReturn = undefined
+  closeMini()
+  fn()
+} }, label)
+
+function rowMenu(r) {
+  const prefs = state.browser.prefs
+  const pinned = prefs.pinnedSessions.includes(r.id)
+  const hidden = prefs.hiddenSessions.includes(r.id)
+  const where = r.where ?? `${r.projectName || basename(r.project || r.directory)}`
+  miniSheet(r.title, [
+    h("p", { class: "small muted" }, r.workspace && r.workspace !== where ? `${r.workspace} · ${where}` : where),
+    h("div", { class: "stack" },
+      r.exposed
+        ? menuButton("Open", () => navigate(`/s/${enc(r.id)}`), "primary")
+        : menuButton("Enable voice and open", () => setExposed(r.id, true, { open: true }), "primary"),
+      menuButton(pinned ? "Unpin" : "Pin to top", () => changePref("pinnedSessions", r.id, !pinned)),
+      menuButton(hidden ? "Unhide" : "Hide", () =>
+        changePref("hiddenSessions", r.id, !hidden, { message: hidden ? `Unhid “${r.title}”` : `Hid “${r.title}” — find it under Hidden`, undo: true }))),
+  ])
+}
+
+/** Menu of a workspace group (Herdr workspace or folder): new session, pin, hide, and collapse for Recent groups. */
+function workspaceMenu({ machineID, key, name, directory, pinned, kind, toggle }) {
+  const hidden = state.browser.prefs.hiddenWorkspaces.includes(key)
+  miniSheet(name, [
+    h("p", { class: "small muted mono" }, kind === "herdr" ? `Herdr workspace${directory ? ` · ${directory}` : ""}` : directory || key),
+    h("div", { class: "stack" },
+      menuButton("New session here", () => openNewSession({ machineID, key, directory }), "primary"),
+      menuButton(pinned ? "Unpin workspace" : "Pin workspace", () => changePref("pinnedWorkspaces", key, !pinned)),
+      menuButton(hidden ? "Unhide workspace" : "Hide workspace", () =>
+        changePref("hiddenWorkspaces", key, !hidden, { message: hidden ? `Unhid ${name}` : `Hid ${name} — find it under Hidden`, undo: true })),
+      toggle ? menuButton(toggle.open ? "Collapse" : "Expand", toggle.run) : null),
+  ])
+}
+
+// ----- Recent tab -----
 
 function machineSection(v) {
   const id = domID("m", v.id)
   const summary = v.online
-    ? `${plural(v.total, "session")}${filtering() ? ` · ${v.shown} shown` : ""}`
+    ? `${plural(v.total, "recent session")}${filtering() ? ` · ${v.shown} shown` : ""}`
     : `offline · seen ${ago(v.lastSeen)}`
   const parts = [h("div", { class: "machine-head" }, h("h2", { id }, v.name), h("span", { class: "small muted" }, summary))]
   if (v.pinned.length) parts.push(block(v, "pinned", "Pinned", v.pinned))
-  if (v.needs.length) parts.push(block(v, "needs", "Needs you", v.needs))
-  if (v.active.length) parts.push(block(v, "active", "Active now", v.active))
   if (v.workspaces.length) {
     const hid = domID("ws", v.id)
     parts.push(h("section", { class: "block", "aria-labelledby": hid },
@@ -720,20 +1080,6 @@ function toggleGroup(key, open) {
   renderHomeList()
 }
 
-function togglePin(id) {
-  const pins = state.browser.pins
-  pins.sessions = toggleIn(pins.sessions, id)
-  localStorage.setItem(PREF_PINS, JSON.stringify([...pins.sessions]))
-  renderHomeList()
-}
-
-function togglePinWorkspace(key) {
-  const pins = state.browser.pins
-  pins.workspaces = toggleIn(pins.workspaces, key)
-  localStorage.setItem(PREF_PINNED_WS, JSON.stringify([...pins.workspaces]))
-  renderHomeList()
-}
-
 /** A workspace (project root) group, or a nested worktree/subfolder group when `parent` is given. */
 function workspaceGroup(v, g, parent) {
   const b = state.browser
@@ -743,6 +1089,7 @@ function workspaceGroup(v, g, parent) {
   const fullName = parent ? `${parent.name}/${g.rel || g.dir}` : g.name
   const directory = parent ? g.dir : g.root
   const Heading = parent ? "h5" : "h4"
+  const menu = () => workspaceMenu({ machineID: v.id, key: g.key, name: fullName, directory, pinned: g.pinned, kind: "folder", toggle: { open, run: () => toggleGroup(g.key, open) } })
   const head = h("div", { class: "group-head" },
     h(Heading, { class: "group-name" },
       h("button", { class: "group-toggle", type: "button", "aria-expanded": String(open), "aria-controls": bodyID, "data-key": `toggle:${g.key}`, onclick: () => toggleGroup(g.key, open) },
@@ -752,56 +1099,179 @@ function workspaceGroup(v, g, parent) {
         g.pinned ? h("span", { class: "pin-mark", "aria-hidden": "true" }, "★") : null,
         h("span", { class: "group-meta" }, `${g.count} · ${ago(g.updated)}`),
         h("span", { class: "sr-only" }, `, ${STATE_LABEL[g.state]}${g.pinned ? ", pinned" : ""}`))),
-    h("button", { class: "icon-btn small", type: "button", "aria-label": `New session in ${fullName}`, title: "New session here", "data-key": `new:${g.key}`, onclick: () => openNewSession(v, directory, fullName) }, icon(PLUS_ICON)),
-    h("button", { class: "icon-btn small", type: "button", "aria-label": `More actions for ${fullName}`, "aria-haspopup": "dialog", "data-key": `menu:${g.key}`, onclick: () => openGroupMenu(v, g, { open, directory, fullName }) }, icon(MORE_ICON)))
+    h("button", { class: "icon-btn small", type: "button", "aria-label": `New session in ${fullName}`, "aria-haspopup": "dialog", title: "New session here", "data-key": `new:${g.key}`, onclick: () => openNewSession({ machineID: v.id, key: g.key, directory }) }, icon(PLUS_ICON)),
+    h("button", { class: "icon-btn small", type: "button", "aria-label": `More actions for ${fullName}`, "aria-haspopup": "dialog", "data-key": `menu:${g.key}`, onclick: menu }, icon(MORE_ICON)))
   const body = h("div", { id: bodyID, class: "group-body", hidden: !open },
     open ? [rowsList(v, g.key, g.rows, "group"), ...(g.nested ?? []).map((n) => workspaceGroup(v, n, g))] : [])
   return h("div", { class: `group${parent ? " nested" : ""}` }, head, body)
 }
 
-function openGroupMenu(v, g, { open, directory, fullName }) {
-  const act = (label, fn, cls = "") => h("button", { class: `btn wide ${cls}`, type: "button", onclick: () => {
-    closeMini()
-    fn()
-  } }, label)
-  miniSheet(fullName, [
-    h("p", { class: "small muted mono" }, directory),
-    h("div", { class: "stack" },
-      act("New session here", () => openNewSession(v, directory, fullName), "primary"),
-      act(g.pinned ? "Unpin workspace" : "Pin workspace", () => togglePinWorkspace(g.key)),
-      act(open ? "Collapse" : "Expand", () => toggleGroup(g.key, open))),
-  ])
+function sessionRow(v, r, context) {
+  const nowText = liveNow(r)
+  const blocker = r.blockers[0]
+  const root = r.project || r.directory
+  const rel = r.directory && root && r.directory !== root && r.directory.startsWith(`${root}/`) ? r.directory.slice(root.length + 1) : ""
+  const where = `${r.projectName || basename(root)}${rel ? ` › ${rel}` : ""}`
+  const label = [
+    r.title,
+    STATE_LABEL[r.state],
+    r.pinned ? "pinned" : "",
+    r.conversation ? "voice conversation on" : "",
+    r.exposed ? "" : "voice off",
+    nowText ? `now: ${nowText}` : "",
+    blockerLine(blocker),
+    context === "group" ? "" : where,
+    ago(r.updated),
+  ].filter(Boolean).join(", ")
+  const content = [
+    h("span", { class: `dot ${r.state}`, "aria-hidden": "true" }),
+    h("span", { class: "session-title" }, r.pinned ? h("span", { class: "pin-mark" }, "★ ") : null, mark(r.title)),
+    h("span", { class: "session-when" }, ago(r.updated)),
+    nowText || blocker || context !== "group"
+      ? h("span", { class: `session-meta${nowText ? " now" : blocker ? " warn" : ""}` },
+          nowText ? [h("span", { class: "spinner small", "aria-hidden": "true" }), nowText] : blocker ? `⚠ ${blockerLine(blocker)}` : mark(where))
+      : null,
+    r.conversation || !r.exposed
+      ? h("span", { class: "badges" },
+          r.conversation ? h("span", { class: "badge-pill voice" }, icon(MIC_ICON), "voice") : null,
+          r.exposed ? null : h("span", { class: "badge-pill off" }, "voice off"))
+      : null,
+  ]
+  return rowItem({ ...r, where }, `${context}:${r.id}`, label, content, context)
 }
 
-function openNewSession(v, directory, name) {
+// ----- Hidden tab -----
+
+function hiddenTab(machines) {
+  const hv = hiddenView(machines, state.browser.prefs)
+  if (!hv.workspaces.length && !hv.sessions.length) {
+    return [emptyState("Nothing hidden", "Hide a session or a workspace from its ⋯ menu (or long-press a session) to keep it out of Open and Recent.")]
+  }
+  const parts = []
+  if (hv.workspaces.length) {
+    parts.push(h("section", { class: "block", "aria-labelledby": "hidden-ws" },
+      h("h2", { id: "hidden-ws", class: "block-title" }, "Workspaces", h("span", { class: "count" }, String(hv.workspaces.length))),
+      h("div", { class: "group flat" }, h("ul", { class: "sessions" }, hv.workspaces.map((w) =>
+        h("li", { class: "hidden-item" },
+          h("div", { class: "hidden-text" },
+            h("span", { class: "session-title" }, w.name),
+            h("span", { class: "small muted mono" }, w.key.startsWith("herdr:") ? "Herdr workspace" : w.key),
+            h("span", { class: "small muted" }, w.count ? plural(w.count, "session") : "no sessions right now")),
+          h("button", { class: "btn small", type: "button", "aria-label": `Unhide ${w.name}`, "data-key": `unhide-ws:${w.key}`, onclick: () => changePref("hiddenWorkspaces", w.key, false, { message: `Unhid ${w.name}` }) }, "Unhide")))))))
+  }
+  if (hv.sessions.length) {
+    parts.push(h("section", { class: "block", "aria-labelledby": "hidden-s" },
+      h("h2", { id: "hidden-s", class: "block-title" }, "Sessions", h("span", { class: "count" }, String(hv.sessions.length))),
+      h("div", { class: "group flat" }, h("ul", { class: "sessions" }, hv.sessions.map((r) =>
+        h("li", { class: "hidden-item" },
+          h("div", { class: "hidden-text" },
+            h("span", { class: "session-title" }, h("span", { class: `dot ${r.state}`, "aria-hidden": "true" }), " ", r.title),
+            h("span", { class: "small muted" }, `${r.open ? "open · " : ""}${r.where} · ${ago(r.updated)}`)),
+          h("button", { class: "btn small", type: "button", "aria-label": `Unhide ${r.title}`, "data-key": `unhide:${r.id}`, onclick: () => changePref("hiddenSessions", r.id, false, { message: `Unhid “${r.title}”` }) }, "Unhide")))))))
+  }
+  if (hv.unknown) parts.push(h("p", { class: "small muted hint" }, `${plural(hv.unknown, "hidden session")} not reported by any machine right now.`))
+  return parts
+}
+
+// ----- new session -----
+
+/**
+ * New session sheet: machine (when several are online), workspace (Herdr workspaces first, then folders), folder,
+ * optional title and "Open in Herdr" (shown when the machine has Herdr, on by default for Herdr workspaces).
+ * `key` preselects a workspace group (`herdr:<id>` or folder) and `directory` its folder.
+ */
+function openNewSession({ machineID, key, directory } = {}) {
+  const candidates = (state.machines ?? []).filter((m) => m.online)
+  if (!candidates.length) return toast("No machine is online to start a session on.", "err")
+  let machine = candidates.find((m) => m.id === machineID) ?? candidates[0]
+  let herdrWanted = true
+  let targets = []
+  let herdr = false
+  const machineSelect = h("select", { id: "new-machine" }, candidates.map((m) => h("option", { value: m.id }, m.name)))
+  const targetSelect = h("select", { id: "new-target" })
+  const dirSelect = h("select", { id: "new-dir" })
+  const dirField = h("div", { class: "field" }, h("label", { for: "new-dir" }, "Folder"), dirSelect)
+  const dirText = h("p", { class: "small muted mono", id: "new-dir-text" })
   const title = h("input", { id: "new-title", type: "text", maxlength: "200", autocomplete: "off", placeholder: "Optional", enterkeyhint: "go" })
+  const herdrBox = h("input", { id: "new-herdr", type: "checkbox", "aria-describedby": "new-herdr-help" })
+  const herdrHelp = h("span", { id: "new-herdr-help", class: "small muted" })
+  const herdrRow = h("div", { class: "switch card" }, h("label", { for: "new-herdr", class: "switch-label" }, h("span", {}, "Open in Herdr"), herdrHelp), herdrBox)
   const error = h("p", { class: "error small", role: "alert" })
   const submit = h("button", { class: "btn primary", type: "submit" }, "Create session")
+  const current = () => targets.find((t) => t.key === targetSelect.value)
+  const folders = () => targets.filter((t) => t.kind === "folder").flatMap((t) => t.directories)
+
+  function fillTargets(selectKey, selectDir) {
+    ;({ herdr, targets } = newSessionTargets(withPending(machine)))
+    if (selectKey && !targets.some((t) => t.key === selectKey) && selectDir) {
+      targets.push({ kind: "folder", key: selectKey, label: basename(selectDir), directories: [selectDir] })
+    }
+    const group = (label, list) => (list.length ? h("optgroup", { label }, list.map((t) => h("option", { value: t.key }, t.label))) : null)
+    targetSelect.replaceChildren(
+      ...[group("Herdr workspaces", targets.filter((t) => t.kind === "herdr")), group("Folders", targets.filter((t) => t.kind === "folder"))].filter(Boolean),
+    )
+    if (selectKey && targets.some((t) => t.key === selectKey)) targetSelect.value = selectKey
+    fillDirs(selectDir)
+  }
+
+  function fillDirs(selectDir) {
+    const t = current()
+    const dirs = !t ? [] : t.directories.length ? t.directories : folders()
+    dirSelect.replaceChildren(...dirs.map((d) => h("option", { value: d }, d)))
+    if (selectDir && dirs.includes(selectDir)) dirSelect.value = selectDir
+    dirField.hidden = dirs.length < 2
+    dirText.textContent = dirs.length === 1 ? dirs[0] : t && !dirs.length ? "No known folder for this workspace yet." : ""
+    dirText.hidden = !dirText.textContent
+    submit.disabled = !dirs.length
+    herdrRow.hidden = !herdr
+    const isHerdr = t?.kind === "herdr"
+    herdrBox.disabled = !isHerdr
+    herdrBox.checked = isHerdr && herdrWanted
+    herdrHelp.textContent = isHerdr ? `Opens a new tab in the ${t.label} workspace, running OpenCode on this session.` : "Pick a Herdr workspace to open the session there."
+  }
+
+  machineSelect.value = machine.id
+  machineSelect.addEventListener("change", () => {
+    machine = candidates.find((m) => m.id === machineSelect.value) ?? machine
+    fillTargets()
+  })
+  targetSelect.addEventListener("change", () => fillDirs())
+  herdrBox.addEventListener("change", () => (herdrWanted = herdrBox.checked))
+  fillTargets(key, directory)
+
   const form = h("form", { class: "stack", novalidate: true },
-    h("p", { class: "small muted mono" }, directory),
+    candidates.length > 1 ? h("div", { class: "field" }, h("label", { for: "new-machine" }, "Machine"), machineSelect) : null,
+    h("div", { class: "field" }, h("label", { for: "new-target" }, "Workspace"), targetSelect),
+    dirField,
+    dirText,
     h("div", { class: "field" }, h("label", { for: "new-title" }, "Title"), title),
+    herdrRow,
     error,
     h("div", { class: "row" }, submit, h("button", { class: "btn", type: "button", onclick: closeMini }, "Cancel")))
   form.addEventListener("submit", async (event) => {
     event.preventDefault()
+    const target = current()
+    const dir = dirSelect.value || target?.directories[0]
+    if (!target || !dir) return
     submit.disabled = true
     error.textContent = ""
-    const json = { directory }
-    if (title.value.trim()) json.title = title.value.trim()
+    const body = createBody({ target, directory: dir, title: title.value, openInHerdr: herdr && herdrBox.checked })
     try {
-      const { sessionID } = await (await api(`/api/machines/${enc(v.id)}/sessions`, { method: "POST", json })).json()
+      const res = await (await api(`/api/machines/${enc(machine.id)}/sessions`, { method: "POST", json: body })).json()
       miniReturn = undefined
       closeMini()
-      state.offerConversation = sessionID
-      navigate(`/s/${enc(sessionID)}`)
+      state.offerConversation = res.sessionID
+      navigate(`/s/${enc(res.sessionID)}`)
+      if (res.warning) toast(`Session created, but Herdr didn't open it: ${res.warning}`, "warn")
+      else if (res.openedIn === "herdr") toast(`Opened in Herdr · ${target.label}`)
     } catch (e) {
       error.textContent = e.status === 409
-        ? `The background service on ${v.name} isn't connected. Start it, then try again.`
+        ? `The background service on ${machine.name} isn't connected. Start it, then try again.`
         : `Could not create the session: ${e.message}`
       submit.disabled = false
     }
   })
-  miniSheet(`New session in ${name}`, [form], { focus: title })
+  miniSheet("New session", [form], { focus: key ? title : targetSelect })
 }
 
 function openEnableSheet(r) {
@@ -817,52 +1287,6 @@ function openEnableSheet(r) {
       } }, "Enable voice and open"),
       h("button", { class: "btn", type: "button", onclick: closeMini }, "Cancel")),
   ])
-}
-
-function sessionRow(v, r, context) {
-  const feed = r.state === "working" ? state.feeds.get(r.id) : undefined
-  const pulse = feed?.pulse()
-  const nowText = r.state === "working" ? (pulse?.busy && pulse.label !== "Working" ? pulse.label : feed?.now() ?? r.nowText ?? "Working") : undefined
-  const blocker = r.blockers[0]
-  const blockerText = blocker ? `${blocker.kind === "permission" ? "Permission" : "Question"}: ${blocker.summary}` : ""
-  const root = r.project || r.directory
-  const rel = r.directory && root && r.directory !== root && r.directory.startsWith(`${root}/`) ? r.directory.slice(root.length + 1) : ""
-  const where = `${r.projectName || basename(root)}${rel ? ` › ${rel}` : ""}`
-  const label = [
-    r.title,
-    STATE_LABEL[r.state],
-    r.conversation ? "voice conversation on" : "",
-    r.exposed ? "" : "voice off",
-    nowText ? `now: ${nowText}` : "",
-    blockerText,
-    context === "group" ? "" : where,
-    ago(r.updated),
-  ].filter(Boolean).join(", ")
-  const key = `${context}:${r.id}`
-  const content = [
-    h("span", { class: `dot ${r.state}`, "aria-hidden": "true" }),
-    h("span", { class: "session-title" }, mark(r.title)),
-    h("span", { class: "session-when" }, ago(r.updated)),
-    nowText || blocker || context !== "group"
-      ? h("span", { class: `session-meta${nowText ? " now" : blocker ? " warn" : ""}` },
-          nowText ? [h("span", { class: "spinner small", "aria-hidden": "true" }), nowText] : blocker ? `⚠ ${blockerText}` : mark(where))
-      : null,
-    r.conversation || !r.exposed
-      ? h("span", { class: "badges" },
-          r.conversation ? h("span", { class: "badge-pill voice" }, icon(MIC_ICON), "voice") : null,
-          r.exposed ? null : h("span", { class: "badge-pill off" }, "voice off"))
-      : null,
-  ]
-  const main = r.exposed
-    ? h("a", { class: "session-link", href: `/s/${enc(r.id)}`, "data-link": true, "aria-label": label, "data-key": `row:${key}` }, content)
-    : h("button", { class: "session-link", type: "button", "aria-haspopup": "dialog", "aria-label": `${label}. Voice is off`, "data-key": `row:${key}`, onclick: () => openEnableSheet(r) }, content)
-  return h("li", { class: `session-item${r.exposed ? "" : " unexposed"}` },
-    main,
-    r.exposed ? null : h("button", { class: "btn small enable", type: "button", "aria-label": `Enable voice for ${r.title}`, "data-key": `enable:${key}`, onclick: () => setExposed(r.id, true) }, "Enable voice"),
-    h("div", { class: "row-actions" },
-      context === "needs" && r.exposed ? h("a", { class: "btn small primary", href: `/s/${enc(r.id)}`, "data-link": true, "aria-label": `Open ${r.title} to answer` }, "Open") : null,
-      h("button", { class: `pin${r.pinned ? " on" : ""}`, type: "button", "aria-pressed": String(r.pinned), "aria-label": `Pin ${r.title}`, "data-key": `pin:${key}`, onclick: () => togglePin(r.id) },
-        h("span", { "aria-hidden": "true" }, r.pinned ? "★" : "☆"))))
 }
 
 // ---------- pairing ----------
