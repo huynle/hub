@@ -67,6 +67,15 @@ export const VoiceRpc = Rpc.define({
     handoff: { input: obj({ sessionID: str }, ["sessionID"]), output: obj({ notified: num }, ["notified"]), errors },
     /** One-time sign-in link: the session's page, or the home page without sessionID. */
     openLink: { input: obj({ sessionID: str }), output: obj({ url: str }, ["url"]), errors },
+    /**
+     * TUI presence: the sessions this TUI shows (route root and open tabs), sent on change and every 15 s.
+     * `reporter` identifies the TUI; each report replaces its previous one.
+     */
+    presence: {
+      input: obj({ sessionIDs: { type: "array", items: str, maxItems: 200 }, reporter: str }, ["sessionIDs"]),
+      output: empty,
+      errors,
+    },
     /** Conversation mode for a session in this process (same path as the server's "conversation" op). */
     conversation: { input: obj({ sessionID: str, on: bool }, ["sessionID", "on"]), output: obj({ agent: str }, ["agent"]), errors },
   },

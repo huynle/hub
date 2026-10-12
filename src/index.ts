@@ -8,6 +8,7 @@ import { configPath, DEFAULT_SUBAGENT } from "./config"
 import { VoiceRpc } from "./rpc"
 import { checkServer, parseServerInput } from "./setup"
 import { defineVoiceAgent, orchestratorParts } from "./spoke/conversation"
+import { herdrRunner } from "./spoke/herdr"
 import { listServiceSessions } from "./spoke/listing"
 import { ensureLocalHub } from "./spoke/localhub"
 import { joinProcess, type Membership } from "./spoke/singleton"
@@ -30,15 +31,15 @@ function pluginVersion(): string {
 
 /**
  * The most recent root sessions of the local OpenCode service with their workspace (used by the
- * service's own spoke for the phone's session browser).
+ * service's own spoke for the phone's session browser): the history window plus `include`.
  */
-async function listRecent() {
+async function listRecent(options?: { days: number; max: number; include: readonly string[] }) {
   const { Service } = await import("@opencode/client/service")
   const { OpenCode } = await import("@opencode/client")
   const endpoint = await Service.discover()
   if (!endpoint) return []
   const client = OpenCode.make({ baseUrl: endpoint.url, headers: Service.headers(endpoint) ?? {} })
-  return listServiceSessions(client)
+  return listServiceSessions(client, options ?? {})
 }
 
 /** Plugin API results may arrive bare or wrapped as { location, data }. */
@@ -94,6 +95,8 @@ export default Plugin.define({
           pluginVersion: pluginVersion(),
           // Loopback servers only, and only when autoStartLocalHub is on (see src/spoke/localhub.ts).
           localHub: (server) => ensureLocalHub(server),
+          // One Herdr reader per machine: the background service's spoke (see src/spoke/herdr.ts).
+          ...(kind === "service" ? { herdr: herdrRunner() } : {}),
         }),
     )
 
@@ -150,6 +153,13 @@ export default Plugin.define({
         openLink: (value, rpc) => run(rpc, (s) => s.openLink(input(value).sessionID ? String(input(value).sessionID) : undefined)),
         conversation: (value, rpc) =>
           run(rpc, (s) => s.setConversation(String(input(value).sessionID ?? ""), Boolean(input(value).on))),
+        presence: (value, rpc) =>
+          run(rpc, (s) => {
+            const { sessionIDs, reporter } = input(value)
+            if (!Array.isArray(sessionIDs)) throw new SpokeError("invalid", "Expected {sessionIDs: string[]}")
+            s.presence(sessionIDs.filter((id): id is string => typeof id === "string").slice(0, 200), typeof reporter === "string" ? reporter.slice(0, 100) : undefined)
+            return {}
+          }),
       })
     } catch (cause) {
       console.error("[opencode-voice] could not register RPC methods", cause)

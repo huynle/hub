@@ -120,6 +120,14 @@ describe("plugin setup", () => {
     expect(await b.call("status")).toMatchObject({ type: "unavailable" })
   })
 
+  test("presence RPC takes the TUI's sessions; anything but a list is refused", async () => {
+    tempConfig({ mode: "off" })
+    const fake = fakeContext()
+    cleanups.push((await plugin.setup(fake.ctx as any)) as () => void)
+    expect(await fake.call("presence", { sessionIDs: ["ses_a", 3], reporter: "tui_1" })).toEqual({})
+    expect(await fake.call("presence", { sessionIDs: "ses_a" })).toMatchObject({ type: "invalid" })
+  })
+
   test("checkServer validates the URL and asks <server>/healthz from this machine", async () => {
     tempConfig({ mode: "off" })
     const fake = fakeContext()

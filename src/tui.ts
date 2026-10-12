@@ -3,6 +3,7 @@ import { Plugin } from "@opencode/plugin/tui"
 import { isLoopbackURL } from "./loopback"
 import { VoiceRpc } from "./rpc"
 import { localServerFor, modeFor, needsSetup, parseServerInput, setupOptions, type SetupChoice } from "./setup"
+import { PresenceReporter, shownSessions } from "./tui-presence"
 
 // /voice: first-run setup (a hub on this computer, or your own voice server), then one dialog to choose
 // what this machine shares and to open sessions on this device or a phone. Links are shown here, never
@@ -350,6 +351,19 @@ export default Plugin.define({
       }
     }
 
+    // Presence: tell the server-side spoke which sessions this TUI shows, so the phone lists them as open.
+    const reporter = `tui_${Math.random().toString(36).slice(2, 12)}`
+    const presence = new PresenceReporter({
+      read: () =>
+        shownSessions({
+          route: context.ui.router.current() as { type: string; sessionID?: string },
+          root: (id) => context.data.session.root(id),
+          tabs: context.ui.tabs.enabled() ? context.ui.tabs.list().map((t) => t.sessionID) : [],
+        }),
+      send: (sessionIDs) => call("presence", { sessionIDs: [...sessionIDs], reporter }),
+    })
+    presence.start()
+
     context.keymap.layer(() => ({
       mode: "global",
       commands: [
@@ -366,6 +380,7 @@ export default Plugin.define({
         },
       ],
     }))
+    return () => presence.stop()
   },
 })
 
