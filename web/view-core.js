@@ -1,0 +1,244 @@
+// Pure logic for the 0.4.0 home screen (docs/session-view.md), no DOM: synced view prefs (hide/pin), migration
+// of 0.3 local pins, the Open / Recent / Hidden split, Herdr-like grouping and ordering of open sessions, status
+// dots and new-session targets. Imported by web/app.js and by bun tests.
+
+import { UNTITLED, aggregateState, blockersOf, nowLabel, relativeDir, sessionState } from "./browser-core.js"
+
+const RANK = { blocked: 0, working: 1, error: 2, idle: 3 }
+const trimSlash = (dir) => String(dir ?? "").replace(/(.)[\\/]+$/, "$1")
+const basename = (dir) => trimSlash(dir).split(/[\\/]/).pop() || String(dir ?? "")
+
+// ---------- view prefs ----------
+
+/** The synced lists (GET/PUT /api/prefs/view). */
+export const PREF_LISTS = ["hiddenSessions", "hiddenWorkspaces", "pinnedSessions", "pinnedWorkspaces"]
+const MAX_ENTRIES = 500
+const MAX_KEY = 4096
+
+const cleanList = (value) =>
+  Array.isArray(value) ? [...new Set(value.filter((x) => typeof x === "string" && x.length > 0 && x.length <= MAX_KEY))].slice(0, MAX_ENTRIES) : []
+
+/** Prefs from the hub (a prefs object or {prefs}); every list present, unique strings, at most 500 each. */
+export function normalizePrefs(raw) {
+  const source = raw && typeof raw === "object" && raw.prefs && typeof raw.prefs === "object" ? raw.prefs : raw ?? {}
+  return Object.fromEntries(PREF_LISTS.map((list) => [list, cleanList(source[list])]))
+}
+
+/** Adds (`on`) or removes `key` in one list. Returns the new prefs and the PUT patch (undefined: no change). */
+export function setPref(prefs, list, key, on) {
+  if (!PREF_LISTS.includes(list)) throw new Error(`unknown prefs list: ${list}`)
+  const current = prefs[list] ?? []
+  const has = current.includes(key)
+  if (has === on) return { prefs, patch: undefined }
+  const next = on ? [...current, key] : current.filter((x) => x !== key)
+  return { prefs: { ...prefs, [list]: next }, patch: { [list]: next } }
+}
+
+const parseList = (raw) => {
+  try {
+    const value = JSON.parse(raw ?? "null")
+    return Array.isArray(value) ? value.filter((x) => typeof x === "string") : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 0.3 kept pins in localStorage (session IDs; workspace/worktree folders). Merges them into the synced prefs:
+ * `patch` to PUT (undefined when prefs already have them), `clear` when local keys exist and should be removed.
+ */
+export function migratePins(rawSessions, rawWorkspaces, prefs) {
+  const clear = rawSessions != null || rawWorkspaces != null
+  const patch = {}
+  for (const [list, raw] of [["pinnedSessions", rawSessions], ["pinnedWorkspaces", rawWorkspaces]]) {
+    const current = prefs[list] ?? []
+    const add = parseList(raw).filter((x) => !current.includes(x))
+    if (add.length) patch[list] = cleanList([...current, ...add])
+  }
+  return { clear, patch: Object.keys(patch).length ? patch : undefined }
+}
+
+// ---------- sessions ----------
+
+/** Herdr's agent status as a session state ("done"/"unknown" count as idle). */
+const TERMINAL_STATE = { working: "working", blocked: "blocked" }
+
+/** Status dot of a session: the worse of Herdr's agent status and the session's own state. */
+export function dotState(s) {
+  return aggregateState([sessionState(s), TERMINAL_STATE[s?.terminal?.status] ?? "idle"])
+}
+
+const isHerdr = (s) => !!s?.open && s.terminal?.source === "herdr" && !!s.terminal.workspaceID
+/** Project folder of a session (the Recent tab's workspace key, and the Open tab's key outside Herdr). */
+export const folderKey = (s) => trimSlash(s?.project || s?.directory)
+
+/** Open-tab group key: `herdr:<workspaceID>` when open in Herdr, else the project folder. */
+export function groupKey(s) {
+  return isHerdr(s) ? `herdr:${s.terminal.workspaceID}` : folderKey(s)
+}
+
+/** Hidden by its ID, its Herdr workspace or its project folder. */
+function isHidden(s, hidden) {
+  return hidden.sessions.has(s.id) || hidden.workspaces.has(folderKey(s)) || (isHerdr(s) && hidden.workspaces.has(groupKey(s)))
+}
+
+/** Two reports of one session (several processes): the latest wins; live flags and terminal from any copy. */
+function merge(a, b) {
+  const base = (b.updated ?? 0) > (a.updated ?? 0) ? b : a
+  const open = a.open ? a : b.open ? b : undefined
+  return {
+    ...base,
+    conversation: !!(a.conversation || b.conversation),
+    busy: !!(a.busy || b.busy),
+    ...(open ? { open: true, terminal: open.terminal } : {}),
+  }
+}
+
+/** Root sessions of a machine, one per ID. */
+function roots(machine) {
+  const processes = machine?.processes ?? []
+  const all = new Set(processes.flatMap((p) => p.sessions.map((s) => s.id)))
+  const merged = new Map()
+  for (const p of processes) {
+    for (const s of p.sessions) {
+      if (s.parentID && all.has(s.parentID)) continue
+      const seen = merged.get(s.id)
+      merged.set(s.id, seen ? merge(seen, s) : s)
+    }
+  }
+  return [...merged.values()]
+}
+
+const hiddenSets = (prefs) => ({ sessions: new Set(prefs?.hiddenSessions ?? []), workspaces: new Set(prefs?.hiddenWorkspaces ?? []) })
+const herdrWorkspaces = (machine) => machine?.terminals?.herdr?.workspaces ?? []
+
+/** Short folder line: project name, plus the path inside the project (worktree, subfolder). */
+function whereOf(s) {
+  const root = trimSlash(s.project || s.directory)
+  const rel = s.project ? relativeDir(s.directory, root) : ""
+  return `${s.projectName || basename(root)}${rel ? ` › ${rel}` : ""}`
+}
+
+function toRow(s, machine, pinned) {
+  const ws = isHerdr(s) ? s.terminal.workspace || herdrWorkspaces(machine).find((w) => w.id === s.terminal.workspaceID)?.label || s.terminal.workspaceID : undefined
+  return {
+    ...s,
+    title: s.title || s.terminal?.title || UNTITLED,
+    updated: s.updated ?? 0,
+    state: dotState(s),
+    blockers: blockersOf(s),
+    exposed: s.exposed !== false,
+    pinned: pinned.has(s.id),
+    nowText: nowLabel(s.now),
+    where: whereOf(s),
+    workspace: ws ?? (s.projectName || basename(folderKey(s))),
+    machineID: machine?.id,
+  }
+}
+
+const byPinStateRecent = (a, b) => Number(b.pinned) - Number(a.pinned) || RANK[a.state] - RANK[b.state] || b.updated - a.updated
+const maxUpdated = (rows) => rows.reduce((m, r) => Math.max(m, r.updated), 0)
+
+/** Open sessions grouped like Herdr's sidebar, plus sessions running outside a terminal ("background"). */
+function openGroups(machine, open, pinnedWorkspaces) {
+  const order = new Map(herdrWorkspaces(machine).map((w, i) => [w.id, i]))
+  const groups = new Map()
+  for (const r of open) {
+    const key = groupKey(r)
+    let g = groups.get(key)
+    if (!g) {
+      const herdr = isHerdr(r)
+      const known = herdr ? herdrWorkspaces(machine).find((w) => w.id === r.terminal.workspaceID) : undefined
+      g = {
+        key,
+        kind: herdr ? "herdr" : "folder",
+        name: r.workspace,
+        ...(herdr ? { workspaceID: r.terminal.workspaceID } : {}),
+        directory: known?.directories?.[0] ?? (herdr ? undefined : key),
+        order: herdr ? order.get(r.terminal.workspaceID) ?? Infinity : Infinity,
+        rows: [],
+      }
+      groups.set(key, g)
+    }
+    g.rows.push(r)
+  }
+  return [...groups.values()]
+    .map((g) => {
+      g.rows.sort(byPinStateRecent)
+      return {
+        ...g,
+        directory: g.directory ?? g.rows[0].directory,
+        state: aggregateState(g.rows.map((r) => r.state)),
+        updated: maxUpdated(g.rows),
+        pinned: pinnedWorkspaces.has(g.key),
+      }
+    })
+    .sort((a, b) => Number(b.pinned) - Number(a.pinned) || a.order - b.order || b.updated - a.updated)
+}
+
+/**
+ * Everything the home screen shows, from the catalog machines and the synced prefs:
+ * `needs` (blocked, any machine, not hidden), per machine the Open tab (`open.groups`, `open.background`), and
+ * tab counts (open sessions, other history, hidden entries as listed by hiddenView).
+ */
+export function homeView(machines, prefs, { now = Date.now() } = {}) {
+  const hidden = hiddenSets(prefs)
+  const pinned = new Set(prefs?.pinnedSessions ?? [])
+  const pinnedWorkspaces = new Set(prefs?.pinnedWorkspaces ?? [])
+  const counts = { open: 0, recent: 0, hidden: 0 }
+  const needs = []
+  const views = (machines ?? []).map((machine) => {
+    const rows = roots(machine)
+      .filter((s) => !isHidden(s, hidden))
+      .map((s) => toRow(s, machine, pinned))
+    const open = rows.filter((r) => r.open)
+    const rest = rows.filter((r) => !r.open)
+    counts.open += open.length
+    counts.recent += rest.length
+    needs.push(...rows.filter((r) => r.state === "blocked"))
+    return {
+      id: machine.id,
+      name: machine.name,
+      online: !!machine.online,
+      lastSeen: machine.lastSeen,
+      herdr: !!machine.terminals?.herdr,
+      open: {
+        groups: openGroups(machine, open, pinnedWorkspaces),
+        background: rest.filter((r) => r.state === "working" || r.conversation).sort(byPinStateRecent),
+      },
+    }
+  })
+  const h = hiddenView(machines, prefs)
+  counts.hidden = h.sessions.length + h.workspaces.length
+  needs.sort((a, b) => b.updated - a.updated)
+  return { now, needs, counts, machines: views }
+}
+
+/** A catalog machine reduced to the Recent tab: root sessions that are neither open nor hidden. */
+export function recentMachine(machine, prefs) {
+  const hidden = hiddenSets(prefs)
+  const keep = new Set(roots(machine).filter((s) => !s.open && !isHidden(s, hidden)).map((s) => s.id))
+  return {
+    ...machine,
+    processes: (machine?.processes ?? []).map((p) => ({ ...p, sessions: p.sessions.filter((s) => keep.has(s.id)) })),
+  }
+}
+
+/** The Hidden tab: hidden workspaces (named, with how many sessions they hide) and hidden sessions, all machines. */
+export function hiddenView(machines, prefs) {
+  const all = (machines ?? []).flatMap((m) => roots(m).map((s) => ({ s, m })))
+  const workspaces = (prefs?.hiddenWorkspaces ?? []).map((key) => {
+    const inside = all.filter(({ s }) => folderKey(s) === key || (isHerdr(s) && groupKey(s) === key))
+    let name
+    if (key.startsWith("herdr:")) {
+      const id = key.slice(6)
+      const known = (machines ?? []).flatMap(herdrWorkspaces).find((w) => w.id === id)
+      name = known?.label || inside[0]?.s.terminal?.workspace || `Herdr workspace ${id}`
+    } else name = inside.find(({ s }) => folderKey(s) === key)?.s.projectName || basename(key)
+    return { key, name, count: inside.length }
+  })
+  const ids = new Set(prefs?.hiddenSessions ?? [])
+  const sessions = all.filter(({ s }) => ids.has(s.id)).map(({ s, m }) => toRow(s, m, new Set(prefs?.pinnedSessions ?? [])))
+  sessions.sort((a, b) => b.updated - a.updated)
+  return { workspaces, sessions, unknown: ids.size - new Set(sessions.map((r) => r.id)).size }
+}
