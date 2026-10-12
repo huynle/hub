@@ -1,6 +1,6 @@
 {
   "name": "@huynle/opencode-voice",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Talk to your OpenCode sessions by voice from your phone or browser: hands-free conversation mode, a voice agent that delegates to subagents, live activity, and a self-hostable hub.",
   "license": "MIT",
   "author": "Huy Le",
