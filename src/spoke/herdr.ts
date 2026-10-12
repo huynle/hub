@@ -20,19 +20,54 @@ const STDERR_MAX = 300
 export function herdrRunner(bin = "herdr"): HerdrRunner {
   return async (args, timeoutMs) => {
     const proc = Bun.spawn([bin, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe" })
-    let timedOut = false
-    const timer = setTimeout(() => {
-      timedOut = true
-      proc.kill()
-    }, timeoutMs)
+    const what = `herdr ${args.slice(0, 2).join(" ")}`
+    const stdout = collect(proc.stdout)
+    const stderr = collect(proc.stderr)
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<"timeout">((resolve) => (timer = setTimeout(() => resolve("timeout"), timeoutMs)))
     try {
-      const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
-      if (timedOut) throw new Error(`herdr ${args.slice(0, 2).join(" ")} timed out after ${timeoutMs} ms`)
-      if (code !== 0) throw new Error(`herdr ${args.slice(0, 2).join(" ")} failed (exit ${code}): ${(stderr || stdout).trim().slice(0, STDERR_MAX)}`)
-      return stdout
+      const code = await Promise.race([proc.exited, timeout])
+      if (code === "timeout") {
+        proc.kill()
+        throw new Error(`${what} timed out after ${timeoutMs} ms`)
+      }
+      // A process herdr started in the background may keep the pipes open: read what is there, briefly.
+      const [out, err] = await Promise.all([stdout.settle(PIPE_GRACE_MS), stderr.settle(PIPE_GRACE_MS)])
+      if (code !== 0) throw new Error(`${what} failed (exit ${code}): ${(err || out).trim().slice(0, STDERR_MAX)}`)
+      return out
     } finally {
       clearTimeout(timer)
     }
+  }
+}
+
+/** How long output is still read after the process exited. */
+const PIPE_GRACE_MS = 200
+
+/** Reads a stream in the background; settle() waits up to `ms` more for its end, then returns what arrived. */
+function collect(stream: ReadableStream<Uint8Array>) {
+  const reader = stream.getReader()
+  const decoder = new TextDecoder()
+  let text = ""
+  const done = (async () => {
+    try {
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) return
+        text += decoder.decode(value, { stream: true })
+      }
+    } catch {
+      // cancelled or broken: keep what arrived
+    }
+  })()
+  return {
+    async settle(ms: number): Promise<string> {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      await Promise.race([done, new Promise((resolve) => (timer = setTimeout(resolve, ms)))])
+      clearTimeout(timer)
+      reader.cancel().catch(() => {})
+      return text
+    },
   }
 }
 

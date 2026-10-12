@@ -225,6 +225,13 @@ describe("herdrRunner", () => {
     expect(await herdrRunner(bin)(["agent", "list"], 3000)).toBe('{"args":"agent list"}')
   })
 
+  test("answers when herdr exits even if a background process it started keeps stdout open", async () => {
+    const bin = fakeBin('(sleep 3 &) ; printf \'{"ok":true}\'')
+    const started = Date.now()
+    expect(await herdrRunner(bin)(["agent", "list"], 2500)).toBe('{"ok":true}')
+    expect(Date.now() - started).toBeLessThan(1500)
+  })
+
   test("non-zero exit, timeout and a missing executable reject", async () => {
     await expect(herdrRunner(fakeBin("echo boom >&2; exit 3"))(["x"], 3000)).rejects.toThrow(/boom|3/)
     const started = Date.now()
