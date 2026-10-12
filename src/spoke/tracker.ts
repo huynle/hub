@@ -1,7 +1,7 @@
 // Sessions this OpenCode process knows about, built from the events it sees, plus which of them
 // are exposed to the central server (by mode). Pure: time is passed in.
 import type { Mode } from "../config"
-import { FORWARDED_EVENTS, type SessionInfo } from "../protocol"
+import { FORWARDED_EVENTS, type SessionInfo, type TerminalInfo } from "../protocol"
 
 /** A session is "owned" by this process while it viewed or ran it within this window. */
 export const OWNED_WINDOW_MS = 30 * 60 * 1000
@@ -58,11 +58,18 @@ export function eventSessionID(event: EventLike): string | undefined {
   return undefined
 }
 
+const RUN_END = new Set(["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"])
+
 export class SessionTracker {
   private readonly entries = new Map<string, Entry>()
+  /** Sessions with a run in progress. */
+  private readonly running = new Set<string>()
+  /** Pending permission or form ID → its session. */
+  private readonly waiting = new Map<string, string>()
 
   /** Applies an event seen in this process. Returns true when the snapshot may have changed. */
   observe(event: EventLike, now: number): boolean {
+    this.trackActive(event)
     const data = record(event.data)
     const id = typeof data.sessionID === "string" && data.sessionID ? data.sessionID : undefined
     if (!id) return false
@@ -86,6 +93,8 @@ export class SessionTracker {
         return true
       }
       case "session.deleted":
+        this.running.delete(id)
+        for (const [key, sessionID] of this.waiting) if (sessionID === id) this.waiting.delete(key)
         return this.entries.delete(id)
       default: {
         if (!ACTIVITY.has(event.type)) return false
@@ -102,11 +111,11 @@ export class SessionTracker {
    * follow it (renames, removal); live sessions keep their live details and only gain the workspace.
    * Returns true when the snapshot may have changed.
    */
-  applyListing(sessions: ReadonlyArray<{ readonly id: string } & SessionDetails>, now: number): boolean {
+  applyListing(sessions: ReadonlyArray<{ readonly id: string } & SessionDetails>, now: number, keep: ReadonlySet<string> = new Set()): boolean {
     let changed = false
     const ids = new Set(sessions.map((s) => s.id))
     for (const entry of [...this.entries.values()]) {
-      if (!entry.listed || ids.has(entry.id)) continue
+      if (!entry.listed || ids.has(entry.id) || keep.has(entry.id)) continue
       if (entry.lastActivity !== undefined && now - entry.lastActivity <= OWNED_WINDOW_MS) {
         entry.listed = false
         continue
@@ -157,6 +166,36 @@ export class SessionTracker {
     entry.updated = Math.max(entry.updated, details.updated)
     entry.info = true
     return true
+  }
+
+  /**
+   * Adds a session known only by ID (e.g. open in a terminal), not owned; its details (and last update)
+   * are fetched later. `_now` is accepted for symmetry with observe.
+   */
+  ensure(id: string, _now: number): boolean {
+    if (this.entries.has(id)) return false
+    this.entry(id, 0)
+    return true
+  }
+
+  /** Root sessions with a run in progress or a pending permission or form somewhere in their tree. */
+  active(): string[] {
+    const roots = new Set<string>()
+    for (const id of [...this.running, ...this.waiting.values()]) roots.add(this.rootOf(id))
+    return [...roots]
+  }
+
+  private trackActive(event: EventLike): void {
+    const data = record(event.data)
+    const sessionID = eventSessionID(event)
+    if (event.type === "session.execution.started" && sessionID) this.running.add(sessionID)
+    else if (RUN_END.has(event.type) && sessionID) this.running.delete(sessionID)
+    else if (event.type === "permission.asked" && sessionID && typeof data.id === "string") this.waiting.set(`per ${data.id}`, sessionID)
+    else if (event.type === "permission.replied" && typeof data.requestID === "string") this.waiting.delete(`per ${data.requestID}`)
+    else if (event.type === "form.created" && sessionID && typeof record(data.form).id === "string") this.waiting.set(`frm ${record(data.form).id}`, sessionID)
+    else if ((event.type === "form.replied" || event.type === "form.cancelled") && typeof (record(data.form).id ?? data.formID ?? data.id) === "string") {
+      this.waiting.delete(`frm ${record(data.form).id ?? data.formID ?? data.id}`)
+    }
   }
 
   needsInfo(): string[] {
@@ -249,23 +288,31 @@ export const SNAPSHOT_MAX_BYTES = 900_000
 
 /**
  * The snapshot for the session browser: every known session with its exposure, except subagent
- * children of unexposed sessions. Over the limits, exposed then most recent sessions are kept.
+ * children of unexposed sessions. Over the limits, open, then exposed, then most recent sessions are kept.
  */
 export function browserSessions(
   config: ExposureConfig,
   tracker: SessionTracker,
   now: number,
-  limits: { readonly max?: number; readonly maxBytes?: number } = {},
+  limits: {
+    readonly max?: number
+    readonly maxBytes?: number
+    /** Where a session is open right now (Herdr pane or TUI), if it is. */
+    readonly terminal?: (sessionID: string) => TerminalInfo | undefined
+  } = {},
 ): Array<SessionInfo & { exposed: boolean }> {
   if (config.mode === "off") return []
   const all = tracker
     .snapshot(now)
-    .map((s) => ({ ...s, exposed: isExposed(config, tracker, s.id) }))
+    .map((s) => {
+      const terminal = limits.terminal?.(s.id)
+      return { ...s, exposed: isExposed(config, tracker, s.id), ...(terminal ? { open: true, terminal } : {}) }
+    })
     .filter((s) => s.exposed || !s.parentID)
   const max = limits.max ?? SNAPSHOT_MAX
   const maxBytes = limits.maxBytes ?? SNAPSHOT_MAX_BYTES
   if (all.length <= max && JSON.stringify(all).length <= maxBytes) return all
-  const ranked = [...all].sort((a, b) => Number(b.exposed) - Number(a.exposed) || b.updated - a.updated)
+  const ranked = [...all].sort((a, b) => Number(b.open === true) - Number(a.open === true) || Number(b.exposed) - Number(a.exposed) || b.updated - a.updated)
   const keep = new Set<string>()
   let bytes = 2
   for (const s of ranked) {

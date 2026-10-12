@@ -239,3 +239,56 @@ describe("browserSessions", () => {
     expect(sessions.map((s) => s.id)).toEqual(sessions.map((_, i) => `ses_${i}`))
   })
 })
+
+describe("0.4 session view", () => {
+  const listed = (id: string, extra: Record<string, unknown> = {}) => ({ id, title: `L ${id}`, directory: "/d", updated: T0 - 1000, ...extra })
+
+  test("the listing never drops sessions in the keep set", () => {
+    const tracker = new SessionTracker()
+    tracker.applyListing([listed("ses_open"), listed("ses_gone")], T0)
+    expect(tracker.applyListing([], T0, new Set(["ses_open"]))).toBe(true)
+    expect(tracker.snapshot(T0).map((s) => s.id)).toEqual(["ses_open"])
+  })
+
+  test("active: sessions running or waiting on a permission or form, by root", () => {
+    const tracker = new SessionTracker()
+    tracker.observe(created("ses_a"), T0)
+    tracker.observe(created("ses_kid", { parentID: "ses_a" }), T0)
+    tracker.observe(created("ses_b"), T0)
+    tracker.observe(created("ses_c"), T0)
+    expect(tracker.active()).toEqual([])
+    tracker.observe(ev("session.execution.started", { sessionID: "ses_kid" }), T0)
+    tracker.observe(ev("permission.asked", { sessionID: "ses_b", id: "per_1" }), T0)
+    tracker.observe(ev("form.created", { form: { id: "frm_1", sessionID: "ses_c" } }), T0)
+    expect(tracker.active().sort()).toEqual(["ses_a", "ses_b", "ses_c"])
+    tracker.observe(ev("session.execution.succeeded", { sessionID: "ses_kid" }), T0)
+    tracker.observe(ev("permission.replied", { sessionID: "ses_b", requestID: "per_1" }), T0)
+    tracker.observe(ev("form.cancelled", { form: { id: "frm_1", sessionID: "ses_c" } }), T0)
+    expect(tracker.active()).toEqual([])
+    tracker.observe(ev("session.execution.started", { sessionID: "ses_b" }), T0)
+    tracker.observe(ev("session.deleted", { sessionID: "ses_b" }), T0)
+    expect(tracker.active()).toEqual([])
+  })
+
+  test("ensure adds an unknown session that needs info, without owning it", () => {
+    const tracker = new SessionTracker()
+    expect(tracker.ensure("ses_x", T0)).toBe(true)
+    expect(tracker.ensure("ses_x", T0)).toBe(false)
+    expect(tracker.needsInfo()).toEqual(["ses_x"])
+    tracker.setInfo("ses_x", { title: "X", directory: "/d", updated: 5 })
+    expect(tracker.snapshot(T0)).toEqual([{ id: "ses_x", title: "X", directory: "/d", updated: 5, owned: false }])
+  })
+
+  test("browserSessions marks open sessions with their terminal and keeps them first when capping", () => {
+    const t = new SessionTracker()
+    t.applyListing(
+      Array.from({ length: 6 }, (_, i) => ({ id: `ses_${i}`, title: "", directory: "/d", updated: T0 - i * 10 })),
+      T0,
+    )
+    const terminal = (id: string) => (id === "ses_5" ? { source: "herdr" as const, workspaceID: "w1", workspace: "app", status: "idle" as const } : undefined)
+    const all = browserSessions({ mode: "always", sessions: [] }, t, T0, { terminal })
+    expect(all.find((s) => s.id === "ses_5")).toMatchObject({ open: true, terminal: { source: "herdr", workspaceID: "w1" } })
+    expect(all.find((s) => s.id === "ses_0")).not.toHaveProperty("open")
+    expect(browserSessions({ mode: "always", sessions: [] }, t, T0, { max: 2, terminal }).map((s) => s.id)).toEqual(["ses_0", "ses_5"])
+  })
+})
