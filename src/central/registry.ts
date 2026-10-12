@@ -95,7 +95,12 @@ export interface Alert {
   readonly detail?: "permission" | "form" | "succeeded" | "failed"
   /** say: the spoken text. */
   readonly text?: string
+  /** Tenant (user ID) that owns the session; push goes to this user's devices only. */
+  readonly owner?: string
 }
+
+/** Machine ID → tenant (owning user ID). Every machine belongs to exactly one tenant. */
+export type TenantOf = (machineID: string) => string | undefined
 
 /** A pending permission or question somewhere in a session's tree, with where it was asked. */
 export interface TreeBlocker extends Blocker {
@@ -211,7 +216,7 @@ export class Registry {
   /** permission requestID → where it was asked. */
   private readonly permissions = new Map<string, { connID: string; sessionID: string }>()
   private readonly active = new Set<string>()
-  private readonly listeners = new Set<(message: RegistryMessage) => void>()
+  private readonly listeners = new Set<(message: RegistryMessage, tenant?: string) => void>()
   private readonly alertListeners = new Set<(alert: Alert) => void>()
   /** Form IDs already alerted (forms may be forwarded by several processes). */
   private readonly alertedForms = new Set<string>()
@@ -236,9 +241,15 @@ export class Registry {
   constructor(
     private readonly now: () => number = Date.now,
     private readonly timers: Timers = realTimers,
+    /** Single tenant unless given (pairing mode, tests). */
+    private readonly tenantOf: TenantOf = () => "",
   ) {}
 
-  subscribe(listener: (message: RegistryMessage) => void): () => void {
+  /**
+   * Listens to registry messages. `tenant` is the user that owns the message's session (undefined for
+   * catalog changes, which concern everyone, and for sessions nobody reports).
+   */
+  subscribe(listener: (message: RegistryMessage, tenant?: string) => void): () => void {
     this.listeners.add(listener)
     return () => this.listeners.delete(listener)
   }
@@ -254,6 +265,46 @@ export class Registry {
 
   connectionsFor(machineID: string): string[] {
     return [...this.conns.values()].filter((c) => c.machine.id === machineID).map((c) => c.id)
+  }
+
+  // ---------- tenancy ----------
+  // A session belongs to the tenant of the earliest connected process reporting it. Processes of other
+  // tenants reporting the same ID are ignored for it (no listing, routing or events), so a spoke cannot
+  // claim, read or inject into another user's session by reusing its ID.
+
+  private tenant(conn: Conn): string {
+    return this.tenantOf(conn.machine.id) ?? `?${conn.machine.id}`
+  }
+
+  /** Tenant of a reported session, or of the status board that contains it; undefined when unknown. */
+  sessionTenant(sessionID: string): string | undefined {
+    let first: Conn | undefined
+    for (const conn of this.conns.values()) if (conn.sessions.has(sessionID) && (!first || conn.seq < first.seq)) first = conn
+    if (first) return this.tenant(first)
+    const rootID = this.rootOf(sessionID)
+    return rootID && rootID !== sessionID ? this.sessionTenant(rootID) : undefined
+  }
+
+  /** The session as `conn` reports it, unless another tenant owns that ID. */
+  private reports(conn: Conn, sessionID: string): SessionInfo | undefined {
+    const info = conn.sessions.get(sessionID)
+    return info && this.sessionTenant(sessionID) === this.tenant(conn) ? info : undefined
+  }
+
+  /** Sessions `conn` reports that belong to its tenant. */
+  private visible(conn: Conn): SessionInfo[] {
+    return [...conn.sessions.values()].filter((s) => this.reports(conn, s.id))
+  }
+
+  /** True when the tenant owns the session (reported by one of its processes, or a subagent of such a session). */
+  owns(tenant: string, sessionID: string): boolean {
+    return this.sessionTenant(sessionID) === tenant
+  }
+
+  /** Whether the connection's process belongs to the tenant. */
+  connTenant(connID: string): string | undefined {
+    const conn = this.conns.get(connID)
+    return conn && this.tenant(conn)
   }
 
   connect(connID: string, machine: MachineRef, hello: Hello): void {
@@ -307,8 +358,15 @@ export class Registry {
     if (!conn) return
     conn.lastSeen = this.now()
     const sessionID = eventSessionID(event)
-    if (sessionID) conn.activity.set(sessionID, ++this.seq)
     const data = event.data as Record<string, unknown>
+    // Events about another tenant's session (or nesting under one) are dropped.
+    const tenant = this.tenant(conn)
+    for (const id of [sessionID, data.parentID]) {
+      if (typeof id !== "string") continue
+      const owner = this.sessionTenant(id)
+      if (owner !== undefined && owner !== tenant) return
+    }
+    if (sessionID) conn.activity.set(sessionID, ++this.seq)
     const streamed = event.type === "session.text.delta" || event.type === "session.reasoning.delta"
     // Anything else in a session (text ended → say, run ended → status) goes out after its streamed text.
     if (sessionID && !streamed) this.flushStream(this.streams.get(sessionID), sessionID)
@@ -340,7 +398,7 @@ export class Registry {
     }
 
     if (sessionID) this.trackRun(event.type, sessionID)
-    this.observeBoards(event)
+    this.observeBoards(event, tenant)
     if (sessionID) this.observeActivity(event, sessionID, data)
 
     if (streamed && sessionID) {
@@ -411,7 +469,7 @@ export class Registry {
     if (!conn) return []
     const resend: string[] = []
     for (const [sessionID, told] of this.conversations) {
-      if (told === connID || !conn.sessions.has(sessionID) || this.owner(sessionID) !== connID) continue
+      if (told === connID || !this.reports(conn, sessionID) || this.owner(sessionID) !== connID) continue
       this.conversations.set(sessionID, connID)
       resend.push(sessionID)
     }
@@ -458,7 +516,7 @@ export class Registry {
   exposed(sessionID: string): boolean | undefined {
     let reported = false
     for (const conn of this.conns.values()) {
-      const s = conn.sessions.get(sessionID)
+      const s = this.reports(conn, sessionID)
       if (!s) continue
       if (isOn(s)) return true
       reported = true
@@ -468,7 +526,7 @@ export class Registry {
 
   /** Process to change a session's exposure: a reporting service process, else the most recent reporter. */
   exposeTarget(sessionID: string): string | undefined {
-    const reporters = [...this.conns.values()].filter((c) => c.sessions.has(sessionID))
+    const reporters = [...this.conns.values()].filter((c) => this.reports(c, sessionID))
     const services = reporters.filter((c) => c.hello.kind === "service")
     return this.recent(services.length ? services : reporters, sessionID)
   }
@@ -484,7 +542,7 @@ export class Registry {
     const conn = this.conns.get(connID)
     if (!conn || !directory.startsWith("/")) return false
     const target = path.posix.resolve(directory)
-    for (const s of conn.sessions.values()) {
+    for (const s of this.visible(conn)) {
       if (s.project?.startsWith("/") && path.posix.resolve(s.project) === target) return true
       if (s.directory.startsWith("/") && path.posix.resolve(s.directory) === target) return true
     }
@@ -526,7 +584,7 @@ export class Registry {
         pluginVersion,
         connected: conn.connected,
         lastSeen: conn.lastSeen,
-        sessions: [...conn.sessions.values()].map((s) => {
+        sessions: this.visible(conn).map((s) => {
           const fields = this.browserFields(s.id)
           return {
             ...s,
@@ -547,7 +605,7 @@ export class Registry {
   session(sessionID: string): SessionView | undefined {
     let info: SessionInfo | undefined
     for (const conn of this.conns.values()) {
-      const s = conn.sessions.get(sessionID)
+      const s = this.reports(conn, sessionID)
       if (s && (!info || s.updated > info.updated)) info = s
     }
     if (!info) return undefined
@@ -722,11 +780,12 @@ export class Registry {
    */
   owner(sessionID: string): string | undefined {
     // Processes that report the session without exposing it would refuse the request.
-    const all = [...this.conns.values()].filter((c) => c.sessions.get(sessionID)?.exposed !== false)
-    const reporters = all.filter((c) => c.sessions.has(sessionID))
+    const tenant = this.sessionTenant(sessionID)
+    const all = [...this.conns.values()].filter((c) => this.tenant(c) === tenant && c.sessions.get(sessionID)?.exposed !== false)
+    const reporters = all.filter((c) => this.reports(c, sessionID))
     if (reporters.length === 0) return undefined
     const recent = (list: Conn[]) => this.recent(list, sessionID)
-    const owned = reporters.filter((c) => c.sessions.get(sessionID)?.owned)
+    const owned = reporters.filter((c) => this.reports(c, sessionID)?.owned)
     if (owned.length) return recent(owned)
     const services = reporters.filter((c) => c.hello.kind === "service")
     if (services.length) return recent(services)
@@ -746,6 +805,7 @@ export class Registry {
     )
     const origin = this.permissions.get(requestID)
     if (!pending || !origin || !this.conns.has(origin.connID)) return undefined
+    if (this.connTenant(origin.connID) !== this.sessionTenant(rootID)) return undefined
     return { ...origin }
   }
 
@@ -763,8 +823,10 @@ export class Registry {
     }
   }
 
-  private observeBoards(event: ForwardedEvent): void {
+  /** Feeds an event to the status boards; with a tenant, only to that tenant's boards. */
+  private observeBoards(event: ForwardedEvent, tenant?: string): void {
     for (const [rootID, board] of this.boards) {
+      if (tenant !== undefined && this.sessionTenant(rootID) !== tenant) continue
       if (board.observe(event)) this.emit({ type: "status", sessionID: rootID, sessions: this.live(board.snapshot().sessions) })
     }
   }
@@ -773,7 +835,7 @@ export class Registry {
   private syncBoards(): void {
     // Only exposed sessions get status boards: nothing is forwarded for the others.
     const reported = new Map<string, SessionInfo>()
-    for (const conn of this.conns.values()) for (const s of conn.sessions.values()) if (isOn(s)) reported.set(s.id, s)
+    for (const conn of this.conns.values()) for (const s of this.visible(conn)) if (isOn(s)) reported.set(s.id, s)
 
     const rootOf = (id: string): string => {
       const seen = new Set<string>()
@@ -830,10 +892,12 @@ export class Registry {
       ...(detail ? { detail } : {}),
       ...(text !== undefined ? { text } : {}),
     }
-    for (const listener of this.alertListeners) listener(alert)
+    const owner = this.sessionTenant(rootID)
+    for (const listener of this.alertListeners) listener(owner ? { ...alert, owner } : alert)
   }
 
   private emit(message: RegistryMessage): void {
-    for (const listener of this.listeners) listener(message)
+    const tenant = message.type === "catalog" ? undefined : this.sessionTenant("rootID" in message ? message.rootID : message.sessionID)
+    for (const listener of this.listeners) listener(message, tenant)
   }
 }

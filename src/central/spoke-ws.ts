@@ -16,9 +16,9 @@ import type { PushDetail, PushKind } from "./push"
 import type { Registry } from "./registry"
 import { newID, type Store } from "./store"
 
-/** Push notifications (implemented by Push in push.ts). Returns the number of devices notified. */
+/** Push notifications (implemented by Push in push.ts) to `ownerID`'s devices. Returns the number of devices notified. */
 export interface Notifier {
-  notify(kind: PushKind, sessionID: string, title: string, detail?: PushDetail, body?: string): Promise<number>
+  notify(kind: PushKind, sessionID: string, title: string, detail?: PushDetail, body?: string, ownerID?: string): Promise<number>
 }
 
 /** The spoke answered with an error, or disconnected before answering. */
@@ -53,8 +53,8 @@ export interface SpokeHubOptions {
   readonly registry: Registry
   readonly publicURL: string
   readonly notifier: Notifier
-  /** Sends a message to every SSE subscriber. */
-  readonly broadcast: (message: { type: string; [key: string]: unknown }) => void
+  /** Sends a message to the SSE subscribers of `tenant` (a user ID). */
+  readonly broadcast: (message: { type: string; [key: string]: unknown }, tenant: string) => void
   readonly turnTimeoutMs: number
   /** Added to turnTimeoutMs for the hub-side wait (default TURN_GRACE_MS). */
   readonly turnGraceMs?: number
@@ -234,9 +234,12 @@ export class SpokeHub {
         return { code, url: `${publicURL}/pair`, expiresAt }
       }
       case "handoff": {
-        this.options.broadcast({ type: "handoff", sessionID: req.sessionID })
-        const title = this.options.registry.status(req.sessionID)?.[0]?.title ?? req.sessionID
-        return { notified: await this.options.notifier.notify("handoff", req.sessionID, title) }
+        // Only the machine owner's own (or not yet reported) sessions: never another user's title or ID.
+        const tenant = this.options.registry.sessionTenant(req.sessionID)
+        if (tenant !== undefined && tenant !== owner) throw new Error("Unknown session")
+        this.options.broadcast({ type: "handoff", sessionID: req.sessionID }, owner)
+        const title = (tenant && this.options.registry.status(req.sessionID)?.[0]?.title) || req.sessionID
+        return { notified: await this.options.notifier.notify("handoff", req.sessionID, title, undefined, undefined, owner) }
       }
       case "openLink": {
         const { code } = auth.issueLoginCode(owner)

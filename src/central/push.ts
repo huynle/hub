@@ -111,10 +111,16 @@ export class Push {
     return this.keys().publicKey
   }
 
-  /** Notifies every subscribed device that wants `kind`. Returns the number of successful deliveries. */
-  async notify(kind: PushKind, sessionID: string, title: string, detail?: PushDetail, body?: string): Promise<number> {
+  /**
+   * Notifies every subscribed device that wants `kind` — only devices of `ownerID` (the session's
+   * owner) when given. Returns the number of successful deliveries.
+   */
+  async notify(kind: PushKind, sessionID: string, title: string, detail?: PushDetail, body?: string, ownerID?: string): Promise<number> {
     if (!this.cool(`${sessionID}\n${kind}`, kind === "say" ? SAY_COOLDOWN_MS : PUSH_COOLDOWN_MS)) return 0
-    const targets = this.store.pushSubscriptions().filter((s) => this.store.pushPrefs(s.deviceID)[kind])
+    const owners = new Map(this.store.devices().map((d) => [d.id, d.ownerID]))
+    const targets = this.store
+      .pushSubscriptions()
+      .filter((s) => (ownerID === undefined || owners.get(s.deviceID) === ownerID) && this.store.pushPrefs(s.deviceID)[kind])
     if (targets.length === 0) return 0
     const payload = JSON.stringify(pushPayload(kind, sessionID, title, detail, body))
     const keys = this.keys()

@@ -147,7 +147,7 @@ describe("turns", () => {
     expect(tuiSeen).toEqual([])
   })
 
-  test("second turn while one runs is 409; no owner is 409; empty text is 400", async () => {
+  test("second turn while one runs is 409; unreported session is 404; empty text is 400", async () => {
     h = harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true }), session("ses_2")] })
     let finish: (() => void) | undefined
@@ -162,9 +162,10 @@ describe("turns", () => {
     finish!()
     expect((await first).status).toBe(200)
 
+    // 0.3.0: a session none of your machines reports is 404 (as another user's would be).
     const none = await h.api("/api/sessions/ses_unreported/turn", { method: "POST", json: { text: "x" } })
-    expect(none.status).toBe(409)
-    expect(((await none.json()) as any).error).toBe("No OpenCode process for this session is connected")
+    expect(none.status).toBe(404)
+    expect(((await none.json()) as any).error).toBe("Not found")
     expect((await h.api("/api/sessions/ses_1/turn", { method: "POST", json: { text: "  " } })).status).toBe(400)
   })
 

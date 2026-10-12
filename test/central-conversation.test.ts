@@ -69,9 +69,10 @@ describe("utterance", () => {
     expect((await post("/api/sessions/ses_1/utterance", { text: 5 })).status).toBe(400)
     expect((await post("/api/sessions/ses_1/utterance", { text: "x".repeat(4001) })).status).toBe(400)
     expect((await post("/api/sessions/ses_1/utterance", { text: "x".repeat(4000) })).status).toBe(202)
+    // 0.3.0: a session none of your machines reports is 404 (as another user's would be).
     const none = await post("/api/sessions/ses_nobody/utterance", { text: "hi" })
-    expect(none.status).toBe(409)
-    expect(((await none.json()) as any).error).toBe("No OpenCode process for this session is connected")
+    expect(none.status).toBe(404)
+    expect(((await none.json()) as any).error).toBe("Not found")
     expect(seen.filter((r) => r.op === "steer")).toHaveLength(1)
   })
 
@@ -87,14 +88,14 @@ describe("utterance", () => {
 })
 
 describe("interrupt", () => {
-  test("sends interrupt to the owner and returns 204; 409 without owner", async () => {
+  test("sends interrupt to the owner and returns 204; 404 for an unreported session", async () => {
     h = harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     const seen = conversationSpoke(client)
     const res = await post("/api/sessions/ses_1/interrupt")
     expect(res.status).toBe(204)
     expect(seen).toEqual([{ op: "interrupt", sessionID: "ses_1" }])
-    expect((await post("/api/sessions/ses_nobody/interrupt")).status).toBe(409)
+    expect((await post("/api/sessions/ses_nobody/interrupt")).status).toBe(404)
   })
 })
 
@@ -124,12 +125,12 @@ describe("conversation mode", () => {
     await events.cancel()
   })
 
-  test("invalid body is 400; no owner is 409; spoke error leaves it off", async () => {
+  test("invalid body is 400; unreported session is 404; spoke error leaves it off", async () => {
     h = harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     answer(client, () => new Error("no voice agent"))
     expect((await post("/api/sessions/ses_1/conversation", { on: "yes" })).status).toBe(400)
-    expect((await post("/api/sessions/ses_nobody/conversation", { on: true })).status).toBe(409)
+    expect((await post("/api/sessions/ses_nobody/conversation", { on: true })).status).toBe(404)
     const failed = await post("/api/sessions/ses_1/conversation", { on: true })
     expect(failed.status).toBe(502)
     expect(h.registry.conversation("ses_1")).toBe(false)

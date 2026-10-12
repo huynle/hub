@@ -57,10 +57,49 @@ export interface Central {
   readonly spokes: SpokeHub
   readonly push: Push
   readonly speechSettings: SpeechService
+  /** The JSON API's route table (method, path, access), for audits and tests. */
+  readonly routes: readonly RouteInfo[]
   stop(): Promise<void>
 }
 
 type Message = { type: string; [key: string]: unknown }
+
+interface Listener {
+  readonly userID: string
+  send(message: Message): void
+  close(): void
+}
+
+/** Who may call a route: anyone, any signed-in user, admins, or the owner of the :session / :machine in the path. */
+export type Access = "public" | "user" | "admin" | "session" | "machine"
+
+export interface RouteInfo {
+  readonly method: string
+  /** Express-style path, e.g. /api/sessions/:session/turn. */
+  readonly path: string
+  readonly access: Access
+}
+
+interface Context {
+  readonly request: Request
+  readonly server: Server<SpokeSocketData>
+  readonly url: URL
+  readonly params: Record<string, string>
+  readonly device: DeviceRecord
+  readonly user: UserRecord
+}
+
+type Handler = (context: Context) => Response | Promise<Response>
+
+interface Route extends RouteInfo {
+  readonly handle: Handler
+  readonly pattern: RegExp
+  readonly keys: string[]
+  /** Session routes refused (403 not_exposed) while voice is off for the session. */
+  readonly exposed: boolean
+}
+
+const NO_STORE = { "cache-control": "no-store" }
 
 export const COOKIE = "voice_device"
 const COOKIE_MAX_AGE = 400 * 24 * 60 * 60
@@ -110,12 +149,29 @@ export function startCentral(options: CentralOptions): Central {
   const web: WebAssets = options.web ?? diskAssets(options.webDir ?? path.join(import.meta.dir, "..", "..", "web"))
   const now = options.now ?? Date.now
   const store = Store.open(config.stateDir, now, { mode: config.auth.mode })
-  const registry = new Registry()
+  // A machine's tenant is its owner (read live: ownership moves on migration).
+  const registry = new Registry(Date.now, undefined, (machineID) => store.machines().find((m) => m.id === machineID)?.ownerID)
   const push = new Push({ store, subject: config.vapidSubject, sender: options.pushSender })
   const notifier = options.notifier ?? push
-  const listeners = new Set<(message: Message) => void>()
-  const broadcast = (message: Message) => {
-    for (const listener of listeners) listener(message)
+  /** SSE subscribers, one user each. */
+  const listeners = new Set<Listener>()
+  /**
+   * Sends to SSE subscribers: catalog to everyone (each gets their own machines), `admins` messages to
+   * admins only, anything else only to `tenant` (the session's owner). Streams of users who were
+   * disabled are closed.
+   */
+  const broadcast = (message: Message, audience: { tenant?: string; admins?: true } = {}) => {
+    for (const listener of [...listeners]) {
+      const user = store.user(listener.userID)
+      if (!user || user.disabled) {
+        listener.close()
+        continue
+      }
+      if (message.type === "catalog") listener.send({ type: "catalog", machines: machines(user.id) })
+      else if (audience.admins) {
+        if (user.role === "admin") listener.send(message)
+      } else if (audience.tenant !== undefined && audience.tenant === user.id) listener.send(message)
+    }
   }
   const speechSettings = new SpeechService({
     store,
@@ -165,16 +221,17 @@ export function startCentral(options: CentralOptions): Central {
     registry,
     publicURL,
     notifier,
-    broadcast,
+    broadcast: (message, tenant) => broadcast(message, { tenant }),
     turnTimeoutMs: config.turnTimeoutMs,
     ...options.timing,
   })
 
-  const machines = () => {
+  /** The user's machines with their live processes and sessions. */
+  const machines = (userID: string) => {
     const online = new Map(registry.catalog().map((m) => [m.id, m]))
     return store
       .machines()
-      .filter((m) => !m.revoked)
+      .filter((m) => !m.revoked && m.ownerID === userID)
       .map((m) => ({
         id: m.id,
         name: m.name,
@@ -185,11 +242,11 @@ export function startCentral(options: CentralOptions): Central {
       }))
   }
 
-  registry.subscribe((message) =>
-    broadcast(message.type === "catalog" ? { type: "catalog", machines: machines() } : { ...message }),
-  )
+  registry.subscribe((message, tenant) => broadcast({ ...message }, tenant !== undefined ? { tenant } : {}))
   registry.subscribeAlerts((alert) => {
-    notifier.notify(alert.kind, alert.sessionID, alert.title, alert.detail, alert.text).catch((cause) => {
+    // Push goes to the session owner's devices only; an alert without an owner goes nowhere.
+    if (!alert.owner) return
+    notifier.notify(alert.kind, alert.sessionID, alert.title, alert.detail, alert.text, alert.owner).catch((cause) => {
       console.error("[voice] push notification failed:", cause instanceof Error ? cause.message : cause)
     })
   })
@@ -247,7 +304,7 @@ export function startCentral(options: CentralOptions): Central {
       return deny(403, "Account disabled", "Your account on this voice hub is disabled. Ask its admin.")
     }
     const user = store.upsertUser({ email: identity.email, ...(identity.name ? { name: identity.name } : {}), role })
-    if (user.role === "admin" && store.migrateLocal(user.id)) broadcast({ type: "catalog", machines: machines() })
+    if (user.role === "admin" && store.migrateLocal(user.id)) broadcast({ type: "catalog" })
     const headers = new Headers({ "cache-control": "no-store" })
     headers.append("set-cookie", cleared["set-cookie"])
     const current = deviceFor(request)
@@ -303,21 +360,18 @@ export function startCentral(options: CentralOptions): Central {
           console.log(`[voice] local hub: approved the first machine (code ${start.userCode}) without confirmation; later machines need approval`)
           return Response.json({ ...start, autoApproved: true } satisfies EnrollStart)
         }
-        broadcast({ type: "enrollment" })
+        broadcast({ type: "enrollment" }, { admins: true })
         return Response.json(start)
       }
       if (method === "POST" && pathname === "/spoke/enroll/poll") {
         const poll = auth.pollEnrollment((await body(request)).deviceCode)
-        if (poll.status === "approved") broadcast({ type: "catalog", machines: machines() })
+        if (poll.status === "approved") broadcast({ type: "catalog" })
         return Response.json(poll)
       }
       if (method === "GET" && pathname === "/login") return login(request, url)
-      if (method === "GET" && pathname === "/api/auth") {
-        return Response.json({ mode: config.auth.mode, signIn: oidc ? "/auth/login" : null }, { headers: { "cache-control": "no-store" } })
-      }
       if (oidc && method === "GET" && pathname === "/auth/login") return await authLogin(url)
       if (oidc && method === "GET" && pathname === "/auth/callback") return await authCallback(request, url)
-      if (pathname.startsWith("/api/")) return await api(request, server, pathname, method)
+      if (pathname.startsWith("/api/")) return await api(request, server, url)
       if (method === "GET") return staticFile(pathname)
       return error(404, "Not found")
     } catch (cause) {
@@ -347,158 +401,291 @@ export function startCentral(options: CentralOptions): Central {
     return new Response(null, { status: 302, headers })
   }
 
-  async function api(
-    request: Request,
-    server: Server<SpokeSocketData>,
-    pathname: string,
-    method: string,
-  ): Promise<Response> {
-    if (method !== "GET" && method !== "HEAD" && !sameOrigin(request)) {
-      return error(403, "Cross-origin request refused")
-    }
-    if (method === "POST" && pathname === "/api/pair") {
+  // ---------- JSON API: a route table with declared access, enforced here before any handler runs ----------
+
+  const ownMachine = (userID: string, machineID: string) =>
+    store.machines().find((m) => m.id === machineID && !m.revoked && m.ownerID === userID)
+
+  const route = (method: string, path: string, access: Access, handle: Handler, exposed = false): Route => {
+    const keys: string[] = []
+    const pattern = new RegExp(`^${path.replace(/:([a-z]+)/g, (_, key: string) => (keys.push(key), "([^/]+)"))}$`)
+    return { method, path, access, handle, pattern, keys, exposed }
+  }
+
+  const routes: Route[] = [
+    // public
+    route("GET", "/api/auth", "public", () =>
+      Response.json({ mode: config.auth.mode, signIn: oidc ? "/auth/login" : null }, { headers: { "cache-control": "no-store" } }),
+    ),
+    route("POST", "/api/pair", "public", async ({ request }) => {
       const input = await body(request)
       const paired = auth.pair(input.code, input.deviceName)
       if (!paired) return error(401, "Invalid or expired pairing code")
       store.audit({ actor: paired.device.ownerID, action: "device.pair", target: paired.device.id })
       return Response.json({ device: deviceView(paired.device) }, { headers: { "set-cookie": cookie(paired.token) } })
+    }),
+
+    // any signed-in user, own data only
+    route("GET", "/api/me", "user", ({ device, user }) =>
+      Response.json({
+        device: deviceView(device),
+        user: userView(user),
+        auth: config.auth.mode,
+        publicURL,
+        version: options.version ?? "0.0.0",
+      }),
+    ),
+    route("GET", "/api/machines", "user", ({ user }) => Response.json({ machines: machines(user.id) })),
+    route("GET", "/api/events", "user", ({ request, server, user }) => {
+      server.timeout(request, 0)
+      return events(request.signal, user.id)
+    }),
+    route("POST", "/api/enrollments/:code/approve", "user", ({ params, user }) => decideEnrollment(params.code!, "approved", user)),
+    route("POST", "/api/enrollments/:code/deny", "user", ({ params, user }) => decideEnrollment(params.code!, "denied", user)),
+    route("GET", "/api/devices", "user", ({ device, user }) =>
+      Response.json({
+        devices: store
+          .devices()
+          .filter((d) => d.ownerID === user.id)
+          .map((d) => ({ ...deviceView(d), current: d.id === device.id })),
+      }),
+    ),
+    route("DELETE", "/api/devices/:id", "user", ({ params, user }) => {
+      const target = store.devices().find((d) => d.id === params.id && d.ownerID === user.id)
+      if (!target || !store.removeDevice(target.id)) return error(404, "No such device")
+      store.audit({ actor: user.id, action: "device.revoke", target: target.id })
+      return new Response(null, { status: 204 })
+    }),
+    route("POST", "/api/logout", "user", ({ device }) => {
+      store.removeDevice(device.id)
+      return new Response(null, { status: 204, headers: { "set-cookie": cookie("", 0) } })
+    }),
+    route("POST", "/api/transcribe", "user", ({ request }) => transcribe(request)),
+    route("POST", "/api/speak", "user", async ({ request }) => {
+      const text = speakable(String((await body(request)).text ?? ""), config.maxSpeechChars)
+      if (!text) return error(400, "Nothing to speak")
+      return new Response(await speech.speak(text), { headers: { "content-type": "audio/mpeg" } })
+    }),
+    route("GET", "/api/push/key", "user", () => Response.json({ publicKey: push.publicKey() })),
+    route("POST", "/api/push/subscribe", "user", async ({ request, device }) => {
+      const input = await body(request)
+      const target = pushTarget(input.subscription)
+      if (!target) return error(400, "Invalid push subscription")
+      store.addPushSubscription(device.id, target)
+      const prefs = prefsInput(input.prefs)
+      return Response.json({ prefs: prefs ? store.setPushPrefs(device.id, prefs) : store.pushPrefs(device.id) })
+    }),
+    route("POST", "/api/push/unsubscribe", "user", async ({ request, device }) => {
+      const endpoint = (await body(request)).endpoint
+      if (typeof endpoint !== "string" || !store.removePushSubscription(device.id, endpoint)) {
+        return error(404, "No such subscription on this device")
+      }
+      return new Response(null, { status: 204 })
+    }),
+    route("GET", "/api/push/prefs", "user", ({ device }) =>
+      Response.json({
+        prefs: store.pushPrefs(device.id),
+        subscriptions: store.pushSubscriptions().filter((s) => s.deviceID === device.id).length,
+      }),
+    ),
+    route("PUT", "/api/push/prefs", "user", async ({ request, device }) =>
+      Response.json({ prefs: store.setPushPrefs(device.id, prefsInput(await body(request)) ?? {}) }),
+    ),
+    route("GET", "/api/settings/speech", "user", () => Response.json(speechSettings.view(), { headers: NO_STORE })),
+    // Raw JSON: anything but an object is refused by the validator.
+    route("PUT", "/api/settings/speech", "user", async ({ request }) =>
+      Response.json(speechSettings.update(await request.json()), { headers: NO_STORE }),
+    ),
+    route("GET", "/api/settings/speech/models", "user", async ({ url }) => {
+      const kind = url.searchParams.get("kind")
+      if (kind !== "stt" && kind !== "tts") return error(400, "Expected kind=stt or kind=tts")
+      return Response.json(await speechSettings.models(kind))
+    }),
+    route("POST", "/api/settings/speech/test", "user", async ({ request }) => {
+      const input = await body(request)
+      if (input.kind === "stt") return error(501, "Testing speech-to-text is not supported; record something instead")
+      if (input.kind !== "tts") return error(400, "Expected kind tts or stt")
+      const text = speakable(typeof input.text === "string" ? input.text : "", SPEECH_TEST_MAX_CHARS - 1) || SPEECH_TEST_TEXT
+      return new Response(await speech.speak(text), { headers: { "content-type": "audio/mpeg", "cache-control": "no-store" } })
+    }),
+
+    // sessions: the caller must own the session (else 404, like an unknown one)
+    route("GET", "/api/sessions/:session", "session", ({ params }) => {
+      const view = registry.session(params.session!)
+      return view ? Response.json(view) : error(404, "Not found")
+    }),
+    route("POST", "/api/sessions/:session/expose", "session", ({ request, params }) => expose(request, params.session!)),
+    route("POST", "/api/sessions/:session/presence", "session", async ({ request, params, device }) => {
+      const visible = (await body(request)).visible
+      if (typeof visible !== "boolean") return error(400, "Expected {visible: boolean}")
+      registry.setPresence(device.id, params.session!, visible)
+      return new Response(null, { status: 204 })
+    }),
+    route("POST", "/api/sessions/:session/turn", "session", ({ request, server, params }) => turn(request, server, params.session!), true),
+    route("POST", "/api/sessions/:session/utterance", "session", ({ request, params }) => utterance(request, params.session!), true),
+    route(
+      "POST",
+      "/api/sessions/:session/interrupt",
+      "session",
+      async ({ params }) => {
+        await spokes.request(ownerOf(params.session!), { op: "interrupt", sessionID: params.session! })
+        return new Response(null, { status: 204 })
+      },
+      true,
+    ),
+    route("POST", "/api/sessions/:session/conversation", "session", ({ request, params }) => conversation(request, params.session!), true),
+    route(
+      "GET",
+      "/api/sessions/:session/context",
+      "session",
+      async ({ params }) => Response.json(await spokes.request(ownerOf(params.session!), { op: "context", sessionID: params.session! })),
+      true,
+    ),
+    route("POST", "/api/sessions/:session/permission", "session", ({ request, params }) => permission(request, params.session!), true),
+
+    // machines: the caller must own the machine
+    route("POST", "/api/machines/:machine/sessions", "machine", ({ request, params }) => createSession(request, params.machine!)),
+    route("DELETE", "/api/machines/:machine", "machine", ({ params, user }) => revokeMachine(params.machine!, user)),
+
+    // admins: users, machines, devices, audit, enrollments, the server speech default
+    route("GET", "/api/enrollments", "admin", () => Response.json({ enrollments: auth.pendingEnrollments() })),
+    route("GET", "/api/admin/users", "admin", () => Response.json(store.users().map(userRow))),
+    route("PUT", "/api/admin/users/:id", "admin", async ({ request, params, user }) => updateUser(params.id!, await body(request), user)),
+    route("GET", "/api/admin/machines", "admin", () => {
+      const online = new Set(registry.catalog().map((m) => m.id))
+      const emails = new Map(store.users().map((u) => [u.id, u.email]))
+      return Response.json(
+        store
+          .machines()
+          .filter((m) => !m.revoked)
+          .map((m) => ({
+            id: m.id,
+            name: m.name,
+            created: m.created,
+            lastSeen: m.lastSeen,
+            online: online.has(m.id),
+            ownerID: m.ownerID,
+            ...(emails.get(m.ownerID) ? { ownerEmail: emails.get(m.ownerID) } : {}),
+          })),
+      )
+    }),
+    route("DELETE", "/api/admin/machines/:id", "admin", ({ params, user }) => revokeMachine(params.id!, user)),
+    route("DELETE", "/api/admin/devices/:id", "admin", ({ params, user }) => {
+      if (!store.removeDevice(params.id!)) return error(404, "No such device")
+      store.audit({ actor: user.id, action: "device.revoke", target: params.id! })
+      return new Response(null, { status: 204 })
+    }),
+    route("GET", "/api/admin/audit", "admin", () => Response.json(store.auditLog())),
+    route("GET", "/api/settings/speech/default", "admin", () => Response.json(speechSettings.view(), { headers: NO_STORE })),
+    route("PUT", "/api/settings/speech/default", "admin", async ({ request, user }) => {
+      const view = speechSettings.update(await request.json())
+      store.audit({ actor: user.id, action: "speech.default" })
+      return Response.json(view, { headers: NO_STORE })
+    }),
+  ]
+
+  function findRoute(method: string, pathname: string): { route: Route; params: Record<string, string> } | undefined {
+    for (const candidate of routes) {
+      if (candidate.method !== method) continue
+      const match = candidate.pattern.exec(pathname)
+      if (!match) continue
+      const params: Record<string, string> = {}
+      candidate.keys.forEach((key, i) => (params[key] = param(match[i + 1]!)))
+      return { route: candidate, params }
+    }
+    return undefined
+  }
+
+  async function api(request: Request, server: Server<SpokeSocketData>, url: URL): Promise<Response> {
+    const method = request.method
+    if (method !== "GET" && method !== "HEAD" && !sameOrigin(request)) {
+      return error(403, "Cross-origin request refused")
+    }
+    const found = findRoute(method, url.pathname)
+    if (found?.route.access === "public") {
+      // Public handlers never read device or user.
+      return await found.route.handle({ request, server, url, params: found.params } as Context)
     }
 
     const resolved = deviceFor(request)
     if (!resolved) return error(401, "This device is not paired")
-    const { device: current, user } = resolved
-    store.touchDevice(current.id)
+    const { device, user } = resolved
+    store.touchDevice(device.id)
     store.touchUser(user.id)
+    if (!found) return error(404, "Not found")
 
-    const route = `${method} ${pathname}`
-    switch (route) {
-      case "GET /api/me":
-        return Response.json({
-          device: deviceView(current),
-          user: userView(user),
-          auth: config.auth.mode,
-          publicURL,
-          version: options.version ?? "0.0.0",
-        })
-      case "GET /api/machines":
-        return Response.json({ machines: machines() })
-      case "GET /api/events":
-        server.timeout(request, 0)
-        return events(request.signal)
-      case "GET /api/enrollments":
-        return Response.json({ enrollments: auth.pendingEnrollments() })
-      case "GET /api/devices":
-        return Response.json({
-          devices: store.devices().map((d) => ({ ...deviceView(d), current: d.id === current.id })),
-        })
-      case "POST /api/logout":
-        store.removeDevice(current.id)
-        return new Response(null, { status: 204, headers: { "set-cookie": cookie("", 0) } })
-      case "POST /api/transcribe":
-        return transcribe(request)
-      case "GET /api/push/key":
-        return Response.json({ publicKey: push.publicKey() })
-      case "POST /api/push/subscribe": {
-        const input = await body(request)
-        const target = pushTarget(input.subscription)
-        if (!target) return error(400, "Invalid push subscription")
-        store.addPushSubscription(current.id, target)
-        const prefs = prefsInput(input.prefs)
-        return Response.json({ prefs: prefs ? store.setPushPrefs(current.id, prefs) : store.pushPrefs(current.id) })
-      }
-      case "POST /api/push/unsubscribe": {
-        const endpoint = (await body(request)).endpoint
-        if (typeof endpoint !== "string" || !store.removePushSubscription(current.id, endpoint)) {
-          return error(404, "No such subscription on this device")
-        }
-        return new Response(null, { status: 204 })
-      }
-      case "GET /api/push/prefs":
-        return Response.json({
-          prefs: store.pushPrefs(current.id),
-          subscriptions: store.pushSubscriptions().filter((s) => s.deviceID === current.id).length,
-        })
-      case "PUT /api/push/prefs":
-        return Response.json({ prefs: store.setPushPrefs(current.id, prefsInput(await body(request)) ?? {}) })
-      case "GET /api/settings/speech":
-        return Response.json(speechSettings.view(), { headers: { "cache-control": "no-store" } })
-      case "PUT /api/settings/speech":
-        // Raw JSON: anything but an object is refused by the validator.
-        return Response.json(speechSettings.update(await request.json()), { headers: { "cache-control": "no-store" } })
-      case "GET /api/settings/speech/models": {
-        const kind = new URL(request.url).searchParams.get("kind")
-        if (kind !== "stt" && kind !== "tts") return error(400, "Expected kind=stt or kind=tts")
-        return Response.json(await speechSettings.models(kind))
-      }
-      case "POST /api/settings/speech/test": {
-        const input = await body(request)
-        if (input.kind === "stt") return error(501, "Testing speech-to-text is not supported; record something instead")
-        if (input.kind !== "tts") return error(400, "Expected kind tts or stt")
-        const text = speakable(typeof input.text === "string" ? input.text : "", SPEECH_TEST_MAX_CHARS - 1) || SPEECH_TEST_TEXT
-        return new Response(await speech.speak(text), { headers: { "content-type": "audio/mpeg", "cache-control": "no-store" } })
-      }
-      case "POST /api/speak": {
-        const text = speakable(String((await body(request)).text ?? ""), config.maxSpeechChars)
-        if (!text) return error(400, "Nothing to speak")
-        return new Response(await speech.speak(text), { headers: { "content-type": "audio/mpeg" } })
-      }
+    const { route: matched, params } = found
+    switch (matched.access) {
+      case "admin":
+        if (user.role !== "admin") return error(403, "Admins only")
+        break
+      case "session":
+        // Foreign and unknown sessions answer alike, so IDs don't leak.
+        if (!registry.owns(user.id, params.session!)) return error(404, "Not found")
+        // Sessions listed for discovery only: nothing but enabling voice (and presence) reaches them.
+        if (matched.exposed && registry.exposed(params.session!) === false) return error(403, NOT_EXPOSED, "not_exposed")
+        break
+      case "machine":
+        if (!ownMachine(user.id, params.machine!)) return error(404, "No such machine")
+        break
     }
+    return await matched.handle({ request, server, url, params, device, user })
+  }
 
-    let match: RegExpExecArray | null
-    if ((match = /^\/api\/sessions\/([^/]+)$/.exec(pathname)) && method === "GET") {
-      const view = registry.session(param(match[1]!))
-      return view ? Response.json(view) : error(404, "No such session")
+  function decideEnrollment(code: string, status: "approved" | "denied", user: UserRecord): Response {
+    const machineName = auth.decide(code, status, user.id)
+    if (machineName === undefined) return error(404, "No pending enrollment with that code")
+    store.audit({ actor: user.id, action: status === "approved" ? "machine.approve" : "machine.deny", detail: machineName })
+    broadcast({ type: "enrollment" }, { admins: true })
+    return new Response(null, { status: 204 })
+  }
+
+  function revokeMachine(id: string, user: UserRecord): Response {
+    if (!store.revokeMachine(id)) return error(404, "No such machine")
+    store.audit({ actor: user.id, action: "machine.revoke", target: id })
+    spokes.closeMachine(id, "revoked")
+    broadcast({ type: "catalog" })
+    return new Response(null, { status: 204 })
+  }
+
+  function userRow(u: UserRecord) {
+    return {
+      id: u.id,
+      ...(u.email ? { email: u.email } : {}),
+      ...(u.name ? { name: u.name } : {}),
+      role: u.role,
+      disabled: u.disabled === true,
+      created: u.created,
+      lastSeen: u.lastSeen,
+      machines: store.machines().filter((m) => m.ownerID === u.id && !m.revoked).length,
+      devices: store.devices().filter((d) => d.ownerID === u.id).length,
     }
-    if ((match = /^\/api\/sessions\/([^/]+)\/(turn|context|permission|utterance|interrupt|conversation|presence|expose)$/.exec(pathname))) {
-      const sessionID = param(match[1]!)
-      const action = match[2]
-      if (action === "expose" && method === "POST") return expose(request, sessionID)
-      // Sessions listed for discovery only: nothing but enabling voice (and presence) reaches them.
-      if (action !== "presence" && registry.exposed(sessionID) === false) {
-        return error(403, NOT_EXPOSED, "not_exposed")
-      }
-      if (action === "turn" && method === "POST") return turn(request, server, sessionID)
-      if (action === "utterance" && method === "POST") return utterance(request, sessionID)
-      if (action === "interrupt" && method === "POST") {
-        await spokes.request(ownerOf(sessionID), { op: "interrupt", sessionID })
-        return new Response(null, { status: 204 })
-      }
-      if (action === "conversation" && method === "POST") return conversation(request, sessionID)
-      if (action === "presence" && method === "POST") {
-        const visible = (await body(request)).visible
-        if (typeof visible !== "boolean") return error(400, "Expected {visible: boolean}")
-        registry.setPresence(current.id, sessionID, visible)
-        return new Response(null, { status: 204 })
-      }
-      if (action === "context" && method === "GET") {
-        return Response.json(await spokes.request(ownerOf(sessionID), { op: "context", sessionID }))
-      }
-      if (action === "permission" && method === "POST") return permission(request, sessionID)
+  }
+
+  /** PUT /api/admin/users/:id {role?, disabled?}: the last active admin can be neither demoted nor disabled. */
+  function updateUser(id: string, input: Record<string, unknown>, actor: UserRecord): Response {
+    const target = store.user(id)
+    if (!target) return error(404, "No such user")
+    const { role, disabled } = input
+    if (role !== undefined && role !== "admin" && role !== "user") return error(400, 'role must be "admin" or "user"')
+    if (disabled !== undefined && typeof disabled !== "boolean") return error(400, "disabled must be true or false")
+    if (role === undefined && disabled === undefined) return error(400, "Expected {role?, disabled?}")
+    const activeAdmin = (u: UserRecord) => u.role === "admin" && !u.disabled
+    const after: UserRecord = { ...target, ...(role ? { role: role as UserRecord["role"] } : {}), ...(disabled !== undefined ? { disabled } : {}) }
+    if (activeAdmin(target) && !activeAdmin(after) && store.users().filter(activeAdmin).length <= 1) {
+      return error(409, "Cannot demote or disable the last active admin. Make someone else an admin first.")
     }
-    if ((match = /^\/api\/enrollments\/([^/]+)\/(approve|deny)$/.exec(pathname)) && method === "POST") {
-      const code = param(match[1]!)
-      const status = match[2] === "approve" ? "approved" : "denied"
-      const machineName = auth.decide(code, status, user.id)
-      if (machineName === undefined) return error(404, "No pending enrollment with that code")
-      store.audit({ actor: user.id, action: status === "approved" ? "machine.approve" : "machine.deny", detail: machineName })
-      broadcast({ type: "enrollment" })
-      return new Response(null, { status: 204 })
+    if (role && role !== target.role) store.audit({ actor: actor.id, action: "user.role", target: id, detail: role })
+    if (disabled !== undefined && disabled !== (target.disabled === true)) {
+      store.audit({ actor: actor.id, action: disabled ? "user.disable" : "user.enable", target: id })
     }
-    if ((match = /^\/api\/machines\/([^/]+)\/sessions$/.exec(pathname)) && method === "POST") {
-      return createSession(request, param(match[1]!))
+    store.setUser(id, { ...(role ? { role: role as "admin" | "user" } : {}), ...(disabled !== undefined ? { disabled } : {}) })
+    if (disabled === true) {
+      // Their machines go offline at once; their browsers get 401 from now on and lose their event streams.
+      for (const machine of store.machines()) if (machine.ownerID === id) spokes.closeMachine(machine.id, "revoked")
+      broadcast({ type: "catalog" })
     }
-    if ((match = /^\/api\/machines\/([^/]+)$/.exec(pathname)) && method === "DELETE") {
-      const id = param(match[1]!)
-      if (!store.revokeMachine(id)) return error(404, "No such machine")
-      spokes.closeMachine(id, "revoked")
-      broadcast({ type: "catalog", machines: machines() })
-      return new Response(null, { status: 204 })
-    }
-    if ((match = /^\/api\/devices\/([^/]+)$/.exec(pathname)) && method === "DELETE") {
-      if (!store.removeDevice(param(match[1]!))) return error(404, "No such device")
-      return new Response(null, { status: 204 })
-    }
-    return error(404, "Not found")
+    return Response.json(userRow(store.user(id)!))
   }
 
   async function turn(request: Request, server: Server<SpokeSocketData>, sessionID: string): Promise<Response> {
@@ -549,7 +736,7 @@ export function startCentral(options: CentralOptions): Central {
     const on = (await body(request)).on
     if (typeof on !== "boolean") return error(400, "Expected {on: boolean}")
     const connID = registry.exposeTarget(sessionID)
-    if (!connID) return error(404, "No such session")
+    if (!connID) return error(404, "Not found")
     const { exposed } = await spokes.request(connID, { op: "expose", sessionID, on })
     return Response.json({ exposed })
   }
@@ -604,7 +791,7 @@ export function startCentral(options: CentralOptions): Central {
     return Response.json({ text: await speech.transcribe(audio, format) })
   }
 
-  function events(signal: AbortSignal): Response {
+  function events(signal: AbortSignal, userID: string): Response {
     const encoder = new TextEncoder()
     let cleanup = () => {}
     const stream = new ReadableStream<Uint8Array>({
@@ -616,13 +803,22 @@ export function startCentral(options: CentralOptions): Central {
             cleanup()
           }
         }
-        const send = (message: Message) => write(`data: ${JSON.stringify(message)}\n\n`)
-        send({ type: "catalog", machines: machines() })
-        listeners.add(send)
+        const listener: Listener = {
+          userID,
+          send: (message) => write(`data: ${JSON.stringify(message)}\n\n`),
+          close: () => {
+            cleanup()
+            try {
+              controller.close()
+            } catch {}
+          },
+        }
+        listener.send({ type: "catalog", machines: machines(userID) })
+        listeners.add(listener)
         const heartbeat = setInterval(() => write(": ping\n\n"), SSE_HEARTBEAT_MS)
         cleanup = () => {
           clearInterval(heartbeat)
-          listeners.delete(send)
+          listeners.delete(listener)
         }
         signal.addEventListener("abort", () => cleanup(), { once: true })
       },
@@ -659,6 +855,7 @@ export function startCentral(options: CentralOptions): Central {
     spokes,
     push,
     speechSettings,
+    routes: routes.map(({ method, path, access }) => ({ method, path, access })),
     async stop() {
       spokes.stop()
       for (const listener of [...listeners]) listeners.delete(listener)
