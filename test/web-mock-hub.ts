@@ -16,6 +16,14 @@
 // chunks as SSE delta/reasoning (with rootID ses_mock); POST /mock/scenario {say?} plays a scripted run of ses_mock: root
 // reasoning, a shell tool, two subagents (ses_mock_kid, ses_mock_kid2) streaming their output, root reply text (and say
 // events when conversation mode is on), then idle. Status entries of working sessions carry `since`.
+// Multi-user (0.3.0, docs/multi-user.md): POST /mock/auth {mode?: "pairing"|"oidc", as?: userID} switches the auth mode
+// and who the fake GET /auth/login signs in (u_alice admin, u_bob user; u_carol is disabled). The `mock_user` cookie
+// holds the signed-in user ID ("out" = signed out); without it, pairing mode is the implicit owner `local` (as
+// before) and oidc mode answers 401. Pairing code 123456 works in both modes. GET /api/auth, /api/me with user+auth,
+// per-user catalog/SSE/sessions (bob owns "bob-laptop" with ses_bob; other sessions are 404 for him), own devices,
+// per-user speech (GET/PUT /api/settings/speech with scope/default/user) and the server default
+// (/api/settings/speech/default, admin), admin users/machines/devices/audit, admin-only GET /api/enrollments with
+// two pending machines, and GET /auth/callback?error=… rendering the hub's error page.
 import { existsSync, readFileSync, statSync } from "node:fs"
 import path from "node:path"
 
@@ -142,24 +150,178 @@ const keyInfo = (kind: "stt" | "tts") => {
   return kind === "tts" ? { set: true, last4: "9z9z", source: "env" } : { set: false, source: "none" }
 }
 const usable = (kind: "stt" | "tts") => (speech[kind].provider === "openrouter" ? keyInfo(kind).set : !!speech[kind].baseURL)
+const readiness = (stt: boolean, tts: boolean) => ({
+  stt,
+  tts,
+  ...(stt && tts ? {} : { reason: "Speech-to-text needs an OpenRouter API key. Set it in Settings → Speech." }),
+})
+/** The server default (GET/PUT /api/settings/speech/default; before 0.3.0 the only scope). */
 const speechSettings = () => ({
   stt: { ...speech.stt, apiKey: keyInfo("stt") },
   tts: { ...speech.tts, apiKey: keyInfo("tts") },
   voiceHints,
-  ready: {
-    stt: usable("stt"),
-    tts: usable("tts"),
-    ...(usable("stt") && usable("tts") ? {} : { reason: "Speech-to-text needs an OpenRouter API key. Set it in Settings → Speech." }),
-  },
+  ready: readiness(usable("stt"), usable("tts")),
 })
-const clients = new Set<(message: object) => void>()
-const emit = (message: object) => {
-  for (const send of clients) send(message)
+type Own = { stt: Record<string, unknown>; tts: Record<string, unknown>; keys: { stt?: string; tts?: string } }
+let userSpeech = new Map<string, Own>()
+const ownOf = (id: string) => {
+  if (!userSpeech.has(id)) userSpeech.set(id, { stt: {}, tts: {}, keys: {} })
+  return userSpeech.get(id)!
 }
+const userKey = (key: string) => ({ set: true, last4: key.slice(-4), source: "user" })
+/** GET /api/settings/speech for a user: own field → server default, keys masked, plus scope/default/user. */
+function userSpeechSettings(user: MockUser) {
+  const own = ownOf(user.id)
+  const card = (kind: "stt" | "tts") => {
+    const merged: Record<string, unknown> = { ...speech[kind] }
+    for (const [k, v] of Object.entries(own[kind])) if (v !== undefined) merged[k] = v
+    const key = own.keys[kind]
+    return { ...merged, apiKey: key ? userKey(key) : keyInfo(kind) }
+  }
+  const stt = card("stt")
+  const tts = card("tts")
+  const ok = (c: Record<string, any>) => (c.provider === "openrouter" ? !!c.apiKey.set : !!c.baseURL)
+  const mine = (kind: "stt" | "tts") => ({ ...own[kind], ...(own.keys[kind] ? { apiKey: userKey(own.keys[kind]!) } : {}) })
+  const { voiceHints: _, ready: __, ...def } = speechSettings()
+  return { stt, tts, voiceHints, ready: readiness(ok(stt), ok(tts)), scope: "user", default: def, user: { stt: mine("stt"), tts: mine("tts") } }
+}
+/** Applies a speech PUT body to a scope; returns an error response body or undefined. */
+function applySpeech(body: Record<string, any>, target: { stt: Record<string, unknown>; tts: Record<string, unknown> }, setKey: (kind: "stt" | "tts", key: string | undefined) => void, dropKey: boolean) {
+  for (const kind of ["stt", "tts"] as const) {
+    const patch = body[kind]
+    if (typeof patch?.baseURL === "string" && !/^https?:\/\//.test(patch.baseURL)) return { error: "baseURL must be an http(s) URL", field: `${kind}.baseURL` }
+  }
+  for (const kind of ["stt", "tts"] as const) {
+    const patch = body[kind]
+    if (!patch) continue
+    if ("apiKey" in patch) setKey(kind, patch.apiKey ?? undefined)
+    else if (dropKey && ("provider" in patch || "baseURL" in patch)) setKey(kind, undefined)
+    for (const [k, v] of Object.entries(patch)) {
+      if (k === "apiKey") continue
+      if (v === null || v === undefined) delete target[kind][k]
+      else target[kind][k] = v
+    }
+  }
+  return undefined
+}
+type Client = { send: (message: object) => void; user: MockUser }
+const clients = new Set<Client>()
+/** Sends to every SSE client allowed to see the message (session owner; enrollments to admins only). */
+const emit = (message: object) => {
+  const m = message as { type?: string; sessionID?: string; rootID?: string }
+  for (const c of clients) {
+    if (m.type === "catalog") c.send(catalog(c.user))
+    else if (m.type === "enrollment" && c.user.role !== "admin") continue
+    else if (m.sessionID && !canSee(c.user, m.rootID ?? m.sessionID)) continue
+    else c.send(message)
+  }
+}
+const emitCatalog = () => emit({ type: "catalog" })
 
-const catalog = () => ({
+// ---------- users, ownership, auth (multi-user mock) ----------
+
+type MockUser = { id: string; email?: string; name?: string; role: "admin" | "user"; disabled?: boolean; created: number; lastSeen: number }
+type MockMachine = { id: string; name: string; ownerID: string; online: boolean; created: number; lastSeen: number }
+type MockDevice = { id: string; name: string; ownerID: string; lastSeen: number }
+type Audit = { at: number; actor: string; action: string; target?: string; detail?: string }
+let authMode: "pairing" | "oidc" = "pairing"
+let loginAs = "u_alice"
+const DAY = 86_400_000
+function seedUsers(): MockUser[] {
+  const t = Date.now()
+  return [
+    { id: "local", role: "admin", created: t - 90 * DAY, lastSeen: t - 2 * DAY },
+    { id: "u_alice", email: "alice@example.com", name: "Alice Example", role: "admin", created: t - 30 * DAY, lastSeen: t - 60_000 },
+    { id: "u_bob", email: "bob@example.com", name: "Bob Example", role: "user", created: t - 12 * DAY, lastSeen: t - 3 * 3_600_000 },
+    { id: "u_carol", email: "carol@example.com", role: "user", disabled: true, created: t - 20 * DAY, lastSeen: t - 9 * DAY },
+  ]
+}
+function seedMachines(): MockMachine[] {
+  const t = Date.now()
+  return [
+    { id: "mac_3", name: "bob-laptop", ownerID: "u_bob", online: true, created: t - 10 * DAY, lastSeen: t },
+    { id: "mac_4", name: "carol-desktop", ownerID: "u_carol", online: false, created: t - 19 * DAY, lastSeen: t - 9 * DAY },
+  ]
+}
+function seedDevices(): MockDevice[] {
+  const t = Date.now()
+  return [
+    { id: "dev_alice_pixel", name: "Pixel 9 · Chrome", ownerID: "u_alice", lastSeen: t - 5 * 3_600_000 },
+    { id: "dev_bob_iphone", name: "iPhone · Safari", ownerID: "u_bob", lastSeen: t - 3 * 3_600_000 },
+    { id: "dev_carol", name: "Android · Chrome", ownerID: "u_carol", lastSeen: t - 9 * DAY },
+  ]
+}
+function seedAudit(): Audit[] {
+  const t = Date.now()
+  return [
+    { at: t - 30 * DAY, actor: "system", action: "migrate.local", target: "u_alice" },
+    { at: t - 12 * DAY, actor: "u_bob", action: "signin" },
+    { at: t - 10 * DAY, actor: "u_bob", action: "machine.approve", target: "mac_3" },
+    { at: t - 9 * DAY, actor: "u_alice", action: "user.disable", target: "u_carol" },
+    { at: t - 2 * DAY, actor: "system", action: "signin.denied", detail: "mallory@example.net" },
+    { at: t - 3_600_000, actor: "u_alice", action: "speech.default" },
+  ]
+}
+function seedEnrollments() {
+  const t = Date.now()
+  return [
+    { userCode: "WXYZ-2345", machineName: "build-box", created: t - 2 * 60_000 },
+    { userCode: "KMNP-6789", machineName: "raspberry-pi", created: t - 7 * 60_000 },
+  ]
+}
+let users = seedUsers()
+let extraMachines = seedMachines()
+let devices = seedDevices()
+let audit = seedAudit()
+let enrollments = seedEnrollments()
+/** Owner of the main fixtures (laptop, desktop): the implicit owner in pairing mode, alice in oidc mode. */
+const mainOwner = () => (authMode === "oidc" ? "u_alice" : "local")
+const userByID = (id: string) => users.find((u) => u.id === id)
+const BOB_SESSION = "ses_bob"
+const bobSession = (): Fixture => ({ id: BOB_SESSION, title: "Bob's grocery list app", directory: "/home/bob/projects/groceries", project: "/home/bob/projects/groceries", projectName: "groceries", updated: Date.now() - 6 * 60_000, exposed: true, state: "idle", blockers: [] })
+/** Whether a user may see a (root) session: bob's laptop reports ses_bob, the main machines report everything else. */
+const canSee = (user: MockUser, sessionID: string) => (sessionID === BOB_SESSION ? user.id === "u_bob" : user.id === mainOwner())
+const record = (actor: string, action: string, target?: string, detail?: string) => {
+  audit.push({ at: Date.now(), actor, action, ...(target ? { target } : {}), ...(detail ? { detail } : {}) })
+  if (audit.length > 500) audit.shift()
+}
+const cookieOf = (request: Request, name: string) =>
+  (request.headers.get("cookie") ?? "").split(/;\s*/).find((c) => c.startsWith(`${name}=`))?.slice(name.length + 1)
+/** The signed-in user, or undefined (401). */
+function whoami(request: Request): MockUser | undefined {
+  const id = cookieOf(request, "mock_user")
+  if (id === "out") return undefined
+  const user = userByID(id ?? (authMode === "pairing" ? "local" : ""))
+  if (!user || user.disabled) return undefined
+  if (authMode === "pairing" && user.id !== "local") return undefined
+  if (authMode === "oidc" && user.id === "local") return undefined
+  user.lastSeen = Date.now()
+  return user
+}
+const signedIn = (id: string, location: string) =>
+  new Response(null, { status: 302, headers: { location, "set-cookie": `mock_user=${id}; Path=/; HttpOnly; SameSite=Lax` } })
+const safeNext = (next: string | null) => (next && next.startsWith("/") && !next.startsWith("//") && !next.includes("\\") ? next : "/")
+const page = (title: string, text: string) =>
+  new Response(
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title><link rel="stylesheet" href="/app.css"></head><body><main id="view"><div class="card stack"><h1>${title}</h1><p>${text}</p><p><a class="btn primary" href="/">Back to OpenCode Voice</a></p></div></main></body></html>`,
+    { status: 403, headers: { "content-type": "text/html; charset=utf-8" } },
+  )
+const machinesOf = (user: MockUser) => [
+  ...(user.id === mainOwner() ? [{ id: "mac_1", name: "laptop", online: true, lastSeen: Date.now(), created: Date.now() - 40 * DAY }, { id: "mac_2", name: "desktop", online: false, lastSeen: Date.now() - 3 * 3_600_000, created: Date.now() - DAY }] : []),
+  ...extraMachines.filter((m) => m.ownerID === user.id),
+]
+
+const catalog = (user: MockUser) => ({
   type: "catalog",
   machines: [
+    ...extraMachines
+      .filter((m) => m.ownerID === user.id)
+      .map((m) => ({ ...m, ownerID: undefined, processes: m.id === "mac_3" && m.online ? [{ id: "proc_bob", kind: "service", directory: "/home/bob", pid: 5151, sessions: [catalogSession(bobSession())] }] : [] })),
+    ...(user.id === mainOwner() ? mainMachines() : []),
+  ],
+})
+
+const mainMachines = () => [
     {
       id: "mac_1",
       name: "laptop",
@@ -183,8 +345,7 @@ const catalog = () => ({
       ],
     },
     { id: "mac_2", name: "desktop", created: Date.now() - 86_400_000, lastSeen: Date.now() - 3 * 3_600_000, online: false, processes: [] },
-  ],
-})
+]
 
 /** A WAV tone (~55 ms per character, 0.4–4 s) standing in for TTS audio. */
 function toneWav(text: string): Uint8Array<ArrayBuffer> {
@@ -211,7 +372,7 @@ function toneWav(text: string): Uint8Array<ArrayBuffer> {
   return bytes
 }
 
-function sse(request: Request): Response {
+function sse(request: Request, user: MockUser): Response {
   const encoder = new TextEncoder()
   let cleanup = () => {}
   const stream = new ReadableStream<Uint8Array>({
@@ -223,9 +384,10 @@ function sse(request: Request): Response {
           cleanup()
         }
       }
-      send(catalog())
-      clients.add(send)
-      cleanup = () => clients.delete(send)
+      const client = { send, user }
+      send(catalog(user))
+      clients.add(client)
+      cleanup = () => clients.delete(client)
       request.signal.addEventListener("abort", () => cleanup(), { once: true })
     },
     cancel: () => cleanup(),
@@ -317,6 +479,7 @@ const server = Bun.serve({
     const p = url.pathname
     const m = request.method
     const json = async () => (await request.json().catch(() => ({}))) as Record<string, any>
+    let match0: RegExpExecArray | null
     if (p.startsWith("/api/") && p !== "/api/events") log.push({ at: Date.now(), method: m, path: p, contentType: request.headers.get("content-type") ?? undefined })
     const last = () => log[log.length - 1]!
 
@@ -359,7 +522,7 @@ const server = Bun.serve({
       const s = sessions.find((x) => x.id === body.id)
       if (!s) return Response.json({ error: "no such session" }, { status: 404 })
       Object.assign(s, body)
-      emit(catalog())
+      emitCatalog()
       return Response.json({ ok: true, session: s })
     }
     if (p === "/mock/fail" && m === "POST") {
@@ -368,10 +531,17 @@ const server = Bun.serve({
     }
     if (p === "/mock/service" && m === "POST") {
       serviceConnected = !!(await json()).connected
-      emit(catalog())
+      emitCatalog()
       return Response.json({ connected: serviceConnected })
     }
-    if (p === "/mock/log") return Response.json({ log, transcripts, conversation, pushPrefs, speech, keys })
+    if (p === "/mock/auth" && m === "POST") {
+      const body = await json()
+      if (body.mode === "pairing" || body.mode === "oidc") authMode = body.mode
+      if (typeof body.as === "string" && userByID(body.as)) loginAs = body.as
+      emitCatalog()
+      return Response.json({ mode: authMode, as: loginAs })
+    }
+    if (p === "/mock/log") return Response.json({ log, transcripts, conversation, pushPrefs, speech, keys, users, audit, enrollments, userSpeech: Object.fromEntries(userSpeech) })
     if (p === "/mock/reset" && m === "POST") {
       scenarioRun++
       log = []
@@ -381,13 +551,130 @@ const server = Bun.serve({
       sessions = fixtures()
       fail = { expose: false, create: false, models: false }
       serviceConnected = true
-      emit(catalog())
+      users = seedUsers()
+      extraMachines = seedMachines()
+      devices = seedDevices()
+      audit = seedAudit()
+      enrollments = seedEnrollments()
+      userSpeech = new Map()
+      emitCatalog()
       return Response.json({ ok: true })
     }
 
-    if (p === "/api/me") return Response.json({ device: { id: "dev_1", name: "Chrome" }, publicURL: `http://127.0.0.1:${PORT}`, version: "mock" })
-    if (p === "/api/events") return sse(request)
-    if (p === "/api/enrollments") return Response.json({ enrollments: [] })
+    // ---------- auth (public) ----------
+    if (p === "/api/auth") return Response.json({ mode: authMode, signIn: authMode === "oidc" ? "/auth/login" : null })
+    if (p === "/auth/login") {
+      if (authMode !== "oidc") return page("Sign-in is off", "This voice server uses pairing codes.")
+      const as = url.searchParams.get("as") ?? loginAs
+      const user = userByID(as)
+      if (!user || user.disabled || user.id === "local") return page("Not allowed", "This Google account is not allowed on this voice server. Ask the admin to add it.")
+      record(user.id, "signin")
+      return signedIn(user.id, safeNext(url.searchParams.get("next")))
+    }
+    if (p === "/auth/callback") {
+      const error = url.searchParams.get("error")
+      return page("Sign-in failed", error ? `The sign-in provider answered “${error.replace(/[<>&"]/g, "")}”. Try again.` : "The sign-in link expired. Try again.")
+    }
+    if (p === "/api/pair" && m === "POST") {
+      const body = await json()
+      if (body.code !== "123456") return Response.json({ error: "Invalid or expired pairing code" }, { status: 401 })
+      const id = authMode === "oidc" ? "u_alice" : "local"
+      return Response.json({ device: { id: "dev_paired", name: body.deviceName } }, { headers: { "set-cookie": `mock_user=${id}; Path=/; HttpOnly; SameSite=Lax` } })
+    }
+    const me = p.startsWith("/api/") ? whoami(request) : undefined
+    if (p.startsWith("/api/") && !me) return Response.json({ error: "This device is not paired" }, { status: 401 })
+    const user = me!
+    const admin = user?.role === "admin"
+    const forbidden = () => Response.json({ error: "Admins only" }, { status: 403 })
+    const notFound = () => Response.json({ error: "Not found" }, { status: 404 })
+    if (p === "/api/logout" && m === "POST") {
+      return new Response(null, { status: 204, headers: { "set-cookie": "mock_user=out; Path=/; HttpOnly; SameSite=Lax" } })
+    }
+
+    if (p === "/api/me") {
+      return Response.json({
+        device: { id: user.id === "u_bob" ? "dev_bob_chrome" : "dev_1", name: "Chrome" },
+        user: { id: user.id, ...(user.email ? { email: user.email } : {}), ...(user.name ? { name: user.name } : {}), role: user.role },
+        auth: authMode,
+        publicURL: `http://127.0.0.1:${PORT}`,
+        version: "mock",
+      })
+    }
+    if (p === "/api/events") return sse(request, user)
+    if (p === "/api/enrollments") return admin ? Response.json({ enrollments }) : forbidden()
+    if ((match0 = /^\/api\/enrollments\/([^/]+)\/(approve|deny)$/.exec(p)) && m === "POST") {
+      const code = decodeURIComponent(match0[1]!).toUpperCase()
+      const e = enrollments.find((x) => x.userCode === code)
+      if (!e) return Response.json({ error: "No pending request with this code" }, { status: 404 })
+      enrollments = enrollments.filter((x) => x !== e)
+      const id = `mac_${e.machineName}`
+      if (match0[2] === "approve") extraMachines.push({ id, name: e.machineName, ownerID: user.id, online: true, created: Date.now(), lastSeen: Date.now() })
+      record(user.id, `machine.${match0[2]}`, match0[2] === "approve" ? id : undefined, e.machineName)
+      emit({ type: "enrollment" })
+      emitCatalog()
+      return Response.json({ ok: true })
+    }
+
+    // ---------- admin ----------
+    if (p.startsWith("/api/admin/") && !admin) return forbidden()
+    const ownedMachines = (id: string) => (id === mainOwner() ? 2 : 0) + extraMachines.filter((x) => x.ownerID === id).length
+    const ownedDevices = (id: string) => (id === mainOwner() ? 1 : 0) + devices.filter((x) => x.ownerID === id).length
+    // In oidc mode `local` is kept but disabled (migrated to the first admin).
+    const visibleUsers = () => (authMode === "pairing" ? users.filter((u) => u.id === "local") : users.map((u) => (u.id === "local" ? { ...u, disabled: true } : u)))
+    if (p === "/api/admin/users" && m === "GET") {
+      return Response.json(visibleUsers().map((u) => ({ ...u, disabled: !!u.disabled, machines: ownedMachines(u.id), devices: ownedDevices(u.id) })))
+    }
+    if ((match0 = /^\/api\/admin\/users\/([^/]+)$/.exec(p)) && m === "PUT") {
+      const target = userByID(decodeURIComponent(match0[1]!))
+      if (!target || !visibleUsers().some((u) => u.id === target.id)) return notFound()
+      const body = await json()
+      last().body = body
+      const next = { ...target, ...(body.role === "admin" || body.role === "user" ? { role: body.role } : {}), ...(typeof body.disabled === "boolean" ? { disabled: body.disabled } : {}) }
+      const admins = visibleUsers().map((u) => (u.id === target.id ? next : u)).filter((u) => u.role === "admin" && !u.disabled)
+      if (!admins.length) return Response.json({ error: "Cannot demote or disable the last active admin. Make someone else an admin first." }, { status: 409 })
+      if (next.role !== target.role) record(user.id, "user.role", target.id, next.role)
+      if (!!next.disabled !== !!target.disabled) record(user.id, next.disabled ? "user.disable" : "user.enable", target.id)
+      Object.assign(target, next)
+      return Response.json({ ...target, disabled: !!target.disabled, machines: ownedMachines(target.id), devices: ownedDevices(target.id) })
+    }
+    if (p === "/api/admin/machines" && m === "GET") {
+      const email = (id: string) => userByID(id)?.email ?? id
+      const owner = mainOwner()
+      return Response.json([
+        ...machinesOf(userByID(owner)!).filter((x) => x.id === "mac_1" || x.id === "mac_2").map((x) => ({ ...x, ownerID: owner, ownerEmail: email(owner) })),
+        ...extraMachines.map((x) => ({ ...x, ownerEmail: email(x.ownerID) })),
+      ])
+    }
+    if ((match0 = /^\/api\/admin\/(machines|devices)\/([^/]+)$/.exec(p)) && m === "DELETE") {
+      const id = decodeURIComponent(match0[2]!)
+      if (match0[1] === "machines") {
+        if (!extraMachines.some((x) => x.id === id)) return notFound()
+        extraMachines = extraMachines.filter((x) => x.id !== id)
+        record(user.id, "machine.revoke", id)
+        emitCatalog()
+      } else {
+        if (!devices.some((x) => x.id === id)) return notFound()
+        devices = devices.filter((x) => x.id !== id)
+        record(user.id, "device.revoke", id)
+      }
+      return new Response(null, { status: 204 })
+    }
+    if (p === "/api/admin/audit" && m === "GET") return Response.json([...audit].reverse().slice(0, 200))
+    if ((match0 = /^\/api\/machines\/([^/]+)$/.exec(p)) && m === "DELETE") {
+      const id = decodeURIComponent(match0[1]!)
+      if (!extraMachines.some((x) => x.id === id && x.ownerID === user.id)) return notFound()
+      extraMachines = extraMachines.filter((x) => x.id !== id)
+      record(user.id, "machine.revoke", id)
+      emitCatalog()
+      return new Response(null, { status: 204 })
+    }
+
+    // ---------- sessions: other people's are 404 ----------
+    const sessionRoute = /^\/api\/sessions\/([^/]+)/.exec(p)
+    if (sessionRoute && !canSee(user, decodeURIComponent(sessionRoute[1]!))) return notFound()
+    if (p === `/api/sessions/${BOB_SESSION}` && m === "GET") return Response.json({ ...catalogSession(bobSession()), activity: [] })
+    if (p === `/api/sessions/${BOB_SESSION}/context`) return Response.json({ messages: [{ role: "assistant", text: "Hi Bob, groceries app here." }] })
+    if (p === `/api/sessions/${BOB_SESSION}/presence`) return new Response(null, { status: 204 })
     if (p === `/api/sessions/${SESSION}` && m === "GET") {
       return Response.json({ ...mockSession(), state: status[0]?.state, activity })
     }
@@ -408,21 +695,21 @@ const server = Bun.serve({
       const ws = projectOf(body.directory)
       const id = `ses_new_${++created}`
       sessions.push({ id, title: typeof body.title === "string" && body.title.trim() ? body.title.trim() : "", directory: body.directory, project: ws?.[0], projectName: ws?.[1], updated: Date.now(), exposed: true, state: "idle", blockers: [] })
-      emit(catalog())
+      emitCatalog()
       return Response.json({ sessionID: id }, { status: 201 })
     }
     if ((match = /^\/api\/sessions\/([^/]+)(?:\/([a-z]+))?$/.exec(p)) && decodeURIComponent(match[1]!) !== SESSION) {
       const id = decodeURIComponent(match[1]!)
       const action = match[2]
       const s = sessions.find((x) => x.id === id)
-      if (!s) return Response.json({ error: "Unknown session" }, { status: 404 })
+      if (!s) return notFound()
       if (action === "expose" && m === "POST") {
         const body = await json()
         last().body = body
         await Bun.sleep(400)
         if (fail.expose) return Response.json({ error: "OpenCode did not answer" }, { status: 502 })
         s.exposed = !!body.on
-        emit(catalog())
+        emitCatalog()
         return Response.json({ exposed: s.exposed })
       }
       if (!s.exposed) return Response.json(NOT_EXPOSED, { status: 403 })
@@ -446,20 +733,34 @@ const server = Bun.serve({
       for (const [k, v] of Object.entries(body)) if (k in pushPrefs && typeof v === "boolean") pushPrefs[k] = v
       return Response.json({ prefs: pushPrefs })
     }
-    if (p === "/api/devices") return Response.json({ devices: [{ id: "dev_1", name: "Chrome", lastSeen: Date.now(), current: true }] })
-    if (p === "/api/settings/speech" && m === "GET") return Response.json(speechSettings())
+    if (p === "/api/devices") {
+      const current = { id: user.id === "u_bob" ? "dev_bob_chrome" : "dev_1", name: "Chrome", lastSeen: Date.now(), current: true }
+      return Response.json({ devices: [current, ...devices.filter((d) => d.ownerID === user.id)] })
+    }
+    if ((match0 = /^\/api\/devices\/([^/]+)$/.exec(p)) && m === "DELETE") {
+      const id = decodeURIComponent(match0[1]!)
+      if (!devices.some((d) => d.id === id && d.ownerID === user.id)) return notFound()
+      devices = devices.filter((d) => d.id !== id)
+      record(user.id, "device.revoke", id)
+      return new Response(null, { status: 204 })
+    }
+    if (p === "/api/settings/speech" && m === "GET") return Response.json(userSpeechSettings(user))
     if (p === "/api/settings/speech" && m === "PUT") {
       const body = await json()
       last().body = body
-      for (const kind of ["stt", "tts"] as const) {
-        const patch = body[kind]
-        if (!patch) continue
-        const base = patch.baseURL
-        if (typeof base === "string" && !/^https?:\/\//.test(base)) return Response.json({ error: "baseURL must be an http(s) URL", field: `${kind}.baseURL` }, { status: 400 })
-        if ("apiKey" in patch) keys[kind] = patch.apiKey ?? undefined
-        const target = speech[kind] as Record<string, unknown>
-        for (const [k, v] of Object.entries(patch)) if (k !== "apiKey") target[k] = v ?? undefined
-      }
+      const own = ownOf(user.id)
+      const bad = applySpeech(body, own, (kind, key) => (own.keys[kind] = key), true)
+      if (bad) return Response.json(bad, { status: 400 })
+      return Response.json(userSpeechSettings(user))
+    }
+    if (p === "/api/settings/speech/default" && m === "GET") return admin ? Response.json(speechSettings()) : forbidden()
+    if (p === "/api/settings/speech/default" && m === "PUT") {
+      if (!admin) return forbidden()
+      const body = await json()
+      last().body = body
+      const bad = applySpeech(body, speech as unknown as Own, (kind, key) => (keys[kind] = key), false)
+      if (bad) return Response.json(bad, { status: 400 })
+      record(user.id, "speech.default")
       return Response.json(speechSettings())
     }
     if (p === "/api/settings/speech/models" && m === "GET") {
@@ -509,7 +810,7 @@ const server = Bun.serve({
       await Bun.sleep(150)
       return new Response(toneWav(String(body.text ?? "")), { headers: { "content-type": "audio/wav" } })
     }
-    if (p.startsWith("/api/")) return Response.json({ error: "Not found" }, { status: 404 })
+    if (p.startsWith("/api/")) return notFound()
 
     const file = /^\/(?:|pair|approve|s\/[^/]+)$/.test(p) ? path.join(WEB, "index.html") : path.resolve(WEB, `.${p}`)
     const type = TYPES[path.extname(file)]
