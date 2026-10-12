@@ -1,0 +1,158 @@
+// Session browser on the hub: catalog fields, 403 for sessions without voice, enabling voice
+// (POST /api/sessions/:id/expose) and new sessions (POST /api/machines/:machineID/sessions).
+import { afterEach, describe, expect, test } from "bun:test"
+import { harness, session, spoke, waitFor, type Harness } from "./central-harness"
+
+let h: Harness
+afterEach(async () => {
+  await h?.stop()
+})
+
+type Client = Awaited<ReturnType<typeof spoke>>
+
+/** Answers every server request with `reply(req)`; an Error answers ok:false. */
+function answer(client: Client, reply: (req: any) => unknown) {
+  const seen: any[] = []
+  client.ws.addEventListener("message", (event) => {
+    const frame = JSON.parse(String(event.data))
+    if (frame.t !== "req") return
+    seen.push(frame.req)
+    const result = reply(frame.req)
+    if (result instanceof Error) client.send({ t: "res", id: frame.id, ok: false, error: result.message })
+    else if (result !== undefined) client.send({ t: "res", id: frame.id, ok: true, result })
+  })
+  return seen
+}
+
+const post = (path: string, json?: unknown, init: { origin?: string | null; cookie?: string | null } = {}) =>
+  h.api(path, { method: "POST", json: json ?? {}, ...init })
+
+/** A machine with a service process reporting one exposed and one unexposed session. */
+async function machine(options: { kind?: "service" | "standalone" } = {}) {
+  const { machine, token } = h.store.addMachine("laptop")
+  const client = await spoke(h, {
+    machine: { token },
+    hello: { kind: options.kind ?? "service", mode: "session" },
+    sessions: [
+      session("ses_on", { exposed: true, directory: "/u/voice/web", project: "/u/voice", projectName: "voice" }),
+      session("ses_off", { exposed: false, directory: "/u/webshop", project: "/u/webshop", projectName: "webshop" }),
+    ],
+  })
+  return { machineID: machine.id, client }
+}
+
+describe("catalog", () => {
+  test("sessions carry exposure, workspace, owner process and machine, state and blockers", async () => {
+    h = harness()
+    const { machineID } = await machine()
+    const body = (await (await h.api("/api/machines")).json()) as any
+    const sessions = body.machines[0].processes[0].sessions
+    expect(sessions.find((s: any) => s.id === "ses_on")).toMatchObject({
+      exposed: true,
+      project: "/u/voice",
+      projectName: "voice",
+      processID: "p1",
+      machineID,
+      state: "idle",
+      blockers: [],
+      conversation: false,
+    })
+    expect(sessions.find((s: any) => s.id === "ses_off")).toMatchObject({ exposed: false, state: "idle", status: [] })
+  })
+})
+
+describe("sessions without voice", () => {
+  test("session endpoints answer 403 not_exposed and never reach the spoke", async () => {
+    h = harness()
+    const { client } = await machine()
+    const seen = answer(client, () => ({}))
+    const calls: Array<[string, string, unknown?]> = [
+      ["POST", "turn", { text: "hi" }],
+      ["POST", "utterance", { text: "hi" }],
+      ["POST", "interrupt"],
+      ["POST", "conversation", { on: true }],
+      ["POST", "permission", { requestID: "per_1", decision: "once" }],
+      ["GET", "context"],
+    ]
+    for (const [method, action, json] of calls) {
+      const res = await h.api(`/api/sessions/ses_off/${action}`, { method, ...(json ? { json } : {}) })
+      expect(res.status).toBe(403)
+      expect(await res.json()).toEqual({ error: "Voice is not enabled for this session", code: "not_exposed" })
+    }
+    expect(seen).toEqual([])
+  })
+
+  test("GET /api/sessions/:id returns basic info with exposed:false", async () => {
+    h = harness()
+    await machine()
+    const res = await h.api("/api/sessions/ses_off")
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ id: "ses_off", exposed: false, state: "idle", projectName: "webshop", status: [], activity: [] })
+    expect(await (await h.api("/api/sessions/ses_on")).json()).toMatchObject({ id: "ses_on", exposed: true })
+  })
+})
+
+describe("POST /api/sessions/:id/expose", () => {
+  test("asks a reporting process (service first) and returns its answer", async () => {
+    h = harness()
+    const { client } = await machine()
+    const seen = answer(client, (req) => (req.op === "expose" ? { exposed: req.on } : undefined))
+    const res = await post("/api/sessions/ses_off/expose", { on: true })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ exposed: true })
+    expect(seen).toEqual([{ op: "expose", sessionID: "ses_off", on: true }])
+    // Once the spoke's fresh snapshot arrives, the session's endpoints open up.
+    client.send({ t: "sessions", sessions: [session("ses_off", { exposed: true })] })
+    await waitFor(() => h.registry.exposed("ses_off") === true)
+    answer(client, (req) => (req.op === "context" ? { messages: [] } : undefined))
+    expect((await h.api("/api/sessions/ses_off/context")).status).toBe(200)
+  })
+
+  test("validates the body, unknown sessions, origin and cookie; spoke errors are 502", async () => {
+    h = harness()
+    const { client } = await machine()
+    answer(client, () => new Error("Unknown session"))
+    expect((await post("/api/sessions/ses_off/expose", { on: "yes" })).status).toBe(400)
+    expect((await post("/api/sessions/ses_nope/expose", { on: true })).status).toBe(404)
+    expect((await post("/api/sessions/ses_off/expose", { on: true }, { origin: "https://evil.example" })).status).toBe(403)
+    expect((await post("/api/sessions/ses_off/expose", { on: true }, { cookie: null })).status).toBe(401)
+    const failed = await post("/api/sessions/ses_off/expose", { on: true })
+    expect(failed.status).toBe(502)
+    expect(((await failed.json()) as any).error).toMatch(/unknown session/i)
+  })
+})
+
+describe("POST /api/machines/:machineID/sessions", () => {
+  test("creates a session through the machine's service process in a reported workspace", async () => {
+    h = harness()
+    const { machineID, client } = await machine()
+    const seen = answer(client, (req) => (req.op === "create" ? { sessionID: "ses_new" } : undefined))
+    const res = await post(`/api/machines/${machineID}/sessions`, { directory: "/u/voice", title: "Voice idea" })
+    expect(res.status).toBe(201)
+    expect(await res.json()).toEqual({ sessionID: "ses_new" })
+    expect(seen).toEqual([{ op: "create", directory: "/u/voice", title: "Voice idea" }])
+    // A reported session directory works too; the title is optional.
+    expect((await post(`/api/machines/${machineID}/sessions`, { directory: "/u/voice/web/" })).status).toBe(201)
+    expect(seen[1]).toEqual({ op: "create", directory: "/u/voice/web" })
+  })
+
+  test("refuses unknown workspaces, bad input, unknown machines and machines without a service", async () => {
+    h = harness()
+    const { machineID, client } = await machine()
+    const seen = answer(client, () => ({ sessionID: "ses_new" }))
+    const unknown = await post(`/api/machines/${machineID}/sessions`, { directory: "/etc" })
+    expect(unknown.status).toBe(400)
+    expect(((await unknown.json()) as any).error).toBe("unknown workspace")
+    expect((await post(`/api/machines/${machineID}/sessions`, { directory: "relative/path" })).status).toBe(400)
+    expect((await post(`/api/machines/${machineID}/sessions`, { directory: "/u/voice", title: 7 })).status).toBe(400)
+    expect((await post(`/api/machines/${machineID}/sessions`, { directory: "/u/voice", title: "x".repeat(201) })).status).toBe(400)
+    expect((await post("/api/machines/mch_nope/sessions", { directory: "/u/voice" })).status).toBe(404)
+    expect((await post(`/api/machines/${machineID}/sessions`, { directory: "/u/voice" }, { origin: null })).status).toBe(403)
+    expect(seen).toEqual([])
+
+    const standalone = await machine({ kind: "standalone" })
+    const none = await post(`/api/machines/${standalone.machineID}/sessions`, { directory: "/u/voice" })
+    expect(none.status).toBe(409)
+    expect(((await none.json()) as any).error).toMatch(/background service/i)
+  })
+})

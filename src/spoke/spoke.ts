@@ -1,0 +1,750 @@
+// The spoke: one per OpenCode process. Watches the machine config, tracks this process's sessions,
+// keeps the WebSocket to the central server, forwards exposed events, and executes the server's
+// requests (voice turns, permission replies, context reads) through the plugin context.
+import path from "node:path"
+import { readConfig, setSession, withServer, writeConfig, type Mode, type VoiceConfig, explicitVariant, formatModelRef, parseModelRef, plainModelRef, type ModelRef } from "../config"
+import { isLoopbackURL } from "../loopback"
+import { compactActivity, type PermissionDecision, type ProcessKind, type ResultFor, type ServerRequest, type SpokeRequest, type TurnResult } from "../protocol"
+import { extractReply } from "../reply"
+import { TurnTracker } from "../turns"
+import { SpokeConnection, type Backoff, type ConnectionState } from "./client"
+import { VOICE_AGENT } from "./conversation"
+import { pollEnrollment, startEnrollment } from "./enroll"
+import type { LocalHubResult } from "./localhub"
+import { browserSessions, isExposed, SessionTracker, shouldForward, type EventLike, type SessionDetails } from "./tracker"
+import { watchConfig, type ConfigWatcher } from "./watch"
+
+export type SpokeErrorName = "not_connected" | "not_enrolled" | "invalid" | "unreachable"
+
+export class SpokeError extends Error {
+  constructor(
+    readonly name: SpokeErrorName,
+    message: string,
+  ) {
+    super(message)
+  }
+}
+
+/** The shared background service runs `opencode serve --service ...`; anything else is a standalone process. */
+export function detectKind(argv: readonly string[]): ProcessKind {
+  return argv.includes("--service") ? "service" : "standalone"
+}
+
+export interface HostSession {
+  readonly id: string
+  readonly title?: string
+  readonly parentID?: string
+  readonly location: { readonly directory: string }
+  readonly time: { readonly updated: number }
+  /** The session's selected agent; absent means the default agent. */
+  readonly agent?: string
+  /** The session's selected model; absent means the default model. */
+  readonly model?: ModelRef
+}
+
+/** What the spoke needs from the plugin context (a fake in tests). */
+export interface SpokeHost {
+  readonly directory: string
+  readonly opencodeVersion: string
+  events(signal: AbortSignal): AsyncIterable<EventLike>
+  prompt(input: { sessionID: string; text: string; metadata: Record<string, unknown>; delivery?: "steer" }): Promise<{ id: string }>
+  context(sessionID: string): Promise<ReadonlyArray<unknown>>
+  getSession(sessionID: string): Promise<HostSession>
+  replyPermission(input: { sessionID: string; requestID: string; decision: PermissionDecision }): Promise<unknown>
+  interrupt(sessionID: string): Promise<unknown>
+  switchAgent(sessionID: string, agent: string): Promise<unknown>
+  switchModel(sessionID: string, model: ModelRef): Promise<unknown>
+  hasAgent(id: string): Promise<boolean>
+  /** The agent a session without an explicit selection runs with. */
+  defaultAgent(): Promise<string | undefined>
+  /** Recent root sessions from the local service with their workspace (service processes only). */
+  listRecent?(): Promise<Array<{ id: string } & SessionDetails>>
+  /** Creates a session in a directory (service processes only). */
+  createSession?(input: { directory: string; title?: string }): Promise<{ id: string }>
+}
+
+export interface SpokeOptions {
+  readonly configFile: string
+  readonly machineName: string
+  readonly kind: ProcessKind
+  readonly processID: string
+  readonly pid: number
+  readonly pluginVersion: string
+  readonly turnTimeoutMs?: number
+  readonly snapshotDebounceMs?: number
+  readonly snapshotIntervalMs?: number
+  readonly seedIntervalMs?: number
+  /** Delay before re-listing the service's sessions after a session event (default 2 s). */
+  readonly seedDebounceMs?: number
+  readonly pollMs?: number
+  readonly backoff?: Backoff
+  /**
+   * Starts a local hub for a loopback server nothing answers on (ensureLocalHub). Without it the spoke
+   * never starts one. Used when the connection fails (service process at once, standalone processes
+   * after localHubDelayMs) and when enrolling (at once).
+   */
+  readonly localHub?: (server: string) => Promise<LocalHubResult>
+  /** Grace period before a standalone process tries, so the service process goes first (default 8 s). */
+  readonly localHubDelayMs?: number
+  /** Minimum time between attempts; doubles after each failure up to 15 min (default 30 s). */
+  readonly localHubRetryMs?: number
+}
+
+export type EnrollmentState = "pending" | "approved" | "denied" | "expired" | "error"
+
+export interface SpokeStatus {
+  readonly server: string
+  readonly mode: Mode
+  readonly enrolled: boolean
+  readonly connection: ConnectionState
+  readonly lastError?: string
+  readonly sessionExposed?: boolean
+  /** Conversation mode is on for the session in this process. */
+  readonly conversation?: boolean
+  readonly enrollment?: EnrollmentState
+  readonly machineName: string
+  readonly kind: ProcessKind
+  /** Why the local hub could not be started (auto-start), until the connection succeeds. */
+  readonly localHub?: string
+}
+
+export interface EnrollResult {
+  readonly userCode: string
+  readonly approveURL: string
+  /** The local hub approved this machine without confirmation (first machine). */
+  readonly autoApproved?: boolean
+  /** A local hub was started (or found starting) for this enrollment. */
+  readonly localHub?: "started" | "running" | "busy"
+}
+
+const MODES: readonly Mode[] = ["off", "always", "session"]
+const INFO_RETRY_MS = 60_000
+const CONTEXT_LIMIT = 20
+
+type Message = { id?: string; type?: string; text?: unknown; content?: ReadonlyArray<{ type?: string; text?: unknown }> | null }
+
+function contextMessages(messages: ReadonlyArray<unknown>): ResultFor["context"]["messages"] {
+  const out: Array<{ role: "user" | "assistant"; text: string }> = []
+  for (const raw of messages) {
+    const m = raw as Message
+    if (m?.type === "user" && typeof m.text === "string" && m.text.trim()) out.push({ role: "user", text: m.text.trim() })
+    if (m?.type === "assistant") {
+      const text = (m.content ?? [])
+        .filter((p) => p?.type === "text" && typeof p.text === "string")
+        .map((p) => p.text as string)
+        .join("")
+        .trim()
+      if (text) out.push({ role: "assistant", text })
+    }
+  }
+  return out.slice(-CONTEXT_LIMIT)
+}
+
+const FALLBACK_AGENT = "build"
+const LOCAL_HUB_MAX_RETRY_MS = 15 * 60_000
+const ENROLL_RETRY_MS = 500
+const NOT_SHARED = "This session is not shared with voice"
+/** Events after which the service re-lists its sessions (other processes' sessions appear, change, go). */
+const LISTING_EVENTS = new Set(["session.created", "session.renamed", "session.deleted"])
+
+const errorText = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause))
+
+export class Spoke {
+  private config: VoiceConfig
+  private watcher?: ConfigWatcher
+  private connection?: SpokeConnection
+  private connectionKey = ""
+  private readonly tracker = new SessionTracker()
+  private readonly turns = new TurnTracker()
+  private readonly voiceTurns = new Map<string, number>()
+  private readonly running = new Set<string>()
+  private readonly infoTried = new Map<string, number>()
+  /** Sessions in conversation mode → the agent to restore when it ends (undefined: the default agent). */
+  private readonly conversations = new Map<string, { previous?: string; previousModel?: ModelRef; voiceModel?: ModelRef }>()
+  private conversationChain: Promise<unknown> = Promise.resolve()
+  private readonly abort = new AbortController()
+  private snapshotTimer?: ReturnType<typeof setTimeout>
+  private seedTimer?: ReturnType<typeof setTimeout>
+  private intervals: Array<ReturnType<typeof setInterval>> = []
+  private enrollment?: { state: EnrollmentState; abort: AbortController }
+  private started = false
+  /** Local hub auto-start: one attempt at a time, spaced by a cooldown. */
+  private readonly hub: {
+    pending: boolean
+    timer?: ReturnType<typeof setTimeout>
+    nextAt: number
+    cooldown: number
+    message?: string
+    /** A hub was just started while a connection attempt was in flight: retry as soon as that attempt fails. */
+    retryOnError?: boolean
+  }
+
+  constructor(
+    private readonly host: SpokeHost,
+    private readonly options: SpokeOptions,
+  ) {
+    this.config = readConfig(options.configFile, options.machineName)
+    this.hub = { pending: false, nextAt: 0, cooldown: options.localHubRetryMs ?? 30_000 }
+  }
+
+  start(): void {
+    if (this.started) return
+    this.started = true
+    try {
+      this.watcher = watchConfig(this.options.configFile, this.options.machineName, (c) => this.apply(c), { pollMs: this.options.pollMs })
+      this.config = this.watcher.current()
+    } catch (cause) {
+      console.error("[opencode-voice] config watch failed", cause)
+    }
+    void this.listen()
+    this.apply(this.config)
+    this.every(this.options.snapshotIntervalMs ?? 30_000, () => this.sendSnapshot())
+    if (this.options.kind === "service" && this.host.listRecent) {
+      void this.seed()
+      this.every(this.options.seedIntervalMs ?? 60_000, () => void this.seed())
+    }
+  }
+
+  stop(): void {
+    this.started = false
+    this.abort.abort()
+    this.watcher?.stop()
+    this.enrollment?.abort.abort()
+    clearTimeout(this.hub.timer)
+    this.hub.pending = false
+    for (const interval of this.intervals) clearInterval(interval)
+    this.intervals = []
+    clearTimeout(this.snapshotTimer)
+    clearTimeout(this.seedTimer)
+    this.seedTimer = undefined
+    this.connection?.stop()
+    this.connection = undefined
+    this.connectionKey = ""
+  }
+
+  isVoiceTurn(sessionID: string): boolean {
+    return (this.voiceTurns.get(sessionID) ?? 0) > 0
+  }
+
+  inConversation(sessionID: string): boolean {
+    return this.conversations.has(sessionID)
+  }
+
+  /** The agent the voice orchestrator delegates to (per-machine config). */
+  /** The model subagents should work on for a session in conversation mode, as "provider/model[#variant]". */
+  workModelFor(sessionID: string): string | undefined {
+    const entry = this.conversations.get(sessionID)
+    if (!entry?.voiceModel) return undefined
+    return this.config.workModel ?? (entry.previousModel ? formatModelRef(entry.previousModel) : undefined)
+  }
+
+  subagent(): string {
+    return this.config.subagent
+  }
+
+  /**
+   * Turns conversation mode on or off for a session in this process. On: switch to the "voice"
+   * agent (remembering the previous one) or, without that agent, let the context hook add the
+   * orchestrator prompt. Off: restore the previous agent unless the user picked another meanwhile.
+   * Calls are serialized so a re-sent "on" cannot race an "off".
+   */
+  setConversation(sessionID: string, on: boolean): Promise<ResultFor["conversation"]> {
+    if (!isExposed(this.config, this.tracker, sessionID)) return Promise.reject(new SpokeError("invalid", NOT_SHARED))
+    const run = () => (on ? this.conversationOn(sessionID) : this.conversationOff(sessionID))
+    const result = this.conversationChain.then(run, run)
+    this.conversationChain = result.catch(() => undefined)
+    return result
+  }
+
+  // ---------- RPC-facing API ----------
+
+  status(sessionID?: string): SpokeStatus {
+    const connection = this.connection?.state ?? "off"
+    const lastError = this.connection?.lastError
+    return {
+      server: this.config.server,
+      mode: this.config.mode,
+      enrolled: Boolean(this.config.token),
+      connection,
+      ...(lastError && connection !== "connected" ? { lastError } : {}),
+      ...(sessionID ? { sessionExposed: isExposed(this.config, this.tracker, sessionID), conversation: this.inConversation(sessionID) } : {}),
+      ...(this.enrollment ? { enrollment: this.enrollment.state } : {}),
+      machineName: this.config.machineName,
+      kind: this.options.kind,
+      ...(this.hub.message && connection !== "connected" ? { localHub: this.hub.message } : {}),
+    }
+  }
+
+  setServer(server: string): void {
+    const trimmed = server.trim().replace(/\/+$/, "")
+    if (!/^https?:\/\/[^\s/]+[^\s]*$/.test(trimmed)) throw new SpokeError("invalid", "Server must be an http(s) URL")
+    this.write(withServer(this.current(), trimmed))
+  }
+
+  setMode(mode: Mode): void {
+    if (!MODES.includes(mode)) throw new SpokeError("invalid", `Mode must be one of ${MODES.join(", ")}`)
+    this.write({ ...this.current(), mode })
+  }
+
+  setSession(sessionID: string, on: boolean): void {
+    if (!sessionID.startsWith("ses")) throw new SpokeError("invalid", "Not a session ID")
+    this.write(setSession(this.current(), sessionID, on))
+  }
+
+  /** Starts device enrollment; polling continues in the background and stores the token on approval. */
+  async enroll(): Promise<EnrollResult> {
+    const { server, machineName, autoStartLocalHub } = this.current()
+    this.enrollment?.abort.abort()
+    const abort = new AbortController()
+    const unreachable = (cause: unknown) => new SpokeError("unreachable", `Could not reach ${server}: ${errorText(cause)}`)
+    let start
+    let localHub: EnrollResult["localHub"]
+    try {
+      start = await startEnrollment(server, machineName, { signal: abort.signal })
+    } catch (cause) {
+      // Nothing answers on a local server: start the hub (user-initiated, so any process may), then retry.
+      const starter = this.options.localHub
+      if (!starter || !autoStartLocalHub || !isLoopbackURL(server)) throw unreachable(cause)
+      const result = await starter(server)
+      if (result.status === "failed") throw new SpokeError("unreachable", `Could not start a local voice hub for ${server}: ${result.error}`)
+      if (result.status === "skipped") throw unreachable(cause)
+      localHub = result.status
+      start = await this.retryEnrollment(server, machineName, abort.signal, result.status === "busy" ? 30 : 4).catch((again) => {
+        throw unreachable(again)
+      })
+    }
+    const enrollment = { state: "pending" as EnrollmentState, abort }
+    this.enrollment = enrollment
+    void pollEnrollment(server, start, { signal: abort.signal })
+      .then((outcome) => {
+        if (this.enrollment !== enrollment || outcome.status === "cancelled") return
+        if (outcome.status !== "approved") {
+          enrollment.state = outcome.status
+          return
+        }
+        const latest = this.current()
+        if (latest.server !== server) return
+        this.write({ ...latest, token: outcome.machineToken, machineID: outcome.machineID })
+        enrollment.state = "approved"
+      })
+      .catch((cause) => {
+        enrollment.state = "error"
+        console.error("[opencode-voice] enrollment failed", cause)
+      })
+    return {
+      userCode: start.userCode,
+      approveURL: start.approveURL,
+      ...(start.autoApproved === true ? { autoApproved: true } : {}),
+      ...(localHub ? { localHub } : {}),
+    }
+  }
+
+  private async retryEnrollment(server: string, machineName: string, signal: AbortSignal, attempts: number) {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await startEnrollment(server, machineName, { signal })
+      } catch (cause) {
+        if (attempt >= attempts || signal.aborted) throw cause
+        await new Promise((resolve) => setTimeout(resolve, ENROLL_RETRY_MS))
+      }
+    }
+  }
+
+  pairCode(): Promise<ResultFor["pairCode"]> {
+    return this.ask({ op: "pairCode" })
+  }
+
+  handoff(sessionID: string): Promise<ResultFor["handoff"]> {
+    return this.ask({ op: "handoff", sessionID })
+  }
+
+  /** A one-time sign-in link to the session's page, or to the home page without a session. */
+  openLink(sessionID?: string): Promise<ResultFor["openLink"]> {
+    return this.ask(sessionID ? { op: "openLink", sessionID } : { op: "openLink" })
+  }
+
+  /**
+   * Starts the local hub for the configured loopback server now (the user asked: "Open voice UI"), even
+   * with autoStartLocalHub off, and reconnects at once when it answers.
+   */
+  async startLocalHub(): Promise<{ status: "started" | "running" | "busy" }> {
+    const { server } = this.current()
+    const starter = this.options.localHub
+    if (!isLoopbackURL(server)) throw new SpokeError("invalid", `${server} is not a local voice server`)
+    if (!starter) throw new SpokeError("invalid", "This OpenCode process cannot start a local voice hub")
+    let result: LocalHubResult
+    try {
+      result = await starter(server)
+    } catch (cause) {
+      result = { status: "failed", error: errorText(cause) }
+    }
+    if (result.status === "failed") {
+      this.hub.message = result.error
+      throw new SpokeError("unreachable", `Could not start a local voice hub for ${server}: ${result.error}`)
+    }
+    if (result.status === "skipped") throw new SpokeError("invalid", `Cannot start a local voice hub for ${server}: ${result.reason}`)
+    this.hub.message = undefined
+    const connection = this.connection
+    if (connection && connection.state !== "connected" && (result.status === "started" || result.status === "running")) {
+      this.hub.retryOnError = true // retryNow() is a no-op while an attempt is in flight
+      connection.retryNow()
+    }
+    return { status: result.status }
+  }
+
+  // ---------- internals ----------
+
+  private async ask<R extends SpokeRequest>(req: R): Promise<ResultFor[R["op"]]> {
+    const connection = this.connection
+    if (!connection || connection.state !== "connected") {
+      const hint = !this.config.token
+        ? "This machine is not connected to a voice server yet"
+        : this.config.mode === "off"
+          ? "Voice is off for this machine"
+          : `Not connected to ${this.config.server}`
+      throw new SpokeError("not_connected", hint)
+    }
+    return connection.request(req)
+  }
+
+  private current(): VoiceConfig {
+    return this.watcher?.refresh() ?? readConfig(this.options.configFile, this.options.machineName)
+  }
+
+  private write(config: VoiceConfig): void {
+    writeConfig(this.options.configFile, config)
+    if (this.watcher) this.watcher.refresh()
+    else this.apply(readConfig(this.options.configFile, this.options.machineName))
+  }
+
+  private apply(config: VoiceConfig): void {
+    const previous = this.config
+    this.config = config
+    if (!this.started) return
+    const active = config.mode !== "off" && Boolean(config.token)
+    const key = active ? JSON.stringify([config.server, config.token, config.mode]) : ""
+    if (key !== this.connectionKey) {
+      this.connection?.stop()
+      this.connection = undefined
+      this.connectionKey = key
+      if (active) this.connect(config)
+    }
+    if (previous.sessions.join() !== config.sessions.join()) this.scheduleSnapshot()
+  }
+
+  private connect(config: VoiceConfig): void {
+    const connection = new SpokeConnection({
+      server: config.server,
+      token: config.token!,
+      backoff: this.options.backoff,
+      hello: () => ({
+        processID: this.options.processID,
+        kind: this.options.kind,
+        directory: this.host.directory,
+        pid: this.options.pid,
+        mode: this.config.mode === "session" ? "session" : "always",
+        opencodeVersion: this.host.opencodeVersion,
+        pluginVersion: this.options.pluginVersion,
+      }),
+      handle: (req) => this.handle(req),
+      onWelcome: () => this.sendSnapshot(),
+      onState: (state, error) => {
+        if (state === "revoked") console.error("[opencode-voice] this machine was revoked by the voice server")
+        else if (state === "error" && error) console.error(`[opencode-voice] ${error}; retrying`)
+        if (state === "error" && this.hub.retryOnError) {
+          this.hub.retryOnError = false
+          setTimeout(() => this.connection?.retryNow(), 0)
+        } else if (state === "error") this.maybeStartLocalHub(config.server)
+        if (state === "connected") {
+          this.hub.message = undefined
+          this.hub.retryOnError = false
+          this.hub.cooldown = this.options.localHubRetryMs ?? 30_000
+        }
+      },
+    })
+    this.connection = connection
+    connection.start()
+  }
+
+  /** After a failed connection to a loopback server: maybe start the local hub (see SpokeOptions.localHub). */
+  private maybeStartLocalHub(server: string): void {
+    const starter = this.options.localHub
+    if (!starter || !this.config.autoStartLocalHub || !isLoopbackURL(server)) return
+    if (this.hub.pending || Date.now() < this.hub.nextAt) return
+    this.hub.pending = true
+    const delay = this.options.kind === "service" ? 0 : (this.options.localHubDelayMs ?? 8000)
+    this.hub.timer = setTimeout(() => void this.autoStartHub(server, starter), delay)
+  }
+
+  private async autoStartHub(server: string, starter: (server: string) => Promise<LocalHubResult>): Promise<void> {
+    try {
+      const connection = this.connection
+      if (!this.started || !connection || connection.state === "connected" || this.config.server !== server) return
+      let result: LocalHubResult
+      try {
+        result = await starter(server)
+      } catch (cause) {
+        result = { status: "failed", error: errorText(cause) }
+      }
+      // Whatever happened, the next attempt waits for the cooldown, so a hub that answers but refuses
+      // this machine (or keeps crashing) is not restarted in a loop. The connection stays in its error
+      // state meanwhile (no new state change), so check again once the cooldown is over.
+      const wait = this.hub.cooldown
+      this.hub.nextAt = Date.now() + wait
+      this.hub.timer = setTimeout(() => {
+        if (this.connection && this.connection.state !== "connected") this.maybeStartLocalHub(server)
+      }, wait)
+      ;(this.hub.timer as { unref?: () => void }).unref?.()
+      if (result.status === "failed") {
+        this.hub.message = result.error
+        this.hub.cooldown = Math.min(this.hub.cooldown * 2, LOCAL_HUB_MAX_RETRY_MS)
+        console.error(`[opencode-voice] could not start a local voice hub for ${server}: ${result.error}`)
+        return
+      }
+      this.hub.message = undefined
+      if (result.status === "started") console.log(`[opencode-voice] started a local voice hub for ${server} (pid ${result.pid})`)
+      if (result.status === "started" || result.status === "running") this.connection?.retryNow()
+    } finally {
+      this.hub.pending = false
+    }
+  }
+
+  private async conversationOn(sessionID: string): Promise<ResultFor["conversation"]> {
+    const entry = this.conversations.get(sessionID)
+    const session = await this.host.getSession(sessionID)
+    const current = session.agent
+    const models = await this.voiceModelOn(sessionID, session, entry)
+    if (!(await this.host.hasAgent(VOICE_AGENT))) {
+      this.conversations.set(sessionID, { ...entry, ...models })
+      return { agent: current ?? (await this.defaultAgent()) }
+    }
+    const previous = entry ? entry.previous : current === VOICE_AGENT ? undefined : current
+    this.conversations.set(sessionID, { ...(previous ? { previous } : {}), ...models })
+    if (current !== VOICE_AGENT) await this.host.switchAgent(sessionID, VOICE_AGENT)
+    return { agent: VOICE_AGENT }
+  }
+
+  /** Switches to the configured fast model, remembering the session's model for subagent work and for restoring. */
+  private async voiceModelOn(
+    sessionID: string,
+    session: HostSession,
+    entry: { previousModel?: ModelRef; voiceModel?: ModelRef } | undefined,
+  ): Promise<{ previousModel?: ModelRef; voiceModel?: ModelRef }> {
+    const voiceModel = this.config.voiceModel ? parseModelRef(this.config.voiceModel) : undefined
+    if (!voiceModel) return {}
+    const current = session.model
+    const onVoice = current !== undefined && sameModel(current, voiceModel)
+    const previousModel = entry?.voiceModel ? entry.previousModel : onVoice || !current ? undefined : plainModelRef(current)
+    if (!onVoice) await this.host.switchModel(sessionID, voiceModel)
+    return { voiceModel, ...(previousModel ? { previousModel } : {}) }
+  }
+
+  private async conversationOff(sessionID: string): Promise<ResultFor["conversation"]> {
+    const entry = this.conversations.get(sessionID)
+    this.conversations.delete(sessionID)
+    const session = await this.host.getSession(sessionID)
+    // Restore the model only if the session is still on the voice model (the user may have picked another).
+    if (entry?.voiceModel && entry.previousModel && session.model && sameModel(session.model, entry.voiceModel)) {
+      await this.host.switchModel(sessionID, entry.previousModel)
+    }
+    const current = session.agent
+    if (current !== VOICE_AGENT) return { agent: current ?? (await this.defaultAgent()) }
+    let target = entry?.previous ?? (await this.defaultAgent())
+    if (target === VOICE_AGENT) target = FALLBACK_AGENT
+    await this.host.switchAgent(sessionID, target)
+    return { agent: target }
+  }
+
+  private async defaultAgent(): Promise<string> {
+    try {
+      return (await this.host.defaultAgent()) ?? FALLBACK_AGENT
+    } catch {
+      return FALLBACK_AGENT
+    }
+  }
+
+  private async handle(req: ServerRequest): Promise<unknown> {
+    // Session browser ops are not gated by exposure: they are how a session gets exposed.
+    if (req.op === "expose") return this.expose(req.sessionID, req.on)
+    if (req.op === "create") return this.create(req.directory, req.title)
+    if (!isExposed(this.config, this.tracker, req.sessionID)) throw new Error(NOT_SHARED)
+    switch (req.op) {
+      case "turn":
+        return this.turn(req.sessionID, req.text, req.voiceStyle)
+      case "permission":
+        await this.host.replyPermission({ sessionID: req.sessionID, requestID: req.requestID, decision: req.decision })
+        return {}
+      case "context":
+        return { messages: contextMessages(await this.host.context(req.sessionID)) }
+      case "steer": {
+        const inbox = await this.host.prompt({
+          sessionID: req.sessionID,
+          text: req.text,
+          delivery: "steer",
+          metadata: { source: "opencode-voice", mode: "conversation" },
+        })
+        return { inboxID: inbox.id } satisfies ResultFor["steer"]
+      }
+      case "interrupt":
+        await this.host.interrupt(req.sessionID)
+        return {}
+      case "conversation":
+        return this.setConversation(req.sessionID, req.on)
+    }
+  }
+
+  /** Enables or disables voice for a session this process reported (mode "session" only). */
+  private expose(sessionID: string, on: boolean): ResultFor["expose"] {
+    if (!this.tracker.has(sessionID)) throw new Error("Unknown session")
+    if (this.config.mode === "session") this.setSession(sessionID, on)
+    this.sendSnapshot()
+    return { exposed: isExposed(this.config, this.tracker, sessionID) }
+  }
+
+  /** Creates a session in a workspace or session directory this (service) process reported. */
+  private async create(directory: string, title?: string): Promise<ResultFor["create"]> {
+    if (this.options.kind !== "service" || !this.host.createSession) {
+      throw new Error("Only the background service creates sessions")
+    }
+    const target = path.resolve(directory)
+    const workspace = this.workspaces().get(target)
+    if (!workspace) throw new Error("unknown workspace")
+    const session = await this.host.createSession({ directory: target, ...(title ? { title } : {}) })
+    const now = Date.now()
+    this.tracker.observe({ type: "session.created", data: { sessionID: session.id, title: title ?? "", location: { directory: target } } }, now)
+    this.tracker.setInfo(session.id, { title: title ?? "", directory: target, updated: now, ...workspace })
+    if (this.config.mode === "session") this.setSession(session.id, true)
+    this.sendSnapshot()
+    return { sessionID: session.id }
+  }
+
+  /** Normalized workspace roots and session directories this process knows → their workspace. */
+  private workspaces(): Map<string, { project: string; projectName: string }> {
+    const out = new Map<string, { project: string; projectName: string }>()
+    for (const s of this.tracker.snapshot(Date.now())) {
+      if (!s.directory.startsWith("/")) continue
+      const project = s.project ?? path.resolve(s.directory)
+      const workspace = { project, projectName: s.projectName ?? path.basename(project) }
+      if (!out.has(project)) out.set(project, workspace)
+      out.set(path.resolve(s.directory), workspace)
+    }
+    return out
+  }
+
+  private async turn(sessionID: string, text: string, voiceStyle: boolean): Promise<TurnResult> {
+    if (this.running.has(sessionID)) throw new Error("A voice turn is already running for this session")
+    this.running.add(sessionID)
+    if (voiceStyle) this.voiceTurns.set(sessionID, (this.voiceTurns.get(sessionID) ?? 0) + 1)
+    try {
+      const inbox = await this.host.prompt({ sessionID, text, metadata: { source: "opencode-voice" } })
+      const result = await this.turns.wait(inbox.id, { timeoutMs: this.options.turnTimeoutMs ?? 10 * 60_000 })
+      let reply = ""
+      try {
+        reply = extractReply((await this.host.context(sessionID)) as Parameters<typeof extractReply>[0], inbox.id)
+      } catch {
+        // reply stays empty; the outcome still matters
+      }
+      if (result.outcome === "succeeded" || result.outcome === "timeout") return { outcome: result.outcome, reply }
+      return { outcome: result.outcome, message: result.message, reply }
+    } finally {
+      this.running.delete(sessionID)
+      if (voiceStyle) {
+        const left = (this.voiceTurns.get(sessionID) ?? 1) - 1
+        if (left > 0) this.voiceTurns.set(sessionID, left)
+        else this.voiceTurns.delete(sessionID)
+      }
+    }
+  }
+
+  private async listen(): Promise<void> {
+    while (!this.abort.signal.aborted) {
+      try {
+        for await (const event of this.host.events(this.abort.signal)) this.observe(event)
+      } catch (cause) {
+        if (this.abort.signal.aborted) return
+        console.error("[opencode-voice] event stream failed, retrying", cause)
+      }
+      if (this.abort.signal.aborted) return
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+    }
+  }
+
+  private observe(event: EventLike): void {
+    try {
+      this.turns.observe(event)
+      if (this.tracker.observe(event, Date.now())) this.scheduleSnapshot()
+      if (this.options.kind === "service" && this.host.listRecent && LISTING_EVENTS.has(event.type) && !(event.data as any)?.parentID) {
+        this.scheduleSeed()
+      }
+      void this.fetchInfo()
+      if (this.connection?.state === "connected" && shouldForward(this.config, this.tracker, event)) {
+        // Activity events go out compact: tool inputs become a short summary, outputs are dropped.
+        const compact = compactActivity({ type: event.type, data: (event.data ?? {}) as Record<string, unknown> })
+        if (compact) this.connection.send({ t: "event", event: compact })
+      }
+    } catch (cause) {
+      console.error("[opencode-voice] event handling failed", cause)
+    }
+  }
+
+  private async fetchInfo(): Promise<void> {
+    const now = Date.now()
+    for (const id of this.tracker.needsInfo()) {
+      const tried = this.infoTried.get(id)
+      if (tried !== undefined && now - tried < INFO_RETRY_MS) continue
+      this.infoTried.set(id, now)
+      try {
+        const session = await this.host.getSession(id)
+        this.tracker.setInfo(id, {
+          title: session.title ?? "",
+          directory: session.location?.directory ?? "",
+          ...(session.parentID ? { parentID: session.parentID } : {}),
+          updated: session.time?.updated ?? now,
+        })
+        this.infoTried.delete(id)
+        this.scheduleSnapshot()
+      } catch {
+        // retried after INFO_RETRY_MS
+      }
+    }
+  }
+
+  private async seed(): Promise<void> {
+    try {
+      const sessions = (await this.host.listRecent?.()) ?? []
+      if (this.tracker.applyListing(sessions, Date.now())) this.scheduleSnapshot()
+    } catch (cause) {
+      console.error("[opencode-voice] could not list recent sessions", errorText(cause))
+    }
+  }
+
+  private scheduleSeed(): void {
+    if (this.seedTimer || !this.started) return
+    this.seedTimer = setTimeout(() => {
+      this.seedTimer = undefined
+      void this.seed()
+    }, this.options.seedDebounceMs ?? 2000)
+  }
+
+  private scheduleSnapshot(): void {
+    if (this.snapshotTimer) return
+    this.snapshotTimer = setTimeout(() => {
+      this.snapshotTimer = undefined
+      this.sendSnapshot()
+    }, this.options.snapshotDebounceMs ?? 500)
+  }
+
+  private sendSnapshot(): void {
+    this.connection?.send({ t: "sessions", sessions: browserSessions(this.config, this.tracker, Date.now()) })
+  }
+
+  private every(ms: number, run: () => void): void {
+    const interval = setInterval(run, ms)
+    ;(interval as { unref?: () => void }).unref?.()
+    this.intervals.push(interval)
+  }
+}
+
+function sameModel(a: ModelRef, b: ModelRef): boolean {
+  return a.providerID === b.providerID && a.id === b.id && (explicitVariant(a) ?? "") === (explicitVariant(b) ?? "")
+}

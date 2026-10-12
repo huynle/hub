@@ -1,0 +1,8 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  // Loads the plugin only for sessions in this folder. Run `opencode --standalone` here
+  // so the shared background service never loads it.
+  "plugins": [{ "package": "../..", "options": {} }],
+  // Voice turns can run tools; make shell commands ask so they show up on the voice page.
+  "permissions": [{ "action": "shell", "resource": "*", "effect": "ask" }],
+}

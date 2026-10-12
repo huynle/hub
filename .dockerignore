@@ -1,0 +1,12 @@
+node_modules
+.worktrees
+.git
+test-project
+test
+scripts
+*.log
+.DS_Store
+Dockerfile
+.dockerignore
+dist
+.build

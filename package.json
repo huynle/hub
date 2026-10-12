@@ -1,0 +1,73 @@
+{
+  "name": "@huynle/opencode-voice",
+  "version": "0.2.0",
+  "description": "Talk to your OpenCode sessions by voice from your phone or browser: hands-free conversation mode, a voice agent that delegates to subagents, live activity, and a self-hostable hub.",
+  "license": "MIT",
+  "author": "Huy Le",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/huynle/opencode-voice.git"
+  },
+  "homepage": "https://github.com/huynle/opencode-voice#readme",
+  "bugs": {
+    "url": "https://github.com/huynle/opencode-voice/issues"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "voice",
+    "speech",
+    "tts",
+    "stt",
+    "pwa",
+    "agent"
+  ],
+  "type": "module",
+  "main": "./server.ts",
+  "exports": {
+    ".": "./server.ts",
+    "./server": "./server.ts",
+    "./tui": "./tui.ts",
+    "./rpc": "./rpc.ts",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "opencode-voice-hub": "bin/hub.ts"
+  },
+  "files": [
+    "server.ts",
+    "tui.ts",
+    "rpc.ts",
+    "src",
+    "bin",
+    "web",
+    "docker",
+    "Dockerfile",
+    "scripts/hub-local.sh",
+    "scripts/com.opencode-voice.hub.plist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "bun": ">=1.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "hub": "bun bin/hub.ts"
+  },
+  "dependencies": {
+    "@opencode/client": "^2.0.26",
+    "@opencode/plugin": "^2.0.26",
+    "web-push": "^3.6.7"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "@types/web-push": "^3.6.4",
+    "typescript": "^5.9.3"
+  }
+}

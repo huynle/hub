@@ -1,0 +1,149 @@
+name: Release
+# Push a tag vX.Y.Z (matching package.json) to publish: standalone hub binaries + SHA256SUMS on the
+# GitHub Release, the hub image on GHCR (linux/amd64 + linux/arm64), and the npm package when the
+# NPM_TOKEN secret is set.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Tag matches package.json
+        run: |
+          version="v$(node -p "require('./package.json').version")"
+          if [ "$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json ($version)"
+            exit 1
+          fi
+      - run: npm ci --no-audit --no-fund
+      - run: npx tsc --noEmit
+      - run: bun test
+
+  binaries:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [darwin-arm64, darwin-x64, linux-x64, linux-arm64, windows-x64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci --no-audit --no-fund
+      # Cross-compiles from Linux: bun fetches the runtime for each --target.
+      - run: scripts/build-binaries.sh ${{ matrix.target }}
+      - name: Smoke test
+        if: matrix.target == 'linux-x64'
+        run: ./dist/opencode-voice-hub-linux-x64 --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hub-${{ matrix.target }}
+          path: dist/opencode-voice-hub-*
+          if-no-files-found: error
+
+  release:
+    needs: binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hub-*
+          path: dist
+          merge-multiple: true
+      - name: SHA256SUMS
+        working-directory: dist
+        run: |
+          chmod +x opencode-voice-hub-*
+          sha256sum opencode-voice-hub-* > SHA256SUMS
+          cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/opencode-voice-hub-*
+            dist/SHA256SUMS
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/opencode-voice-hub
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+          labels: |
+            org.opencontainers.image.title=opencode-voice-hub
+            org.opencontainers.image.description=Voice server for opencode-voice: web app, pairing, speech and push for OpenCode sessions
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  npm:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - name: Skip without NPM_TOKEN
+        if: env.NPM_TOKEN == ''
+        run: echo "NPM_TOKEN is not set; skipping npm publish."
+      - uses: actions/checkout@v4
+        if: env.NPM_TOKEN != ''
+      - uses: actions/setup-node@v4
+        if: env.NPM_TOKEN != ''
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - if: env.NPM_TOKEN != ''
+        run: npm publish --provenance --access public ${{ contains(github.ref_name, '-') && '--tag next' || '' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

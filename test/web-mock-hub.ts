@@ -1,0 +1,521 @@
+#!/usr/bin/env bun
+// Mock hub for manual/browser checks of the PWA's conversation mode (not a test file): serves web/ and fakes
+// the hub API + SSE per the conversation contract. Usage: `bun test/web-mock-hub.ts [port]` (default 4311).
+// Control: POST /mock/transcripts {texts: string[]} (queued /api/transcribe answers), POST /mock/emit {…SSE message},
+// POST /mock/status {sessions} (status tree of ses_mock, root first; emitted as SSE status),
+// POST /mock/activity {sessionID?, item} (stored for GET /api/sessions/ses_mock and emitted as SSE activity),
+// GET /mock/log (recorded API calls), POST /mock/reset.
+// Also fakes presence, push prefs (incl. `say`), devices and the speech settings API (keys masked as last4).
+// Session browser (VF6): ~40 sessions on "laptop" (6 workspaces incl. worktrees, blocked/working/unexposed ones,
+// a standalone process) plus an offline machine. Sessions carry exposed/project/projectName/now/state/blockers;
+// POST /api/sessions/:id/expose {on}; 403 {code:"not_exposed"} from session endpoints of unexposed sessions;
+// POST /api/machines/:id/sessions {directory, title?} → 201 {sessionID}. Control: POST /mock/session {id, ...patch}
+// (patch a session and emit a catalog), POST /mock/fail {expose?, create?, models?} (make those calls fail),
+// POST /mock/service {connected} (409 for create while false).
+// Streaming: POST /mock/stream {sessionID?, kind: "text"|"reasoning", messageID, text, every?, size?} emits the text in
+// chunks as SSE delta/reasoning (with rootID ses_mock); POST /mock/scenario {say?} plays a scripted run of ses_mock: root
+// reasoning, a shell tool, two subagents (ses_mock_kid, ses_mock_kid2) streaming their output, root reply text (and say
+// events when conversation mode is on), then idle. Status entries of working sessions carry `since`.
+import { existsSync, readFileSync, statSync } from "node:fs"
+import path from "node:path"
+
+const WEB = path.join(import.meta.dir, "..", "web")
+const PORT = Number(process.argv[2] ?? 4311)
+const SESSION = "ses_mock"
+const TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".webmanifest": "application/manifest+json",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+}
+
+type Log = { at: number; method: string; path: string; contentType?: string; bytes?: number; body?: unknown }
+let log: Log[] = []
+let transcripts: string[] = []
+let conversation = false
+let inbox = 0
+type Status = { id: string; title: string; state: string; blockers: unknown[]; parentID?: string; since?: number }
+let status: Status[] = [{ id: SESSION, title: "Mock session", state: "idle", blockers: [] }]
+let activity: Array<Record<string, unknown>> = []
+type Fixture = {
+  id: string
+  title: string
+  directory: string
+  project?: string
+  projectName?: string
+  updated: number
+  exposed: boolean
+  conversation?: boolean
+  state: string
+  blockers: Array<Record<string, unknown>>
+  now?: { kind: string; tool?: string; summary?: string }
+}
+const HOME = "/home/user/projects"
+const WORKSPACES: Array<[string, string]> = [
+  [`${HOME}/opencode-voice`, "opencode-voice"],
+  [`${HOME}/webshop`, "webshop"],
+  ["/home/user/dotfiles", "dotfiles"],
+  [`${HOME}/infra`, "infra"],
+  [`${HOME}/pcb-designs`, "pcb-designs"],
+  [`${HOME}/cafe-blog`, "café-blog"],
+]
+const projectOf = (dir: string) => WORKSPACES.find(([root]) => dir === root || dir.startsWith(`${root}/`))
+function fixtures(): Fixture[] {
+  const t = Date.now()
+  const out: Fixture[] = []
+  const add = (dir: string, title: string, minutes: number, extra: Partial<Fixture> = {}) => {
+    const ws = projectOf(dir)
+    out.push({ id: `ses_${String(out.length + 1).padStart(2, "0")}`, title, directory: dir, project: ws?.[0], projectName: ws?.[1], updated: t - minutes * 60_000, exposed: true, state: "idle", blockers: [], ...extra })
+  }
+  const ov = `${HOME}/opencode-voice`
+  add(ov, "Session browser on the phone", 3, { state: "blocked", blockers: [{ id: "per_1", kind: "permission", summary: "shell: rm -rf web/dist" }] })
+  add(ov, "Hub SSE reconnect", 40)
+  add(ov, "README local-only section", 60 * 20)
+  add(ov, "", 60 * 30)
+  add(`${ov}/.worktrees/feat-voice-feedback`, "Voice speed slider", 1, { state: "working", conversation: true, now: { kind: "tool", tool: "shell", summary: "bun test" } })
+  add(`${ov}/.worktrees/feat-voice-feedback`, "Progress cues", 90)
+  add(`${ov}/.worktrees/feat-voice-feedback`, "Screen-off listening", 60 * 26)
+  add(`${ov}/.worktrees/fix-sse`, "Fix SSE keepalive", 15, { state: "working", now: { kind: "thinking" } })
+  add(`${ov}/.worktrees/fix-sse`, "SSE backoff", 60 * 50)
+  add(`${ov}/web`, "PWA icons", 60 * 72, { exposed: false })
+  const shop = `${HOME}/webshop`
+  for (const [i, title] of ["Checkout migration", "Search ranking", "Cart bug", "Image resizing", "Orders API", "CLI polish"].entries()) {
+    add(shop, title, 7 + i * 95, i === 1 ? { state: "working", now: { kind: "tool", tool: "edit", summary: "internal/search/rank.go" } } : i >= 4 ? { exposed: false } : {})
+  }
+  add(`${shop}/.worktrees/feat-x`, "Feature X spike", 25)
+  add(`${shop}/.worktrees/feat-x`, "Feature X tests", 200, { exposed: false })
+  for (const [i, title] of ["editor config", "shell setup", "tmux keybinds", "zsh prompt", "opencode agents", "git aliases"].entries()) {
+    add("/home/user/dotfiles", title, 60 * (2 + i * 9), i > 1 ? { exposed: false } : {})
+  }
+  const infra = `${HOME}/infra`
+  add(infra, "Reverse proxy route for dashboard", 12, { state: "blocked", blockers: [{ id: "q_1", kind: "question", summary: "Which subdomain should the dashboard use?" }] })
+  add(infra, "Nightly backup job", 60 * 5)
+  add(infra, "DNS server upgrade", 60 * 30, { exposed: false })
+  add(`${infra}/ansible`, "Inventory cleanup", 60 * 8)
+  add(infra, "Snapshot audit", 60 * 100)
+  const pcb = `${HOME}/pcb-designs`
+  add(pcb, "Café röuter board", 33)
+  add(pcb, "Stitching vias", 60 * 7, { state: "working", now: { kind: "tool", tool: "shell", summary: "make drc" } })
+  add(pcb, "Gerber export", 60 * 48)
+  add(`${pcb}/motor-driver`, "Motor driver layout", 60 * 9, { exposed: false })
+  const site = `${HOME}/cafe-blog`
+  add(site, "Résumé page", 60 * 3)
+  add(site, "Dark mode", 60 * 36)
+  add(site, "Static deploy", 60 * 80)
+  for (let i = 0; i < 6; i++) add(`${ov}/test-project`, `Test project run ${i + 1}`, 60 * (100 + i * 12), { exposed: i % 2 === 0 })
+  return out
+}
+let sessions = fixtures()
+let created = 0
+let fail = { expose: false, create: false, models: false }
+let serviceConnected = true
+const NOT_EXPOSED = { error: "Voice is not enabled for this session. Enable it from the session list.", code: "not_exposed" }
+const fixtureStatus = (s: Fixture) => [{ id: s.id, title: s.title, state: s.state, blockers: s.blockers }]
+const catalogSession = (s: Fixture) => ({ ...s, owned: false, busy: false, conversation: !!s.conversation, status: fixtureStatus(s) })
+const mockSession = () => ({
+  id: SESSION,
+  title: "Mock session",
+  directory: `${HOME}/opencode-voice`,
+  project: `${HOME}/opencode-voice`,
+  projectName: "opencode-voice",
+  updated: Date.now(),
+  owned: true,
+  busy: false,
+  exposed: true,
+  conversation,
+  state: status[0]?.state ?? "idle",
+  blockers: status[0]?.blockers ?? [],
+  status,
+})
+let pushPrefs: Record<string, boolean> = { handoff: true, blocked: true, finished: false, say: false }
+const keys: Record<string, string | undefined> = { stt: "sk-or-v1-mock-stt-1234", tts: undefined }
+let speech = {
+  stt: { provider: "openrouter", model: "openai/whisper-1", language: "en" as string | undefined, baseURL: undefined as string | undefined },
+  tts: { provider: "openai-compatible", model: "tts-1", voice: "alloy", baseURL: "http://kokoro:8880/v1" as string | undefined, speed: undefined as number | undefined },
+}
+const voiceHints = { "tts-": ["alloy", "echo", "fable", "onyx", "nova", "shimmer"], "gpt-4o-mini-tts": ["alloy", "coral", "sage"], kokoro: ["af_bella", "am_adam"] }
+const keyInfo = (kind: "stt" | "tts") => {
+  const key = keys[kind]
+  if (key) return { set: true, last4: key.slice(-4), source: "settings" }
+  return kind === "tts" ? { set: true, last4: "9z9z", source: "env" } : { set: false, source: "none" }
+}
+const usable = (kind: "stt" | "tts") => (speech[kind].provider === "openrouter" ? keyInfo(kind).set : !!speech[kind].baseURL)
+const speechSettings = () => ({
+  stt: { ...speech.stt, apiKey: keyInfo("stt") },
+  tts: { ...speech.tts, apiKey: keyInfo("tts") },
+  voiceHints,
+  ready: {
+    stt: usable("stt"),
+    tts: usable("tts"),
+    ...(usable("stt") && usable("tts") ? {} : { reason: "Speech-to-text needs an OpenRouter API key. Set it in Settings → Speech." }),
+  },
+})
+const clients = new Set<(message: object) => void>()
+const emit = (message: object) => {
+  for (const send of clients) send(message)
+}
+
+const catalog = () => ({
+  type: "catalog",
+  machines: [
+    {
+      id: "mac_1",
+      name: "laptop",
+      created: Date.now(),
+      lastSeen: Date.now(),
+      online: true,
+      processes: [
+        ...(serviceConnected
+          ? [{ id: "proc_1", kind: "service", directory: "/home/user", pid: 4242, sessions: [mockSession(), ...sessions.map(catalogSession)] }]
+          : []),
+        {
+          id: "proc_2",
+          kind: "standalone",
+          directory: "/tmp/scratch",
+          pid: 777,
+          sessions: [
+            catalogSession({ id: "ses_scratch", title: "Scratch experiment", directory: "/tmp/scratch", updated: Date.now() - 4 * 60_000, exposed: true, state: "idle", blockers: [] }),
+            ...sessions.filter((s) => s.id === "ses_05").map(catalogSession),
+          ],
+        },
+      ],
+    },
+    { id: "mac_2", name: "desktop", created: Date.now() - 86_400_000, lastSeen: Date.now() - 3 * 3_600_000, online: false, processes: [] },
+  ],
+})
+
+/** A WAV tone (~55 ms per character, 0.4–4 s) standing in for TTS audio. */
+function toneWav(text: string): Uint8Array<ArrayBuffer> {
+  const rate = 16_000
+  const seconds = Math.min(4, Math.max(0.4, text.length * 0.055))
+  const n = Math.round(rate * seconds)
+  const bytes = new Uint8Array(44 + n * 2)
+  const view = new DataView(bytes.buffer)
+  const ascii = (at: number, s: string) => [...s].forEach((c, i) => (bytes[at + i] = c.charCodeAt(0)))
+  ascii(0, "RIFF")
+  view.setUint32(4, bytes.length - 8, true)
+  ascii(8, "WAVE")
+  ascii(12, "fmt ")
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, 1, true)
+  view.setUint32(24, rate, true)
+  view.setUint32(28, rate * 2, true)
+  view.setUint16(32, 2, true)
+  view.setUint16(34, 16, true)
+  ascii(36, "data")
+  view.setUint32(40, n * 2, true)
+  for (let i = 0; i < n; i++) view.setInt16(44 + i * 2, Math.round(Math.sin((2 * Math.PI * 330 * i) / rate) * 3000), true)
+  return bytes
+}
+
+function sse(request: Request): Response {
+  const encoder = new TextEncoder()
+  let cleanup = () => {}
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const send = (message: object) => {
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(message)}\n\n`))
+        } catch {
+          cleanup()
+        }
+      }
+      send(catalog())
+      clients.add(send)
+      cleanup = () => clients.delete(send)
+      request.signal.addEventListener("abort", () => cleanup(), { once: true })
+    },
+    cancel: () => cleanup(),
+  })
+  return new Response(stream, { headers: { "content-type": "text/event-stream", "cache-control": "no-cache" } })
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/** Emits text in small chunks as SSE delta (text) or reasoning messages, like the hub after coalescing. */
+async function streamText(kind: "text" | "reasoning", sessionID: string, messageID: string, text: string, every = 100, size = 7, alive = () => true) {
+  for (let i = 0; i < text.length && alive(); i += size) {
+    const chunk = text.slice(i, i + size)
+    emit(kind === "text" ? { type: "delta", sessionID, rootID: SESSION, messageID, text: chunk } : { type: "reasoning", sessionID, rootID: SESSION, messageID, delta: chunk })
+    await sleep(every)
+  }
+}
+
+function setStatus(next: Status[]) {
+  status = next
+  emit({ type: "status", sessionID: SESSION, sessions: status })
+}
+
+function addActivity(sessionID: string, item: Record<string, unknown>) {
+  const full: Record<string, unknown> = { ...item, sessionID, at: Date.now() }
+  const i = activity.findIndex((x) => x.id === full.id)
+  if (i >= 0) activity[i] = full
+  else activity.push(full)
+  if (activity.length > 30) activity.shift()
+  emit({ type: "activity", sessionID, rootID: SESSION, item: full })
+}
+
+let scenarioRun = 0
+/** A scripted run of ses_mock: root reasoning → tool → two subagents streaming → reply text (+ say) → idle. */
+async function scenario() {
+  const run = ++scenarioRun
+  const alive = () => run === scenarioRun
+  const t0 = Date.now()
+  const root = (state: string): Status => ({ id: SESSION, title: "Mock session", state, blockers: [], ...(state === "working" ? { since: t0 } : {}) })
+  const kid = (id: string, title: string, state: string, since: number): Status => ({ id, parentID: SESSION, title, state, blockers: [], ...(state === "working" ? { since } : {}) })
+  setStatus([root("working")])
+  await sleep(600)
+  await streamText("reasoning", SESSION, "msg_r1", "The user wants the failing tests fixed.\nFirst I should look at the test output to see what broke.\nThe picker tests and the pulse tests are new, so check those.\nThen hand the fix to a subagent so we can keep talking.\nLet me run the suite first.", 90, 9, alive)
+  if (!alive()) return
+  addActivity(SESSION, { id: "thinking:msg_r1", kind: "thinking", state: "done" })
+  addActivity(SESSION, { id: "tool_bash", kind: "tool", tool: "bash", summary: "bun test", state: "running" })
+  await sleep(2500)
+  if (!alive()) return
+  addActivity(SESSION, { id: "tool_bash", kind: "tool", tool: "bash", summary: "bun test", state: "done" })
+  addActivity(SESSION, { id: "tool_task", kind: "tool", tool: "task", summary: "Fix failing tests", background: true, state: "running" })
+  const k1 = Date.now()
+  setStatus([root("working"), kid("ses_mock_kid", "Fix failing tests", "working", k1)])
+  const kidWork = (async () => {
+    await streamText("reasoning", "ses_mock_kid", "msg_k1", "Two failures in web-picker.test.ts.\nThe ranking puts prefix matches after the rest.", 90, 8, alive)
+    addActivity("ses_mock_kid", { id: "tool_k_read", kind: "tool", tool: "read", summary: "web/picker-core.js", state: "running" })
+    await sleep(700)
+    addActivity("ses_mock_kid", { id: "tool_k_read", kind: "tool", tool: "read", summary: "web/picker-core.js", state: "done" })
+    await streamText("text", "ses_mock_kid", "msg_k2", "Reading the failing assertions.\nFixing rank order in filterPicker.\nRe-running bun test test/web-picker.test.ts\n8 pass, 0 fail.", 110, 6, alive)
+  })()
+  await sleep(1200)
+  if (!alive()) return
+  const k2 = Date.now()
+  setStatus([root("working"), kid("ses_mock_kid", "Fix failing tests", "working", k1), kid("ses_mock_kid2", "Update README", "working", k2)])
+  const kid2Work = streamText("text", "ses_mock_kid2", "msg_k3", "Adding the picker to the Speech settings section.\nDocumenting reasoning SSE.", 140, 6, alive)
+  const reply1 = "I started two subagents: one fixes the failing tests, the other updates the README. I'll tell you when they're done."
+  await streamText("text", SESSION, "msg_t1", reply1, 80, 8, alive)
+  if (conversation) emit({ type: "say", sessionID: SESSION, messageID: "msg_t1", ordinal: 0, text: reply1 })
+  await kid2Work
+  if (!alive()) return
+  setStatus([root("working"), kid("ses_mock_kid", "Fix failing tests", "working", k1), kid("ses_mock_kid2", "Update README", "idle", k2)])
+  await kidWork
+  if (!alive()) return
+  setStatus([root("working"), kid("ses_mock_kid", "Fix failing tests", "idle", k1), kid("ses_mock_kid2", "Update README", "idle", k2)])
+  addActivity(SESSION, { id: "tool_task", kind: "tool", tool: "task", summary: "Fix failing tests", background: true, state: "done" })
+  const reply2 = "All done: the tests pass and the README is updated."
+  await streamText("text", SESSION, "msg_t2", reply2, 80, 8, alive)
+  if (conversation) emit({ type: "say", sessionID: SESSION, messageID: "msg_t2", ordinal: 0, text: reply2 })
+  await sleep(300)
+  if (!alive()) return
+  setStatus([root("idle"), kid("ses_mock_kid", "Fix failing tests", "idle", k1), kid("ses_mock_kid2", "Update README", "idle", k2)])
+}
+
+const server = Bun.serve({
+  port: PORT,
+  hostname: "127.0.0.1",
+  idleTimeout: 0,
+  async fetch(request) {
+    const url = new URL(request.url)
+    const p = url.pathname
+    const m = request.method
+    const json = async () => (await request.json().catch(() => ({}))) as Record<string, any>
+    if (p.startsWith("/api/") && p !== "/api/events") log.push({ at: Date.now(), method: m, path: p, contentType: request.headers.get("content-type") ?? undefined })
+    const last = () => log[log.length - 1]!
+
+    if (p === "/mock/transcripts" && m === "POST") {
+      transcripts.push(...((await json()).texts ?? []))
+      return Response.json({ queued: transcripts.length })
+    }
+    if (p === "/mock/emit" && m === "POST") {
+      emit(await json())
+      return Response.json({ ok: true, clients: clients.size })
+    }
+    if (p === "/mock/status" && m === "POST") {
+      status = (await json()).sessions
+      emit({ type: "status", sessionID: SESSION, sessions: status })
+      return Response.json({ ok: true, clients: clients.size })
+    }
+    if (p === "/mock/stream" && m === "POST") {
+      const body = await json()
+      const kind = body.kind === "reasoning" ? "reasoning" : "text"
+      void streamText(kind, body.sessionID ?? SESSION, body.messageID ?? "msg_stream", String(body.text ?? ""), body.every ?? 100, body.size ?? 7)
+      return Response.json({ ok: true, clients: clients.size })
+    }
+    if (p === "/mock/scenario" && m === "POST") {
+      void scenario()
+      return Response.json({ ok: true, clients: clients.size })
+    }
+    if (p === "/mock/activity" && m === "POST") {
+      const body = await json()
+      const sessionID = body.sessionID ?? SESSION
+      const item = { ...body.item, sessionID, at: body.item?.at ?? Date.now() }
+      const i = activity.findIndex((x) => x.id === item.id)
+      if (i >= 0) activity[i] = item
+      else activity.push(item)
+      if (activity.length > 30) activity.shift()
+      emit({ type: "activity", sessionID, rootID: SESSION, item })
+      return Response.json({ ok: true, clients: clients.size })
+    }
+    if (p === "/mock/session" && m === "POST") {
+      const body = await json()
+      const s = sessions.find((x) => x.id === body.id)
+      if (!s) return Response.json({ error: "no such session" }, { status: 404 })
+      Object.assign(s, body)
+      emit(catalog())
+      return Response.json({ ok: true, session: s })
+    }
+    if (p === "/mock/fail" && m === "POST") {
+      fail = { ...fail, ...(await json()) }
+      return Response.json(fail)
+    }
+    if (p === "/mock/service" && m === "POST") {
+      serviceConnected = !!(await json()).connected
+      emit(catalog())
+      return Response.json({ connected: serviceConnected })
+    }
+    if (p === "/mock/log") return Response.json({ log, transcripts, conversation, pushPrefs, speech, keys })
+    if (p === "/mock/reset" && m === "POST") {
+      scenarioRun++
+      log = []
+      transcripts = []
+      activity = []
+      status = [{ id: SESSION, title: "Mock session", state: "idle", blockers: [] }]
+      sessions = fixtures()
+      fail = { expose: false, create: false, models: false }
+      serviceConnected = true
+      emit(catalog())
+      return Response.json({ ok: true })
+    }
+
+    if (p === "/api/me") return Response.json({ device: { id: "dev_1", name: "Chrome" }, publicURL: `http://127.0.0.1:${PORT}`, version: "mock" })
+    if (p === "/api/events") return sse(request)
+    if (p === "/api/enrollments") return Response.json({ enrollments: [] })
+    if (p === `/api/sessions/${SESSION}` && m === "GET") {
+      return Response.json({ ...mockSession(), state: status[0]?.state, activity })
+    }
+    if (p === `/api/sessions/${SESSION}/presence` && m === "POST") {
+      last().body = await json()
+      return new Response(null, { status: 204 })
+    }
+    let match: RegExpExecArray | null
+    if ((match = /^\/api\/machines\/([^/]+)\/sessions$/.exec(p)) && m === "POST") {
+      const body = await json()
+      last().body = body
+      await Bun.sleep(250)
+      if (fail.create) return Response.json({ error: "OpenCode could not create the session" }, { status: 502 })
+      if (decodeURIComponent(match[1]!) !== "mac_1" || !serviceConnected) {
+        return Response.json({ error: "The background service of this machine is not connected" }, { status: 409 })
+      }
+      if (typeof body.directory !== "string" || !body.directory.startsWith("/")) return Response.json({ error: "directory must be absolute" }, { status: 400 })
+      const ws = projectOf(body.directory)
+      const id = `ses_new_${++created}`
+      sessions.push({ id, title: typeof body.title === "string" && body.title.trim() ? body.title.trim() : "", directory: body.directory, project: ws?.[0], projectName: ws?.[1], updated: Date.now(), exposed: true, state: "idle", blockers: [] })
+      emit(catalog())
+      return Response.json({ sessionID: id }, { status: 201 })
+    }
+    if ((match = /^\/api\/sessions\/([^/]+)(?:\/([a-z]+))?$/.exec(p)) && decodeURIComponent(match[1]!) !== SESSION) {
+      const id = decodeURIComponent(match[1]!)
+      const action = match[2]
+      const s = sessions.find((x) => x.id === id)
+      if (!s) return Response.json({ error: "Unknown session" }, { status: 404 })
+      if (action === "expose" && m === "POST") {
+        const body = await json()
+        last().body = body
+        await Bun.sleep(400)
+        if (fail.expose) return Response.json({ error: "OpenCode did not answer" }, { status: 502 })
+        s.exposed = !!body.on
+        emit(catalog())
+        return Response.json({ exposed: s.exposed })
+      }
+      if (!s.exposed) return Response.json(NOT_EXPOSED, { status: 403 })
+      if (!action && m === "GET") return Response.json({ ...catalogSession(s), activity: [] })
+      if (action === "context") return Response.json({ messages: [{ role: "assistant", text: `Hi, this is “${s.title || "Untitled"}”.` }] })
+      if (action === "presence") return new Response(null, { status: 204 })
+      if (action === "conversation" && m === "POST") {
+        const body = await json()
+        s.conversation = !!body.on
+        emit({ type: "conversation", sessionID: id, on: s.conversation })
+        return Response.json({ on: s.conversation, agent: "voice" })
+      }
+      if (action === "turn" && m === "POST") return Response.json({ outcome: "succeeded", reply: `You said: ${(await json()).text}` })
+      if (action === "utterance" && m === "POST") return Response.json({ inboxID: `inb_${++inbox}` }, { status: 202 })
+      if (action === "interrupt" && m === "POST") return new Response(null, { status: 204 })
+    }
+    if (p === "/api/push/prefs" && m === "GET") return Response.json({ prefs: pushPrefs })
+    if (p === "/api/push/prefs" && m === "PUT") {
+      const body = await json()
+      last().body = body
+      for (const [k, v] of Object.entries(body)) if (k in pushPrefs && typeof v === "boolean") pushPrefs[k] = v
+      return Response.json({ prefs: pushPrefs })
+    }
+    if (p === "/api/devices") return Response.json({ devices: [{ id: "dev_1", name: "Chrome", lastSeen: Date.now(), current: true }] })
+    if (p === "/api/settings/speech" && m === "GET") return Response.json(speechSettings())
+    if (p === "/api/settings/speech" && m === "PUT") {
+      const body = await json()
+      last().body = body
+      for (const kind of ["stt", "tts"] as const) {
+        const patch = body[kind]
+        if (!patch) continue
+        const base = patch.baseURL
+        if (typeof base === "string" && !/^https?:\/\//.test(base)) return Response.json({ error: "baseURL must be an http(s) URL", field: `${kind}.baseURL` }, { status: 400 })
+        if ("apiKey" in patch) keys[kind] = patch.apiKey ?? undefined
+        const target = speech[kind] as Record<string, unknown>
+        for (const [k, v] of Object.entries(patch)) if (k !== "apiKey") target[k] = v ?? undefined
+      }
+      return Response.json(speechSettings())
+    }
+    if (p === "/api/settings/speech/models" && m === "GET") {
+      await Bun.sleep(300)
+      if (fail.models) return Response.json({ error: "OpenRouter is unreachable" }, { status: 502 })
+      const kind = url.searchParams.get("kind")
+      return Response.json(
+        kind === "stt"
+          ? [{ id: "openai/whisper-1", name: "Whisper" }, { id: "openai/gpt-4o-transcribe", name: "GPT-4o Transcribe" }]
+          : [{ id: "tts-1", name: "TTS 1" }, { id: "tts-1-hd", name: "TTS 1 HD" }, { id: "gpt-4o-mini-tts", name: "GPT-4o mini TTS" }],
+      )
+    }
+    if (p === "/api/settings/speech/test" && m === "POST") {
+      last().body = await json()
+      return new Response(toneWav("This is how replies will sound."), { headers: { "content-type": "audio/wav" } })
+    }
+    if (p === `/api/sessions/${SESSION}/context`) return Response.json({ messages: [{ role: "assistant", text: "Hi, mock session here." }] })
+    if (p === `/api/sessions/${SESSION}/conversation` && m === "POST") {
+      const body = await json()
+      last().body = body
+      conversation = !!body.on
+      emit({ type: "conversation", sessionID: SESSION, on: conversation })
+      return Response.json({ on: conversation, agent: "voice" })
+    }
+    if (p === "/api/transcribe" && m === "POST") {
+      const audio = new Uint8Array(await request.arrayBuffer())
+      last().bytes = audio.length
+      await Bun.sleep(300)
+      return Response.json({ text: transcripts.shift() ?? "" })
+    }
+    if (p === `/api/sessions/${SESSION}/utterance` && m === "POST") {
+      const body = await json()
+      last().body = body
+      const inboxID = `inb_${++inbox}`
+      setTimeout(() => emit({ type: "heard", sessionID: SESSION, inboxID }), 400)
+      return Response.json({ inboxID }, { status: 202 })
+    }
+    if (p === `/api/sessions/${SESSION}/interrupt` && m === "POST") return new Response(null, { status: 204 })
+    if (p === `/api/sessions/${SESSION}/turn` && m === "POST") {
+      const body = await json()
+      last().body = body
+      return Response.json({ outcome: "succeeded", reply: `You said: ${body.text}` })
+    }
+    if (p === "/api/speak" && m === "POST") {
+      const body = await json()
+      last().body = body
+      await Bun.sleep(150)
+      return new Response(toneWav(String(body.text ?? "")), { headers: { "content-type": "audio/wav" } })
+    }
+    if (p.startsWith("/api/")) return Response.json({ error: "Not found" }, { status: 404 })
+
+    const file = /^\/(?:|pair|approve|s\/[^/]+)$/.test(p) ? path.join(WEB, "index.html") : path.resolve(WEB, `.${p}`)
+    const type = TYPES[path.extname(file)]
+    if (!type || !file.startsWith(WEB) || !existsSync(file) || !statSync(file).isFile()) return new Response("Not found", { status: 404 })
+    return new Response(readFileSync(file), { headers: { "content-type": type, "cache-control": "no-cache" } })
+  },
+})
+
+console.log(`[mock-hub] http://127.0.0.1:${server.port}/ (home) · /s/${SESSION}`)

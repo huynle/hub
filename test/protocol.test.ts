@@ -1,0 +1,139 @@
+import { describe, expect, test } from "bun:test"
+import { encode, parseServerMessage, parseSpokeMessage, PROTOCOL_VERSION } from "../src/protocol"
+
+const hello = {
+  t: "hello",
+  v: PROTOCOL_VERSION,
+  processID: "p1",
+  kind: "standalone",
+  directory: "/tmp/x",
+  pid: 42,
+  mode: "always",
+  opencodeVersion: "2.0.25",
+  pluginVersion: "0.1.0",
+}
+const j = (v: unknown) => JSON.stringify(v)
+
+describe("parseSpokeMessage", () => {
+  test("accepts a valid hello and round-trips through encode", () => {
+    expect(parseSpokeMessage(encode(hello as any))).toEqual(hello as any)
+  })
+
+  test("rejects malformed JSON, oversized frames and unknown types", () => {
+    expect(parseSpokeMessage("{")).toBeUndefined()
+    expect(parseSpokeMessage("[]")).toBeUndefined()
+    expect(parseSpokeMessage(j({ t: "nope" }))).toBeUndefined()
+    expect(parseSpokeMessage("x".repeat(1_000_001))).toBeUndefined()
+  })
+
+  test("rejects a hello with a bad kind or mode", () => {
+    expect(parseSpokeMessage(j({ ...hello, kind: "tui" }))).toBeUndefined()
+    expect(parseSpokeMessage(j({ ...hello, mode: "off" }))).toBeUndefined()
+  })
+
+  test("validates session snapshots", () => {
+    const ok = { t: "sessions", sessions: [{ id: "ses_1", title: "a", directory: "/d", updated: 1, owned: true }] }
+    expect(parseSpokeMessage(j(ok))).toEqual(ok as any)
+    expect(parseSpokeMessage(j({ t: "sessions", sessions: [{ id: "ses_1", title: "a", directory: "/d", updated: 1 }] }))).toBeUndefined()
+  })
+
+  test("only forwards allow-listed event types", () => {
+    const ev = (type: string) => j({ t: "event", event: { type, data: { sessionID: "ses_1" } } })
+    expect(parseSpokeMessage(ev("permission.asked"))).toBeDefined()
+    expect(parseSpokeMessage(ev("mcp.status.changed"))).toBeUndefined()
+  })
+
+  test("spokes may only send their own request ops", () => {
+    expect(parseSpokeMessage(j({ t: "req", id: "1", req: { op: "pairCode" } }))).toBeDefined()
+    expect(parseSpokeMessage(j({ t: "req", id: "1", req: { op: "handoff", sessionID: "ses_1" } }))).toBeDefined()
+    expect(parseSpokeMessage(j({ t: "req", id: "1", req: { op: "turn", sessionID: "ses_1", text: "x", voiceStyle: true } }))).toBeUndefined()
+  })
+})
+
+describe("parseServerMessage", () => {
+  test("accepts server requests and rejects spoke-only ops", () => {
+    const turn = { t: "req", id: "r1", req: { op: "turn", sessionID: "ses_1", text: "hi", voiceStyle: true } }
+    expect(parseServerMessage(j(turn))).toEqual(turn as any)
+    expect(parseServerMessage(j({ t: "req", id: "r1", req: { op: "pairCode" } }))).toBeUndefined()
+  })
+
+  test("validates permission decisions", () => {
+    const req = (decision: string) => j({ t: "req", id: "r", req: { op: "permission", sessionID: "ses_1", requestID: "per_1", decision } })
+    expect(parseServerMessage(req("once"))).toBeDefined()
+    expect(parseServerMessage(req("yes"))).toBeUndefined()
+  })
+
+  test("accepts welcome, res and bye", () => {
+    expect(parseServerMessage(j({ t: "welcome", v: 1, machineID: "m1", publicURL: "https://voice.example.com" }))).toBeDefined()
+    expect(parseServerMessage(j({ t: "res", id: "1", ok: false, error: "x" }))).toBeDefined()
+    expect(parseServerMessage(j({ t: "bye", reason: "revoked" }))).toBeDefined()
+    expect(parseServerMessage(j({ t: "res", ok: true }))).toBeUndefined()
+  })
+})
+
+describe("conversation ops", () => {
+  const r = (req: unknown) => JSON.stringify({ t: "req", id: "c1", req })
+  test("server accepts steer, interrupt and conversation; rejects malformed", () => {
+    expect(parseServerMessage(r({ op: "steer", sessionID: "ses_1", text: "also add tests" }))).toBeDefined()
+    expect(parseServerMessage(r({ op: "steer", sessionID: "ses_1", text: "" }))).toBeUndefined()
+    expect(parseServerMessage(r({ op: "interrupt", sessionID: "ses_1" }))).toBeDefined()
+    expect(parseServerMessage(r({ op: "conversation", sessionID: "ses_1", on: true }))).toBeDefined()
+    expect(parseServerMessage(r({ op: "conversation", sessionID: "ses_1", on: "yes" }))).toBeUndefined()
+  })
+  test("spokes forward text.ended and agent.selected", () => {
+    const ev = (type: string) => JSON.stringify({ t: "event", event: { type, data: { sessionID: "ses_1" } } })
+    expect(parseSpokeMessage(ev("session.text.ended"))).toBeDefined()
+    expect(parseSpokeMessage(ev("session.agent.selected"))).toBeDefined()
+  })
+})
+
+describe("activity compaction", () => {
+  const { compactActivity, summarizeToolInput } = require("../src/protocol")
+  test("summarizes tool input without the full payload", () => {
+    expect(summarizeToolInput({ command: "bun test\nmore" })).toBe("bun test")
+    expect(summarizeToolInput({ filePath: "/a/b.ts", content: "x".repeat(10000) })).toBe("/a/b.ts")
+    expect(summarizeToolInput({ content: "secret" })).toBe("")
+    expect(summarizeToolInput({ command: "y".repeat(500) }).length).toBe(160)
+  })
+  test("drops tool input and output payloads", () => {
+    const called = compactActivity({ type: "session.tool.called", data: { sessionID: "s", assistantMessageID: "m", id: "t", input: { filePath: "/x", content: "BIG" }, executed: true } })
+    expect(JSON.stringify(called)).not.toContain("BIG")
+    expect(called.data).toEqual({ sessionID: "s", assistantMessageID: "m", id: "t", summary: "/x", background: false })
+    const ok = compactActivity({ type: "session.tool.success", data: { sessionID: "s", assistantMessageID: "m", id: "t", content: [{ type: "text", text: "OUTPUT" }] } })
+    expect(JSON.stringify(ok)).not.toContain("OUTPUT")
+    const failed = compactActivity({ type: "session.tool.failed", data: { sessionID: "s", assistantMessageID: "m", id: "t", error: { type: "x", message: "boom" } } })
+    expect(failed.data.error).toBe("boom")
+    expect(compactActivity({ type: "session.tool.called", data: { sessionID: "s", id: "t", input: { agent: "general", background: true } } }).data.background).toBe(true)
+  })
+  test("tool events are forwardable", () => {
+    const ev = (type: string) => JSON.stringify({ t: "event", event: { type, data: { sessionID: "ses_1" } } })
+    for (const t of ["session.tool.input.started", "session.tool.called", "session.tool.success", "session.tool.failed", "session.reasoning.started"]) expect(parseSpokeMessage(ev(t))).toBeDefined()
+  })
+  test("reasoning deltas and ends are forwardable in compact form (delta capped, full text dropped)", () => {
+    const ev = (type: string) => JSON.stringify({ t: "event", event: { type, data: { sessionID: "ses_1" } } })
+    for (const t of ["session.reasoning.delta", "session.reasoning.ended"]) expect(parseSpokeMessage(ev(t))).toBeDefined()
+    const delta = compactActivity({ type: "session.reasoning.delta", data: { sessionID: "s", assistantMessageID: "m", ordinal: 0, delta: "let me think", extra: "X" } })
+    expect(delta).toEqual({ type: "session.reasoning.delta", data: { sessionID: "s", assistantMessageID: "m", delta: "let me think" } })
+    const long = compactActivity({ type: "session.reasoning.delta", data: { sessionID: "s", assistantMessageID: "m", delta: "z".repeat(5000) } })
+    expect((long!.data.delta as string).length).toBe(2000)
+    const odd = compactActivity({ type: "session.reasoning.delta", data: { sessionID: "s", assistantMessageID: "m", delta: 42 } })
+    expect(odd!.data.delta).toBe("")
+    const ended = compactActivity({ type: "session.reasoning.ended", data: { sessionID: "s", assistantMessageID: "m", ordinal: 0, text: "SECRET FULL REASONING" } })
+    expect(ended).toEqual({ type: "session.reasoning.ended", data: { sessionID: "s", assistantMessageID: "m" } })
+  })
+})
+
+describe("session browser ops", () => {
+  const r = (req: unknown) => JSON.stringify({ t: "req", id: "b1", req })
+  test("expose and create are validated", () => {
+    expect(parseServerMessage(r({ op: "expose", sessionID: "ses_1", on: true }))).toBeDefined()
+    expect(parseServerMessage(r({ op: "expose", sessionID: "ses_1" }))).toBeUndefined()
+    expect(parseServerMessage(r({ op: "create", directory: "/home/user/projects/x", title: "New" }))).toBeDefined()
+    expect(parseServerMessage(r({ op: "create", directory: "relative/path" }))).toBeUndefined()
+  })
+  test("session info accepts optional workspace fields", () => {
+    const s = { id: "ses_1", title: "a", directory: "/d/wt", updated: 1, owned: false, exposed: false, project: "/d", projectName: "d" }
+    expect(parseSpokeMessage(JSON.stringify({ t: "sessions", sessions: [s] }))).toBeDefined()
+    expect(parseSpokeMessage(JSON.stringify({ t: "sessions", sessions: [{ ...s, exposed: "no" }] }))).toBeUndefined()
+  })
+})
