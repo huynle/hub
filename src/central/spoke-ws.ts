@@ -74,6 +74,8 @@ interface Pending {
 
 /** Extra time the hub waits past the turn timeout so the spoke's own timeout result arrives first. */
 export const TURN_GRACE_MS = 15_000
+/** Creating a session and opening it in a new Herdr tab (the spoke allows `herdr agent start` 20 s). */
+export const CREATE_IN_HERDR_TIMEOUT_MS = 45_000
 
 const CLOSE_PROTOCOL = 4000
 const CLOSE_REVOKED = 4001
@@ -128,10 +130,13 @@ export class SpokeHub {
     const ws = this.sockets.get(connID)
     if (!ws?.data.ready) return Promise.reject(new SpokeError("OpenCode process disconnected"))
     const id = `r${++this.seq}`
+    const base = this.options.requestTimeoutMs ?? 15_000
     const timeoutMs =
       req.op === "turn"
         ? this.options.turnTimeoutMs + (this.options.turnGraceMs ?? TURN_GRACE_MS)
-        : (this.options.requestTimeoutMs ?? 15_000)
+        : req.op === "create" && req.herdrWorkspace
+          ? Math.max(base, CREATE_IN_HERDR_TIMEOUT_MS) // the spoke waits for OpenCode to start in the new tab
+          : base
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
@@ -190,6 +195,8 @@ export class SpokeHub {
       case "sessions":
         registry.setSessions(connID, message.sessions)
         return this.resendConversations(connID)
+      case "terminals":
+        return registry.setTerminals(connID, message)
       case "event":
         return registry.observe(connID, message.event)
       case "req":

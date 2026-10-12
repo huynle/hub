@@ -195,6 +195,18 @@ describe("bob cannot reach alice's sessions", () => {
 })
 
 describe("catalog, SSE and push", () => {
+  test("terminals, Herdr directories and view prefs stay with their owner", async () => {
+    alice.spoke.send({ t: "terminals", herdr: { workspaces: [{ id: "w5", label: "alice-space", directories: ["/home/user/alice"] }] } })
+    await waitFor(() => h.registry.terminals(alice.machineID) !== undefined)
+    expect(JSON.stringify(await json(await as(bob, "/api/machines")))).not.toContain("alice-space")
+    expect((await json(await as(alice, "/api/machines"))).machines[0].terminals.herdr.workspaces[0].label).toBe("alice-space")
+    // Alice's Herdr folder is not a workspace on bob's machine.
+    const create = await as(bob, `/api/machines/${bob.machineID}/sessions`, { method: "POST", json: { directory: "/home/user/alice", herdrWorkspace: "w5" } })
+    expect(create.status).toBe(400)
+    expect((await as(alice, "/api/prefs/view", { method: "PUT", json: { pinnedSessions: ["ses_alice"] } })).status).toBe(200)
+    expect((await json(await as(bob, "/api/prefs/view"))).prefs.pinnedSessions).toEqual([])
+  })
+
   test("GET /api/machines lists only your own machines", async () => {
     const machines = (await json(await as(bob, "/api/machines"))).machines
     expect(machines.map((m: any) => m.id)).toEqual([bob.machineID])

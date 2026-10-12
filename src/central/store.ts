@@ -28,7 +28,19 @@ export interface UserRecord {
   disabled?: boolean
   /** Per-user speech settings (same shape as the server default in StateData.speech). */
   speech?: StoredSpeech
+  /** The phone's session view: hidden and pinned sessions and workspaces (synced across devices). */
+  viewPrefs?: ViewPrefs
 }
+
+/** Workspace keys are the phone's group keys: `herdr:<workspaceID>` or a folder path. */
+export interface ViewPrefs {
+  hiddenSessions: string[]
+  hiddenWorkspaces: string[]
+  pinnedSessions: string[]
+  pinnedWorkspaces: string[]
+}
+
+export const VIEW_PREF_KEYS = ["hiddenSessions", "hiddenWorkspaces", "pinnedSessions", "pinnedWorkspaces"] as const
 
 export interface AuditEntry {
   at: number
@@ -391,6 +403,26 @@ export class Store {
     if (!user) return
     user.speech = structuredClone(settings)
     this.save()
+  }
+
+  // ---------- per-user view preferences ----------
+
+  viewPrefs(id: string): ViewPrefs {
+    const stored = this.user(id)?.viewPrefs
+    const out = {} as ViewPrefs
+    for (const key of VIEW_PREF_KEYS) out[key] = Array.isArray(stored?.[key]) ? [...stored[key]] : []
+    return out
+  }
+
+  /** Replaces the lists given (callers validate); returns the result. */
+  setViewPrefs(id: string, change: Partial<ViewPrefs>): ViewPrefs {
+    const user = this.user(id)
+    if (!user) return this.viewPrefs(id)
+    const next = this.viewPrefs(id)
+    for (const key of VIEW_PREF_KEYS) if (change[key]) next[key] = [...change[key]]
+    user.viewPrefs = next
+    this.save()
+    return this.viewPrefs(id)
   }
 
   touchDevice(id: string): void {

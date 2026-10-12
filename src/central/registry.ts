@@ -3,7 +3,7 @@
 // a per-session turn lock, permission routing back to the process that asked, and conversation mode
 // (which sessions speak their replies on the phone).
 import path from "node:path"
-import type { ForwardedEvent, Hello, ProcessKind, SessionInfo, SpokeMode } from "../protocol"
+import type { ForwardedEvent, Hello, HerdrWorkspace, ProcessKind, SessionInfo, SpokeMode, TerminalInfo, Terminals } from "../protocol"
 import { StatusBoard, type Blocker, type SessionStatus } from "../status"
 
 export class BusyError extends Error {
@@ -144,6 +144,9 @@ export interface SessionView extends BrowserFields {
   readonly project?: string
   readonly projectName?: string
   readonly updated: number
+  /** Open in a terminal (any reporting process says so); where. */
+  readonly open?: boolean
+  readonly terminal?: TerminalInfo
   readonly busy: boolean
   readonly conversation: boolean
   /** Status tree of the root session that contains this session. */
@@ -165,10 +168,16 @@ export interface CatalogProcess {
   readonly sessions: CatalogSession[]
 }
 
+/** A machine's terminal context: its Herdr workspaces (latest terminals frame of the machine). */
+export interface MachineTerminals {
+  readonly herdr?: { readonly workspaces: readonly HerdrWorkspace[] }
+}
+
 export interface CatalogMachine {
   readonly id: string
   readonly name: string
   readonly processes: CatalogProcess[]
+  readonly terminals?: MachineTerminals
 }
 
 interface Conn {
@@ -236,6 +245,8 @@ export class Registry {
   private readonly since = new Map<string, number>()
   /** Session → streamed text waiting for its send window. */
   private readonly streams = new Map<string, Stream>()
+  /** Machine → its latest terminals frame and the connection that sent it. */
+  private readonly machineTerminals = new Map<string, { connID: string; terminals: MachineTerminals; key: string }>()
   private seq = 0
 
   constructor(
@@ -324,7 +335,9 @@ export class Registry {
   }
 
   disconnect(connID: string): void {
-    if (!this.conns.delete(connID)) return
+    const conn = this.conns.get(connID)
+    if (!conn || !this.conns.delete(connID)) return
+    if (this.machineTerminals.get(conn.machine.id)?.connID === connID) this.machineTerminals.delete(conn.machine.id)
     // Nobody can answer permissions asked by a process that is gone.
     for (const [requestID, origin] of this.permissions) {
       if (origin.connID !== connID) continue
@@ -351,6 +364,23 @@ export class Registry {
     conn.sessions = new Map(sessions.map((s) => [s.id, s]))
     this.syncBoards()
     this.emit({ type: "catalog" })
+  }
+
+  /** Records a machine's terminal context (sent by one process per machine); catalog on change. */
+  setTerminals(connID: string, frame: Terminals): void {
+    const conn = this.conns.get(connID)
+    if (!conn) return
+    conn.lastSeen = this.now()
+    const terminals: MachineTerminals = frame.herdr ? { herdr: { workspaces: frame.herdr.workspaces.map((w) => ({ id: w.id, label: w.label, directories: [...w.directories] })) } } : {}
+    const key = JSON.stringify(terminals)
+    const previous = this.machineTerminals.get(conn.machine.id)
+    this.machineTerminals.set(conn.machine.id, { connID, terminals, key })
+    if (previous?.key !== key) this.emit({ type: "catalog" })
+  }
+
+  /** The machine's terminal context, while the process that sent it is connected. */
+  terminals(machineID: string): MachineTerminals | undefined {
+    return this.machineTerminals.get(machineID)?.terminals
   }
 
   observe(connID: string, event: ForwardedEvent): void {
@@ -537,11 +567,16 @@ export class Registry {
     return services.sort((a, b) => b.seq - a.seq)[0]?.id
   }
 
-  /** True when the process reported a session in, or a workspace root equal to, the directory. */
+  /**
+   * True when the process reported a session in, or a workspace root equal to, the directory, or its
+   * machine has a Herdr pane in it.
+   */
   reportsWorkspace(connID: string, directory: string): boolean {
     const conn = this.conns.get(connID)
     if (!conn || !directory.startsWith("/")) return false
     const target = path.posix.resolve(directory)
+    const herdr = this.terminals(conn.machine.id)?.herdr
+    if (herdr?.workspaces.some((w) => w.directories.some((d) => d.startsWith("/") && path.posix.resolve(d) === target))) return true
     for (const s of this.visible(conn)) {
       if (s.project?.startsWith("/") && path.posix.resolve(s.project) === target) return true
       if (s.directory.startsWith("/") && path.posix.resolve(s.directory) === target) return true
@@ -573,6 +608,8 @@ export class Registry {
     for (const conn of [...this.conns.values()].sort((a, b) => a.seq - b.seq)) {
       const machine = machines.get(conn.machine.id) ?? { id: conn.machine.id, name: conn.machine.name, processes: [] }
       machines.set(conn.machine.id, machine)
+      const terminals = this.terminals(conn.machine.id)
+      if (terminals) Object.assign(machine, { terminals })
       const { processID, kind, directory, pid, mode, opencodeVersion, pluginVersion } = conn.hello
       machine.processes.push({
         id: processID,
@@ -604,9 +641,12 @@ export class Registry {
   /** The session as reported by any process plus its live status; undefined when nobody reports it. */
   session(sessionID: string): SessionView | undefined {
     let info: SessionInfo | undefined
+    /** Open from any reporting process; a Herdr pane wins over a TUI. */
+    let terminal: TerminalInfo | undefined
     for (const conn of this.conns.values()) {
       const s = this.reports(conn, sessionID)
       if (s && (!info || s.updated > info.updated)) info = s
+      if (s?.open && s.terminal && (!terminal || (terminal.source !== "herdr" && s.terminal.source === "herdr"))) terminal = s.terminal
     }
     if (!info) return undefined
     const fields = this.browserFields(sessionID)
@@ -620,6 +660,7 @@ export class Registry {
       ...(info.project ? { project: info.project } : {}),
       ...(info.projectName ? { projectName: info.projectName } : {}),
       updated: info.updated,
+      ...(terminal ? { open: true, terminal } : {}),
       ...fields,
       busy: this.active.has(sessionID),
       conversation: this.conversations.has(sessionID),

@@ -15,7 +15,7 @@ import { BusyError, Registry } from "./registry"
 import { audioFormat, SpeechError } from "./speech/provider"
 import { SpeechService } from "./speech/service"
 import { RequestTimeoutError, SpokeError, SpokeHub, type Notifier, type SpokeSocketData } from "./spoke-ws"
-import { DEFAULT_PUSH_PREFS, LOCAL_USER, Store, type DeviceRecord, type PushPrefs, type UserRecord } from "./store"
+import { DEFAULT_PUSH_PREFS, LOCAL_USER, Store, VIEW_PREF_KEYS, type DeviceRecord, type PushPrefs, type UserRecord, type ViewPrefs } from "./store"
 
 export interface Speech {
   transcribe(audio: Uint8Array, format: string): Promise<string>
@@ -66,6 +66,7 @@ type Message = { type: string; [key: string]: unknown }
 
 interface Listener {
   readonly userID: string
+  readonly deviceID: string
   send(message: Message): void
   close(): void
 }
@@ -109,6 +110,11 @@ const NOT_EXPOSED = "Voice is not enabled for this session"
 /** Longest directory and title accepted for a new session (as in the spoke protocol). */
 const MAX_DIRECTORY_CHARS = 4096
 const MAX_TITLE_CHARS = 200
+/** Longest Herdr workspace ID accepted (as in the spoke protocol). */
+const MAX_HERDR_WORKSPACE_CHARS = 100
+/** View preferences: entries per list and characters per entry. */
+const VIEW_PREF_MAX_ENTRIES = 500
+const VIEW_PREF_MAX_CHARS = 4096
 const DECISIONS = new Set<PermissionDecision>(["once", "always", "reject"])
 /** Longest utterance accepted for conversation mode (characters, after trimming). */
 export const MAX_UTTERANCE_CHARS = 4000
@@ -242,6 +248,7 @@ export function startCentral(options: CentralOptions): Central {
         lastSeen: m.lastSeen,
         online: online.has(m.id),
         processes: online.get(m.id)?.processes ?? [],
+        ...(online.get(m.id)?.terminals ? { terminals: online.get(m.id)!.terminals } : {}),
       }))
   }
 
@@ -439,9 +446,19 @@ export function startCentral(options: CentralOptions): Central {
       }),
     ),
     route("GET", "/api/machines", "user", ({ user }) => Response.json({ machines: machines(user.id) })),
-    route("GET", "/api/events", "user", ({ request, server, user }) => {
+    route("GET", "/api/events", "user", ({ request, server, user, device }) => {
       server.timeout(request, 0)
-      return events(request.signal, user.id)
+      return events(request.signal, user.id, device.id)
+    }),
+    // The phone's session view (hidden/pinned sessions and workspaces), per user, synced to their other devices.
+    route("GET", "/api/prefs/view", "user", ({ user }) => Response.json({ prefs: store.viewPrefs(user.id) }, { headers: NO_STORE })),
+    route("PUT", "/api/prefs/view", "user", async ({ request, user, device }) => {
+      const prefs = store.setViewPrefs(user.id, viewPrefsInput(await request.json()))
+      // The user's other devices only: never another user, and not the device that made the change.
+      for (const listener of [...listeners]) {
+        if (listener.userID === user.id && listener.deviceID !== device.id) listener.send({ type: "prefs", prefs })
+      }
+      return Response.json({ prefs }, { headers: NO_STORE })
     }),
     route("POST", "/api/enrollments/:code/approve", "user", ({ params, user }) => decideEnrollment(params.code!, "approved", user)),
     route("POST", "/api/enrollments/:code/deny", "user", ({ params, user }) => decideEnrollment(params.code!, "denied", user)),
@@ -745,27 +762,42 @@ export function startCentral(options: CentralOptions): Central {
     return Response.json({ exposed })
   }
 
-  /** Creates a session in a workspace the machine's background service reported. */
+  /**
+   * Creates a session in a workspace the machine's background service reported (or a Herdr pane folder);
+   * with herdrWorkspace, the spoke also opens it in a new tab of that Herdr workspace.
+   */
   async function createSession(request: Request, machineID: string): Promise<Response> {
     const input = await body(request)
-    const { directory, title } = input
+    const { directory, title, herdrWorkspace } = input
     if (typeof directory !== "string" || !directory.startsWith("/") || directory.length > MAX_DIRECTORY_CHARS) {
       return error(400, "Expected {directory: absolute path, title?: string}")
     }
     if (title !== undefined && (typeof title !== "string" || title.length > MAX_TITLE_CHARS)) {
       return error(400, `Title must be a string of at most ${MAX_TITLE_CHARS} characters`)
     }
+    if (herdrWorkspace !== undefined && (typeof herdrWorkspace !== "string" || !herdrWorkspace || herdrWorkspace.length > MAX_HERDR_WORKSPACE_CHARS)) {
+      return error(400, `herdrWorkspace must be a Herdr workspace ID of at most ${MAX_HERDR_WORKSPACE_CHARS} characters`)
+    }
     if (!store.machines().some((m) => m.id === machineID && !m.revoked)) return error(404, "No such machine")
     const connID = registry.serviceFor(machineID)
     if (!connID) return error(409, "The background service of this machine is not connected")
     if (!registry.reportsWorkspace(connID, directory)) return error(400, "unknown workspace")
     const trimmed = typeof title === "string" ? title.trim() : ""
-    const { sessionID } = await spokes.request(connID, {
+    const result = (await spokes.request(connID, {
       op: "create",
       directory: path.posix.resolve(directory),
       ...(trimmed ? { title: trimmed } : {}),
-    })
-    return Response.json({ sessionID }, { status: 201 })
+      ...(typeof herdrWorkspace === "string" ? { herdrWorkspace } : {}),
+    })) as { sessionID: string; openedIn?: unknown; warning?: unknown }
+    const openedIn = herdrWorkspace !== undefined && result.openedIn === "herdr" ? ("herdr" as const) : undefined
+    // Herdr failed (or an older spoke ignored it): the session exists anyway.
+    const warning =
+      herdrWorkspace === undefined || openedIn
+        ? undefined
+        : typeof result.warning === "string" && result.warning
+          ? result.warning.slice(0, 500)
+          : "The session was created but could not be opened in Herdr"
+    return Response.json({ sessionID: result.sessionID, ...(openedIn ? { openedIn } : {}), ...(warning ? { warning } : {}) }, { status: 201 })
   }
 
   async function permission(request: Request, rootID: string): Promise<Response> {
@@ -795,7 +827,7 @@ export function startCentral(options: CentralOptions): Central {
     return Response.json({ text: await speech.transcribe(audio, format) })
   }
 
-  function events(signal: AbortSignal, userID: string): Response {
+  function events(signal: AbortSignal, userID: string, deviceID: string): Response {
     const encoder = new TextEncoder()
     let cleanup = () => {}
     const stream = new ReadableStream<Uint8Array>({
@@ -809,6 +841,7 @@ export function startCentral(options: CentralOptions): Central {
         }
         const listener: Listener = {
           userID,
+          deviceID,
           send: (message) => write(`data: ${JSON.stringify(message)}\n\n`),
           close: () => {
             cleanup()
@@ -907,6 +940,25 @@ function prefsInput(value: unknown): Partial<PushPrefs> | undefined {
     if (typeof v === "boolean") prefs[key] = v
   }
   return Object.keys(prefs).length ? prefs : undefined
+}
+
+/** PUT /api/prefs/view body: any of the four lists, each replacing the stored one. */
+function viewPrefsInput(value: unknown): Partial<ViewPrefs> {
+  const invalid = () =>
+    new HttpError(400, `Expected {${VIEW_PREF_KEYS.join("?, ")}?}: lists of at most ${VIEW_PREF_MAX_ENTRIES} strings of at most ${VIEW_PREF_MAX_CHARS} characters`)
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw invalid()
+  const record = value as Record<string, unknown>
+  if (Object.keys(record).some((key) => !(VIEW_PREF_KEYS as readonly string[]).includes(key))) throw invalid()
+  const out: Partial<ViewPrefs> = {}
+  for (const key of VIEW_PREF_KEYS) {
+    const list = record[key]
+    if (list === undefined) continue
+    if (!Array.isArray(list) || list.length > VIEW_PREF_MAX_ENTRIES) throw invalid()
+    if (!list.every((entry) => typeof entry === "string" && entry.length > 0 && entry.length <= VIEW_PREF_MAX_CHARS)) throw invalid()
+    out[key] = [...new Set(list as string[])]
+  }
+  if (Object.keys(out).length === 0) throw invalid()
+  return out
 }
 
 function param(raw: string): string {
