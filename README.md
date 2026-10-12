@@ -225,9 +225,10 @@ holds the startup (`bin/hub.ts` serves `web/` from disk; the compiled binaries e
 | Env | Default | |
 |---|---|---|
 | `VOICE_HUB_CONFIG` | `~/.config/opencode-voice/hub.json` | optional config file ([Local only](#local-only)); env vars win over it |
+| `VOICE_AUTH` | `pairing` | `oidc` for several users signing in with Google; see [Multi-user](#multi-user-sign-in-with-google) |
 | `VOICE_HOST` / `VOICE_PORT` | `127.0.0.1` / `4097` | listen address |
 | `VOICE_PUBLIC_URL` | `http://<host>:<port>` (`http://127.0.0.1:<port>` when the host is `0.0.0.0` / `::`) | origin used in links, cookies and CSRF checks |
-| `VOICE_STATE_DIR` | `~/.local/state/opencode-voice` | `state.json` (0600): machines, devices (token hashes only), VAPID keys, push subscriptions, speech settings (provider API keys set from the phone) |
+| `VOICE_STATE_DIR` | `~/.local/state/opencode-voice` | `state.json` (0600): users, machines and devices (token hashes only) with their owners, VAPID keys, push subscriptions, speech settings (server default and per user; provider API keys set from the phone), the audit log (last 500 entries) |
 | `VOICE_TURN_TIMEOUT_MS` | `600000` | the hub waits this + 15 s so the spoke's own timeout result arrives first |
 | `VOICE_VAPID_SUBJECT` | the https public URL, else `mailto:opencode-voice@localhost` | contact sent to push services |
 | `OPENROUTER_API_KEY` | | default key for the `openrouter` speech provider (never sent to other providers) |
@@ -311,6 +312,93 @@ every 30 s; expired subscriptions (404/410) are pruned. "Read agent replies as n
   tap first (the mic or Send button unlocks playback).
 - Microphone and push need a secure context: HTTPS, or `http://localhost` / `127.0.0.1` for testing.
 
+## Multi-user (sign in with Google)
+
+One hub can serve several people. Each person signs in with Google (or any OpenID Connect provider)
+and sees and controls only their own machines, sessions, phones and speech settings. Without it
+(`VOICE_AUTH=pairing`, the default) the hub has one owner, exactly as before. The full contract is in
+[docs/multi-user.md](docs/multi-user.md).
+
+**Google Cloud console**
+
+1. APIs & Services → OAuth consent screen: set it up (External or Internal; scopes `openid`, `email`,
+   `profile` are enough).
+2. APIs & Services → Credentials → Create credentials → OAuth client ID → **Web application**.
+3. Authorized redirect URI: `<public URL>/auth/callback`, e.g. `https://voice.example.com/auth/callback`
+   (Google wants https, except for `localhost`).
+4. Copy the client ID and client secret into the hub's environment or `hub.json`.
+
+**Configuration** (env vars win over `hub.json`'s `auth` object):
+
+| Env | hub.json | |
+|---|---|---|
+| `VOICE_AUTH` | `auth.mode` | `pairing` (default) or `oidc` |
+| `VOICE_OIDC_ISSUER` | `auth.issuer` | default `https://accounts.google.com`; must be https |
+| `VOICE_OIDC_CLIENT_ID` | `auth.clientId` | required |
+| `VOICE_OIDC_CLIENT_SECRET` | `auth.clientSecret` | required; never logged or returned. In `hub.json` it is ignored (with a warning) unless the file is `chmod 600` |
+| `VOICE_OIDC_ALLOWED` | `auth.allowed` | required: who may sign in, emails and/or `@domain` entries (comma list, or an array in hub.json) |
+| `VOICE_ADMIN_EMAILS` | `auth.admins` | at least one admin email (admins are always allowed) |
+
+```sh
+VOICE_PUBLIC_URL=https://voice.example.com \
+VOICE_AUTH=oidc \
+VOICE_OIDC_CLIENT_ID=1234567890-abc.apps.googleusercontent.com \
+VOICE_OIDC_CLIENT_SECRET=GOCSPX-… \
+VOICE_OIDC_ALLOWED=alice@example.com,bob@example.com,@example.org \
+VOICE_ADMIN_EMAILS=alice@example.com \
+opencode-voice-hub
+```
+
+```json
+{
+  "publicURL": "https://voice.example.com",
+  "auth": {
+    "mode": "oidc",
+    "clientId": "1234567890-abc.apps.googleusercontent.com",
+    "clientSecret": "GOCSPX-…",
+    "allowed": ["bob@example.com", "@example.org"],
+    "admins": ["alice@example.com"]
+  }
+}
+```
+
+An invalid or incomplete `oidc` setup stops the hub with the reason. The startup log shows the issuer,
+the redirect URI to register and how many allow-list entries and admins there are.
+
+**Who may sign in**: an email on the allow-list, any address of an `@domain` entry (exactly that domain,
+not its subdomains), or an admin. The provider must report the email as verified. There is no open
+sign-up. Others get a "Not allowed" page (and an audit entry).
+
+**Admins** manage users (make admin, disable), everyone's machines and devices, the server default
+speech settings and pending machine enrollments, and read the audit log (Account → Admin). They do
+**not** see other users' sessions. Emails in `VOICE_ADMIN_EMAILS` become admins when they sign in; the
+last active admin cannot be demoted or disabled. Disabling a user signs out all their devices and
+disconnects their machines at once.
+
+**Ownership**: a machine belongs to whoever approves its enrollment code; pairing codes and one-time
+login links from `/voice` belong to the machine's owner. The bootstrap pairing code and the local
+first-machine auto-approve exist only in `pairing` mode.
+
+**Speech**: each user can set their own provider, models, voice and key (Settings → Speech); fields they
+leave empty come from the server default (admins: Settings → Speech → Server default), then `hub.json`,
+then the env. A user's key is only ever shown (masked) to that user.
+
+**Migrating a single-owner hub**: existing machines and devices belong to the built-in owner `local`.
+The first time an admin signs in, all of them move to that admin (audit `migrate.local`) and `local` is
+disabled. Nothing else changes; a running spoke stays connected.
+
+**Security notes**
+
+- `/auth/login` and `/auth/callback` must be reachable from browsers (an auth proxy in front of the hub
+  is still optional, but must let `/auth/*`, `/spoke/*` and the app through).
+- Sign-in uses the authorization code flow with PKCE (S256), `state` and `nonce`; the ID token comes
+  straight from the provider's token endpoint over TLS (client_secret_post) and its claims are checked
+  (`iss`, `aud`/`azp`, `exp`, `nonce`, `email_verified`).
+- Another user's sessions, machines and devices answer 404 (like unknown ones), so IDs don't leak; SSE
+  events and push notifications only go to the owner.
+- `VOICE_OIDC_INSECURE_ISSUER=1` allows a plain-http issuer on loopback. It exists for local
+  development and tests with a fake provider only; never set it in production.
+
 ## Session browser (hub)
 
 Catalog sessions (`GET /api/machines` → `machines[].processes[].sessions[]`, SSE `catalog`) carry, besides
@@ -335,14 +423,17 @@ For a session reported only with `exposed: false`, `turn`, `utterance`, `interru
 
 ### Hub API
 
-All routes need the device cookie; POSTs also need a same-origin `Origin` (or `Referer`). For a loopback
+All routes need the device cookie; POSTs also need a same-origin `Origin` (or `Referer`). Every
+`/api/sessions/:id…` route answers `404 {"error": "Not found"}` for a session that none of the caller's
+machines reports (since 0.3.0; before, a session nobody reported was 409), so another user's session looks
+exactly like an unknown one. For a loopback
 public URL, `localhost`, `127.0.0.1` and `[::1]` with the same scheme and port count as the same origin.
 
 | Route | Spoke op | Result |
 |---|---|---|
-| `POST /api/sessions/:id/utterance {text}` | `steer` | `202 {inboxID}`; allowed while the session is busy (no turn lock). 400 empty or over 4000 chars, 409 no process connected, 502 spoke error, 504 no answer in 15 s |
+| `POST /api/sessions/:id/utterance {text}` | `steer` | `202 {inboxID}`; allowed while the session is busy (no turn lock). 400 empty or over 4000 chars, 404 no machine of yours reports the session, 502 spoke error, 504 no answer in 15 s |
 | `POST /api/sessions/:id/interrupt` | `interrupt` | `204` |
-| `POST /api/sessions/:id/conversation {on}` | `conversation` | `200 {on, agent}`. Turning off clears the hub's flag even when no process is connected (then 409) |
+| `POST /api/sessions/:id/conversation {on}` | `conversation` | `200 {on, agent}`. 404 when no machine of yours reports the session |
 | `GET /api/sessions/:id` | | `{id, title, directory, parentID?, project?, projectName?, updated, exposed, state, blockers, now?, busy, conversation, status, activity}`; catalog sessions also carry `conversation` |
 | `POST /api/sessions/:id/presence {visible}` | | `204`; the phone posts on `visibilitychange` and every 30 s while visible. A root session is *watched* while any device reported it (or one of its subagent sessions) visible within 45 s |
 
@@ -359,7 +450,7 @@ SSE (`/api/events`) adds:
 - `{type: "heard", sessionID, inboxID}` when OpenCode delivers an utterance's inbox item (also when the
   delivery event arrives before the steer result).
 - `{type: "activity", sessionID, rootID, item}` when an activity item is created or changes state, for
-  every session (all devices see all, like `status`). `item` is `{id, sessionID, kind: "tool" | "thinking",
+  every session (all of the owner's devices see it, like `status`). `item` is `{id, sessionID, kind: "tool" | "thinking",
   tool?, summary?, background?, state: "running" | "done" | "failed", error?, at}`; `sessionID` is where it
   happened (a subagent session maps to its root `rootID`). The hub keeps the 30 most recent items per
   root (in memory) and returns them, newest last, as `activity` in `GET /api/sessions/:id`. Spokes forward
@@ -535,6 +626,7 @@ in the file).
 | `stateDir` | hub state (default `~/.local/state/opencode-voice`; `~/` is expanded) |
 | `speech.stt` | `{provider, model, baseURL?, language?, apiKey?}` |
 | `speech.tts` | `{provider, model, voice, baseURL?, speed?, apiKey?}` |
+| `auth` | `{mode, issuer?, clientId, clientSecret, allowed, admins}`; see [Multi-user](#multi-user-sign-in-with-google) |
 
 Server fields: env vars (`VOICE_HOST`, `VOICE_PORT`, `VOICE_PUBLIC_URL`, `VOICE_STATE_DIR`) > hub.json >
 defaults. Speech: phone settings > hub.json > env vars. Values are checked like the phone's speech

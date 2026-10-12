@@ -128,3 +128,41 @@ provider/baseURL drops the stored key of that scope (existing rule).
 `signin`, `signin.denied`, `device.pair`, `device.revoke`, `machine.approve`, `machine.deny`,
 `machine.revoke`, `user.role`, `user.disable`, `user.enable`, `speech.default`, `migrate.local`.
 Never include tokens, codes, keys or session content.
+
+## Implementation notes (server, 0.3.0)
+
+Details the contract above leaves open, as implemented in `src/central/`:
+
+- **Response shapes**: `GET /api/admin/users`, `GET /api/admin/machines` and `GET /api/admin/audit` return
+  bare JSON arrays. User rows are `{id, email?, name?, role, disabled: boolean, created, lastSeen,
+  machines, devices}` (non-revoked machines); `PUT /api/admin/users/:id` returns the updated row (400 bad
+  body, 404 unknown user, 409 last active admin). Machine rows are `{id, name, created, lastSeen, online,
+  ownerID, ownerEmail?}` (no sessions). Non-admins get `403 {"error": "Admins only"}` on admin routes.
+- **Speech view for a user** adds `user: {stt, tts}`, the user's own saved fields (key masked with
+  `source: "user"`). Key sources are `user`, `settings` (server default), `config` (hub.json), `env`,
+  `none`; keys that are not the caller's own show only `{set, source}` (no `last4`). The `default` field
+  has no `voiceHints`/`ready`. The `local` user (pairing mode) has no own scope: its GET/PUT
+  `/api/settings/speech` is the server default, unchanged from 0.2 (no `scope`, `default` or `user`).
+- **Unknown sessions**: every session route answers `404 {"error": "Not found"}` when none of the caller's
+  machines reports the session (0.2 answered 409 for a session nobody reported).
+- **Route table**: `Central.routes` lists every `/api/*` route with its access (`public`, `user`, `admin`,
+  `session`, `machine`); the router checks access before any handler runs (`test/central-tenancy.test.ts`
+  iterates it).
+- **Session IDs are claimed** by the tenant of the earliest connected process that reports them. A
+  process of another user reporting the same ID is ignored for it: no listing, routing, status or events
+  (events nesting a child under someone else's session are dropped too). A spoke `handoff` for another
+  user's session is refused.
+- **Admins from the config** (`VOICE_ADMIN_EMAILS`) are made admin at every sign-in; a role change through
+  the API lasts until that person signs in again while still listed.
+- **Sign-in device**: a browser already signed in as the same user keeps its device; otherwise a new
+  device named from the user agent is created. A one-time login link signs the browser in as the
+  machine's owner (a browser signed in as someone else gets a new device for the owner).
+- **Audit**: `signin.denied` has `target` = the email for "not allowed" / "disabled", and only `detail`
+  (the reason, e.g. `nonce mismatch`) for failed claim checks after a valid `state`. Requests with an
+  invalid `state` are not audited (they are unauthenticated and could flood the ring).
+- **Google** documents `iss` as `https://accounts.google.com` or `accounts.google.com`; both are accepted
+  for that issuer.
+- **Dev only**: `VOICE_OIDC_INSECURE_ISSUER=1` allows a plain-http issuer on loopback (tests and local
+  development with a fake provider).
+- **Switching back** from `oidc` to `pairing` re-enables `local` as admin; records owned by other users
+  stay theirs (their devices keep working; the owner can manage them through the admin API).
