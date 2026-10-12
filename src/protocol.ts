@@ -35,7 +35,7 @@ export interface SessionInfo {
 export interface TerminalInfo {
   /** Where "open" was detected. */
   readonly source: "herdr" | "tui"
-  /** Herdr workspace ID and label (e.g. "hindsight"), when open in Herdr. */
+  /** Herdr workspace ID and label (e.g. "research"), when open in Herdr. */
   readonly workspaceID?: string
   readonly workspace?: string
   /** Pane/terminal title, e.g. "OC | Fix the login redirect". */
