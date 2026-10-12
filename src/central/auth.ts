@@ -5,7 +5,7 @@
 // Pending codes live in memory only; a restart invalidates them.
 import { randomBytes, randomInt } from "node:crypto"
 import type { EnrollPoll, EnrollStart } from "../protocol"
-import { newToken, type DeviceRecord, type Store } from "./store"
+import { LOCAL_USER, newToken, type DeviceRecord, type Store } from "./store"
 
 export class RateLimitError extends Error {
   constructor(message = "Too many attempts; try again in a minute") {
@@ -84,6 +84,14 @@ interface Enrollment {
   created: number
   expiresAt: number
   status: "pending" | "approved" | "denied"
+  /** The approver: owner of the machine created on the next poll. */
+  ownerID?: string
+}
+
+/** A pending pairing code or login link and the user its device will belong to. */
+interface Grant {
+  readonly expiresAt: number
+  readonly ownerID: string
 }
 
 export interface PendingEnrollment {
@@ -97,6 +105,8 @@ export interface AuthOptions {
   readonly store: Store
   readonly publicURL: string
   readonly now?: () => number
+  /** oidc: no bootstrap pairing code (devices are created by sign-in or by a machine owner). */
+  readonly mode?: "pairing" | "oidc"
 }
 
 export class Auth {
@@ -104,8 +114,9 @@ export class Auth {
   private readonly publicURL: string
   private readonly now: () => number
   private readonly enrollments = new Map<string, Enrollment>() // by deviceCode
-  private readonly pairCodes = new Map<string, number>() // code → expiresAt
-  private readonly loginCodes = new Map<string, number>()
+  private readonly pairCodes = new Map<string, Grant>()
+  private readonly loginCodes = new Map<string, Grant>()
+  private readonly mode: "pairing" | "oidc"
   private readonly enrollLimiter: Limiter
   private readonly pairFailures: Limiter
 
@@ -113,6 +124,7 @@ export class Auth {
     this.store = options.store
     this.publicURL = options.publicURL
     this.now = options.now ?? Date.now
+    this.mode = options.mode ?? "pairing"
     this.enrollLimiter = new Limiter(5, 60_000, this.now)
     this.pairFailures = new Limiter(10, 60_000, this.now)
   }
@@ -153,7 +165,7 @@ export class Auth {
     if (enrollment.status === "pending") return { status: "pending" }
     this.enrollments.delete(enrollment.deviceCode)
     if (enrollment.status === "denied") return { status: "denied" }
-    const { machine, token } = this.store.addMachine(enrollment.machineName)
+    const { machine, token } = this.store.addMachine(enrollment.machineName, enrollment.ownerID ?? LOCAL_USER)
     return { status: "approved", machineID: machine.id, machineToken: token }
   }
 
@@ -164,75 +176,96 @@ export class Auth {
       .map(({ userCode, machineName, created, expiresAt }) => ({ userCode, machineName, created, expiresAt }))
   }
 
-  approveEnrollment(code: string): boolean {
-    return this.decide(code, "approved")
+  /** Approves a pending enrollment; `ownerID` (the approver) will own the machine. */
+  approveEnrollment(code: string, ownerID: string = LOCAL_USER): boolean {
+    return this.decide(code, "approved", ownerID) !== undefined
   }
 
   denyEnrollment(code: string): boolean {
-    return this.decide(code, "denied")
+    return this.decide(code, "denied") !== undefined
   }
 
-  private decide(code: string, status: "approved" | "denied"): boolean {
+  /** Approves or denies a pending enrollment; the machine name, or undefined when no such code is pending. */
+  decide(code: string, status: "approved" | "denied", ownerID: string = LOCAL_USER): string | undefined {
     this.sweep()
     const wanted = normalizeUserCode(code)
     for (const enrollment of this.enrollments.values()) {
       if (enrollment.userCode === wanted && enrollment.status === "pending") {
         enrollment.status = status
-        return true
+        if (status === "approved") enrollment.ownerID = ownerID
+        return enrollment.machineName
       }
     }
-    return false
+    return undefined
   }
 
   // ---------- device pairing ----------
 
-  issuePairCode(): { code: string; expiresAt: number } {
+  /** A pairing code; the device it pairs belongs to `ownerID`. */
+  issuePairCode(ownerID: string = LOCAL_USER): { code: string; expiresAt: number } {
     this.sweep()
     let code = String(randomInt(1_000_000)).padStart(6, "0")
     while (this.pairCodes.has(code)) code = String(randomInt(1_000_000)).padStart(6, "0")
     const expiresAt = this.now() + PAIR_TTL_MS
-    this.pairCodes.set(code, expiresAt)
+    this.pairCodes.set(code, { expiresAt, ownerID })
     return { code, expiresAt }
   }
 
-  /** A pairing code for the first device, or undefined once any device exists. */
+  /** A pairing code for the first device (pairing mode only), or undefined once any device exists. */
   bootstrapCode(): { code: string; expiresAt: number } | undefined {
-    return this.store.devices().length === 0 ? this.issuePairCode() : undefined
+    return this.mode === "pairing" && this.store.devices().length === 0 ? this.issuePairCode(LOCAL_USER) : undefined
   }
 
-  /** Redeems a pairing code. Throws RateLimitError after too many recent failures. */
+  /**
+   * Redeems a pairing code. Throws RateLimitError after too many recent failures. A code whose owner
+   * is gone or disabled counts as invalid.
+   */
   pair(code: unknown, deviceName: unknown): { device: DeviceRecord; token: string } | undefined {
     if (!this.pairFailures.allowed()) throw new RateLimitError()
     this.sweep()
     const key = typeof code === "string" ? code.trim() : ""
-    if (!this.pairCodes.has(key)) {
+    const grant = this.pairCodes.get(key)
+    if (!grant) {
       this.pairFailures.hit()
       return undefined
     }
     this.pairCodes.delete(key)
-    return this.store.addDevice(name(deviceName, "device name", "Device"))
+    if (!this.active(grant.ownerID)) return undefined
+    return this.store.addDevice(name(deviceName, "device name", "Device"), grant.ownerID)
   }
 
   // ---------- login links ----------
 
-  issueLoginCode(): { code: string; expiresAt: number } {
+  /** A single-use login link code; it signs a browser in as `ownerID`. */
+  issueLoginCode(ownerID: string = LOCAL_USER): { code: string; expiresAt: number } {
     const code = randomBytes(32).toString("base64url")
     const expiresAt = this.now() + LOGIN_TTL_MS
-    this.loginCodes.set(code, expiresAt)
+    this.loginCodes.set(code, { expiresAt, ownerID })
     return { code, expiresAt }
   }
 
-  redeemLoginCode(code: unknown): boolean {
+  /** Redeems a login code: the user to sign in as, or undefined (unknown, used, expired, or owner disabled). */
+  redeemLogin(code: unknown): string | undefined {
     this.sweep()
-    if (typeof code !== "string" || !this.loginCodes.has(code)) return false
-    this.loginCodes.delete(code)
-    return true
+    const grant = typeof code === "string" ? this.loginCodes.get(code) : undefined
+    if (!grant) return undefined
+    this.loginCodes.delete(code as string)
+    return this.active(grant.ownerID) ? grant.ownerID : undefined
+  }
+
+  redeemLoginCode(code: unknown): boolean {
+    return this.redeemLogin(code) !== undefined
+  }
+
+  private active(userID: string): boolean {
+    const user = this.store.user(userID)
+    return user !== undefined && !user.disabled
   }
 
   private sweep(): void {
     const t = this.now()
     for (const [key, e] of this.enrollments) if (e.expiresAt < t) this.enrollments.delete(key)
-    for (const [key, exp] of this.pairCodes) if (exp < t) this.pairCodes.delete(key)
-    for (const [key, exp] of this.loginCodes) if (exp < t) this.loginCodes.delete(key)
+    for (const [key, grant] of this.pairCodes) if (grant.expiresAt < t) this.pairCodes.delete(key)
+    for (const [key, grant] of this.loginCodes) if (grant.expiresAt < t) this.loginCodes.delete(key)
   }
 }

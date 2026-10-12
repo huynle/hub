@@ -110,7 +110,8 @@ export class SpokeHub {
   upgrade(request: Request, server: Server<SpokeSocketData>): Response | undefined {
     const match = /^Bearer\s+(\S+)$/i.exec(request.headers.get("authorization") ?? "")
     const machine = match?.[1] ? this.options.store.findMachine(match[1]) : undefined
-    if (!machine) return Response.json({ error: "Invalid or revoked machine token" }, { status: 401 })
+    const owner = machine && this.options.store.user(machine.ownerID)
+    if (!machine || !owner || owner.disabled) return Response.json({ error: "Invalid or revoked machine token" }, { status: 401 })
     const data: SpokeSocketData = {
       connID: newID("conn"),
       machineID: machine.id,
@@ -211,18 +212,25 @@ export class SpokeHub {
 
   private async answer(ws: Socket, frame: Req<SpokeRequest>): Promise<void> {
     try {
-      const result = await this.handle(frame.req)
+      const result = await this.handle(ws, frame.req)
       this.send(ws, { t: "res", id: frame.id, ok: true, result })
     } catch (cause) {
       this.send(ws, { t: "res", id: frame.id, ok: false, error: cause instanceof Error ? cause.message : String(cause) })
     }
   }
 
-  private async handle(req: SpokeRequest): Promise<ResultFor[SpokeRequest["op"]]> {
+  /** The machine's current owner (read live: ownership can move, e.g. on migration). */
+  ownerOf(machineID: string): string | undefined {
+    return this.options.store.machines().find((m) => m.id === machineID)?.ownerID
+  }
+
+  private async handle(ws: Socket, req: SpokeRequest): Promise<ResultFor[SpokeRequest["op"]]> {
     const { auth, publicURL } = this.options
+    const owner = this.ownerOf(ws.data.machineID)
+    if (!owner) throw new Error("This machine is no longer enrolled")
     switch (req.op) {
       case "pairCode": {
-        const { code, expiresAt } = auth.issuePairCode()
+        const { code, expiresAt } = auth.issuePairCode(owner)
         return { code, url: `${publicURL}/pair`, expiresAt }
       }
       case "handoff": {
@@ -231,7 +239,7 @@ export class SpokeHub {
         return { notified: await this.options.notifier.notify("handoff", req.sessionID, title) }
       }
       case "openLink": {
-        const { code } = auth.issueLoginCode()
+        const { code } = auth.issueLoginCode(owner)
         const next = req.sessionID ? `/s/${encodeURIComponent(req.sessionID)}` : "/"
         return { url: `${publicURL}/login?code=${code}&next=${next}` }
       }

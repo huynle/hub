@@ -157,7 +157,7 @@ export function startCentral(options: CentralOptions): Central {
   const origins = loopbackOrigins(publicURL)
   const secure = publicURL.startsWith("https:")
 
-  auth = new Auth({ store, publicURL })
+  auth = new Auth({ store, publicURL, now, mode: config.auth.mode })
   const oidc = config.auth.mode === "oidc" ? new OidcClient({ config: config.auth, publicURL, fetch: options.fetch, now }) : undefined
   spokes = new SpokeHub({
     store,
@@ -289,7 +289,7 @@ export function startCentral(options: CentralOptions): Central {
       }
       if (method === "POST" && pathname === "/spoke/enroll") {
         const start = auth.startEnrollment((await body(request)).machineName)
-        const auto = localAutoApprove({
+        const auto = config.auth.mode === "pairing" && localAutoApprove({
           host: config.host,
           publicURL,
           peer: server.requestIP(request)?.address,
@@ -328,7 +328,8 @@ export function startCentral(options: CentralOptions): Central {
   function login(request: Request, url: URL): Response {
     const next = url.searchParams.get("next") ?? "/"
     if (!LOGIN_NEXT.test(next)) return error(400, "Invalid next path")
-    if (!auth.redeemLoginCode(url.searchParams.get("code"))) {
+    const ownerID = auth.redeemLogin(url.searchParams.get("code"))
+    if (!ownerID) {
       return new Response("This sign-in link has expired or was already used. Run /voice again.", {
         status: 401,
         headers: { "content-type": "text/plain; charset=utf-8" },
@@ -337,7 +338,12 @@ export function startCentral(options: CentralOptions): Central {
     // Speech not usable yet (e.g. no key): land on the page's speech setup (web/app.js opens it for #speech).
     const setup = speechSettings.view().ready.reason ? "#speech" : ""
     const headers = new Headers({ location: `${next}${setup}`, "cache-control": "no-store" })
-    if (!deviceFor(request)) headers.set("set-cookie", cookie(store.addDevice("Browser (sign-in link)").token))
+    // A link signs in as the machine's owner: a browser signed in as someone else gets a new device.
+    if (deviceFor(request)?.user.id !== ownerID) {
+      const { device, token } = store.addDevice("Browser (sign-in link)", ownerID)
+      store.audit({ actor: ownerID, action: "device.pair", target: device.id, detail: "login link" })
+      headers.set("set-cookie", cookie(token))
+    }
     return new Response(null, { status: 302, headers })
   }
 
@@ -354,6 +360,7 @@ export function startCentral(options: CentralOptions): Central {
       const input = await body(request)
       const paired = auth.pair(input.code, input.deviceName)
       if (!paired) return error(401, "Invalid or expired pairing code")
+      store.audit({ actor: paired.device.ownerID, action: "device.pair", target: paired.device.id })
       return Response.json({ device: deviceView(paired.device) }, { headers: { "set-cookie": cookie(paired.token) } })
     }
 
@@ -470,8 +477,10 @@ export function startCentral(options: CentralOptions): Central {
     }
     if ((match = /^\/api\/enrollments\/([^/]+)\/(approve|deny)$/.exec(pathname)) && method === "POST") {
       const code = param(match[1]!)
-      const done = match[2] === "approve" ? auth.approveEnrollment(code) : auth.denyEnrollment(code)
-      if (!done) return error(404, "No pending enrollment with that code")
+      const status = match[2] === "approve" ? "approved" : "denied"
+      const machineName = auth.decide(code, status, user.id)
+      if (machineName === undefined) return error(404, "No pending enrollment with that code")
+      store.audit({ actor: user.id, action: status === "approved" ? "machine.approve" : "machine.deny", detail: machineName })
       broadcast({ type: "enrollment" })
       return new Response(null, { status: 204 })
     }
