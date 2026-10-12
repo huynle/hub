@@ -151,16 +151,18 @@ Speech, the web page and phones live on the central server.
 | Entry | File | Role |
 |---|---|---|
 | server | `server.ts` → `src/index.ts` | Starts the process-wide spoke (`src/spoke/`), `voice.*` RPC, the `voice` agent, short-reply and orchestrator `context` hook |
-| tui | `tui.ts` → `src/tui.ts` | `/voice` dialog |
-| rpc | `rpc.ts` → `src/rpc.ts` | `voice.status / setServer / checkServer / enroll / startLocalHub / setMode / setSession / pairCode / handoff / openLink / conversation` |
+| tui | `tui.ts` → `src/tui.ts` | `/voice` dialog; reports the sessions it shows (`voice.presence`) |
+| rpc | `rpc.ts` → `src/rpc.ts` | `voice.status / setServer / checkServer / enroll / startLocalHub / setMode / setSession / pairCode / handoff / openLink / conversation / presence` |
 
 OpenCode resolves a local plugin directory as `<dir>/server`, `<dir>/tui` and `<dir>/rpc` (`package.json`
 `main` is ignored), and an installed package through its `exports` (`./server`, `./tui`, `./rpc`).
 
 - **Config**: `~/.config/opencode-voice/config.json` (or `$OPENCODE_VOICE_CONFIG`), shared by all
   processes on the machine, mode 0600, watched live. Holds the server URL, mode, machine token,
-  `subagent` (the agent conversation mode delegates to; default `general`, `[A-Za-z0-9_.-]+`), and
-  `autoStartLocalHub` (default `true`; see [Local only](#local-only)).
+  `subagent` (the agent conversation mode delegates to; default `general`, `[A-Za-z0-9_.-]+`),
+  `autoStartLocalHub` (default `true`; see [Local only](#local-only)), `herdr` (default `true`; read open
+  sessions and workspaces from [Herdr](#open-sessions-herdr-and-tuis)), and `list` (the history window,
+  default `{"days": 30, "max": 100}`; days 1–365, max 1–500; out-of-range values fall back per field).
 - **Modes**: `off` (no connection), `always` (every session this process knows), `session` (only
   sessions switched on in `/voice` or from the phone, plus their subagent sessions). In `session` mode the
   other root sessions are still listed (`exposed: false`) so the phone can offer "Enable voice"; their
@@ -176,16 +178,42 @@ OpenCode resolves a local plugin directory as `<dir>/server`, `<dir>/tui` and `<
   While speech is not usable (see `ready` below) the hub redirects to `<next>#speech`, and the page opens
   Settings → Speech.
 - One active spoke per process (`globalThis` singleton); the shared background service
-  (`opencode serve --service`) also lists its 500 most recent root sessions (no subagent children, nothing
-  archived; `src/spoke/listing.ts`), each with its workspace: `project` = the OpenCode project root
+  (`opencode serve --service`) also lists its root sessions from the last `list.days` days, at most
+  `list.max`, newest first (no subagent children, nothing archived; `src/spoke/listing.ts`), plus sessions
+  that are always listed whatever their age: open in a terminal, running or blocked, in conversation mode,
+  and voice-enabled sessions in `session` mode (fetched one by one when the window misses them). Each comes
+  with its workspace: `project` = the OpenCode project root
   (worktrees map to their repository), else the directory minus its `subpath`; `projectName` = the
   project name or the root's basename. It re-lists every 60 s and 2 s after `session.created/renamed/deleted`.
   Snapshots are capped at 500 sessions / 900 kB (exposed, then most recent, are kept).
 - **Session browser ops**: `expose {sessionID, on}` (any process, only sessions it reported; in `session`
   mode it edits the config's session list, which every process watches; `always` answers `exposed: true`)
-  and `create {directory, title?}` (service process only; `directory` must be a reported workspace root or
-  session directory, else `unknown workspace`; in `session` mode the new session is exposed). Both send a
-  fresh snapshot before answering.
+  and `create {directory, title?, herdrWorkspace?}` (service process only; `directory` must be a reported
+  workspace root or session directory, or a folder of a Herdr pane, else `unknown workspace`; in `session`
+  mode the new session is exposed). Both send a fresh snapshot before answering. With `herdrWorkspace` the
+  service then opens the session in Herdr (below) and answers `{sessionID, openedIn: "herdr"}`, or
+  `{sessionID, warning}` when Herdr failed (the session exists either way).
+
+### Open sessions (Herdr and TUIs)
+
+Sessions open in a terminal are reported with `open: true` and `terminal` (`src/spoke/herdr.ts`,
+`src/spoke/presence.ts`, `src/tui-presence.ts`):
+
+- **Herdr**: the background service's spoke runs `herdr agent list` every 5 s and `herdr workspace list` +
+  `herdr pane list` every 30 s (3 s timeout each). Every `opencode` pane with a session ID is open with
+  `terminal: {source: "herdr", workspaceID, workspace (label), title (pane title without "OC | "),
+  status}`. It sends a `terminals` frame with the Herdr workspaces in Herdr's order, each with its pane
+  folders, most used first. No `herdr`, its server down, or `"herdr": false`: no Herdr data, silently.
+  Standalone processes never read Herdr (one reader per machine); a machine without a background service
+  only gets TUI presence.
+- **TUIs**: the TUI plugin reports the root of the session it shows and its open tabs (when session tabs
+  are on) to its server's spoke with `voice.presence({sessionIDs, reporter})` on change (polled every 2 s)
+  and every 15 s. A session is open while some TUI reported it within 45 s (`terminal: {source: "tui"}`);
+  a TUI's report replaces its previous one, so a closed tab stops counting at once. Herdr wins when both
+  apply.
+- **Opening in Herdr** (`create` with `herdrWorkspace`): `herdr tab create --workspace <id> --cwd <dir>
+  [--label <title>] --no-focus`, then in its root pane `herdr agent start <title-slug>-<id-tail> --kind
+  opencode --pane <pane> --timeout 20000 -- --session <sessionID>`. The hub waits up to 45 s for this op.
 
 ## Conversation mode (OpenCode side)
 
@@ -424,14 +452,19 @@ the reported `id, title, directory, parentID?, updated, owned, status, busy, con
 `exposed` (any process exposes it), `project?`, `projectName?`, `processID`, `machineID`, `state` (whole
 subtree: `blocked` if anything waits for the user, else `error` (own), `working`, `idle`), `blockers[]`
 (`{kind, id, summary, sessionID, sessionTitle}` for the subtree) and `now?` (`{kind: "tool" | "thinking",
-tool?, summary?}`, the latest running activity item). `now` and `state` are snapshots: the phone follows
+tool?, summary?}`, the latest running activity item), and `open?` / `terminal?` as the process reported them
+(`GET /api/sessions/:id`: open from any reporting process, Herdr first). Machines carry `terminals?:
+{herdr?: {workspaces: [{id, label, directories}]}}`, the latest `terminals` frame of the machine, while
+the process that sent it is connected. `now` and `state` are snapshots: the phone follows
 SSE `activity` and `status` for live changes. Unexposed sessions have no status board (`status: []`,
 `state: "idle"`). An unchanged sessions frame does not re-broadcast the catalog.
 
 | Route | Spoke op | Result |
 |---|---|---|
 | `POST /api/sessions/:id/expose {on}` | `expose` | `200 {exposed}` from a reporting process (service first). 400 bad body, 404 not reported, 502 spoke error |
-| `POST /api/machines/:machineID/sessions {directory, title?}` | `create` | `201 {sessionID}` from the machine's service process. 400 bad input or `unknown workspace` (not a workspace root or session directory that process reported), 404 unknown machine, 409 no service process connected |
+| `POST /api/machines/:machineID/sessions {directory, title?, herdrWorkspace?}` | `create` | `201 {sessionID, openedIn?: "herdr", warning?}` from the machine's service process; with `herdrWorkspace` (≤ 100 characters) the session is also opened in a new tab of that Herdr workspace, and when that fails the answer has a `warning` instead of `openedIn`. 400 bad input or `unknown workspace` (not a workspace root, session directory or Herdr pane folder of that machine), 404 unknown machine, 409 no service process connected |
+| `GET /api/prefs/view` | – | `{prefs: {hiddenSessions, hiddenWorkspaces, pinnedSessions, pinnedWorkspaces}}`, the caller's view preferences (pairing mode: the single user) |
+| `PUT /api/prefs/view {any of the four lists}` | – | Replaces the lists given (each ≤ 500 non-empty strings of ≤ 4096 characters, duplicates dropped; other keys 400). Stored on the user record; SSE `{type: "prefs", prefs}` goes to the user's other devices (never to other users, not to the device that changed them) |
 
 For a session reported only with `exposed: false`, `turn`, `utterance`, `interrupt`, `conversation`,
 `permission` and `context` answer `403 {error: "Voice is not enabled for this session", code: "not_exposed"}`;
