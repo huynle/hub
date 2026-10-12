@@ -242,3 +242,55 @@ export function hiddenView(machines, prefs) {
   sessions.sort((a, b) => b.updated - a.updated)
   return { workspaces, sessions, unknown: ids.size - new Set(sessions.map((r) => r.id)).size }
 }
+
+// ---------- new session ----------
+
+const MAX_FOLDERS = 50
+const TITLE_MAX = 200
+
+/**
+ * Where a new session can go on a machine: Herdr workspaces first (Herdr's order, with their pane folders),
+ * then other known folders (session folders and project roots, not already under a Herdr workspace), most
+ * recently active first. `herdr` says whether the machine reports Herdr ("Open in Herdr" toggle).
+ */
+export function newSessionTargets(machine) {
+  const herdr = herdrWorkspaces(machine).map((w) => ({
+    kind: "herdr",
+    key: `herdr:${w.id}`,
+    workspaceID: w.id,
+    label: w.label || w.id,
+    directories: [...(w.directories ?? [])],
+  }))
+  const taken = new Set(herdr.flatMap((t) => t.directories.map(trimSlash)))
+  const sessions = roots(machine)
+  const activity = new Map()
+  const names = new Map()
+  for (const s of sessions) {
+    const dir = trimSlash(s.directory)
+    if (!dir) continue
+    activity.set(dir, Math.max(activity.get(dir) ?? 0, s.updated ?? 0))
+    names.set(dir, whereOf(s))
+  }
+  for (const s of sessions) {
+    const root = trimSlash(s.project)
+    if (!root || names.has(root)) continue
+    const latest = Math.max(...sessions.filter((x) => trimSlash(x.project) === root).map((x) => x.updated ?? 0))
+    activity.set(root, latest)
+    names.set(root, s.projectName || basename(root))
+  }
+  const folders = [...activity.entries()]
+    .filter(([dir]) => !taken.has(dir))
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, MAX_FOLDERS)
+    .map(([dir]) => ({ kind: "folder", key: dir, label: names.get(dir), directories: [dir] }))
+  return { herdr: !!machine?.terminals?.herdr, targets: [...herdr, ...folders] }
+}
+
+/** Body of POST /api/machines/:id/sessions. */
+export function createBody({ target, directory, title, openInHerdr }) {
+  const body = { directory }
+  const name = String(title ?? "").trim().slice(0, TITLE_MAX)
+  if (name) body.title = name
+  if (openInHerdr && target?.kind === "herdr" && target.workspaceID) body.herdrWorkspace = target.workspaceID
+  return body
+}

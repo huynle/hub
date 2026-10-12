@@ -88,3 +88,18 @@ export function groupKey(s: ViewSession): string
 export function homeView(machines: ViewMachine[], prefs: ViewPrefs, options?: { now?: number }): HomeView
 export function recentMachine<M extends ViewMachine>(machine: M, prefs: ViewPrefs): M
 export function hiddenView(machines: ViewMachine[], prefs: ViewPrefs): HiddenView
+
+export interface NewSessionTarget {
+  readonly kind: "herdr" | "folder"
+  /** Same as the Open tab's group key (`herdr:<id>` or the folder). */
+  readonly key: string
+  readonly workspaceID?: string
+  readonly label: string
+  readonly directories: string[]
+}
+export function newSessionTargets(machine: ViewMachine): { herdr: boolean; targets: NewSessionTarget[] }
+export function createBody(options: { target?: NewSessionTarget; directory: string; title?: string; openInHerdr?: boolean }): {
+  directory: string
+  title?: string
+  herdrWorkspace?: string
+}

@@ -1,7 +1,7 @@
 // Session view (0.4.0, docs/session-view.md): open sessions first. Synced view prefs (hide/pin), migration of
 // 0.3 local pins, Open / Recent / Hidden split, Herdr-like grouping and ordering, status dots, new-session targets.
 import { describe, expect, test } from "bun:test"
-import { dotState, groupKey, hiddenView, homeView as typedHomeView, migratePins, normalizePrefs, recentMachine, setPref } from "../web/view-core.js"
+import { createBody, dotState, groupKey, newSessionTargets, hiddenView, homeView as typedHomeView, migratePins, normalizePrefs, recentMachine, setPref } from "../web/view-core.js"
 
 type S = any
 const homeView = (...args: Parameters<typeof typedHomeView>): S => typedHomeView(...args)
@@ -233,5 +233,39 @@ describe("home view: hidden sessions and workspaces", () => {
     ])
     expect(v.sessions.map((r: S) => [r.id, r.title, r.machineID])).toEqual([[c.id, "Old spike", "mac_1"]])
     expect(v.unknown).toBe(1) // hidden IDs no machine reports right now
+  })
+})
+
+describe("new session", () => {
+  test("targets: Herdr workspaces in Herdr's order with their folders, then other known folders by latest activity", () => {
+    const a = ses({ directory: `${P}/blog`, project: `${P}/blog`, projectName: "blog", updated: NOW - 9 * MIN })
+    const b = ses({ directory: `${P}/blog/.worktrees/dark`, project: `${P}/blog`, projectName: "blog", updated: NOW - 2 * MIN })
+    const c = ses({ directory: `${P}/api-server`, project: `${P}/api-server`, projectName: "api-server", updated: NOW }) // offered under Herdr
+    const d = ses({ directory: "/tmp/scratch", project: undefined, projectName: undefined, updated: NOW - 50 * MIN })
+    const t = newSessionTargets(machine([a, b, c, d]))
+    expect(t.herdr).toBe(true)
+    expect(t.targets.map((x: S) => [x.kind, x.key, x.label, x.directories])).toEqual([
+      ["herdr", "herdr:w1", "general", [`${P}/general`]],
+      ["herdr", "herdr:w2", "api-server", [`${P}/api-server`, `${P}/api-server/.worktrees/feat-auth`]],
+      ["herdr", "herdr:w3", "research", []],
+      ["folder", `${P}/blog/.worktrees/dark`, "blog › .worktrees/dark", [`${P}/blog/.worktrees/dark`]],
+      ["folder", `${P}/blog`, "blog", [`${P}/blog`]],
+      ["folder", "/tmp/scratch", "scratch", ["/tmp/scratch"]],
+    ])
+    expect(t.targets[2]?.workspaceID).toBe("w3")
+  })
+
+  test("without Herdr: only folders, and herdr is false", () => {
+    const t = newSessionTargets(machine([ses()], { terminals: undefined }))
+    expect(t.herdr).toBe(false)
+    expect(t.targets.map((x: S) => x.key)).toEqual([`${P}/general`])
+  })
+
+  test("createBody: trimmed title, herdrWorkspace only for a Herdr target with Open in Herdr on", () => {
+    const herdrTarget = { kind: "herdr" as const, key: "herdr:w2", workspaceID: "w2", label: "api-server", directories: [] }
+    const folder = { kind: "folder" as const, key: "/tmp/x", label: "x", directories: ["/tmp/x"] }
+    expect(createBody({ target: herdrTarget, directory: `${P}/api-server`, title: "  Fix auth  ", openInHerdr: true })).toEqual({ directory: `${P}/api-server`, title: "Fix auth", herdrWorkspace: "w2" })
+    expect(createBody({ target: herdrTarget, directory: `${P}/api-server`, title: " ", openInHerdr: false })).toEqual({ directory: `${P}/api-server` })
+    expect(createBody({ target: folder, directory: "/tmp/x", title: "x".repeat(250), openInHerdr: true })).toEqual({ directory: "/tmp/x", title: "x".repeat(200) })
   })
 })
