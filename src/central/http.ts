@@ -8,13 +8,14 @@ import type { EnrollStart, PermissionDecision } from "../protocol"
 import { isLoopbackAddress, isLoopbackHost, isLoopbackURL, loopbackOrigins } from "../loopback"
 import { speakable } from "../speakable"
 import { Auth, RateLimitError, ValidationError } from "./auth"
-import type { CentralConfig } from "./config"
+import { emailAllowed, type CentralConfig } from "./config"
+import { authPage, cookieValue, deviceName, OIDC_COOKIE, OidcClient, OidcError } from "./oidc"
 import { Push, type PushSender } from "./push"
 import { BusyError, Registry } from "./registry"
 import { audioFormat, SpeechError } from "./speech/provider"
 import { SpeechService } from "./speech/service"
 import { RequestTimeoutError, SpokeError, SpokeHub, type Notifier, type SpokeSocketData } from "./spoke-ws"
-import { DEFAULT_PUSH_PREFS, Store, type DeviceRecord, type PushPrefs } from "./store"
+import { DEFAULT_PUSH_PREFS, Store, type DeviceRecord, type PushPrefs, type UserRecord } from "./store"
 
 export interface Speech {
   transcribe(audio: Uint8Array, format: string): Promise<string>
@@ -36,6 +37,8 @@ export interface CentralOptions {
   readonly notifier?: Notifier
   /** Overrides web-push delivery (tests; web-push itself needs https push services). */
   readonly pushSender?: PushSender
+  /** Clock for sign-in expiry and the store (tests). */
+  readonly now?: () => number
   readonly timing?: {
     readonly helloTimeoutMs?: number
     readonly requestTimeoutMs?: number
@@ -105,7 +108,8 @@ const error = (status: number, message: string, code?: string) =>
 export function startCentral(options: CentralOptions): Central {
   const { config } = options
   const web: WebAssets = options.web ?? diskAssets(options.webDir ?? path.join(import.meta.dir, "..", "..", "web"))
-  const store = Store.open(config.stateDir)
+  const now = options.now ?? Date.now
+  const store = Store.open(config.stateDir, now, { mode: config.auth.mode })
   const registry = new Registry()
   const push = new Push({ store, subject: config.vapidSubject, sender: options.pushSender })
   const notifier = options.notifier ?? push
@@ -154,6 +158,7 @@ export function startCentral(options: CentralOptions): Central {
   const secure = publicURL.startsWith("https:")
 
   auth = new Auth({ store, publicURL })
+  const oidc = config.auth.mode === "oidc" ? new OidcClient({ config: config.auth, publicURL, fetch: options.fetch, now }) : undefined
   spokes = new SpokeHub({
     store,
     auth,
@@ -192,15 +197,72 @@ export function startCentral(options: CentralOptions): Central {
   const cookie = (token: string, maxAge = COOKIE_MAX_AGE) =>
     `${COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secure ? "; Secure" : ""}`
 
-  const deviceFor = (request: Request): { device: DeviceRecord } | undefined => {
+  /** The device of the voice_device cookie and its user; undefined when unknown or the user is disabled. */
+  const deviceFor = (request: Request): { device: DeviceRecord; user: UserRecord } | undefined => {
     const header = request.headers.get("cookie") ?? ""
     for (const part of header.split(";")) {
       const [name, ...rest] = part.trim().split("=")
       if (name !== COOKIE) continue
       const device = store.findDevice(rest.join("="))
-      if (device) return { device }
+      if (!device) continue
+      const user = store.user(device.ownerID)
+      return user && !user.disabled ? { device, user } : undefined
     }
     return undefined
+  }
+
+  const oidcCookie = (state: string, maxAge: number) =>
+    `${OIDC_COOKIE}=${state}; HttpOnly; SameSite=Lax; Path=/auth; Max-Age=${maxAge}${secure ? "; Secure" : ""}`
+
+  async function authLogin(url: URL): Promise<Response> {
+    const { location, state } = await oidc!.login(url.searchParams.get("next"))
+    const headers = new Headers({ location, "cache-control": "no-store" })
+    headers.append("set-cookie", oidcCookie(state, 600))
+    return new Response(null, { status: 302, headers })
+  }
+
+  async function authCallback(request: Request, url: URL): Promise<Response> {
+    if (config.auth.mode !== "oidc") throw new Error("oidc is not configured")
+    const settings = config.auth
+    const cleared = { "set-cookie": oidcCookie("", 0) }
+    const deny = (status: number, title: string, message: string) => authPage(status, title, message, cleared)
+    let result: Awaited<ReturnType<OidcClient["callback"]>>
+    try {
+      result = await oidc!.callback(url.searchParams, cookieValue(request.headers.get("cookie"), OIDC_COOKIE))
+    } catch (cause) {
+      if (!(cause instanceof OidcError)) throw cause
+      if (cause.audited) store.audit({ actor: "system", action: "signin.denied", detail: cause.reason })
+      else console.warn(`[voice] sign-in refused: ${cause.reason}`)
+      return deny(cause.status, "Sign-in failed", cause.message)
+    }
+    const { identity, next } = result
+    if (!emailAllowed(settings, identity.email)) {
+      store.audit({ actor: "system", action: "signin.denied", target: identity.email, detail: "not allowed" })
+      return deny(403, "Not allowed", `${identity.email} is not allowed to use this voice hub. Ask its admin to add you.`)
+    }
+    const role = settings.admins.includes(identity.email) ? "admin" : "user"
+    const existing = store.userByEmail(identity.email)
+    if (existing?.disabled) {
+      store.audit({ actor: "system", action: "signin.denied", target: identity.email, detail: "disabled" })
+      return deny(403, "Account disabled", "Your account on this voice hub is disabled. Ask its admin.")
+    }
+    const user = store.upsertUser({ email: identity.email, ...(identity.name ? { name: identity.name } : {}), role })
+    if (user.role === "admin" && store.migrateLocal(user.id)) broadcast({ type: "catalog", machines: machines() })
+    const headers = new Headers({ "cache-control": "no-store" })
+    headers.append("set-cookie", cleared["set-cookie"])
+    const current = deviceFor(request)
+    let deviceID: string
+    if (current && current.user.id === user.id) deviceID = current.device.id
+    else {
+      const { device, token } = store.addDevice(deviceName(request.headers.get("user-agent")), user.id)
+      deviceID = device.id
+      headers.append("set-cookie", cookie(token))
+    }
+    store.audit({ actor: user.id, action: "signin", target: deviceID })
+    // Speech not usable yet (e.g. no key): land on the page's speech setup (web/app.js opens it for #speech).
+    const setup = !next.includes("#") && speechSettings.view().ready.reason ? "#speech" : ""
+    headers.set("location", `${next}${setup}`)
+    return new Response(null, { status: 302, headers })
   }
 
   /** CSRF guard for state-changing requests: Origin (or Referer) must be the public origin (any loopback name for a local hub). */
@@ -250,6 +312,11 @@ export function startCentral(options: CentralOptions): Central {
         return Response.json(poll)
       }
       if (method === "GET" && pathname === "/login") return login(request, url)
+      if (method === "GET" && pathname === "/api/auth") {
+        return Response.json({ mode: config.auth.mode, signIn: oidc ? "/auth/login" : null }, { headers: { "cache-control": "no-store" } })
+      }
+      if (oidc && method === "GET" && pathname === "/auth/login") return await authLogin(url)
+      if (oidc && method === "GET" && pathname === "/auth/callback") return await authCallback(request, url)
       if (pathname.startsWith("/api/")) return await api(request, server, pathname, method)
       if (method === "GET") return staticFile(pathname)
       return error(404, "Not found")
@@ -290,14 +357,22 @@ export function startCentral(options: CentralOptions): Central {
       return Response.json({ device: deviceView(paired.device) }, { headers: { "set-cookie": cookie(paired.token) } })
     }
 
-    const current = deviceFor(request)?.device
-    if (!current) return error(401, "This device is not paired")
+    const resolved = deviceFor(request)
+    if (!resolved) return error(401, "This device is not paired")
+    const { device: current, user } = resolved
     store.touchDevice(current.id)
+    store.touchUser(user.id)
 
     const route = `${method} ${pathname}`
     switch (route) {
       case "GET /api/me":
-        return Response.json({ device: deviceView(current), publicURL, version: options.version ?? "0.0.0" })
+        return Response.json({
+          device: deviceView(current),
+          user: userView(user),
+          auth: config.auth.mode,
+          publicURL,
+          version: options.version ?? "0.0.0",
+        })
       case "GET /api/machines":
         return Response.json({ machines: machines() })
       case "GET /api/events":
@@ -585,6 +660,10 @@ export function startCentral(options: CentralOptions): Central {
   }
 }
 
+function userView(user: UserRecord) {
+  return { id: user.id, ...(user.email ? { email: user.email } : {}), ...(user.name ? { name: user.name } : {}), role: user.role }
+}
+
 function deviceView(device: DeviceRecord) {
   return { id: device.id, name: device.name, created: device.created, lastSeen: device.lastSeen }
 }
@@ -641,6 +720,7 @@ function failure(cause: unknown): Response {
   if (cause instanceof SyntaxError) return error(400, "Invalid JSON")
   if (cause instanceof SpeechError) return error(502, cause.message)
   if (cause instanceof SpokeError) return error(502, cause.message)
+  if (cause instanceof OidcError) return authPage(cause.status, "Sign-in failed", cause.message)
   if (cause instanceof RequestTimeoutError) return error(504, cause.message)
   console.error("[voice] request failed:", cause)
   return error(500, cause instanceof Error ? cause.message : String(cause))
