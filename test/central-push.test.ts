@@ -94,12 +94,12 @@ describe("notify", () => {
 
   test("sends {kind, sessionID, title, body} with TTL 300 and high urgency; returns successful sends", async () => {
     setup()
-    expect(await push.notify("handoff", "ses_1", "mcp-gateway")).toBe(2)
+    expect(await push.notify("handoff", "ses_1", "api-server")).toBe(2)
     expect(fake.sent.map((s) => s.endpoint)).toEqual([sub(1).endpoint, sub(2).endpoint])
     const { payload, options } = fake.sent[0]!
     expect(Object.keys(payload).sort()).toEqual(["body", "kind", "sessionID", "title"])
     expect(payload).toMatchObject({ kind: "handoff", sessionID: "ses_1" })
-    expect(payload.title).toContain("mcp-gateway")
+    expect(payload.title).toContain("api-server")
     expect(options).toMatchObject({ TTL: 300, urgency: "high" })
     expect(options.vapidDetails).toEqual({
       subject: "mailto:admin@example.com",
@@ -111,11 +111,11 @@ describe("notify", () => {
   test("blocked titles say what is needed; finished is normal urgency", async () => {
     setup()
     store.setPushPrefs(phone, { finished: true })
-    await push.notify("blocked", "ses_1", "mcp-gateway", "permission")
+    await push.notify("blocked", "ses_1", "api-server", "permission")
     await push.notify("blocked", "ses_2", "docs", "form")
     await push.notify("finished", "ses_3", "build", "failed")
     const titles = fake.sent.map((s) => s.payload.title)
-    expect(titles).toContain("mcp-gateway needs permission")
+    expect(titles).toContain("api-server needs permission")
     expect(titles).toContain("docs has a question")
     expect(titles).toContain("build failed")
     expect(fake.sent.find((s) => s.payload.kind === "finished")!.options.urgency).toBe("normal")
@@ -158,15 +158,15 @@ describe("notify", () => {
   test("say pushes carry the spoken text (at most 180 chars) under the session title, high urgency, 10 s cooldown", async () => {
     setup()
     expect(SAY_COOLDOWN_MS).toBe(10_000)
-    expect(await push.notify("say", "ses_1", "mcp-gateway", undefined, `${"x".repeat(300)}`)).toBe(2)
+    expect(await push.notify("say", "ses_1", "api-server", undefined, `${"x".repeat(300)}`)).toBe(2)
     const { payload, options } = fake.sent[0]!
-    expect(payload).toEqual({ kind: "say", sessionID: "ses_1", title: "mcp-gateway", body: `${"x".repeat(179)}…` })
+    expect(payload).toEqual({ kind: "say", sessionID: "ses_1", title: "api-server", body: `${"x".repeat(179)}…` })
     expect(options.urgency).toBe("high")
     clock += 5_000
-    expect(await push.notify("say", "ses_1", "mcp-gateway", undefined, "next")).toBe(0)
+    expect(await push.notify("say", "ses_1", "api-server", undefined, "next")).toBe(0)
     clock += 5_000
     store.setPushPrefs(phone, { say: false })
-    expect(await push.notify("say", "ses_1", "mcp-gateway", undefined, "  Tests\n  pass.  ")).toBe(1)
+    expect(await push.notify("say", "ses_1", "api-server", undefined, "  Tests\n  pass.  ")).toBe(1)
     expect(fake.sent.at(-1)!.payload.body).toBe("Tests pass.")
   })
 

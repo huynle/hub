@@ -347,7 +347,7 @@ screen-off listening), Speech (STT/TTS providers), notification preferences, dev
 **Notifications** (web push, VAPID keys generated once and stored in the state file): hand-offs from the
 terminal and blocked sessions are on by default, "finished" (a root session's run succeeded or failed,
 except voice turns started from the page) is opt-in per device. Payloads are `{kind, sessionID, title,
-body}` with a short title only (e.g. "mcp-gateway needs permission"); at most one per session and kind
+body}` with a short title only (e.g. "api-server needs permission"); at most one per session and kind
 every 30 s; expired subscriptions (404/410) are pruned. "Read agent replies as notifications when the phone is locked"
 (push pref `say`) is opt-in per device: the hub pushes spoken replies while no phone shows the session.
 

@@ -97,7 +97,7 @@ describe("notifications", () => {
     const sent = pushHarness({ [subscription(9).endpoint]: 410 })
     await h.api("/api/push/subscribe", { method: "POST", json: { subscription: subscription() } })
     await h.api("/api/push/subscribe", { method: "POST", json: { subscription: subscription(9) } })
-    const client = await spoke(h, { sessions: [session("ses_1", { owned: true, title: "mcp-gateway" })] })
+    const client = await spoke(h, { sessions: [session("ses_1", { owned: true, title: "api-server" })] })
     client.send({ t: "req", id: "h1", req: { op: "handoff", sessionID: "ses_1" } })
     const res = await client.next((f) => f.t === "res" && f.id === "h1")
     expect(res).toEqual({ t: "res", id: "h1", ok: true, result: { notified: 1 } })
@@ -105,7 +105,7 @@ describe("notifications", () => {
     expect(sent[0]!.payload).toEqual({
       kind: "handoff",
       sessionID: "ses_1",
-      title: "mcp-gateway",
+      title: "api-server",
       body: expect.any(String),
     })
     const deviceToken = h.cookie.split("=")[1]!
@@ -117,13 +117,13 @@ describe("notifications", () => {
   test("a permission asked in a session pushes 'blocked'", async () => {
     const sent = pushHarness()
     await h.api("/api/push/subscribe", { method: "POST", json: { subscription: subscription() } })
-    const client = await spoke(h, { sessions: [session("ses_1", { owned: true, title: "mcp-gateway" })] })
+    const client = await spoke(h, { sessions: [session("ses_1", { owned: true, title: "api-server" })] })
     client.send({
       t: "event",
       event: { type: "permission.asked", data: { sessionID: "ses_1", id: "per_1", action: "bash", resources: ["secret cmd"] } },
     })
     await waitFor(() => sent.length === 1)
-    expect(sent[0]!.payload).toMatchObject({ kind: "blocked", sessionID: "ses_1", title: "mcp-gateway needs permission" })
+    expect(sent[0]!.payload).toMatchObject({ kind: "blocked", sessionID: "ses_1", title: "api-server needs permission" })
     expect(sent[0]!.raw).not.toContain("secret cmd")
   })
 
