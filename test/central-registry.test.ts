@@ -229,11 +229,11 @@ describe("alerts (push triggers)", () => {
   beforeEach(() => {
     registry.connect("c1", laptop, hello("p1"))
     registry.setSessions("c1", [
-      session("ses_1", { owned: true, title: "mcp-gateway" }),
+      session("ses_1", { owned: true, title: "api-server" }),
       session("ses_child", { parentID: "ses_1" }),
     ])
     registry.connect("c2", laptop, hello("p2", "service"))
-    registry.setSessions("c2", [session("ses_1", { title: "mcp-gateway" })])
+    registry.setSessions("c2", [session("ses_1", { title: "api-server" })])
     alerts = []
     registry.subscribeAlerts((alert) => alerts.push(alert))
   })
@@ -242,7 +242,7 @@ describe("alerts (push triggers)", () => {
     const asked = ev("permission.asked", { sessionID: "ses_child", id: "per_1", action: "bash", resources: ["rm -rf"] })
     registry.observe("c1", asked)
     registry.observe("c2", asked)
-    expect(alerts).toEqual([{ kind: "blocked", sessionID: "ses_1", title: "mcp-gateway", detail: "permission" }])
+    expect(alerts).toEqual([{ kind: "blocked", sessionID: "ses_1", title: "api-server", detail: "permission" }])
     expect(messages.some((m) => (m as any).type === "alert")).toBe(false)
   })
 
@@ -250,7 +250,7 @@ describe("alerts (push triggers)", () => {
     registry.observe("c1", ev("form.created", { form: { id: "frm_1", sessionID: "ses_1", title: "Pick" } }))
     registry.observe("c1", ev("form.created", { form: { id: "frm_1", sessionID: "ses_1", title: "Pick" } }))
     registry.observe("c1", ev("permission.asked", { sessionID: "ses_other", id: "per_9", action: "bash" }))
-    expect(alerts).toEqual([{ kind: "blocked", sessionID: "ses_1", title: "mcp-gateway", detail: "form" }])
+    expect(alerts).toEqual([{ kind: "blocked", sessionID: "ses_1", title: "api-server", detail: "form" }])
   })
 
   test("root execution succeeded/failed alerts finished; child sessions do not", () => {
@@ -259,8 +259,8 @@ describe("alerts (push triggers)", () => {
     registry.observe("c1", ev("session.execution.failed", { sessionID: "ses_1", error: { message: "x" } }))
     registry.observe("c1", ev("session.execution.interrupted", { sessionID: "ses_1" }))
     expect(alerts).toEqual([
-      { kind: "finished", sessionID: "ses_1", title: "mcp-gateway", detail: "succeeded" },
-      { kind: "finished", sessionID: "ses_1", title: "mcp-gateway", detail: "failed" },
+      { kind: "finished", sessionID: "ses_1", title: "api-server", detail: "succeeded" },
+      { kind: "finished", sessionID: "ses_1", title: "api-server", detail: "failed" },
     ])
   })
 
@@ -391,7 +391,7 @@ describe("presence and conversation-mode alerts", () => {
     t = 1_000_000
     registry = new Registry(() => t)
     registry.connect("c1", laptop, hello("p1"))
-    registry.setSessions("c1", [session("ses_1", { owned: true, title: "mcp-gateway" }), session("ses_kid", { parentID: "ses_1" })])
+    registry.setSessions("c1", [session("ses_1", { owned: true, title: "api-server" }), session("ses_kid", { parentID: "ses_1" })])
     alerts = []
     registry.subscribeAlerts((alert) => alerts.push(alert))
   })
@@ -425,8 +425,8 @@ describe("presence and conversation-mode alerts", () => {
     registry.observe("c1", ended("ses_kid", 0, "Subagent chatter."))
     registry.observe("c1", ev("session.execution.succeeded", { sessionID: "ses_1" }))
     expect(alerts).toEqual([
-      { kind: "say", sessionID: "ses_1", title: "mcp-gateway", text: "All tests pass." },
-      { kind: "finished", sessionID: "ses_1", title: "mcp-gateway", detail: "succeeded" },
+      { kind: "say", sessionID: "ses_1", title: "api-server", text: "All tests pass." },
+      { kind: "finished", sessionID: "ses_1", title: "api-server", detail: "succeeded" },
     ])
   })
 
@@ -434,7 +434,7 @@ describe("presence and conversation-mode alerts", () => {
     registry.setPresence("dev_a", "ses_1", true)
     registry.observe("c1", ended("ses_1", 0, "Hello."))
     registry.observe("c1", ev("session.execution.succeeded", { sessionID: "ses_1" }))
-    expect(alerts).toEqual([{ kind: "finished", sessionID: "ses_1", title: "mcp-gateway", detail: "succeeded" }])
+    expect(alerts).toEqual([{ kind: "finished", sessionID: "ses_1", title: "api-server", detail: "succeeded" }])
   })
 })
 
