@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.0
+
+Open sessions first: the phone now shows what is open in your terminals, like Herdr's sidebar, instead
+of every stored session.
+
+- **Open tab (default)**: sessions open in a terminal right now, grouped by Herdr workspace (or project
+  folder), with working / idle / blocked dots and "Needs you" on top. "Open" comes from Herdr (`herdr
+  agent list`, when installed) or from the OpenCode TUI itself (the plugin's TUI part reports the session
+  and tabs it shows), so it works without Herdr too.
+- **Recent tab**: the history window per machine — last 30 days, at most 100 sessions (config
+  `list: {days, max}`); open, running, blocked, conversation and voice-enabled sessions are always
+  included. Search and filters as before.
+- **Hide and pin** sessions and workspaces, synced across your devices (per user); a **Hidden** tab to
+  restore them.
+- **New session from the phone** in a Herdr workspace or folder; with Herdr it opens in a new tab of that
+  workspace (`opencode --session <id>`), so it appears in your terminal too.
+- CI runs each test file in its own process (works around an intermittent Bun 1.3.5 hang on Linux).
+
 ## 0.3.0
 
 One hub, several people. Each person signs in and sees only their own machines, sessions, phones and
