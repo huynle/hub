@@ -15,7 +15,7 @@ import { BusyError, Registry } from "./registry"
 import { audioFormat, SpeechError } from "./speech/provider"
 import { SpeechService } from "./speech/service"
 import { RequestTimeoutError, SpokeError, SpokeHub, type Notifier, type SpokeSocketData } from "./spoke-ws"
-import { DEFAULT_PUSH_PREFS, Store, type DeviceRecord, type PushPrefs, type UserRecord } from "./store"
+import { DEFAULT_PUSH_PREFS, LOCAL_USER, Store, type DeviceRecord, type PushPrefs, type UserRecord } from "./store"
 
 export interface Speech {
   transcribe(audio: Uint8Array, format: string): Promise<string>
@@ -184,7 +184,6 @@ export function startCentral(options: CentralOptions): Central {
     },
     fetch: options.fetch,
   })
-  const speech: Speech = options.speech ?? speechSettings
 
   // Assigned right after the server starts listening; no request can arrive before that.
   let publicURL = config.publicURL
@@ -214,7 +213,11 @@ export function startCentral(options: CentralOptions): Central {
   const secure = publicURL.startsWith("https:")
 
   auth = new Auth({ store, publicURL, now, mode: config.auth.mode })
-  const oidc = config.auth.mode === "oidc" ? new OidcClient({ config: config.auth, publicURL, fetch: options.fetch, now }) : undefined
+  // options.fetch is for speech providers only; sign-in always talks to the real issuer.
+  const oidc = config.auth.mode === "oidc" ? new OidcClient({ config: config.auth, publicURL, now }) : undefined
+  /** Speech settings scope of a user: "local" (pairing mode) uses the server default directly. */
+  const speechScope = (userID: string) => (userID === LOCAL_USER ? undefined : userID)
+  const speechFor = (userID: string): Speech => options.speech ?? speechSettings.forUser(speechScope(userID))
   spokes = new SpokeHub({
     store,
     auth,
@@ -317,7 +320,7 @@ export function startCentral(options: CentralOptions): Central {
     }
     store.audit({ actor: user.id, action: "signin", target: deviceID })
     // Speech not usable yet (e.g. no key): land on the page's speech setup (web/app.js opens it for #speech).
-    const setup = !next.includes("#") && speechSettings.view().ready.reason ? "#speech" : ""
+    const setup = !next.includes("#") && speechSettings.view(speechScope(user.id)).ready.reason ? "#speech" : ""
     headers.set("location", `${next}${setup}`)
     return new Response(null, { status: 302, headers })
   }
@@ -390,7 +393,7 @@ export function startCentral(options: CentralOptions): Central {
       })
     }
     // Speech not usable yet (e.g. no key): land on the page's speech setup (web/app.js opens it for #speech).
-    const setup = speechSettings.view().ready.reason ? "#speech" : ""
+    const setup = speechSettings.view(speechScope(ownerID)).ready.reason ? "#speech" : ""
     const headers = new Headers({ location: `${next}${setup}`, "cache-control": "no-store" })
     // A link signs in as the machine's owner: a browser signed in as someone else gets a new device.
     if (deviceFor(request)?.user.id !== ownerID) {
@@ -460,11 +463,11 @@ export function startCentral(options: CentralOptions): Central {
       store.removeDevice(device.id)
       return new Response(null, { status: 204, headers: { "set-cookie": cookie("", 0) } })
     }),
-    route("POST", "/api/transcribe", "user", ({ request }) => transcribe(request)),
-    route("POST", "/api/speak", "user", async ({ request }) => {
+    route("POST", "/api/transcribe", "user", ({ request, user }) => transcribe(request, speechFor(user.id))),
+    route("POST", "/api/speak", "user", async ({ request, user }) => {
       const text = speakable(String((await body(request)).text ?? ""), config.maxSpeechChars)
       if (!text) return error(400, "Nothing to speak")
-      return new Response(await speech.speak(text), { headers: { "content-type": "audio/mpeg" } })
+      return new Response(await speechFor(user.id).speak(text), { headers: { "content-type": "audio/mpeg" } })
     }),
     route("GET", "/api/push/key", "user", () => Response.json({ publicKey: push.publicKey() })),
     route("POST", "/api/push/subscribe", "user", async ({ request, device }) => {
@@ -491,22 +494,23 @@ export function startCentral(options: CentralOptions): Central {
     route("PUT", "/api/push/prefs", "user", async ({ request, device }) =>
       Response.json({ prefs: store.setPushPrefs(device.id, prefsInput(await body(request)) ?? {}) }),
     ),
-    route("GET", "/api/settings/speech", "user", () => Response.json(speechSettings.view(), { headers: NO_STORE })),
+    // The caller's own settings (pairing mode: the single owner's are the server default).
+    route("GET", "/api/settings/speech", "user", ({ user }) => Response.json(speechSettings.view(speechScope(user.id)), { headers: NO_STORE })),
     // Raw JSON: anything but an object is refused by the validator.
-    route("PUT", "/api/settings/speech", "user", async ({ request }) =>
-      Response.json(speechSettings.update(await request.json()), { headers: NO_STORE }),
+    route("PUT", "/api/settings/speech", "user", async ({ request, user }) =>
+      Response.json(speechSettings.update(await request.json(), speechScope(user.id)), { headers: NO_STORE }),
     ),
-    route("GET", "/api/settings/speech/models", "user", async ({ url }) => {
+    route("GET", "/api/settings/speech/models", "user", async ({ url, user }) => {
       const kind = url.searchParams.get("kind")
       if (kind !== "stt" && kind !== "tts") return error(400, "Expected kind=stt or kind=tts")
-      return Response.json(await speechSettings.models(kind))
+      return Response.json(await speechSettings.models(kind, speechScope(user.id)))
     }),
-    route("POST", "/api/settings/speech/test", "user", async ({ request }) => {
+    route("POST", "/api/settings/speech/test", "user", async ({ request, user }) => {
       const input = await body(request)
       if (input.kind === "stt") return error(501, "Testing speech-to-text is not supported; record something instead")
       if (input.kind !== "tts") return error(400, "Expected kind tts or stt")
       const text = speakable(typeof input.text === "string" ? input.text : "", SPEECH_TEST_MAX_CHARS - 1) || SPEECH_TEST_TEXT
-      return new Response(await speech.speak(text), { headers: { "content-type": "audio/mpeg", "cache-control": "no-store" } })
+      return new Response(await speechFor(user.id).speak(text), { headers: { "content-type": "audio/mpeg", "cache-control": "no-store" } })
     }),
 
     // sessions: the caller must own the session (else 404, like an unknown one)
@@ -779,7 +783,7 @@ export function startCentral(options: CentralOptions): Central {
     return new Response(null, { status: 204 })
   }
 
-  async function transcribe(request: Request): Promise<Response> {
+  async function transcribe(request: Request, speech: Speech): Promise<Response> {
     const format = audioFormat(request.headers.get("content-type"))
     if (!format) return error(415, `Unsupported audio type: ${request.headers.get("content-type")}`)
     if (Number(request.headers.get("content-length") ?? 0) > config.maxAudioBytes) {

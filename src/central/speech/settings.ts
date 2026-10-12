@@ -1,7 +1,8 @@
-// Owner-configurable speech settings (persisted in state.json): which provider, model, voice, key and
-// base URL to use for speech-to-text and text-to-speech. Precedence, per direction and field: the phone's
-// saved settings > hub.json (`speech`) > the hub's environment (OPENROUTER_API_KEY, VOICE_STT_MODEL,
-// VOICE_TTS_MODEL, VOICE_VOICE). Keys are only ever shown masked ({set, last4, source}).
+// Speech settings (persisted in state.json): which provider, model, voice, key and base URL to use for
+// speech-to-text and text-to-speech. Precedence, per direction and field: the user's own settings (multi-
+// user hubs) > the saved server default > hub.json (`speech`) > the hub's environment (OPENROUTER_API_KEY,
+// VOICE_STT_MODEL, VOICE_TTS_MODEL, VOICE_VOICE). Keys are only ever shown masked ({set, last4, source});
+// a user sees last4 of their own key only.
 import { ValidationError } from "../auth"
 import { OPENROUTER_BASE_URL } from "./openrouter"
 
@@ -41,7 +42,8 @@ export interface SpeechDefaults {
   readonly file?: StoredSpeech
 }
 
-export type KeySource = "settings" | "config" | "env" | "none"
+/** user: the caller's own key; settings: the saved server default; config: hub.json; env: OPENROUTER_API_KEY. */
+export type KeySource = "user" | "settings" | "config" | "env" | "none"
 
 export interface KeyView {
   readonly set: boolean
@@ -93,6 +95,20 @@ export interface SpeechView {
   readonly ready: SpeechReady
 }
 
+/** A user's own saved fields, key masked (source "user"). */
+export interface OwnSpeechView {
+  readonly stt: Omit<StoredStt, "apiKey"> & { readonly apiKey?: KeyView }
+  readonly tts: Omit<StoredTts, "apiKey"> & { readonly apiKey?: KeyView }
+}
+
+/** GET /api/settings/speech for a user of a multi-user hub: effective settings plus where they come from. */
+export interface UserSpeechView extends SpeechView {
+  readonly scope: "user"
+  /** The server default (keys: set and source only). */
+  readonly default: { readonly stt: SttView; readonly tts: TtsView }
+  readonly user: OwnSpeechView
+}
+
 /** Voices known to work, keyed by model ID prefix (voices are model-specific). */
 export const VOICE_HINTS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   "microsoft/mai-voice": ["en-US-Harper:MAI-Voice-2.1-Flash"],
@@ -139,61 +155,108 @@ export function layer<T extends StoredStt | StoredTts>(file: T | undefined, save
   return merged
 }
 
-function resolve(saved: StoredStt | StoredTts | undefined, merged: StoredStt | StoredTts | undefined, model: string, defaults: SpeechDefaults): Resolved {
+function resolve(
+  own: { user?: StoredStt | StoredTts; saved?: StoredStt | StoredTts },
+  merged: StoredStt | StoredTts | undefined,
+  model: string,
+  defaults: SpeechDefaults,
+): Resolved {
   const provider = merged?.provider ?? "openrouter"
   const envKey = provider === "openrouter" ? defaults.apiKey : undefined
-  const apiKey = merged?.apiKey ?? envKey
+  const key = merged?.apiKey
+  const apiKey = key ?? envKey
   return {
     provider,
     model: merged?.model ?? model,
     baseURL: merged?.baseURL ?? OPENROUTER_BASE_URL,
     ...(apiKey ? { apiKey } : {}),
-    keySource: saved?.apiKey ? "settings" : merged?.apiKey ? "config" : envKey ? "env" : "none",
+    keySource: key ? (own.user?.apiKey === key ? "user" : own.saved?.apiKey === key ? "settings" : "config") : envKey ? "env" : "none",
   }
 }
 
-export function resolveStt(stored: StoredSpeech, defaults: SpeechDefaults): ResolvedStt {
-  const stt = layer(defaults.file?.stt, stored.stt)
-  return { ...resolve(stored.stt, stt, defaults.sttModel, defaults), ...(stt?.language ? { language: stt.language } : {}) }
+/** One direction's layers merged: user over the saved server default over hub.json. */
+function merged<K extends "stt" | "tts">(kind: K, stored: StoredSpeech, defaults: SpeechDefaults, user?: StoredSpeech): StoredSpeech[K] {
+  const lower = layer(defaults.file?.[kind], stored[kind]) as StoredSpeech[K]
+  return user ? (layer(lower, user[kind]) as StoredSpeech[K]) : lower
 }
 
-export function resolveTts(stored: StoredSpeech, defaults: SpeechDefaults): ResolvedTts {
-  const tts = layer(defaults.file?.tts, stored.tts)
+/** The server default and hub.json merged: the layer under a user's own settings. */
+export function lowerLayers(stored: StoredSpeech, defaults: SpeechDefaults): StoredSpeech {
+  const stt = merged("stt", stored, defaults)
+  const tts = merged("tts", stored, defaults)
+  return { ...(stt ? { stt } : {}), ...(tts ? { tts } : {}) }
+}
+
+export function resolveStt(stored: StoredSpeech, defaults: SpeechDefaults, user?: StoredSpeech): ResolvedStt {
+  const stt = merged("stt", stored, defaults, user)
+  return { ...resolve({ user: user?.stt, saved: stored.stt }, stt, defaults.sttModel, defaults), ...(stt?.language ? { language: stt.language } : {}) }
+}
+
+export function resolveTts(stored: StoredSpeech, defaults: SpeechDefaults, user?: StoredSpeech): ResolvedTts {
+  const tts = merged("tts", stored, defaults, user)
   return {
-    ...resolve(stored.tts, tts, defaults.ttsModel, defaults),
+    ...resolve({ user: user?.tts, saved: stored.tts }, tts, defaults.ttsModel, defaults),
     voice: tts?.voice ?? defaults.voice,
     ...(tts?.speed !== undefined ? { speed: tts.speed } : {}),
   }
 }
 
-function keyView(resolved: Resolved): KeyView {
+/** `own`: last4 only for the caller's own key (user views), else for any key (the server default's view). */
+function keyView(resolved: Resolved, own?: "user"): KeyView {
   const key = resolved.apiKey
   if (!key) return { set: false, source: "none" }
-  return { set: true, ...(key.length >= 12 ? { last4: key.slice(-4) } : {}), source: resolved.keySource }
+  const last4 = key.length >= 12 && (own === undefined || resolved.keySource === "user")
+  return { set: true, ...(last4 ? { last4: key.slice(-4) } : {}), source: resolved.keySource }
 }
 
-/** Settings as shown to the phone: effective values, keys masked. */
+function sections(stored: StoredSpeech, defaults: SpeechDefaults, user: StoredSpeech | undefined, own?: "user") {
+  const stt = resolveStt(stored, defaults, user)
+  const tts = resolveTts(stored, defaults, user)
+  const sttView: SttView = {
+    provider: stt.provider,
+    model: stt.model,
+    ...(merged("stt", stored, defaults, user)?.baseURL ? { baseURL: stt.baseURL } : {}),
+    ...(stt.language ? { language: stt.language } : {}),
+    apiKey: keyView(stt, own),
+  }
+  const ttsView: TtsView = {
+    provider: tts.provider,
+    model: tts.model,
+    voice: tts.voice,
+    ...(merged("tts", stored, defaults, user)?.baseURL ? { baseURL: tts.baseURL } : {}),
+    ...(tts.speed !== undefined ? { speed: tts.speed } : {}),
+    apiKey: keyView(tts, own),
+  }
+  return { stt: sttView, tts: ttsView, ready: speechReady(stt, tts) }
+}
+
+/** Settings as shown to the phone (the server default's scope): effective values, keys masked. */
 export function speechView(stored: StoredSpeech, defaults: SpeechDefaults): SpeechView {
-  const stt = resolveStt(stored, defaults)
-  const tts = resolveTts(stored, defaults)
+  const { stt, tts, ready } = sections(stored, defaults, undefined)
+  return { stt, tts, voiceHints: VOICE_HINTS, ready }
+}
+
+/**
+ * A user's view: effective settings (own → server default → hub.json → env), the server default and the
+ * user's own fields. Keys that are not the user's own show only whether they are set and where from.
+ */
+export function userSpeechView(stored: StoredSpeech, defaults: SpeechDefaults, user: StoredSpeech): UserSpeechView {
+  const { stt, tts, ready } = sections(stored, defaults, user, "user")
+  const fallback = sections(stored, defaults, undefined, "user")
+  const own = <T extends StoredStt | StoredTts>(section: T | undefined) => {
+    const { apiKey, ...rest } = section ?? ({} as T)
+    const view = { ...rest } as Omit<T, "apiKey"> & { apiKey?: KeyView }
+    if (apiKey) view.apiKey = { set: true, ...(apiKey.length >= 12 ? { last4: apiKey.slice(-4) } : {}), source: "user" }
+    return view
+  }
   return {
-    stt: {
-      provider: stt.provider,
-      model: stt.model,
-      ...(layer(defaults.file?.stt, stored.stt)?.baseURL ? { baseURL: stt.baseURL } : {}),
-      ...(stt.language ? { language: stt.language } : {}),
-      apiKey: keyView(stt),
-    },
-    tts: {
-      provider: tts.provider,
-      model: tts.model,
-      voice: tts.voice,
-      ...(layer(defaults.file?.tts, stored.tts)?.baseURL ? { baseURL: tts.baseURL } : {}),
-      ...(tts.speed !== undefined ? { speed: tts.speed } : {}),
-      apiKey: keyView(tts),
-    },
+    stt,
+    tts,
     voiceHints: VOICE_HINTS,
-    ready: speechReady(stt, tts),
+    ready,
+    scope: "user",
+    default: { stt: fallback.stt, tts: fallback.tts },
+    user: { stt: own(user.stt), tts: own(user.tts) },
   }
 }
 
