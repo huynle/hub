@@ -81,8 +81,17 @@ export function fakeCentral(
     },
   })
   fake.url = `http://127.0.0.1:${server.port}`
-  fake.stop = () => server.stop(true)
+  fake.stop = () => stopServer(server)
   return fake
+}
+
+/**
+ * Stops a Bun server without hanging: in Bun 1.3.5, once the server has closed a WebSocket itself,
+ * stop(true)'s promise can stay pending forever (see src/central/http.ts). An afterEach hook awaiting it
+ * then hangs the whole test run (hooks have no timeout); seen about 1 in 8 full runs on Linux CI.
+ */
+export function stopServer(server: { stop(force?: boolean): unknown }): Promise<void> {
+  return Promise.race([Promise.resolve(server.stop(true)).then(() => undefined), Bun.sleep(250)])
 }
 
 /** A loopback port nothing listens on (taken from a server that was just stopped). */

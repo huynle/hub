@@ -1,3 +1,4 @@
+import { stopServer } from "./spoke-fake"
 import { afterEach, describe, expect, test } from "bun:test"
 import type { EnrollPoll } from "../src/protocol"
 import { pollEnrollment, startEnrollment } from "../src/spoke/enroll"
@@ -5,7 +6,7 @@ import { pollEnrollment, startEnrollment } from "../src/spoke/enroll"
 type Handler = (path: string, body: any) => Response | Promise<Response>
 const servers: Array<{ stop: (force?: boolean) => void }> = []
 afterEach(() => {
-  for (const s of servers.splice(0)) s.stop(true)
+  for (const s of servers.splice(0)) void stopServer(s)
 })
 
 function fake(handler: Handler) {

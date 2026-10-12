@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import { defaults, writeConfig } from "../src/config"
 import plugin from "../src/index"
-import { EventQueue, until } from "./spoke-fake"
+import { EventQueue, stopServer, until } from "./spoke-fake"
 
 const cleanups: Array<() => unknown> = []
 afterEach(async () => {
@@ -126,7 +126,7 @@ describe("plugin setup", () => {
     cleanups.push((await plugin.setup(fake.ctx as any)) as () => void)
     expect(await fake.call("checkServer", { server: "ftp://x.example" })).toMatchObject({ type: "invalid" })
     const hub = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ ok: true, version: "1.2.3" }) })
-    cleanups.push(() => hub.stop(true))
+    cleanups.push(() => stopServer(hub))
     expect(await fake.call("checkServer", { server: `http://127.0.0.1:${hub.port}/` })).toEqual({ ok: true, version: "1.2.3" })
   })
 

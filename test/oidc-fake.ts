@@ -1,3 +1,4 @@
+import { stopServer } from "./spoke-fake"
 // A fake OpenID Connect provider for tests: discovery, an "authorize" step simulated by the test (it
 // reads the hub's redirect and decides which claims the code yields), and a token endpoint that checks
 // client_secret_post + PKCE and returns an unsigned ID token.
@@ -102,7 +103,7 @@ export function fakeProvider(options: { clientId?: string; clientSecret?: string
       codes.set(code, { challenge: p.get("code_challenge")!, redirectURI: p.get("redirect_uri")!, nonce, grant })
       return { code, state: p.get("state")!, nonce, redirectURI: p.get("redirect_uri")! }
     },
-    stop: () => void server.stop(true),
+    stop: () => void stopServer(server),
   }
   return provider
 }

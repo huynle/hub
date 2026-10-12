@@ -6,6 +6,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -16,4 +17,4 @@ jobs:
           node-version: 22
       - run: npm ci --no-audit --no-fund
       - run: npx tsc --noEmit
-      - run: bun test
+      - run: scripts/test-ci.sh

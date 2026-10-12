@@ -16,6 +16,7 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -33,11 +34,12 @@ jobs:
           fi
       - run: npm ci --no-audit --no-fund
       - run: npx tsc --noEmit
-      - run: bun test
+      - run: scripts/test-ci.sh
 
   binaries:
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       matrix:
         target: [darwin-arm64, darwin-x64, linux-x64, linux-arm64, windows-x64]
@@ -64,6 +66,7 @@ jobs:
   release:
     needs: binaries
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
     steps:
@@ -89,6 +92,7 @@ jobs:
   image:
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
@@ -127,6 +131,7 @@ jobs:
   npm:
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       id-token: write

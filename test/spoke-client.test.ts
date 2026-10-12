@@ -1,3 +1,4 @@
+import { stopServer } from "./spoke-fake"
 import { afterEach, describe, expect, test } from "bun:test"
 import type { ServerWebSocket } from "bun"
 import { encode, parseSpokeMessage, PROTOCOL_VERSION, type ServerMessage, type SpokeMessage } from "../src/protocol"
@@ -62,7 +63,7 @@ function fakeServer(options: { welcome?: boolean; reject?: boolean; onFrame?: (m
     },
   })
   fake.url = `http://127.0.0.1:${server.port}`
-  fake.stop = () => server.stop(true)
+  fake.stop = () => stopServer(server)
   fakes.push(fake)
   return fake
 }
