@@ -16,6 +16,10 @@ export interface VoiceConfig {
   readonly subagent: string
   /** Start a local hub in the background when the server is loopback and nothing answers (default true). */
   readonly autoStartLocalHub: boolean
+  /** Read open sessions and workspaces from the Herdr CLI (default true; the service process only). */
+  readonly herdr: boolean
+  /** History window of the session listing: root sessions from the last `days` days, at most `max`. */
+  readonly list: ListWindow
   /** Fast model the voice agent talks with in conversation mode ("provider/model[#variant]"). */
   readonly voiceModel?: string
   /** Model subagents work on; defaults to the session's model before conversation mode. */
@@ -23,6 +27,14 @@ export interface VoiceConfig {
   readonly machineID?: string
   readonly token?: string
 }
+
+export interface ListWindow {
+  readonly days: number
+  readonly max: number
+}
+
+export const DEFAULT_LIST: ListWindow = Object.freeze({ days: 30, max: 100 })
+const LIST_LIMITS = { days: 365, max: 500 } as const
 
 export const DEFAULT_SERVER = "http://127.0.0.1:4097"
 export const DEFAULT_SUBAGENT = "general"
@@ -68,7 +80,7 @@ export function configPath(env: Readonly<Record<string, string | undefined>> = p
 }
 
 export function defaults(machineName: string): VoiceConfig {
-  return { server: DEFAULT_SERVER, mode: "off", sessions: [], machineName, subagent: DEFAULT_SUBAGENT, autoStartLocalHub: true }
+  return { server: DEFAULT_SERVER, mode: "off", sessions: [], machineName, subagent: DEFAULT_SUBAGENT, autoStartLocalHub: true, herdr: true, list: { ...DEFAULT_LIST } }
 }
 
 /** Normalizes untrusted JSON into a config, falling back to defaults field by field. */
@@ -86,10 +98,23 @@ export function normalize(raw: unknown, machineName: string): VoiceConfig {
     machineName: typeof r.machineName === "string" && r.machineName ? r.machineName : machineName,
     subagent: typeof r.subagent === "string" && AGENT_ID.test(r.subagent) ? r.subagent : base.subagent,
     autoStartLocalHub: r.autoStartLocalHub !== false,
+    herdr: r.herdr !== false,
+    list: listWindow(r.list),
     ...(modelRef(r.voiceModel) ? { voiceModel: modelRef(r.voiceModel) } : {}),
     ...(modelRef(r.workModel) ? { workModel: modelRef(r.workModel) } : {}),
     ...(typeof r.machineID === "string" && r.machineID ? { machineID: r.machineID } : {}),
     ...(typeof r.token === "string" && r.token ? { token: r.token } : {}),
+  }
+}
+
+const inRange = (v: unknown, max: number): v is number => Number.isInteger(v) && (v as number) >= 1 && (v as number) <= max
+
+/** Each field of the history window falls back to its default when missing or out of range. */
+function listWindow(raw: unknown): ListWindow {
+  const r = typeof raw === "object" && raw !== null && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {}
+  return {
+    days: inRange(r.days, LIST_LIMITS.days) ? r.days : DEFAULT_LIST.days,
+    max: inRange(r.max, LIST_LIMITS.max) ? r.max : DEFAULT_LIST.max,
   }
 }
 

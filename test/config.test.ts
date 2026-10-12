@@ -13,6 +13,8 @@ describe("config", () => {
       machineName: "mac",
       subagent: "general",
       autoStartLocalHub: true,
+      herdr: true,
+      list: { days: 30, max: 100 },
     })
   })
 
@@ -25,6 +27,8 @@ describe("config", () => {
       machineName: "mac",
       subagent: "general",
       autoStartLocalHub: true,
+      herdr: true,
+      list: { days: 30, max: 100 },
       token: "t",
     })
     expect(normalize({ server: "javascript:alert(1)" }, "mac").server).toBe("http://127.0.0.1:4097")
@@ -41,6 +45,23 @@ describe("config", () => {
     expect(normalize({ autoStartLocalHub: false }, "mac").autoStartLocalHub).toBe(false)
     expect(normalize({ autoStartLocalHub: true }, "mac").autoStartLocalHub).toBe(true)
     for (const v of ["false", 0, null, "no"]) expect(normalize({ autoStartLocalHub: v }, "mac").autoStartLocalHub).toBe(true)
+  })
+
+  test("herdr defaults to true; only a boolean false turns it off", () => {
+    expect(normalize({ herdr: false }, "mac").herdr).toBe(false)
+    expect(normalize({ herdr: true }, "mac").herdr).toBe(true)
+    for (const v of ["false", 0, null]) expect(normalize({ herdr: v }, "mac").herdr).toBe(true)
+  })
+
+  test("list window: days 1-365 and max 1-500 (integers), each falling back to its default", () => {
+    expect(normalize({ list: { days: 7, max: 50 } }, "mac").list).toEqual({ days: 7, max: 50 })
+    expect(normalize({ list: { days: 1, max: 1 } }, "mac").list).toEqual({ days: 1, max: 1 })
+    expect(normalize({ list: { days: 365, max: 500 } }, "mac").list).toEqual({ days: 365, max: 500 })
+    expect(normalize({ list: { days: 0, max: 501 } }, "mac").list).toEqual({ days: 30, max: 100 })
+    expect(normalize({ list: { days: 366, max: 0 } }, "mac").list).toEqual({ days: 30, max: 100 })
+    expect(normalize({ list: { days: 2.5, max: "50" } }, "mac").list).toEqual({ days: 30, max: 100 })
+    expect(normalize({ list: { days: 10 } }, "mac").list).toEqual({ days: 10, max: 100 })
+    for (const bad of [null, "x", [1, 2], 5]) expect(normalize({ list: bad }, "mac").list).toEqual({ days: 30, max: 100 })
   })
 
   test("writes atomically with 0600 and reads back", () => {
