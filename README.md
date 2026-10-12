@@ -253,6 +253,27 @@ voice speed slider; `/pair` and `/approve` handle pairing and machine approval; 
 screen-off listening), Speech (STT/TTS providers), notification preferences, devices and machines (see
 [Voice feedback (phone)](#voice-feedback-phone)).
 
+**Accounts** (multi-user hub, contract in [docs/multi-user.md](docs/multi-user.md); pure logic in
+`web/account-core.js`, tested with bun):
+
+- **Signing in**: with `VOICE_AUTH=oidc` the sign-in screen shows **Sign in with Google**
+  (`/auth/login?next=<page>`), with the pairing code behind "Have a pairing code?" (a code signs the browser
+  in as the owner of the computer that made it). In pairing mode the pair screen is unchanged.
+- **Account menu** (avatar in the header): name and email (or "This hub" in pairing mode), an Admin badge,
+  My devices, Speech, Admin (admins only) and Sign out (`POST /api/logout`, then the sign-in screen).
+- **Speech** is per user: each field you have not set shows "Using server default: …" (keys: "Key: server
+  default"), and each card has **Reset to server default** (sends `null` for every field and the key).
+  Admins also get **Server default** (`/api/settings/speech/default`), used by everyone for what they have
+  not set themselves.
+- **Admin** (in Settings, admins only): **Users** (search, filter, sort; make/remove admin and
+  disable/enable with a confirmation; the hub refuses to demote or disable the last active admin and the
+  page shows its message; not shown in pairing mode), **Machines** (every machine with its owner; Revoke),
+  **Approvals** (pending machines; approving makes the machine yours) and the **Audit log** (newest
+  first, e.g. "Approved a machine", "Changed a role").
+- **Approving a machine** (`/approve?code=`) says "This machine will belong to you (<email>)". Only admins
+  see the list of pending requests; everyone else approves by the code OpenCode shows.
+- A session link that is not yours (or is gone) shows **Session not found** with a link home.
+
 **Session browser** (`/`; pure logic in `web/browser-core.js`, tested with bun). Per machine:
 
 - **Pinned** (when any), **Needs you** (permission or question blockers, with the blocker and an Open
@@ -471,7 +492,7 @@ Pure logic is in `web/feedback-core.js` (tested with bun); `web/cues.js` plays c
   listening survives a locked screen depends on Android Chrome (battery saver, OS version), and iOS
   suspends it. The OpenCode session keeps running on the laptop either way. When the phone is not
   listening, turn on the `say` notification to get replies as push notifications.
-- **Settings → Speech** (owner device): cards for Speech-to-text and Text-to-speech, with provider
+- **Settings → Speech** (your own settings; admins also edit the server default): cards for Speech-to-text and Text-to-speech, with provider
   (OpenRouter / OpenAI-compatible), base URL (OpenAI-compatible only), model, voice (TTS), language (STT,
   optional), server-side speed (TTS, optional, 0.25–4) and API key. Model and voice are buttons that open a
   full-height picker (logic in `web/picker-core.js`): a search box (every word must match the ID or name,
