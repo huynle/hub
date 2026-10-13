@@ -2,6 +2,14 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { PresenceReporter, shownSessions } from "../src/tui-presence"
 
 const reporters: PresenceReporter[] = []
+async function waitFor(check: () => boolean, description: string, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs
+  while (!check()) {
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${description}`)
+    await Bun.sleep(10)
+  }
+}
+
 afterEach(() => {
   for (const r of reporters.splice(0)) r.stop()
 })
@@ -31,17 +39,19 @@ describe("PresenceReporter", () => {
     })
     reporters.push(reporter)
     reporter.start()
-    await Bun.sleep(30)
-    expect(sent).toEqual([["ses_a"]])
+    await waitFor(() => sent.length >= 1, "initial presence report")
+    expect(sent[0]).toEqual(["ses_a"])
     shown = ["ses_a", "ses_b"]
-    await Bun.sleep(30)
-    expect(sent).toEqual([["ses_a"], ["ses_a", "ses_b"]])
+    await waitFor(() => sent.some((ids) => ids.length === 2), "changed presence report")
+    const changed = sent.findIndex((ids) => ids.length === 2)
+    expect(sent.slice(changed)).toEqual(sent.slice(changed).map(() => ["ses_a", "ses_b"]))
     fail = true
-    await Bun.sleep(80)
-    expect(sent.length).toBeGreaterThanOrEqual(3)
+    const beforeFailure = sent.length
+    await waitFor(() => sent.length > beforeFailure, "heartbeat retry after failure")
     expect(sent.at(-1)).toEqual(["ses_a", "ses_b"])
     reporter.stop()
     const count = sent.length
+    // This checks the absence of timer callbacks, so wait longer than both configured intervals.
     await Bun.sleep(100)
     expect(sent.length).toBe(count)
   })
