@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Conversation mode handles quick answers and up to two low-risk tools directly, uses the fast voice
+  model for routine workers and the configured work model for complex work, and reuses workers only for
+  follow-ups on the same active task.
+- Successful worker results can be spoken directly from child completion events, removing the extra
+  voice-agent summarization turn while filtering failed, interrupted and stale results.
+
 ## 0.4.0
 
 Open sessions first: the phone now shows what is open in your terminals, like Herdr's sidebar, instead

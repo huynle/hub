@@ -211,6 +211,144 @@ describe("say events", () => {
     expect(first.type).toBe("delta")
     await events.cancel()
   })
+
+  test("speaks a successful subagent's final text through its conversation root", async () => {
+    h = harness()
+    const client = await spoke(h, {
+      sessions: [session("ses_root", { owned: true }), session("ses_child", { parentID: "ses_root" })],
+    })
+    conversationSpoke(client)
+    await post("/api/sessions/ses_root/conversation", { on: true })
+    const events = sse(await h.api("/api/events"))
+
+    client.send(event("session.execution.started", { sessionID: "ses_child" }))
+    client.send(ended("ses_child", "msg_child", 0, "The Brain entry is saved and linked."))
+    client.send(event("session.execution.succeeded", { sessionID: "ses_child" }))
+
+    expect(await events.next((m) => m.type === "say")).toEqual({
+      type: "say",
+      sessionID: "ses_root",
+      messageID: "msg_child",
+      ordinal: 0,
+      text: "The Brain entry is saved and linked.",
+    })
+    await events.cancel()
+  })
+
+  test("speaks late subagent text when success arrives first and dedupes repeated reports", async () => {
+    h = harness()
+    const machine = h.store.addMachine("laptop")
+    const sessions = [session("ses_root", { owned: true }), session("ses_child", { parentID: "ses_root" })]
+    const client = await spoke(h, { machine, processID: "tui", sessions })
+    conversationSpoke(client)
+    const other = await spoke(h, { machine, processID: "svc", hello: { kind: "service" }, sessions })
+    conversationSpoke(other)
+    await post("/api/sessions/ses_root/conversation", { on: true })
+    const events = sse(await h.api("/api/events"))
+    const says: any[] = []
+    const collect = events.next((m) => {
+      if (m.type === "say") says.push(m)
+      return m.type === "say" && m.text === "Ready to use."
+    })
+
+    client.send(event("session.execution.started", { sessionID: "ses_child" }))
+    client.send(event("session.execution.succeeded", { sessionID: "ses_child" }))
+    client.send(ended("ses_child", "msg_preamble", 0, "Finishing up."))
+    client.send(ended("ses_child", "msg_child", 0, "Ready to use."))
+    other.send(ended("ses_child", "msg_child", 0, "Ready to use."))
+
+    await collect
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(says).toHaveLength(1)
+    expect(says[0]).toMatchObject({ sessionID: "ses_root", messageID: "msg_child", text: "Ready to use." })
+    await events.cancel()
+  })
+
+  test("speaks only the latest subagent message with its parts in ordinal order", async () => {
+    h = harness()
+    const client = await spoke(h, {
+      sessions: [session("ses_root", { owned: true }), session("ses_child", { parentID: "ses_root" })],
+    })
+    conversationSpoke(client)
+    await post("/api/sessions/ses_root/conversation", { on: true })
+    const events = sse(await h.api("/api/events"))
+    const says: any[] = []
+    const collect = events.next((m) => {
+      if (m.type === "say") says.push(m)
+      return m.type === "say" && m.ordinal === 1
+    })
+
+    client.send(event("session.execution.started", { sessionID: "ses_child" }))
+    client.send(ended("ses_child", "msg_preamble", 0, "I am starting now."))
+    client.send(ended("ses_child", "msg_final", 1, "It is ready to use."))
+    client.send(ended("ses_child", "msg_final", 0, "The change is complete."))
+    client.send(event("session.execution.succeeded", { sessionID: "ses_child" }))
+
+    await collect
+    expect(says).toEqual([
+      { type: "say", sessionID: "ses_root", messageID: "msg_final", ordinal: 0, text: "The change is complete." },
+      { type: "say", sessionID: "ses_root", messageID: "msg_final", ordinal: 1, text: "It is ready to use." },
+    ])
+    await events.cancel()
+  })
+
+  test("a new subagent execution clears text left by its previous run", async () => {
+    h = harness()
+    const client = await spoke(h, {
+      sessions: [session("ses_root", { owned: true }), session("ses_child", { parentID: "ses_root" })],
+    })
+    conversationSpoke(client)
+    await post("/api/sessions/ses_root/conversation", { on: true })
+    const events = sse(await h.api("/api/events"))
+    const says: any[] = []
+    const collect = events.next((m) => {
+      if (m.type === "say") says.push(m)
+      return m.type === "say" && m.text === "Root marker."
+    })
+
+    client.send(event("session.execution.started", { sessionID: "ses_child" }))
+    client.send(ended("ses_child", "msg_old", 0, "Old result."))
+    client.send(event("session.execution.started", { sessionID: "ses_child" }))
+    client.send(event("session.execution.succeeded", { sessionID: "ses_child" }))
+    client.send(ended("ses_root", "msg_root", 0, "Root marker."))
+
+    await collect
+    expect(says).toEqual([{ type: "say", sessionID: "ses_root", messageID: "msg_root", ordinal: 0, text: "Root marker." }])
+    await events.cancel()
+  })
+
+  test("does not speak failed, interrupted, root, or non-conversation child completions", async () => {
+    h = harness()
+    const client = await spoke(h, {
+      sessions: [
+        session("ses_root", { owned: true }),
+        session("ses_failed", { parentID: "ses_root" }),
+        session("ses_interrupted", { parentID: "ses_root" }),
+        session("ses_quiet", { owned: true }),
+        session("ses_quiet_child", { parentID: "ses_quiet" }),
+      ],
+    })
+    conversationSpoke(client)
+    await post("/api/sessions/ses_root/conversation", { on: true })
+    const events = sse(await h.api("/api/events"))
+    const says: any[] = []
+    const collect = events.next((m) => {
+      if (m.type === "say") says.push(m)
+      return m.type === "say" && m.text === "Root marker."
+    })
+
+    client.send(ended("ses_failed", "msg_failed", 0, "Do not speak failed."))
+    client.send(event("session.execution.failed", { sessionID: "ses_failed", error: { message: "nope" } }))
+    client.send(ended("ses_interrupted", "msg_interrupted", 0, "Do not speak interrupted."))
+    client.send(event("session.execution.interrupted", { sessionID: "ses_interrupted" }))
+    client.send(ended("ses_quiet_child", "msg_quiet", 0, "Do not speak quiet."))
+    client.send(event("session.execution.succeeded", { sessionID: "ses_quiet_child" }))
+    client.send(ended("ses_root", "msg_root", 0, "Root marker."))
+
+    await collect
+    expect(says).toEqual([{ type: "say", sessionID: "ses_root", messageID: "msg_root", ordinal: 0, text: "Root marker." }])
+    await events.cancel()
+  })
 })
 
 describe("heard events", () => {

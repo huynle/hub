@@ -84,6 +84,8 @@ const ACTIVITY_ROOTS = 200
 
 /** A session counts as watched while a device reported it visible within this window. */
 export const PRESENCE_WINDOW_MS = 45_000
+/** Child completion text is useful only while its matching run completion is still nearby. */
+export const WORKER_SPEECH_TTL_MS = 5 * 60_000
 
 /** Push-worthy transitions of a root session. Kept off the SSE stream. */
 export interface Alert {
@@ -201,6 +203,16 @@ interface Stream {
   pending: Array<{ kind: "delta" | "reasoning"; rootID: string; messageID?: string; text: string }>
 }
 
+/** Latest assistant message of a child run, paired with its successful completion for direct speech. */
+interface WorkerSpeech {
+  readonly rootID: string
+  succeeded: boolean
+  messageID?: string
+  readonly parts: Map<number, string>
+  at: number
+  timer?: unknown
+}
+
 /** How many spoken texts, utterances and early deliveries are remembered for dedupe and matching. */
 const MEMORY = 1000
 
@@ -233,6 +245,8 @@ export class Registry {
   private readonly conversations = new Map<string, string | undefined>()
   /** `messageID ordinal` of texts already sent as say events (several processes forward the same text). */
   private readonly spoken = new Map<string, true>()
+  /** Child session → latest text and completion state, while its root is in conversation mode. */
+  private readonly workerSpeech = new Map<string, WorkerSpeech>()
   /** Utterance inboxID → session, until OpenCode reports it delivered. */
   private readonly utterances = new Map<string, string>()
   /** Deliveries not (yet) matched to an utterance: the steer result can arrive after the event. */
@@ -430,6 +444,7 @@ export class Registry {
     if (sessionID) this.trackRun(event.type, sessionID)
     this.observeBoards(event, tenant)
     if (sessionID) this.observeActivity(event, sessionID, data)
+    if (sessionID) this.observeWorkerSpeech(event.type, sessionID, data)
 
     if (streamed && sessionID) {
       const rootID = this.rootOf(sessionID)
@@ -514,6 +529,12 @@ export class Registry {
   }
 
   private say(sessionID: string, data: Record<string, unknown>): void {
+    if (this.rootOf(sessionID) !== sessionID) return
+    this.emitSay(sessionID, data)
+  }
+
+  /** Emits one root-session speech part, deduped across processes. */
+  private emitSay(sessionID: string, data: Record<string, unknown>): void {
     const { assistantMessageID: messageID, ordinal, text } = data
     if (!this.conversations.has(sessionID) || !this.boards.has(sessionID)) return
     if (typeof messageID !== "string" || typeof ordinal !== "number" || typeof text !== "string" || !text.trim()) return
@@ -523,6 +544,73 @@ export class Registry {
     this.emit({ type: "say", sessionID, messageID, ordinal, text })
     // Nobody is listening on a phone: push the reply so it reaches a locked screen.
     if (!this.watched(sessionID)) this.alert("say", sessionID, undefined, text)
+  }
+
+  /** Pairs a child session's latest assistant message with successful execution and speaks it once. */
+  private observeWorkerSpeech(type: string, sessionID: string, data: Record<string, unknown>): void {
+    const now = this.now()
+    for (const [childID, state] of this.workerSpeech) {
+      if (now - state.at > WORKER_SPEECH_TTL_MS) this.clearWorkerSpeech(childID)
+    }
+    const rootID = this.rootOf(sessionID)
+    if (!rootID || rootID === sessionID || !this.conversations.has(rootID)) {
+      this.clearWorkerSpeech(sessionID)
+      return
+    }
+    if (type === "session.execution.started") {
+      this.clearWorkerSpeech(sessionID)
+      remember(this.workerSpeech, sessionID, { rootID, succeeded: false, parts: new Map(), at: now })
+      return
+    }
+    if (type === "session.execution.failed" || type === "session.execution.interrupted" || type === "session.deleted") {
+      this.clearWorkerSpeech(sessionID)
+      return
+    }
+    if (type !== "session.execution.succeeded" && type !== "session.text.ended") return
+
+    let state = this.workerSpeech.get(sessionID)
+    if (!state || state.rootID !== rootID) {
+      state = { rootID, succeeded: false, parts: new Map(), at: now }
+      remember(this.workerSpeech, sessionID, state)
+    }
+    state.at = now
+    if (type === "session.execution.succeeded") state.succeeded = true
+    else {
+      const { assistantMessageID, ordinal, text } = data
+      if (typeof assistantMessageID !== "string" || typeof ordinal !== "number" || typeof text !== "string" || !text.trim()) return
+      if (state.messageID !== assistantMessageID) {
+        state.messageID = assistantMessageID
+        state.parts.clear()
+      }
+      state.parts.set(ordinal, text)
+    }
+    if (!state.succeeded || !state.messageID || state.parts.size === 0) return
+    // Success normally follows every text event, so flush immediately. If another process reports
+    // success first, briefly debounce late text so an earlier assistant message is not spoken.
+    if (type === "session.text.ended") {
+      if (state.timer !== undefined) this.timers.clear(state.timer)
+      const held = state
+      state.timer = this.timers.set(() => {
+        held.timer = undefined
+        if (this.workerSpeech.get(sessionID) === held) this.flushWorkerSpeech(held)
+      }, STREAM_INTERVAL_MS)
+      return
+    }
+    this.flushWorkerSpeech(state)
+  }
+
+  private flushWorkerSpeech(state: WorkerSpeech): void {
+    if (!state.succeeded || !state.messageID || state.parts.size === 0 || !this.conversations.has(state.rootID)) return
+    for (const [ordinal, text] of [...state.parts].sort(([a], [b]) => a - b)) {
+      this.emitSay(state.rootID, { assistantMessageID: state.messageID, ordinal, text })
+    }
+    state.parts.clear()
+  }
+
+  private clearWorkerSpeech(sessionID: string): void {
+    const state = this.workerSpeech.get(sessionID)
+    if (state?.timer !== undefined) this.timers.clear(state.timer)
+    this.workerSpeech.delete(sessionID)
   }
 
   /** Records whether a device shows a session page (reported on visibility changes and every 30 s). */
@@ -805,7 +893,10 @@ export class Registry {
   setConversation(sessionID: string, on: boolean, connID?: string): void {
     const changed = on !== this.conversations.has(sessionID)
     if (on) this.conversations.set(sessionID, connID)
-    else this.conversations.delete(sessionID)
+    else {
+      this.conversations.delete(sessionID)
+      for (const [childID, state] of this.workerSpeech) if (state.rootID === sessionID) this.clearWorkerSpeech(childID)
+    }
     if (!changed) return
     this.emit({ type: "conversation", sessionID, on })
     this.emit({ type: "catalog" })

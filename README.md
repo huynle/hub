@@ -218,9 +218,12 @@ Sessions open in a terminal are reported with `open: true` and `terminal` (`src/
 ## Conversation mode (OpenCode side)
 
 In conversation mode the session's main agent becomes a voice orchestrator: it answers in one or two
-spoken sentences and hands anything bigger (code changes, research, commands) to a background
-subagent, then reports back when the subagent finishes. You can keep talking while work runs; new
-utterances steer the session instead of waiting for the turn to end.
+spoken sentences, handles quick answers and up to two low-risk tool calls directly, and hands multi-step
+work to a background subagent. Routine workers inherit the fast voice model; coding, debugging,
+architecture and risky work use the configured full work model. Successful workers finish with a short
+speech-ready result that the hub reads directly, without waiting for another voice-agent summary. You
+can keep talking while work runs; related follow-ups continue the active worker and unrelated tasks start
+a fresh one.
 
 **Spoke side** (`src/spoke/conversation.ts`, `src/spoke/spoke.ts`):
 
@@ -233,6 +236,8 @@ utterances steer the session instead of waiting for the turn to end.
   agent exists, the session keeps its agent and the `context` hook adds the orchestrator prompt instead.
 - The delegate agent (`subagent` in the config) is added per request by the `context` hook, so changing
   it needs no restart.
+- Child text and execution events are paired by the hub. The latest assistant message of a successful
+  child is emitted as root-session speech; failures, interruptions and stale partial results are not.
 - Server ops: `steer` sends the utterance with `delivery: "steer"` (metadata
   `{source: "opencode-voice", mode: "conversation"}`) and returns the inbox ID at once; `interrupt`
   interrupts the session; `conversation` turns the mode on/off and returns the agent now in effect.

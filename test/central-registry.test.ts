@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test"
-import { BusyError, PRESENCE_WINDOW_MS, Registry, type RegistryMessage } from "../src/central/registry"
+import { BusyError, PRESENCE_WINDOW_MS, Registry, WORKER_SPEECH_TTL_MS, type RegistryMessage } from "../src/central/registry"
 import type { Hello, SessionInfo } from "../src/protocol"
 
 const hello = (processID: string, kind: "service" | "standalone" = "standalone"): Hello => ({
@@ -435,6 +435,14 @@ describe("presence and conversation-mode alerts", () => {
     registry.observe("c1", ended("ses_1", 0, "Hello."))
     registry.observe("c1", ev("session.execution.succeeded", { sessionID: "ses_1" }))
     expect(alerts).toEqual([{ kind: "finished", sessionID: "ses_1", title: "api-server", detail: "succeeded" }])
+  })
+
+  test("an expired child result is not spoken when its success arrives late", () => {
+    registry.setConversation("ses_1", true, "c1")
+    registry.observe("c1", ended("ses_kid", 0, "Stale result."))
+    t += WORKER_SPEECH_TTL_MS + 1
+    registry.observe("c1", ev("session.execution.succeeded", { sessionID: "ses_kid" }))
+    expect(alerts).toEqual([])
   })
 })
 

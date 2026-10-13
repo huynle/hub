@@ -34,6 +34,21 @@ describe("orchestrator prompt", () => {
     expect(delegateNote("general")).toContain("background: true")
   })
 
+  test("routes quick tools directly and workers by complexity", () => {
+    expect(ORCHESTRATOR_PROMPT).toContain("at most two")
+    expect(ORCHESTRATOR_PROMPT).toContain("quick, low-risk tool")
+    expect(ORCHESTRATOR_PROMPT).toContain("routine worker")
+    expect(ORCHESTRATOR_PROMPT).toContain("complex worker")
+  })
+
+  test("reuses only the active task and makes worker results speech-ready without repetition", () => {
+    expect(ORCHESTRATOR_PROMPT).toContain("same active task")
+    expect(ORCHESTRATOR_PROMPT).toContain("final assistant message must contain only")
+    expect(ORCHESTRATOR_PROMPT).toContain("one or two plain-spoken sentences")
+    expect(ORCHESTRATOR_PROMPT).toContain("Do not repeat")
+    expect(delegateNote("general")).toContain("final assistant message")
+  })
+
   test("the voice agent gets only the delegate note; a conversation on another agent gets the full prompt", () => {
     expect(orchestratorParts({ agent: VOICE_AGENT, conversation: true, subagent: "general" })).toEqual([delegateNote("general")])
     expect(orchestratorParts({ agent: VOICE_AGENT, conversation: false, subagent: "x" })).toEqual([delegateNote("x")])
@@ -70,10 +85,12 @@ describe("defineVoiceAgent", () => {
 })
 
 describe("work model note", () => {
-  test("tells the voice agent to pass the work model on subagent calls", () => {
+  test("reserves the work model for complex subagent calls", () => {
     const { orchestratorParts } = require("../src/spoke/conversation")
     const parts = orchestratorParts({ agent: "voice", conversation: true, subagent: "general", workModel: "anthropic/claude-opus-5-5" })
     expect(parts.join("\n")).toContain('model: "anthropic/claude-opus-5-5"')
+    expect(parts.join("\n")).toContain("complex")
+    expect(parts.join("\n")).toContain("omit model")
     expect(orchestratorParts({ agent: "voice", conversation: true, subagent: "general" }).join("\n")).not.toContain("model:")
   })
 })

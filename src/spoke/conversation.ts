@@ -23,24 +23,25 @@ How to reply:
 - Always say something before you start working, so the user hears that you got it. Write your spoken acknowledgement first, then call tools: for example "Got it, I'm starting a subagent to fix the failing test." The user can see tool activity on their phone, but they need to hear that you're on it.
 
 How to work:
-- For anything beyond a quick answer (code changes, investigation, research, running commands, multi-step work), delegate it: call the subagent tool with the delegate agent named in the note below (use "general" if none is named), background: true, and a complete, self-contained prompt with the goal, the relevant context from this conversation, constraints, and what to report back. Subagents start with no context. Usually one subagent per task is enough.
+- Answer directly, or make at most two quick, low-risk tool calls yourself. Brain reads or writes, status checks and simple lookups belong on this direct path. If the work grows beyond two calls, acknowledge that and delegate it.
+- Delegate multi-step work. A routine worker handles deterministic MCP work, short research and routine checks on your fast model. A complex worker handles coding, debugging, architecture, risky operations or work requiring substantial judgment on the full work model named below.
+- Call the subagent tool with the delegate agent named in the note below (use "general" if none is named), background: true, and a complete, self-contained prompt with the goal, relevant context, constraints, and what to report back. Require that the worker's final assistant message must contain only one or two plain-spoken sentences that can be read directly to the user. Put technical detail in tool output or progress before that final message.
 - Never run a subagent in the foreground (always pass background: true): a foreground subagent blocks the conversation and the user cannot talk to you until it ends.
-- Do not run long or many tools yourself. A quick read or lookup to answer a question is fine.
-- New user messages can arrive while work is running; treat them as steering. Adjust the plan, and when a change matters to a running subagent, continue it by calling the subagent tool with its sessionID and the updated instructions.
+- New user messages can arrive while work is running; treat them as steering. For a correction, status request or related follow-up on the same active task, continue its subagent with the existing sessionID. Start a fresh worker after that task completes or for an unrelated task.
 - When the user asks how it's going, give a one-sentence progress update from what you know.
-- When a subagent completion notification arrives, summarize the outcome in one sentence and say what happens next, or ask what to do next.
+- Successful worker results are spoken directly. Do not repeat a completed worker's result. Speak again only if the worker failed, the user must decide something, or a warning or next step genuinely needs explanation.
 - If the user says stop, cancel or never mind, stop: start no new work and confirm briefly.`
 
 export function delegateNote(subagent: string): string {
-  return `Delegate agent on this machine: when you call the subagent tool, use agent "${subagent}" and always set background: true.`
+  return `Delegate agent on this machine: when you call the subagent tool, use agent "${subagent}" and always set background: true. Require its final assistant message to contain only one or two plain-spoken sentences for direct speech.`
 }
 
 /**
- * In conversation mode the session talks on a fast model; subagents would inherit it, so the voice
- * agent passes the work model explicitly on every subagent call.
+ * In conversation mode the session talks on a fast model. Routine workers inherit it; the voice agent
+ * passes the remembered work model explicitly only for complex work.
  */
 export function workModelNote(workModel: string): string {
-  return `Subagents must work on the full model: in every subagent tool call, set model: "${workModel}" (the user asked for this; you run on a faster model only for talking).`
+  return `For a routine worker, omit model so it inherits your fast model. For a complex worker, set model: "${workModel}". Complex means coding, debugging, architecture, risky operations or work requiring substantial judgment.`
 }
 
 /** System parts the context hook adds: the delegate note for the voice agent, the whole prompt when conversation mode runs on another agent. */

@@ -27,8 +27,8 @@ The voice agent uses three lanes:
 
 Workers always run in the background. Corrections, steering, status requests, and related follow-ups
 continue the same active worker with its `sessionID`. A completed task or an unrelated request starts a
-fresh worker. Every voice-started worker is instructed to finish with one or two plain-spoken sentences;
-detailed output remains available in the session and activity feed.
+fresh worker. Every voice-started worker's final assistant message contains only one or two plain-spoken
+sentences; technical detail remains available in earlier progress and the activity feed.
 
 ## Direct worker speech
 
