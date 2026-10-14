@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { centralConfig } from "../src/central/config"
-import { hashToken, newToken, Store } from "../src/central/store"
+import { hashToken, MODEL_PREFS_LIMIT, newToken, Store } from "../src/central/store"
 
 const tmp = () => mkdtempSync(path.join(tmpdir(), "voice-store-"))
 
@@ -132,5 +132,26 @@ describe("Store", () => {
     now = 1000 + 120_000
     store.touchDevice(device.id)
     expect(store.devices()[0]?.lastSeen).toBe(now)
+  })
+
+  test("persists isolated per-user model preferences by session and bounds old entries", () => {
+    const dir = tmp()
+    const store = Store.open(dir)
+    const alice = store.upsertUser({ email: "alice@example.test", role: "user" })
+    const bob = store.upsertUser({ email: "bob@example.test", role: "user" })
+    const voice = { providerID: "anthropic", modelID: "claude-haiku", variant: "fast" }
+    const worker = { providerID: "anthropic", modelID: "claude-opus", variant: "thinking" }
+    expect(store.setModelPrefs(alice.id, "ses_one", { voice, worker })).toEqual({ voice, worker })
+    expect(store.modelPrefs(alice.id, "ses_one")).toEqual({ voice, worker })
+    expect(store.modelPrefs(bob.id, "ses_one")).toEqual({})
+    expect(store.setModelPrefs(alice.id, "ses_one", { voice: null })).toEqual({ worker })
+    expect(Store.open(dir).modelPrefs(alice.id, "ses_one")).toEqual({ worker })
+
+    for (let i = 0; i <= MODEL_PREFS_LIMIT; i++) {
+      store.setModelPrefs(alice.id, `ses_${i}`, { voice: { providerID: "p", modelID: `m${i}` } })
+    }
+    expect(store.modelPrefs(alice.id, "ses_0")).toEqual({})
+    expect(store.modelPrefs(alice.id, `ses_${MODEL_PREFS_LIMIT}`).voice?.modelID).toBe(`m${MODEL_PREFS_LIMIT}`)
+    expect(Store.open(dir).modelPrefs(alice.id, `ses_${MODEL_PREFS_LIMIT}`).voice?.modelID).toBe(`m${MODEL_PREFS_LIMIT}`)
   })
 })

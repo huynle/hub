@@ -6,6 +6,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import type { StoredSpeech } from "./speech/settings"
+import type { ModelSelection, SessionModelPrefs } from "../protocol"
 
 /** Owner of everything in pairing mode, and of records from before 0.3.0. */
 export const LOCAL_USER = "local"
@@ -13,6 +14,8 @@ export const LOCAL_USER = "local"
 export const AUDIT_LIMIT = 500
 /** Audit entries returned by auditLog(). */
 export const AUDIT_VIEW_LIMIT = 200
+/** Per-user sessions with explicit Voice/Worker model choices. */
+export const MODEL_PREFS_LIMIT = 500
 
 export type Role = "admin" | "user"
 
@@ -30,6 +33,8 @@ export interface UserRecord {
   speech?: StoredSpeech
   /** The phone's session view: hidden and pinned sessions and workspaces (synced across devices). */
   viewPrefs?: ViewPrefs
+  /** Session ID → per-session Voice and complex-worker model overrides, oldest first. */
+  modelPrefs?: Record<string, SessionModelPrefs>
 }
 
 /** Workspace keys are the phone's group keys: `herdr:<workspaceID>` or a folder path. */
@@ -423,6 +428,31 @@ export class Store {
     user.viewPrefs = next
     this.save()
     return this.viewPrefs(id)
+  }
+
+  // ---------- per-user, per-session model preferences ----------
+
+  modelPrefs(id: string, sessionID: string): SessionModelPrefs {
+    const prefs = this.user(id)?.modelPrefs?.[sessionID]
+    return prefs ? structuredClone(prefs) : {}
+  }
+
+  setModelPrefs(id: string, sessionID: string, change: { voice?: ModelSelection | null; worker?: ModelSelection | null }): SessionModelPrefs {
+    const user = this.user(id)
+    if (!user) return {}
+    const all = user.modelPrefs ?? (user.modelPrefs = {})
+    const next: { voice?: ModelSelection; worker?: ModelSelection } = this.modelPrefs(id, sessionID)
+    for (const key of ["voice", "worker"] as const) {
+      if (!(key in change)) continue
+      const value = change[key]
+      if (value === null) delete next[key]
+      else if (value !== undefined) next[key] = structuredClone(value)
+    }
+    delete all[sessionID]
+    if (next.voice || next.worker) all[sessionID] = next
+    while (Object.keys(all).length > MODEL_PREFS_LIMIT) delete all[Object.keys(all)[0]!]
+    this.save()
+    return this.modelPrefs(id, sessionID)
   }
 
   touchDevice(id: string): void {

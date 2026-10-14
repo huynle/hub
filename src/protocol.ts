@@ -9,6 +9,31 @@ export type ProcessKind = "service" | "standalone"
 export type SpokeMode = "always" | "session"
 export type PermissionDecision = "once" | "always" | "reject"
 
+export interface ModelSelection {
+  readonly providerID: string
+  readonly modelID: string
+  readonly variant?: string
+}
+
+export interface SessionModelPrefs {
+  readonly voice?: ModelSelection
+  readonly worker?: ModelSelection
+}
+
+export interface AvailableModel {
+  readonly providerID: string
+  readonly modelID: string
+  readonly name: string
+  readonly enabled: boolean
+  readonly status: string
+  readonly variants: readonly string[]
+}
+
+export interface TimelinePage {
+  readonly items: readonly unknown[]
+  readonly cursor?: string
+}
+
 export interface SessionInfo {
   readonly id: string
   readonly title: string
@@ -144,6 +169,11 @@ export type ServerRequest =
   | { readonly op: "interrupt"; readonly sessionID: string }
   /** Switch the session to the voice orchestrator agent (on) or back to its previous agent (off). */
   | { readonly op: "conversation"; readonly sessionID: string; readonly on: boolean }
+  | { readonly op: "models"; readonly sessionID: string }
+  | { readonly op: "modelPrefs"; readonly sessionID: string }
+  | { readonly op: "setModelPrefs"; readonly sessionID: string; readonly voice?: ModelSelection | null; readonly worker?: ModelSelection | null }
+  | { readonly op: "timeline"; readonly sessionID: string; readonly limit?: number; readonly cursor?: string }
+  | { readonly op: "timelinePart"; readonly sessionID: string; readonly messageID: string; readonly partID: string }
   /** Enable or disable voice for one session (adds/removes it from the machine config's session list). */
   | { readonly op: "expose"; readonly sessionID: string; readonly on: boolean }
   /** Create a session in a workspace directory the spoke already reported. */
@@ -169,6 +199,11 @@ export interface ResultFor {
   steer: { readonly inboxID: string }
   interrupt: Record<string, never>
   conversation: { readonly agent: string }
+  models: { readonly models: readonly AvailableModel[] }
+  modelPrefs: { readonly prefs: SessionModelPrefs; readonly defaults: SessionModelPrefs }
+  setModelPrefs: { readonly prefs: SessionModelPrefs; readonly defaults: SessionModelPrefs }
+  timeline: TimelinePage
+  timelinePart: { readonly detail: unknown }
   expose: { readonly exposed: boolean }
   create: { readonly sessionID: string; readonly openedIn?: "herdr" }
 }
@@ -203,6 +238,9 @@ const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object
 const str = (v: unknown): v is string => typeof v === "string"
 const nonEmpty = (v: unknown): v is string => typeof v === "string" && v.length > 0
 const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v)
+const ID = /^[A-Za-z0-9_.:@/+~-]{1,300}$/
+const isModelSelection = (v: unknown): v is ModelSelection =>
+  isObj(v) && typeof v.providerID === "string" && ID.test(v.providerID) && typeof v.modelID === "string" && ID.test(v.modelID) && (v.variant === undefined || (typeof v.variant === "string" && ID.test(v.variant)))
 
 const MAX_FRAME = 1_000_000
 
@@ -263,7 +301,24 @@ function isServerRequest(v: unknown): v is ServerRequest {
       return nonEmpty(v.sessionID) && nonEmpty(v.requestID) && ["once", "always", "reject"].includes(v.decision as string)
     case "context":
     case "interrupt":
+    case "models":
+    case "modelPrefs":
       return nonEmpty(v.sessionID)
+    case "setModelPrefs":
+      return (
+        nonEmpty(v.sessionID) &&
+        (v.voice === undefined || v.voice === null || isModelSelection(v.voice)) &&
+        (v.worker === undefined || v.worker === null || isModelSelection(v.worker)) &&
+        (v.voice !== undefined || v.worker !== undefined)
+      )
+    case "timeline":
+      return (
+        nonEmpty(v.sessionID) &&
+        (v.limit === undefined || (Number.isInteger(v.limit) && Number(v.limit) >= 1 && Number(v.limit) <= 200)) &&
+        (v.cursor === undefined || (str(v.cursor) && v.cursor.length <= 4096))
+      )
+    case "timelinePart":
+      return nonEmpty(v.sessionID) && nonEmpty(v.messageID) && v.messageID.length <= 300 && nonEmpty(v.partID) && v.partID.length <= 300
     case "steer":
       return nonEmpty(v.sessionID) && nonEmpty(v.text)
     case "conversation":

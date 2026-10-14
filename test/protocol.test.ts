@@ -85,6 +85,17 @@ describe("conversation ops", () => {
     expect(parseSpokeMessage(ev("session.text.ended"))).toBeDefined()
     expect(parseSpokeMessage(ev("session.agent.selected"))).toBeDefined()
   })
+  test("model catalog, preferences, timeline and detail requests are bounded", () => {
+    expect(parseServerMessage(r({ op: "models", sessionID: "ses_1" }))).toBeDefined()
+    expect(parseServerMessage(r({ op: "modelPrefs", sessionID: "ses_1" }))).toBeDefined()
+    expect(parseServerMessage(r({ op: "setModelPrefs", sessionID: "ses_1", voice: { providerID: "anthropic", modelID: "claude", variant: "fast" }, worker: null }))).toBeDefined()
+    expect(parseServerMessage(r({ op: "setModelPrefs", sessionID: "ses_1", voice: { providerID: "bad space", modelID: "x" } }))).toBeUndefined()
+    expect(parseServerMessage(r({ op: "timeline", sessionID: "ses_1", limit: 50 }))).toBeDefined()
+    expect(parseServerMessage(r({ op: "timeline", sessionID: "ses_1", limit: 201 }))).toBeUndefined()
+    expect(parseServerMessage(r({ op: "timeline", sessionID: "ses_1", cursor: "x".repeat(5000) }))).toBeUndefined()
+    expect(parseServerMessage(r({ op: "timelinePart", sessionID: "ses_1", messageID: "msg_1", partID: "tool_1" }))).toBeDefined()
+    expect(parseServerMessage(r({ op: "timelinePart", sessionID: "ses_1", messageID: "", partID: "tool_1" }))).toBeUndefined()
+  })
 })
 
 describe("activity compaction", () => {
