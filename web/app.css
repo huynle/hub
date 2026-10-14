@@ -323,6 +323,37 @@ mark { background: color-mix(in srgb, var(--accent) 38%, transparent); color: in
 .toggle { display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 14px; color: var(--muted); }
 .toggle input { width: 20px; height: 20px; accent-color: var(--accent); }
 .voice-row { display: flex; align-items: center; justify-content: center; gap: 8px 18px; flex-wrap: wrap; }
+.model-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.model-chip {
+  min-width: 0; min-height: 38px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 9px;
+  background: color-mix(in srgb, var(--panel) 85%, transparent); color: var(--muted); text-align: left;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer;
+}
+.model-chip:hover, .model-chip:active { color: var(--text); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.model-chip.stale { color: var(--warn); border-color: var(--warn); }
+
+/* OpenCode-inspired inline execution timeline: restrained rows between conversation messages. */
+.timeline-step, .timeline-sub { width: min(94%, 720px); align-self: flex-start; color: var(--muted); }
+.timeline-step.nested { width: calc(min(94%, 720px) - 18px); margin-left: 18px; }
+.timeline-trigger {
+  width: 100%; min-height: 36px; display: flex; align-items: center; gap: 8px; padding: 5px 7px;
+  border: 0; border-radius: 8px; background: transparent; color: inherit; text-align: left; cursor: pointer;
+}
+.timeline-trigger:hover, .timeline-trigger:focus-visible { background: var(--panel); color: var(--text); }
+.timeline-title { font-size: 13px; font-weight: 600; }
+.timeline-meta { margin-left: auto; color: var(--muted); font-size: 11.5px; text-transform: capitalize; }
+.timeline-chevron { color: var(--muted); transition: transform .15s; }
+.timeline-trigger[aria-expanded="true"] .timeline-chevron { transform: rotate(90deg); }
+.timeline-icon { width: 14px; text-align: center; color: var(--ok); }
+.timeline-step.running .timeline-title { color: var(--accent); }
+.timeline-step.failed .timeline-icon { color: var(--bad); }
+.timeline-sub { display: flex; align-items: center; gap: 8px; min-height: 34px; padding: 5px 7px; font-size: 13px; }
+.timeline-sub.working .timeline-icon { color: var(--accent); }
+.timeline-sub.blocked .timeline-icon { color: var(--warn); }
+.timeline-detail { margin: 0 7px 6px 29px; border-left: 2px solid var(--line); padding: 7px 10px; max-height: 48vh; overflow: auto; }
+.reasoning-text { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); font-size: 12.5px; line-height: 1.55; }
+.tool-json { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text); }
+@media (max-width: 430px) { .model-controls { grid-template-columns: 1fr; } }
 
 /* ---------- voice speed ---------- */
 .speed { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); }

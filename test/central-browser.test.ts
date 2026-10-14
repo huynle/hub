@@ -156,3 +156,54 @@ describe("POST /api/machines/:machineID/sessions", () => {
     expect(((await none.json()) as any).error).toMatch(/background service/i)
   })
 })
+
+describe("per-session models", () => {
+  test("lists models and persists user-owned session preferences through the spoke", async () => {
+    h = harness()
+    const { client } = await machine()
+    const seen = answer(client, (req) => {
+      if (req.op === "models") return { models: [{ providerID: "anthropic", modelID: "claude", name: "Claude", enabled: true, status: "active", variants: ["fast"] }] }
+      if (req.op === "setModelPrefs") return { prefs: { voice: req.voice, ...(req.worker ? { worker: req.worker } : {}) }, defaults: {} }
+      return undefined
+    })
+    expect(await (await h.api("/api/sessions/ses_on/models")).json()).toEqual({ models: [{ providerID: "anthropic", modelID: "claude", name: "Claude", enabled: true, status: "active", variants: ["fast"] }] })
+    expect(await (await h.api("/api/sessions/ses_on/model-prefs")).json()).toEqual({ prefs: {}, defaults: {} })
+    const selection = { providerID: "anthropic", modelID: "claude", variant: "fast" }
+    const put = await h.api("/api/sessions/ses_on/model-prefs", { method: "PUT", json: { voice: selection } })
+    expect(await put.json()).toEqual({ prefs: { voice: selection }, defaults: {} })
+    expect(h.store.modelPrefs("local", "ses_on")).toEqual({ voice: selection })
+    expect(seen).toContainEqual({ op: "setModelPrefs", sessionID: "ses_on", voice: selection })
+    expect(seen).toContainEqual({ op: "setModelPrefs", sessionID: "ses_on", voice: null, worker: null })
+  })
+
+  test("model routes preserve session isolation and validate selections", async () => {
+    h = harness()
+    const { client } = await machine()
+    const seen = answer(client, () => ({ models: [] }))
+    expect((await h.api("/api/sessions/ses_missing/models")).status).toBe(404)
+    expect((await h.api("/api/sessions/ses_off/models")).status).toBe(403)
+    expect((await h.api("/api/sessions/ses_on/model-prefs", { method: "PUT", json: { voice: { providerID: "bad space", modelID: "x" } } })).status).toBe(400)
+    expect(seen).toEqual([])
+  })
+})
+
+describe("timeline history and details", () => {
+  test("proxies bounded pages and full details only for the owned exposed session", async () => {
+    h = harness()
+    const { client } = await machine()
+    const seen = answer(client, (req) => {
+      if (req.op === "timeline") return { items: [{ key: "u1:text", kind: "user", text: "hi" }], cursor: "next" }
+      if (req.op === "timelinePart") return { detail: { state: { input: { secret: "visible to owner" }, content: [{ type: "text", text: "full" }] } } }
+      return undefined
+    })
+    expect(await (await h.api("/api/sessions/ses_on/timeline?limit=25")).json()).toEqual({ items: [{ key: "u1:text", kind: "user", text: "hi" }], cursor: "next" })
+    expect(await (await h.api("/api/sessions/ses_on/timeline/messages/msg_1/parts/tool_1")).json()).toEqual({ detail: { state: { input: { secret: "visible to owner" }, content: [{ type: "text", text: "full" }] } } })
+    expect(seen).toEqual([
+      { op: "timeline", sessionID: "ses_on", limit: 25 },
+      { op: "timelinePart", sessionID: "ses_on", messageID: "msg_1", partID: "tool_1" },
+    ])
+    expect((await h.api("/api/sessions/ses_off/timeline")).status).toBe(403)
+    expect((await h.api("/api/sessions/ses_missing/timeline")).status).toBe(404)
+    expect((await h.api("/api/sessions/ses_on/timeline?limit=500")).status).toBe(400)
+  })
+})

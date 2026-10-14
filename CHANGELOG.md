@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- The phone now has separate per-session Voice and Worker model selectors, including model variants.
+  Changes apply to the next turn or task; machine configuration remains the fallback.
+- Thinking, tools and subagents now appear inline with the conversation in compact expandable rows inspired
+  by OpenCode. Reopening loads ordered history from OpenCode, and complete tool input/output is fetched only
+  when expanded instead of being stored in the hub.
 - Conversation mode handles quick answers and up to two low-risk tools directly, uses the fast voice
   model for routine workers and the configured work model for complex work, and reuses workers only for
   follow-ups on the same active task.

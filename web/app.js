@@ -22,6 +22,7 @@ import { filterPicker, pickerOptions, stepActive } from "./picker-core.js"
 import { applyRate } from "./cues.js"
 import { FILTERS, groupOpen, highlight, machineView as browseMachine, page, parseChoices } from "./browser-core.js"
 import { createBody, hiddenView, homeView, migratePins, newSessionTargets, normalizePrefs, recentMachine, setPref } from "./view-core.js"
+import { ModelCatalog, Timeline } from "./timeline-core.js"
 import {
   USER_FILTERS,
   USER_SORTS,
@@ -345,6 +346,20 @@ function onEvent(message) {
     case "activity": {
       if (!message.item || typeof message.rootID !== "string") break
       feedFor(message.rootID).activity(message.sessionID, message.item)
+      if (state.route?.name === "session" && state.session?.id === message.rootID) {
+        const item = message.item
+        state.session.timeline?.upsert({
+          key: `activity:${message.sessionID}:${item.id}`,
+          sessionID: message.sessionID,
+          kind: item.kind === "thinking" ? "reasoning" : "tool",
+          ...(item.tool ? { name: item.tool } : {}),
+          ...(item.summary ? { summary: item.summary } : {}),
+          ...(item.error ? { error: item.error } : {}),
+          state: item.state,
+          at: item.at,
+        })
+        renderTimeline()
+      }
       if (state.route?.name === "session" && state.session?.id === message.rootID) scheduleFeedRender()
       if (state.route?.name === "home") scheduleHomeRender()
       break
@@ -391,6 +406,12 @@ function onStream(message) {
   else feed.text(message.sessionID, messageID, text)
   const route = state.route?.name
   if (route === "session" && state.session) {
+    if (state.session.id === rootID && messageID && (reasoning || message.sessionID !== state.session.id)) {
+      const key = `${messageID}:${reasoning ? "reasoning" : "text"}`
+      const previous = state.session.timeline?.rows().find((row) => row.key === key)?.text ?? ""
+      state.session.timeline?.upsert({ key, messageID, sessionID: message.sessionID, kind: reasoning ? "reasoning" : "assistant", text: `${previous}${text}`, state: reasoning ? "running" : undefined, at: Date.now() })
+      renderTimeline()
+    }
     if (!reasoning && state.session.id === message.sessionID) onDelta(text, messageID)
     if (state.session.id === rootID) scheduleFeedRender()
   }
@@ -1575,6 +1596,58 @@ function feedRow(r) {
     h("span", { class: "feed-label" }, r.label, r.error ? h("span", { class: "feed-error" }, ` — ${r.error}`) : null))
 }
 
+function timelineRow(r) {
+  if (r.kind === "user" || r.kind === "assistant") {
+    return h("div", { class: `msg ${r.kind}${r.live ? " live" : ""}`, "data-timeline-key": r.key, "aria-busy": r.live ? "true" : undefined }, r.text ?? "")
+  }
+  if (r.kind === "subagent") {
+    return h("div", { class: `timeline-sub ${r.state}`, "data-timeline-key": r.key },
+      h("span", { class: "timeline-icon", "aria-hidden": "true" }, "◆"),
+      h("strong", {}, r.label), h("span", { class: "timeline-meta" }, r.state))
+  }
+  const open = !!state.session?.expanded.has(r.key)
+  const duration = r.completed && r.at ? formatElapsed(r.completed - r.at) : ""
+  const label = r.kind === "reasoning" ? (r.state === "running" ? "Thinking…" : "Thought") : r.name || "Tool"
+  const box = h("div", { class: `timeline-step ${r.kind} ${r.state ?? ""} ${r.depth ? "nested" : ""}`, "data-timeline-key": r.key })
+  const detail = h("div", { class: "timeline-detail", hidden: !open })
+  if (open) fillTimelineDetail(r, detail)
+  box.append(
+    h("button", { class: "timeline-trigger", type: "button", "aria-expanded": String(open), onclick: () => {
+      if (!state.session.expanded.delete(r.key)) state.session.expanded.add(r.key)
+      renderTimeline()
+    } },
+    r.state === "running" ? h("span", { class: "spinner small" }) : h("span", { class: "timeline-icon", "aria-hidden": "true" }, r.state === "failed" ? "✕" : "✓"),
+    h("span", { class: "timeline-title" }, label),
+    duration ? h("span", { class: "timeline-meta" }, duration) : null,
+    h("span", { class: "timeline-chevron", "aria-hidden": "true" }, "›")), detail)
+  return box
+}
+
+async function fillTimelineDetail(row, target) {
+  if (row.kind === "reasoning") return target.replaceChildren(h("div", { class: "reasoning-text" }, row.text || "No reasoning text."))
+  let detail = row.detail
+  if (!detail && row.messageID && row.partID !== undefined) {
+    target.replaceChildren(h("span", { class: "small muted" }, "Loading full details…"))
+    try {
+      const answer = await getJSON(`/api/sessions/${encodeURIComponent(state.session.id)}/timeline/messages/${encodeURIComponent(row.messageID)}/parts/${encodeURIComponent(row.partID)}`)
+      detail = answer.detail
+      state.session.timeline.detail(row.key, detail)
+    } catch (e) { return target.replaceChildren(h("span", { class: "error" }, e.message)) }
+  }
+  target.replaceChildren(h("pre", { class: "tool-json" }, JSON.stringify(detail ?? { summary: row.summary, error: row.error }, null, 2)))
+}
+
+function renderTimeline() {
+  const s = state.session
+  if (!s?.timeline) return
+  s.timeline.status(s.status, s.id)
+  const rows = s.timeline.rows()
+  s.els.transcript.replaceChildren(...(rows.length ? rows.map(timelineRow) : [h("div", { class: "note" }, "No messages yet. Tap the mic to start.")]))
+  for (const row of rows) {
+    if (row.kind === "assistant" && row.messageID) s.bubbles.set(row.messageID, s.els.transcript.querySelector(`[data-timeline-key="${CSS.escape(row.key)}"]`))
+  }
+}
+
 let feedFrame
 function scheduleFeedRender() {
   if (feedFrame) return
@@ -1681,7 +1754,11 @@ function renderSession(route) {
     status: findSession(route.id)?.status, // previous status tree, for subagent notes
     liveID: undefined, // assistant message ID streaming into `live`
     bubbles: new Map(), // assistant message ID → its bubble (for "say" dedupe)
+    localSeq: 0,
     expanded: new Set(), // expanded Thinking rows (feed row keys)
+    timeline: new Timeline(),
+    modelCatalog: undefined,
+    modelPrefs: undefined,
     forbidden: false, // the hub answered 403 not_exposed
     gated: false, // the "Enable voice" call-to-action is showing
     els: {},
@@ -1735,7 +1812,6 @@ function renderSession(route) {
       els.pulse,
       els.state,
       els.gate,
-      els.feedBox,
       els.blockers,
       els.transcript,
       els.speechSetup,
@@ -1745,6 +1821,7 @@ function renderSession(route) {
     h("div", { class: "mic-row" }, h("span", { class: "mic-side", "aria-hidden": "true" }), els.mic, h("span", { class: "mic-side" }, els.convo)),
     els.micLabel,
     typed,
+    modelControls(s),
     h("div", { class: "voice-row" },
       h("label", { class: "toggle", for: "speak" }, els.speak, "Read replies aloud"),
       speedControl("speed-session", "Speed")))
@@ -1767,6 +1844,62 @@ function renderSession(route) {
   loadActivity(s)
   startPresence(s)
   s.pulseTimer = setInterval(() => state.session === s && document.visibilityState === "visible" && renderPulse(), 1000)
+}
+
+function modelLabel(selection, fallback, noun) {
+  const value = selection ?? fallback
+  if (!value) return `${noun}: default`
+  return `${noun}: ${value.modelID}${value.variant ? ` · ${value.variant}` : ""}`
+}
+
+function modelControls(s) {
+  const voice = h("button", { class: "model-chip", type: "button", "aria-haspopup": "dialog" }, "Voice: loading…")
+  const worker = h("button", { class: "model-chip", type: "button", "aria-haspopup": "dialog" }, "Worker: loading…")
+  const render = () => {
+    const prefs = s.modelPrefs?.prefs ?? {}
+    const defaults = s.modelPrefs?.defaults ?? {}
+    voice.textContent = modelLabel(prefs.voice, defaults.voice, "Voice")
+    worker.textContent = modelLabel(prefs.worker, defaults.worker, "Worker")
+    for (const [button, value] of [[voice, prefs.voice], [worker, prefs.worker]]) button.classList.toggle("stale", !!value && !!s.modelCatalog?.selection(value)?.stale)
+  }
+  const pick = (kind, button) => {
+    const prefs = s.modelPrefs?.prefs ?? {}
+    const defaults = s.modelPrefs?.defaults ?? {}
+    const current = prefs[kind] ?? defaults[kind]
+    openPicker({
+      title: `${kind === "voice" ? "Voice" : "Worker"} model`, noun: "model",
+      current: current ? `${current.providerID}/${current.modelID}` : "",
+      load: async () => {
+        if (!s.modelCatalog) {
+          const { models } = await getJSON(`/api/sessions/${encodeURIComponent(s.id)}/models`)
+          s.modelCatalog = new ModelCatalog(models)
+        }
+        return s.modelCatalog.groups("").flatMap((group) => group.items.map((model) => ({ id: `${model.providerID}/${model.modelID}`, name: `${model.name} · ${group.providerID}` })))
+      },
+      onPick: (id) => pickVariant(s, kind, id, button, render), opener: button,
+    })
+  }
+  voice.onclick = () => pick("voice", voice)
+  worker.onclick = () => pick("worker", worker)
+  getJSON(`/api/sessions/${encodeURIComponent(s.id)}/model-prefs`).then((value) => { if (state.session === s) { s.modelPrefs = value; render() } }, (e) => { voice.textContent = worker.textContent = "Models unavailable"; note(e.message, "err") })
+  return h("div", { class: "model-controls", "aria-label": "Session models" }, voice, worker)
+}
+
+function pickVariant(s, kind, id, opener, render) {
+  const slash = id.indexOf("/")
+  const providerID = id.slice(0, slash)
+  const modelID = id.slice(slash + 1)
+  const model = s.modelCatalog?.selection({ providerID, modelID })
+  const save = async (variant) => {
+    try {
+      s.modelPrefs = await (await api(`/api/sessions/${encodeURIComponent(s.id)}/model-prefs`, { method: "PUT", json: { [kind]: { providerID, modelID, ...(variant ? { variant } : {}) } } })).json()
+      render()
+      toast(`${kind === "voice" ? "Voice" : "Worker"} model applies to the next ${kind === "voice" ? "turn" : "task"}.`)
+    } catch (e) { toast(e.message, "err") }
+  }
+  const variants = model?.variants ?? []
+  if (!variants.length) return save(undefined)
+  openPicker({ title: `${model.name || modelID} variant`, noun: "variant", current: "", load: async () => [{ id: "default", name: "Default" }, ...variants.filter((v) => v !== "default").map((id) => ({ id }))], onPick: (variant) => save(variant === "default" ? undefined : variant), opener })
 }
 
 function updateSessionHeader() {
@@ -1869,12 +2002,17 @@ async function loadTranscript() {
   if (!s || s.loading || s.loaded || s.gated || exposing.has(s.id) || !findSession(s.id)) return
   s.loading = true
   try {
-    const { messages } = await getJSON(`/api/sessions/${encodeURIComponent(s.id)}/context`)
+    let cursor
+    let pages = 0
+    do {
+      const page = await getJSON(`/api/sessions/${encodeURIComponent(s.id)}/timeline?limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`)
+      s.timeline.load(page.items)
+      cursor = page.cursor
+      pages++
+    } while (cursor && pages < 10)
     if (state.session !== s) return
     s.loaded = true
-    const nodes = messages.map((m) => h("div", { class: `msg ${m.role === "user" ? "user" : "assistant"}` }, m.text))
-    if (!nodes.length) nodes.push(h("div", { class: "note" }, "No messages yet. Tap the mic to start."))
-    s.els.transcript.prepend(...nodes)
+    renderTimeline()
     scrollToEnd()
   } catch (e) {
     if (state.session !== s) return
@@ -1893,8 +2031,10 @@ async function loadTranscript() {
 function add(role, text) {
   const s = state.session
   if (!s) return
-  const el = h("div", { class: `msg ${role}` }, text)
-  s.els.transcript.append(el)
+  const key = `local:${++s.localSeq}`
+  s.timeline.upsert({ key, kind: role, text, at: Date.now() })
+  renderTimeline()
+  const el = s.els.transcript.querySelector(`[data-timeline-key="${CSS.escape(key)}"]`)
   if (role === "user") s.lastAgent = undefined
   else s.lastAgent = el
   scrollToEnd()
@@ -1915,18 +2055,13 @@ function scrollToEnd() {
 /** Streams reply text of the viewed session into its bubble: one bubble per assistant message. */
 function onDelta(text, messageID) {
   const s = state.session
-  if (s.live && messageID && s.liveID && s.liveID !== messageID) finishLive()
-  if (!s.live) {
-    s.live = add("assistant", "")
-    s.live.classList.add("live")
-    s.live.setAttribute("aria-busy", "true")
-    s.liveID = messageID
-    if (messageID) {
-      s.bubbles.set(messageID, s.live)
-      if (s.bubbles.size > 50) s.bubbles.delete(s.bubbles.keys().next().value)
-    }
-  }
-  s.live.textContent += text
+  const key = `${messageID ?? `live-${Date.now()}`}:text`
+  const previous = s.timeline.rows().find((row) => row.key === key)?.text ?? ""
+  s.timeline.upsert({ key, messageID, kind: "assistant", text: `${previous}${text}`, live: true, at: Date.now() })
+  s.liveID = messageID
+  renderTimeline()
+  s.live = s.els.transcript.querySelector(`[data-timeline-key="${CSS.escape(key)}"]`)
+  if (messageID && s.live) s.bubbles.set(messageID, s.live)
   scrollToEnd()
 }
 
@@ -1934,14 +2069,14 @@ function finishLive(finalText) {
   const s = state.session
   if (!s) return
   if (finalText !== undefined) {
-    if (s.live) s.live.textContent = finalText
+    if (s.liveID) s.timeline.upsert({ key: `${s.liveID}:text`, messageID: s.liveID, kind: "assistant", text: finalText, live: false, at: Date.now() })
     else add("assistant", finalText)
   }
-  if (s.live) {
-    s.live.classList.remove("live")
-    s.live.removeAttribute("aria-busy")
-    s.lastAgent = s.live
+  if (s.liveID) {
+    const row = s.timeline.rows().find((item) => item.key === `${s.liveID}:text`)
+    if (row) s.timeline.upsert({ ...row, live: false })
   }
+  renderTimeline()
   s.live = undefined
   s.liveID = undefined
 }
@@ -2128,15 +2263,10 @@ function showSay(s, message) {
   const own = typeof message.messageID === "string" ? s.bubbles.get(message.messageID) : undefined
   const bubble = own?.isConnected ? own : s.live ?? s.lastAgent
   const { mode, text } = reconcileSay(bubble?.textContent ?? "", message.text)
-  if (mode === "update") bubble.textContent = text
-  else if (mode === "new") {
-    if (s.live && s.liveID && message.messageID && s.liveID !== message.messageID) {
-      s.live.before(h("div", { class: "msg assistant" }, text))
-    } else {
-      finishLive()
-      const el = add("assistant", text)
-      if (typeof message.messageID === "string") s.bubbles.set(message.messageID, el)
-    }
+  const key = message.messageID ? `${message.messageID}:text` : `say:${++s.localSeq}`
+  if (mode === "update" || mode === "new") {
+    s.timeline.upsert({ key, messageID: message.messageID, kind: "assistant", text, at: Date.now() })
+    renderTimeline()
   }
   scrollToEnd()
 }
@@ -2160,6 +2290,8 @@ function onSessionStatus(sessions) {
   if (!s) return
   for (const text of statusNotes(s.status, sessions, s.id)) note(text, "sys")
   s.status = sessions
+  s.timeline?.status(sessions, s.id)
+  renderTimeline()
   s.conversation?.onStatus(sessions)
 }
 

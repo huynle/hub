@@ -25,6 +25,10 @@ function fakeHost() {
   const agents = new Map<string, string>()
   const known = new Set(["build", "plan", "voice"])
   let inbox = 0
+  const catalog = [
+    { providerID: "anthropic", modelID: "claude-haiku", name: "Claude Haiku", enabled: true, status: "active", variants: [{ id: "fast" }] },
+    { providerID: "anthropic", modelID: "claude-opus", name: "Claude Opus", enabled: true, status: "active", variants: [{ id: "thinking" }] },
+  ]
   const host: SpokeHost & { push(e: Ev): void } = {
     directory: "/work/project",
     opencodeVersion: "2.0.25",
@@ -35,6 +39,7 @@ function fakeHost() {
       return { id: `msg_${++inbox}` }
     },
     context: async (sessionID) => (messages.get(sessionID) ?? []) as any,
+    listModels: async () => catalog as any,
     getSession: async (sessionID) => {
       calls.get.push(sessionID)
       const agent = agents.get(sessionID)
@@ -62,7 +67,7 @@ function fakeHost() {
       return { id: `ses_new${calls.create.length}` }
     },
   }
-  return { host, calls, messages, agents, known, models }
+  return { host, calls, messages, agents, known, models, catalog }
 }
 
 function setup(
@@ -73,7 +78,7 @@ function setup(
   const file = path.join(dir, "config.json")
   const server = opts.server ?? fakeCentral()
   writeConfig(file, { ...defaults("box"), server: server.url, ...config })
-  const { host, calls, messages, agents, known, models } = fakeHost()
+  const { host, calls, messages, agents, known, models, catalog } = fakeHost()
   if (opts.listRecent) (host as { listRecent?: SpokeHost["listRecent"] }).listRecent = opts.listRecent
   const spoke = new Spoke(host, {
     configFile: file,
@@ -95,7 +100,7 @@ function setup(
   cleanups.push(() => server.stop())
   cleanups.push(() => spoke.stop())
   spoke.start()
-  return { spoke, server, host, calls, messages, file, agents, known, models }
+  return { spoke, server, host, calls, messages, file, agents, known, models, catalog }
 }
 
 const created = (sessionID: string, extra: Record<string, unknown> = {}): Ev => ({
@@ -588,6 +593,76 @@ describe("Spoke", () => {
     writeConfig(file, { ...readConfig(file, "box"), subagent: "explore" })
     await until(() => spoke.subagent() === "explore")
   })
+
+  test("lists normalized models and uses per-session Voice and Worker model preferences", async () => {
+    const { spoke, server, host, calls, models } = setup({
+      mode: "always",
+      token: "tok",
+      voiceModel: "fallback/voice",
+      workModel: "fallback/worker",
+    })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    await until(() => lastSessions(server)?.sessions.length === 1)
+
+    const listed = await server.request({ op: "models", sessionID: "ses_a" })
+    expect(listed.result).toEqual({
+      models: [
+        { providerID: "anthropic", modelID: "claude-haiku", name: "Claude Haiku", enabled: true, status: "active", variants: ["fast"] },
+        { providerID: "anthropic", modelID: "claude-opus", name: "Claude Opus", enabled: true, status: "active", variants: ["thinking"] },
+      ],
+    })
+
+    const prefs = {
+      voice: { providerID: "anthropic", modelID: "claude-haiku", variant: "fast" },
+      worker: { providerID: "anthropic", modelID: "claude-opus", variant: "thinking" },
+    }
+    expect((await server.request({ op: "setModelPrefs", sessionID: "ses_a", ...prefs })).result).toEqual({
+      prefs,
+      defaults: {
+        voice: { providerID: "fallback", modelID: "voice" },
+        worker: { providerID: "fallback", modelID: "worker" },
+      },
+    })
+    expect(spoke.workModelFor("ses_a")).toBe("anthropic/claude-opus#thinking")
+
+    models.set("ses_a", { providerID: "fallback", id: "voice" })
+    host.push({ type: "session.execution.started", data: { sessionID: "ses_a" } })
+    await server.request({ op: "steer", sessionID: "ses_a", text: "while busy" })
+    expect(calls.model).toEqual([])
+    host.push({ type: "session.execution.succeeded", data: { sessionID: "ses_a" } })
+    await Bun.sleep(10)
+    await server.request({ op: "steer", sessionID: "ses_a", text: "next turn" })
+    expect(calls.model.at(-1)).toEqual({ sessionID: "ses_a", model: { providerID: "anthropic", id: "claude-haiku", variant: "fast" } })
+  })
+
+  test("normalizes timeline history, paginates it, and returns full tool detail", async () => {
+    const { spoke, server, host, messages } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    await until(() => lastSessions(server)?.sessions.length === 1)
+    messages.set("ses_a", [
+      { id: "u1", type: "user", text: "Please inspect it", time: { created: 1 } },
+      { id: "a1", type: "assistant", agent: "voice", model: { providerID: "anthropic", id: "claude" }, time: { created: 2, completed: 8 }, content: [
+        { type: "reasoning", text: "## Inspecting\nI will read the file.", time: { created: 2, completed: 4 } },
+        { type: "tool", id: "tool_1", name: "read", state: { status: "completed", input: { filePath: "/work/a.ts" }, content: [{ type: "text", text: "FULL OUTPUT" }] }, time: { created: 4, completed: 6 } },
+        { type: "text", text: "It looks good." },
+      ] },
+    ])
+    const page = await server.request({ op: "timeline", sessionID: "ses_a", limit: 2 })
+    expect(page.result).toEqual({
+      items: [
+        { key: "u1:text", messageID: "u1", sessionID: "ses_a", kind: "user", text: "Please inspect it", at: 1 },
+        { key: "a1:0", messageID: "a1", partID: "0", sessionID: "ses_a", kind: "reasoning", text: "## Inspecting\nI will read the file.", state: "done", at: 2, completed: 4 },
+      ],
+      cursor: "2",
+    })
+    const second = await server.request({ op: "timeline", sessionID: "ses_a", limit: 20, cursor: "2" })
+    expect((second.result as any).items.map((x: any) => x.kind)).toEqual(["tool", "assistant"])
+    const detail = await server.request({ op: "timelinePart", sessionID: "ses_a", messageID: "a1", partID: "1" })
+    expect(detail.result).toEqual({ detail: { name: "read", state: { status: "completed", input: { filePath: "/work/a.ts" }, content: [{ type: "text", text: "FULL OUTPUT" }] }, time: { created: 4, completed: 6 } } })
+    expect((await server.request({ op: "timelinePart", sessionID: "ses_a", messageID: "other", partID: "1" })).ok).toBe(false)
+  })
 })
 
 // ---------- 0.4: open sessions first ----------
@@ -758,4 +833,3 @@ describe("open sessions (0.4)", () => {
     expect((unknown.result as any).warning).toMatch(/w99|workspace/i)
   })
 })
-

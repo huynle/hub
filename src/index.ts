@@ -57,6 +57,7 @@ function hostFrom(ctx: Context): SpokeHost {
     events: (signal) => ctx.event.subscribe({ signal }) as AsyncIterable<any>,
     prompt: (input) => session.prompt(input),
     context: (sessionID) => session.context({ sessionID }),
+    listModels: async () => unwrap<ReadonlyArray<unknown>>(await (ctx.model as any).list({}), Array.isArray),
     getSession: async (sessionID) => unwrap(await session.get({ sessionID }), (v) => typeof v.id === "string"),
     replyPermission: (input) => (ctx.permission as any).reply(input),
     interrupt: (sessionID) => session.interrupt({ sessionID }),

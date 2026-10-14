@@ -225,6 +225,16 @@ speech-ready result that the hub reads directly, without waiting for another voi
 can keep talking while work runs; related follow-ups continue the active worker and unrelated tasks start
 a fresh one.
 
+The phone composer exposes separate **Voice** and **Worker** model controls for each session. Each picker
+lists the connected OpenCode process's available models and variants. Choices are saved per user and
+session, apply to the next turn or newly started worker, and fall back to the machine's `voiceModel` and
+`workModel` when unset.
+
+The conversation is an inline execution timeline: streamed thinking, tools and nested subagents appear
+between messages as compact expandable rows. Reopening a session pages its projected message history from
+OpenCode. Expanding a tool fetches its complete input/output from the owning OpenCode process; the hub does
+not persist those potentially sensitive details.
+
 **Spoke side** (`src/spoke/conversation.ts`, `src/spoke/spoke.ts`):
 
 - The plugin registers a primary agent **`voice`** through `ctx.agent.transform` (the agent editor's

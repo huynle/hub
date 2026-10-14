@@ -4,7 +4,7 @@
 import type { Server } from "bun"
 import { diskAssets, type WebAssets } from "./assets"
 import path from "node:path"
-import type { EnrollStart, PermissionDecision } from "../protocol"
+import type { EnrollStart, ModelSelection, PermissionDecision } from "../protocol"
 import { isLoopbackAddress, isLoopbackHost, isLoopbackURL, loopbackOrigins } from "../loopback"
 import { speakable } from "../speakable"
 import { Auth, RateLimitError, ValidationError } from "./auth"
@@ -555,6 +555,34 @@ export function startCentral(options: CentralOptions): Central {
       true,
     ),
     route("POST", "/api/sessions/:session/conversation", "session", ({ request, params }) => conversation(request, params.session!), true),
+    route("GET", "/api/sessions/:session/models", "session", async ({ params }) =>
+      Response.json(await spokes.request(ownerOf(params.session!), { op: "models", sessionID: params.session! }), { headers: NO_STORE }), true),
+    route("GET", "/api/sessions/:session/model-prefs", "session", async ({ params, user }) => {
+      const prefs = store.modelPrefs(user.id, params.session!)
+      const defaults = await spokes.request(ownerOf(params.session!), {
+        op: "setModelPrefs",
+        sessionID: params.session!,
+        voice: prefs.voice ?? null,
+        worker: prefs.worker ?? null,
+      })
+      return Response.json({ prefs, defaults: defaults.defaults }, { headers: NO_STORE })
+    }, true),
+    route("PUT", "/api/sessions/:session/model-prefs", "session", async ({ request, params, user }) => {
+      const change = modelPrefsInput(await request.json())
+      const reply = await spokes.request(ownerOf(params.session!), { op: "setModelPrefs", sessionID: params.session!, ...change })
+      const prefs = store.setModelPrefs(user.id, params.session!, change)
+      return Response.json({ prefs, defaults: reply.defaults }, { headers: NO_STORE })
+    }, true),
+    route("GET", "/api/sessions/:session/timeline", "session", async ({ params, url }) => {
+      const limitRaw = url.searchParams.get("limit")
+      const limit = limitRaw === null ? undefined : Number(limitRaw)
+      if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 200)) return error(400, "limit must be 1–200")
+      const cursor = url.searchParams.get("cursor") ?? undefined
+      if (cursor && cursor.length > 4096) return error(400, "cursor is too long")
+      return Response.json(await spokes.request(ownerOf(params.session!), { op: "timeline", sessionID: params.session!, ...(limit ? { limit } : {}), ...(cursor ? { cursor } : {}) }), { headers: NO_STORE })
+    }, true),
+    route("GET", "/api/sessions/:session/timeline/messages/:message/parts/:part", "session", async ({ params }) =>
+      Response.json(await spokes.request(ownerOf(params.session!), { op: "timelinePart", sessionID: params.session!, messageID: params.message!, partID: params.part! }), { headers: NO_STORE }), true),
     route(
       "GET",
       "/api/sessions/:session/context",
@@ -958,6 +986,26 @@ function viewPrefsInput(value: unknown): Partial<ViewPrefs> {
     out[key] = [...new Set(list as string[])]
   }
   if (Object.keys(out).length === 0) throw invalid()
+  return out
+}
+
+const MODEL_ID = /^[A-Za-z0-9_.:@/+~-]{1,300}$/
+function modelPrefsInput(value: unknown): { voice?: ModelSelection | null; worker?: ModelSelection | null } {
+  const invalid = () => new HttpError(400, "Expected Voice/Worker model selections")
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw invalid()
+  const record = value as Record<string, unknown>
+  if (Object.keys(record).some((key) => key !== "voice" && key !== "worker")) throw invalid()
+  const out: { voice?: ModelSelection | null; worker?: ModelSelection | null } = {}
+  for (const key of ["voice", "worker"] as const) {
+    const item = record[key]
+    if (item === undefined) continue
+    if (item === null) { out[key] = null; continue }
+    if (typeof item !== "object" || Array.isArray(item)) throw invalid()
+    const m = item as Record<string, unknown>
+    if (typeof m.providerID !== "string" || !MODEL_ID.test(m.providerID) || typeof m.modelID !== "string" || !MODEL_ID.test(m.modelID) || (m.variant !== undefined && (typeof m.variant !== "string" || !MODEL_ID.test(m.variant)))) throw invalid()
+    out[key] = { providerID: m.providerID, modelID: m.modelID, ...(typeof m.variant === "string" ? { variant: m.variant } : {}) }
+  }
+  if (!("voice" in out) && !("worker" in out)) throw invalid()
   return out
 }
 

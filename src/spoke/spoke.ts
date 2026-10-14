@@ -11,12 +11,14 @@ import {
   type ProcessKind,
   type ResultFor,
   type ServerRequest,
+  type SessionModelPrefs,
   type SpokeRequest,
   type TerminalInfo,
   type TurnResult,
 } from "../protocol"
 import { extractReply } from "../reply"
 import { TurnTracker } from "../turns"
+import { boundedTimelinePart, timelineItems } from "./timeline"
 import { SpokeConnection, type Backoff, type ConnectionState } from "./client"
 import { VOICE_AGENT } from "./conversation"
 import { pollEnrollment, startEnrollment } from "./enroll"
@@ -61,6 +63,7 @@ export interface SpokeHost {
   events(signal: AbortSignal): AsyncIterable<EventLike>
   prompt(input: { sessionID: string; text: string; metadata: Record<string, unknown>; delivery?: "steer" }): Promise<{ id: string }>
   context(sessionID: string): Promise<ReadonlyArray<unknown>>
+  listModels?(): Promise<ReadonlyArray<unknown>>
   getSession(sessionID: string): Promise<HostSession>
   replyPermission(input: { sessionID: string; requestID: string; decision: PermissionDecision }): Promise<unknown>
   interrupt(sessionID: string): Promise<unknown>
@@ -187,6 +190,8 @@ export class Spoke {
   private readonly infoTried = new Map<string, number>()
   /** Sessions in conversation mode → the agent to restore when it ends (undefined: the default agent). */
   private readonly conversations = new Map<string, { previous?: string; previousModel?: ModelRef; voiceModel?: ModelRef }>()
+  /** Per-session selections supplied by the hub; the hub persists them per user. */
+  private readonly modelPrefs = new Map<string, SessionModelPrefs>()
   private conversationChain: Promise<unknown> = Promise.resolve()
   private readonly abort = new AbortController()
   private snapshotTimer?: ReturnType<typeof setTimeout>
@@ -270,6 +275,8 @@ export class Spoke {
   /** The agent the voice orchestrator delegates to (per-machine config). */
   /** The model subagents should work on for a session in conversation mode, as "provider/model[#variant]". */
   workModelFor(sessionID: string): string | undefined {
+    const selected = this.modelPrefs.get(sessionID)?.worker
+    if (selected) return formatModelRef({ providerID: selected.providerID, id: selected.modelID, ...(selected.variant ? { variant: selected.variant } : {}) })
     const entry = this.conversations.get(sessionID)
     if (!entry?.voiceModel) return undefined
     return this.config.workModel ?? (entry.previousModel ? formatModelRef(entry.previousModel) : undefined)
@@ -657,7 +664,12 @@ export class Spoke {
     session: HostSession,
     entry: { previousModel?: ModelRef; voiceModel?: ModelRef } | undefined,
   ): Promise<{ previousModel?: ModelRef; voiceModel?: ModelRef }> {
-    const voiceModel = this.config.voiceModel ? parseModelRef(this.config.voiceModel) : undefined
+    const selected = this.modelPrefs.get(sessionID)?.voice
+    const voiceModel = selected
+      ? { providerID: selected.providerID, id: selected.modelID, ...(selected.variant ? { variant: selected.variant } : {}) }
+      : this.config.voiceModel
+        ? parseModelRef(this.config.voiceModel)
+        : undefined
     if (!voiceModel) return {}
     const current = session.model
     const onVoice = current !== undefined && sameModel(current, voiceModel)
@@ -703,7 +715,47 @@ export class Spoke {
         return {}
       case "context":
         return { messages: contextMessages(await this.host.context(req.sessionID)) }
+      case "models": {
+        const raw = await this.host.listModels?.() ?? []
+        return {
+          models: raw.flatMap((value: any) => {
+            if (!value || typeof value.providerID !== "string" || typeof value.modelID !== "string") return []
+            return [{
+              providerID: value.providerID,
+              modelID: value.modelID,
+              name: typeof value.name === "string" ? value.name : value.modelID,
+              enabled: value.enabled !== false,
+              status: typeof value.status === "string" ? value.status : "active",
+              variants: Array.isArray(value.variants) ? value.variants.flatMap((v: any) => typeof v?.id === "string" ? [v.id] : []) : [],
+            }]
+          }),
+        } satisfies ResultFor["models"]
+      }
+      case "modelPrefs":
+        return this.modelPrefsResult(req.sessionID)
+      case "setModelPrefs": {
+        const next: { voice?: any; worker?: any } = { ...this.modelPrefs.get(req.sessionID) }
+        for (const key of ["voice", "worker"] as const) {
+          if (!(key in req)) continue
+          if (req[key] === null) delete next[key]
+          else if (req[key] !== undefined) next[key] = req[key]
+        }
+        if (next.voice || next.worker) this.modelPrefs.set(req.sessionID, next)
+        else this.modelPrefs.delete(req.sessionID)
+        return this.modelPrefsResult(req.sessionID)
+      }
+      case "timeline": {
+        const items = timelineItems(req.sessionID, await this.host.context(req.sessionID))
+        const offset = req.cursor === undefined ? 0 : Number(req.cursor)
+        if (!Number.isInteger(offset) || offset < 0) throw new Error("Invalid timeline cursor")
+        const page = items.slice(offset, offset + (req.limit ?? 50))
+        const next = offset + page.length
+        return { items: page, ...(next < items.length ? { cursor: String(next) } : {}) }
+      }
+      case "timelinePart":
+        return { detail: boundedTimelinePart(await this.host.context(req.sessionID), req.messageID, req.partID) }
       case "steer": {
+        await this.applyVoiceModel(req.sessionID)
         const inbox = await this.host.prompt({
           sessionID: req.sessionID,
           text: req.text,
@@ -718,6 +770,27 @@ export class Spoke {
       case "conversation":
         return this.setConversation(req.sessionID, req.on)
     }
+  }
+
+  private modelDefaults(): SessionModelPrefs {
+    const convert = (value: string | undefined) => {
+      const ref = value ? parseModelRef(value) : undefined
+      return ref && { providerID: ref.providerID, modelID: ref.id, ...(ref.variant ? { variant: ref.variant } : {}) }
+    }
+    return { ...(convert(this.config.voiceModel) ? { voice: convert(this.config.voiceModel)! } : {}), ...(convert(this.config.workModel) ? { worker: convert(this.config.workModel)! } : {}) }
+  }
+
+  private modelPrefsResult(sessionID: string): ResultFor["modelPrefs"] {
+    return { prefs: structuredClone(this.modelPrefs.get(sessionID) ?? {}), defaults: this.modelDefaults() }
+  }
+
+  /** Applies a saved Voice override at the boundary before the next turn; never changes a running tree. */
+  private async applyVoiceModel(sessionID: string): Promise<void> {
+    const selected = this.modelPrefs.get(sessionID)?.voice
+    if (!selected || this.tracker.active().includes(this.tracker.rootOf(sessionID))) return
+    const target = { providerID: selected.providerID, id: selected.modelID, ...(selected.variant ? { variant: selected.variant } : {}) }
+    const current = (await this.host.getSession(sessionID)).model
+    if (!current || !sameModel(current, target)) await this.host.switchModel(sessionID, target)
   }
 
   /** Enables or disables voice for a session this process reported (mode "session" only). */
