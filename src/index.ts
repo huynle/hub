@@ -51,6 +51,8 @@ function unwrap<T>(value: unknown, isBare: (v: any) => boolean): T {
 function hostFrom(ctx: Context): SpokeHost {
   const session = ctx.session as any
   const agent = ctx.agent as any
+  const mcp = (ctx as any).mcp
+  const vcs = (ctx as any).vcs
   return {
     directory: ctx.location.directory,
     opencodeVersion: ctx.app?.version ?? "unknown",
@@ -78,6 +80,16 @@ function hostFrom(ctx: Context): SpokeHost {
     listRecent,
     createSession: async ({ directory, title }) =>
       unwrap<{ id: string }>(await session.create({ location: { directory }, ...(title ? { title } : {}) }), (v) => typeof v.id === "string"),
+    ...(mcp?.list ? { mcpList: async (directory: string) => unwrap<ReadonlyArray<unknown>>(await mcp.list({ location: { directory } }), Array.isArray) } : {}),
+    ...(vcs?.diff ? { vcsDiff: async (directory: string) => unwrap<ReadonlyArray<unknown>>(await vcs.diff({ mode: "working", location: { directory } }), Array.isArray) } : {}),
+    ...(vcs?.get
+      ? {
+          vcsBranch: async (directory: string) => {
+            const info = unwrap<{ branch?: { current?: string } }>(await vcs.get({ location: { directory } }), (v) => "branch" in v)
+            return typeof info?.branch?.current === "string" ? info.branch.current : undefined
+          },
+        }
+      : {}),
   }
 }
 

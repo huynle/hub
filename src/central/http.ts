@@ -460,6 +460,7 @@ export function startCentral(options: CentralOptions): Central {
       }
       return Response.json({ prefs }, { headers: NO_STORE })
     }),
+    route("GET", "/api/reads", "user", ({ user }) => Response.json({ reads: store.reads(user.id) }, { headers: NO_STORE })),
     route("POST", "/api/enrollments/:code/approve", "user", ({ params, user }) => decideEnrollment(params.code!, "approved", user)),
     route("POST", "/api/enrollments/:code/deny", "user", ({ params, user }) => decideEnrollment(params.code!, "denied", user)),
     route("GET", "/api/devices", "user", ({ device, user }) =>
@@ -591,6 +592,21 @@ export function startCentral(options: CentralOptions): Central {
       async ({ params }) => Response.json(await spokes.request(ownerOf(params.session!), { op: "context", sessionID: params.session! })),
     ),
     route("POST", "/api/sessions/:session/permission", "session", ({ request, params }) => permission(request, params.session!)),
+    route("GET", "/api/sessions/:session/summary", "session", async ({ params }) =>
+      Response.json(await spokes.request(ownerOf(params.session!), { op: "summary", sessionID: params.session! }), { headers: NO_STORE })),
+    route("GET", "/api/sessions/:session/diff", "session", async ({ params, url }) => {
+      const file = url.searchParams.get("file")
+      if (!file || file.length > 4096) return error(400, "Expected ?file=<path>")
+      const { patch } = await spokes.request(ownerOf(params.session!), { op: "diff", sessionID: params.session!, file })
+      return patch ? Response.json(patch, { headers: NO_STORE }) : error(404, "No changes for that file")
+    }),
+    route("POST", "/api/sessions/:session/read", "session", ({ params, user, device }) => {
+      const reads = store.markRead(user.id, params.session!, Date.now())
+      for (const listener of [...listeners]) {
+        if (listener.userID === user.id && listener.deviceID !== device.id) listener.send({ type: "reads", reads })
+      }
+      return Response.json({ reads }, { headers: NO_STORE })
+    }),
 
     // machines: the caller must own the machine
     route("POST", "/api/machines/:machine/sessions", "machine", ({ request, params }) => createSession(request, params.machine!)),

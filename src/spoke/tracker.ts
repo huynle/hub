@@ -213,6 +213,10 @@ export class SessionTracker {
     return this.entries.has(id)
   }
 
+  directoryOf(id: string): string | undefined {
+    return this.entries.get(id)?.directory || undefined
+  }
+
   parentOf(id: string): string | undefined {
     return this.entries.get(id)?.parentID
   }

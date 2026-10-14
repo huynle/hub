@@ -573,6 +573,41 @@ describe("Spoke", () => {
     expect(await server.request({ op: "stop", sessionID: "ses_r" })).toMatchObject({ ok: true, result: { stopped: ["ses_r"] } })
   })
 
+  test("summary and diff read the session's directory; missing host features leave parts out", async () => {
+    const { spoke, server, host, messages } = setup({ mode: "session", sessions: [], token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_r"))
+    await Bun.sleep(30)
+    messages.set("ses_r", [{ type: "assistant", model: { providerID: "anthropic", id: "claude-opus" }, tokens: { input: 900, output: 100, reasoning: 0, cache: { read: 0, write: 0 } } }])
+    const seen: string[] = []
+    const diffs = [{ file: "a.ts", status: "modified", additions: 3, deletions: 1, patch: "@@ -1 +1 @@" }]
+    Object.assign(host, {
+      mcpList: async (dir: string) => (seen.push(`mcp ${dir}`), [{ name: "github", status: { status: "connected" } }]),
+      vcsDiff: async (dir: string) => (seen.push(`diff ${dir}`), diffs),
+      vcsBranch: async (dir: string) => (seen.push(`branch ${dir}`), "main"),
+    })
+    const summary = await server.request({ op: "summary", sessionID: "ses_r" })
+    expect(summary).toMatchObject({
+      ok: true,
+      result: {
+        directory: "/work/project",
+        branch: "main",
+        context: { used: 1000, model: "Claude Opus" },
+        mcp: [{ name: "github", status: "connected" }],
+        changes: { files: [{ file: "a.ts", status: "modified", additions: 3, deletions: 1 }], additions: 3, deletions: 1 },
+      },
+    })
+    expect(seen.sort()).toEqual(["branch /work/project", "diff /work/project", "mcp /work/project"])
+    expect(await server.request({ op: "diff", sessionID: "ses_r", file: "a.ts" })).toMatchObject({ ok: true, result: { patch: { file: "a.ts", patch: "@@ -1 +1 @@", truncated: false } } })
+    expect(await server.request({ op: "diff", sessionID: "ses_r", file: "zzz" })).toMatchObject({ ok: true, result: {} })
+    // A failing part is left out instead of failing the whole summary.
+    Object.assign(host, { vcsDiff: async () => { throw new Error("not a git repo") } })
+    const partial = await server.request({ op: "summary", sessionID: "ses_r" })
+    expect(partial.ok).toBe(true)
+    expect((partial.result as any).changes).toBeUndefined()
+    expect((partial.result as any).mcp).toHaveLength(1)
+  })
+
   test("stop keeps going when a descendant finished meanwhile", async () => {
     const { spoke, server, calls, host } = setup({ mode: "always", token: "tok" })
     await until(() => spoke.status().connection === "connected")

@@ -25,6 +25,7 @@ import { pollEnrollment, startEnrollment } from "./enroll"
 import { HerdrWatcher, openInHerdr, type HerdrRunner } from "./herdr"
 import type { LocalHubResult } from "./localhub"
 import { PresenceBook } from "./presence"
+import { changeStats, contextUsage, filePatch, mcpServers } from "./summary"
 import { browserSessions, isExposed, isReported, SessionTracker, shouldForward, type EventLike, type SessionDetails } from "./tracker"
 import { watchConfig, type ConfigWatcher } from "./watch"
 
@@ -79,6 +80,12 @@ export interface SpokeHost {
   listRecent?(options?: { days: number; max: number; include: readonly string[] }): Promise<Array<{ id: string } & SessionDetails>>
   /** Creates a session in a directory (service processes only). */
   createSession?(input: { directory: string; title?: string }): Promise<{ id: string }>
+  /** MCP servers and their status for a directory (raw OpenCode McpServer list). */
+  mcpList?(directory: string): Promise<ReadonlyArray<unknown>>
+  /** Working-tree changes of a directory (raw OpenCode FileDiffInfo list). */
+  vcsDiff?(directory: string): Promise<ReadonlyArray<unknown>>
+  /** Current branch of a directory. */
+  vcsBranch?(directory: string): Promise<string | undefined>
 }
 
 export interface SpokeOptions {
@@ -772,6 +779,13 @@ export class Spoke {
         return {}
       case "stop":
         return this.stopTree(req.sessionID)
+      case "summary":
+        return this.summary(req.sessionID)
+      case "diff": {
+        const diffs = await this.host.vcsDiff?.(this.directoryOf(req.sessionID))
+        const patch = diffs && filePatch(diffs, req.file)
+        return patch ? { patch } : {}
+      }
       case "conversation":
         return this.setConversation(req.sessionID, req.on)
     }
@@ -787,6 +801,39 @@ export class Spoke {
 
   private modelPrefsResult(sessionID: string): ResultFor["modelPrefs"] {
     return { prefs: structuredClone(this.modelPrefs.get(sessionID) ?? {}), defaults: this.modelDefaults() }
+  }
+
+  private directoryOf(sessionID: string): string {
+    return this.tracker.directoryOf(sessionID) || this.host.directory
+  }
+
+  /** Right-rail data; each part is read independently and left out when it fails or is unsupported. */
+  private async summary(sessionID: string): Promise<ResultFor["summary"]> {
+    const directory = this.directoryOf(sessionID)
+    const optional = async <T>(read: (() => Promise<T | undefined>) | undefined): Promise<T | undefined> => {
+      if (!read) return undefined
+      try {
+        return await read()
+      } catch {
+        return undefined
+      }
+    }
+    const host = this.host
+    const [messages, models, mcp, diffs, branch] = await Promise.all([
+      optional(() => host.context(sessionID)),
+      optional(host.listModels && (() => host.listModels!())),
+      optional(host.mcpList && (() => host.mcpList!(directory))),
+      optional(host.vcsDiff && (() => host.vcsDiff!(directory))),
+      optional(host.vcsBranch && (() => host.vcsBranch!(directory))),
+    ])
+    const context = messages && contextUsage(messages, models ?? [])
+    return {
+      directory,
+      ...(branch ? { branch } : {}),
+      ...(context ? { context } : {}),
+      ...(mcp ? { mcp: mcpServers(mcp) } : {}),
+      ...(diffs ? { changes: changeStats(diffs) } : {}),
+    }
   }
 
   /**

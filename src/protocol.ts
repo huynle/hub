@@ -169,6 +169,10 @@ export type ServerRequest =
   | { readonly op: "interrupt"; readonly sessionID: string }
   /** Interrupt the session's whole tree: running descendants deepest first, then the root. */
   | { readonly op: "stop"; readonly sessionID: string }
+  /** Right-rail data: context usage, MCP servers, branch and working-tree change stats. */
+  | { readonly op: "summary"; readonly sessionID: string }
+  /** One changed file's patch in the session's directory. */
+  | { readonly op: "diff"; readonly sessionID: string; readonly file: string }
   /** Switch the session to the voice orchestrator agent (on) or back to its previous agent (off). */
   | { readonly op: "conversation"; readonly sessionID: string; readonly on: boolean }
   | { readonly op: "models"; readonly sessionID: string }
@@ -184,6 +188,47 @@ export type ServerRequest =
    * it in a new tab of that Herdr workspace (`opencode --session <id>` in the directory).
    */
   | { readonly op: "create"; readonly directory: string; readonly title?: string; readonly herdrWorkspace?: string }
+
+export interface ContextUsage {
+  /** Tokens of the latest assistant message (input + output + reasoning + cache). */
+  readonly used: number
+  readonly limit?: number
+  readonly percent?: number
+  readonly model?: string
+}
+
+export interface McpStatus {
+  readonly name: string
+  readonly status: "connected" | "pending" | "disabled" | "failed" | "needs_auth" | "unknown"
+  readonly error?: string
+}
+
+export interface ChangedFile {
+  readonly file: string
+  readonly status: "added" | "deleted" | "modified"
+  readonly additions: number
+  readonly deletions: number
+}
+
+export interface SessionChanges {
+  readonly files: readonly ChangedFile[]
+  readonly additions: number
+  readonly deletions: number
+}
+
+export interface FilePatch extends ChangedFile {
+  readonly patch: string
+  readonly truncated: boolean
+}
+
+/** Right-rail data for a session; each part is absent when OpenCode could not provide it. */
+export interface SessionSummary {
+  readonly directory: string
+  readonly branch?: string
+  readonly context?: ContextUsage
+  readonly mcp?: readonly McpStatus[]
+  readonly changes?: SessionChanges
+}
 
 export type TurnResult =
   | { readonly outcome: "succeeded"; readonly reply: string }
@@ -201,6 +246,8 @@ export interface ResultFor {
   steer: { readonly inboxID: string }
   interrupt: Record<string, never>
   stop: { readonly stopped: readonly string[] }
+  summary: SessionSummary
+  diff: { readonly patch?: FilePatch }
   conversation: { readonly agent: string }
   models: { readonly models: readonly AvailableModel[] }
   modelPrefs: { readonly prefs: SessionModelPrefs; readonly defaults: SessionModelPrefs }
@@ -305,6 +352,7 @@ function isServerRequest(v: unknown): v is ServerRequest {
     case "context":
     case "interrupt":
     case "stop":
+    case "summary":
     case "models":
     case "modelPrefs":
       return nonEmpty(v.sessionID)
@@ -325,6 +373,8 @@ function isServerRequest(v: unknown): v is ServerRequest {
       return nonEmpty(v.sessionID) && nonEmpty(v.messageID) && v.messageID.length <= 300 && nonEmpty(v.partID) && v.partID.length <= 300
     case "steer":
       return nonEmpty(v.sessionID) && nonEmpty(v.text)
+    case "diff":
+      return nonEmpty(v.sessionID) && nonEmpty(v.file) && v.file.length <= 4096
     case "conversation":
     case "expose":
       return nonEmpty(v.sessionID) && typeof v.on === "boolean"

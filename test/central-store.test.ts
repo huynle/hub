@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { centralConfig } from "../src/central/config"
-import { hashToken, MODEL_PREFS_LIMIT, newToken, Store } from "../src/central/store"
+import { hashToken, MODEL_PREFS_LIMIT, newToken, READS_LIMIT, Store } from "../src/central/store"
 
 const tmp = () => mkdtempSync(path.join(tmpdir(), "voice-store-"))
 
@@ -153,5 +153,21 @@ describe("Store", () => {
     expect(store.modelPrefs(alice.id, "ses_0")).toEqual({})
     expect(store.modelPrefs(alice.id, `ses_${MODEL_PREFS_LIMIT}`).voice?.modelID).toBe(`m${MODEL_PREFS_LIMIT}`)
     expect(Store.open(dir).modelPrefs(alice.id, `ses_${MODEL_PREFS_LIMIT}`).voice?.modelID).toBe(`m${MODEL_PREFS_LIMIT}`)
+  })
+
+  test("read marks are per user, only move forward, persist and are bounded", () => {
+    const dir = tmp()
+    const store = Store.open(dir)
+    const alice = store.upsertUser({ email: "alice@example.test", role: "user" })
+    const bob = store.upsertUser({ email: "bob@example.test", role: "user" })
+    expect(store.markRead(alice.id, "ses_one", 100)).toEqual({ ses_one: 100 })
+    expect(store.markRead(alice.id, "ses_one", 50)).toEqual({ ses_one: 100 })
+    expect(store.reads(bob.id)).toEqual({})
+    expect(Store.open(dir).reads(alice.id)).toEqual({ ses_one: 100 })
+    for (let i = 0; i <= READS_LIMIT; i++) store.markRead(alice.id, `ses_${i}`, 200 + i)
+    const reads = store.reads(alice.id)
+    expect(Object.keys(reads)).toHaveLength(READS_LIMIT)
+    expect(reads.ses_one).toBeUndefined()
+    expect(reads[`ses_${READS_LIMIT}`]).toBe(200 + READS_LIMIT)
   })
 })

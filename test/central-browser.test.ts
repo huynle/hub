@@ -120,6 +120,37 @@ describe("sessions without voice", () => {
   })
 })
 
+describe("right rail and unread", () => {
+  test("summary and diff proxy to the owning spoke with validation; read marks are per user", async () => {
+    h = harness()
+    const { client } = await machine()
+    const seen = answer(client, (req) => {
+      if (req.op === "summary") return { directory: "/u/webshop", changes: { files: [], additions: 0, deletions: 0 } }
+      if (req.op === "diff") return req.file === "a.ts" ? { patch: { file: "a.ts", status: "modified", additions: 1, deletions: 0, patch: "@@", truncated: false } } : {}
+      return undefined
+    })
+    const summary = await h.api("/api/sessions/ses_off/summary")
+    expect(summary.status).toBe(200)
+    expect(await summary.json()).toEqual({ directory: "/u/webshop", changes: { files: [], additions: 0, deletions: 0 } })
+    expect((await h.api("/api/sessions/ses_off/diff?file=a.ts")).status).toBe(200)
+    expect((await h.api("/api/sessions/ses_off/diff?file=zzz")).status).toBe(404)
+    expect((await h.api("/api/sessions/ses_off/diff")).status).toBe(400)
+    expect((await h.api("/api/sessions/ses_missing/summary")).status).toBe(404)
+    expect(seen).toEqual([
+      { op: "summary", sessionID: "ses_off" },
+      { op: "diff", sessionID: "ses_off", file: "a.ts" },
+      { op: "diff", sessionID: "ses_off", file: "zzz" },
+    ])
+
+    const read = await post("/api/sessions/ses_off/read")
+    expect(read.status).toBe(200)
+    const { reads } = (await read.json()) as { reads: Record<string, number> }
+    expect(reads.ses_off).toBeGreaterThan(0)
+    expect(await (await h.api("/api/reads")).json()).toEqual({ reads })
+    expect((await post("/api/sessions/ses_missing/read")).status).toBe(404)
+  })
+})
+
 describe("POST /api/sessions/:id/expose", () => {
   test("asks a reporting process (service first) and returns its answer", async () => {
     h = harness()

@@ -16,6 +16,8 @@ export const AUDIT_LIMIT = 500
 export const AUDIT_VIEW_LIMIT = 200
 /** Per-user sessions with explicit Voice/Worker model choices. */
 export const MODEL_PREFS_LIMIT = 500
+/** Most sessions with a read mark kept per user (oldest marks dropped first). */
+export const READS_LIMIT = 1000
 
 export type Role = "admin" | "user"
 
@@ -35,6 +37,8 @@ export interface UserRecord {
   viewPrefs?: ViewPrefs
   /** Session ID → per-session Voice and complex-worker model overrides, oldest first. */
   modelPrefs?: Record<string, SessionModelPrefs>
+  /** Session ID → when the user last read it (ms), least recently marked first. */
+  reads?: Record<string, number>
 }
 
 /** Workspace keys are the phone's group keys: `herdr:<workspaceID>` or a folder path. */
@@ -453,6 +457,25 @@ export class Store {
     while (Object.keys(all).length > MODEL_PREFS_LIMIT) delete all[Object.keys(all)[0]!]
     this.save()
     return this.modelPrefs(id, sessionID)
+  }
+
+  // ---------- per-user read marks (unread dots) ----------
+
+  reads(id: string): Record<string, number> {
+    return { ...this.user(id)?.reads }
+  }
+
+  /** Marks a session read at `at`; a mark never moves back. Returns all marks. */
+  markRead(id: string, sessionID: string, at: number): Record<string, number> {
+    const user = this.user(id)
+    if (!user) return {}
+    const all = user.reads ?? (user.reads = {})
+    const next = Math.max(all[sessionID] ?? 0, at)
+    delete all[sessionID]
+    all[sessionID] = next
+    while (Object.keys(all).length > READS_LIMIT) delete all[Object.keys(all)[0]!]
+    this.save()
+    return this.reads(id)
   }
 
   touchDevice(id: string): void {
