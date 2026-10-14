@@ -69,11 +69,11 @@ function tempConfig(config: Partial<ReturnType<typeof defaults>>) {
   const dir = mkdtempSync(path.join(tmpdir(), "voice-plugin-"))
   const file = path.join(dir, "config.json")
   writeConfig(file, { ...defaults("box"), ...config })
-  const previous = process.env.OPENCODE_VOICE_CONFIG
-  process.env.OPENCODE_VOICE_CONFIG = file
+  const previous = process.env.OPENCODE_HUB_CONFIG
+  process.env.OPENCODE_HUB_CONFIG = file
   cleanups.push(() => {
-    if (previous === undefined) delete process.env.OPENCODE_VOICE_CONFIG
-    else process.env.OPENCODE_VOICE_CONFIG = previous
+    if (previous === undefined) delete process.env.OPENCODE_HUB_CONFIG
+    else process.env.OPENCODE_HUB_CONFIG = previous
     rmSync(dir, { recursive: true, force: true })
   })
   return file

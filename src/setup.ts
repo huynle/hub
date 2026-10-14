@@ -100,7 +100,7 @@ export function parseServerInput(raw: string): Parsed {
   return { ok: true, url: `${url.origin}${url.pathname}`.replace(/\/+$/, "") }
 }
 
-/** GET <server>/healthz: reachable and answering like an opencode-voice hub ({ok: true}). */
+/** GET <server>/healthz: reachable and answering like an OpenCode Hub ({ok: true}). */
 export async function checkServer(
   server: string,
   options: { fetch?: typeof globalThis.fetch; timeoutMs?: number } = {},
@@ -119,6 +119,6 @@ export async function checkServer(
     }
   }
   const body = (await res.json().catch(() => undefined)) as { ok?: unknown; version?: unknown } | undefined
-  if (body?.ok !== true) return { ok: false, error: `${server} answered, but it is not an opencode-voice hub` }
+  if (body?.ok !== true) return { ok: false, error: `${server} answered, but it is not an OpenCode Hub` }
   return { ok: true, ...(typeof body.version === "string" ? { version: body.version } : {}) }
 }

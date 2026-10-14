@@ -4,7 +4,7 @@
 import { readFileSync } from "node:fs"
 import { hostname } from "node:os"
 import { Plugin } from "@opencode/plugin"
-import { configPath, DEFAULT_SUBAGENT } from "./config"
+import { DEFAULT_SUBAGENT, prepareConfigPath } from "./config"
 import { VoiceRpc } from "./rpc"
 import { checkServer, parseServerInput } from "./setup"
 import { defineVoiceAgent, orchestratorParts } from "./spoke/conversation"
@@ -100,7 +100,7 @@ export default Plugin.define({
     const membership: Membership<Spoke> = joinProcess(
       (processID) =>
         new Spoke(hostFrom(ctx), {
-          configFile: configPath(),
+          configFile: prepareConfigPath(),
           machineName: hostname(),
           kind,
           processID,

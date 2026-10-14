@@ -1,10 +1,12 @@
-// Central voice server configuration: environment variables over the optional hub config file
-// (~/.config/opencode-voice/hub.json or $VOICE_HUB_CONFIG) over built-in defaults. The file's speech
+// Hub configuration: HUB_* environment variables (legacy VOICE_* still read, see ../env.ts) over the
+// optional hub config file (~/.config/opencode-hub/hub.json or $HUB_CONFIG) over built-in defaults. The file's speech
 // settings sit between the phone's saved settings and the env (see speech/settings.ts).
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
+import { hubEnv } from "../env"
 import { isLoopbackHost } from "../loopback"
+import { APP_DIR, configBase, LEGACY_APP_DIR, migrateLegacy, stateBase } from "../migrate"
 import { updateSpeech, type StoredSpeech } from "./speech/settings"
 
 export const GOOGLE_ISSUER = "https://accounts.google.com"
@@ -23,7 +25,7 @@ export type AuthConfig =
       readonly allowed: readonly string[]
       /** Lowercased admin emails (also allowed). */
       readonly admins: readonly string[]
-      /** Dev only (VOICE_OIDC_INSECURE_ISSUER=1): the issuer is plain http on loopback. */
+      /** Dev only (HUB_OIDC_INSECURE_ISSUER=1): the issuer is plain http on loopback. */
       readonly insecureIssuer?: true
     }
 
@@ -99,8 +101,9 @@ function int(value: string | undefined, fallback: number, min = 1): number {
 const expandHome = (p: string, home: string) => (p === "~" ? home : p.startsWith("~/") ? path.join(home, p.slice(2)) : p)
 
 export function hubConfigPath(env: Env = process.env, home: string = homedir()): string {
-  if (env.VOICE_HUB_CONFIG) return env.VOICE_HUB_CONFIG
-  return path.join(env.XDG_CONFIG_HOME || path.join(home, ".config"), "opencode-voice", "hub.json")
+  const explicit = hubEnv(env).HUB_CONFIG
+  if (explicit) return explicit
+  return path.join(configBase(env, home), APP_DIR, "hub.json")
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v)
@@ -209,80 +212,99 @@ function issuerURL(raw: string, insecure: boolean): string {
   try {
     url = new URL(raw)
   } catch {
-    throw new Error(`VOICE_OIDC_ISSUER (auth.issuer) must be a URL, got ${JSON.stringify(raw)}`)
+    throw new Error(`HUB_OIDC_ISSUER (auth.issuer) must be a URL, got ${JSON.stringify(raw)}`)
   }
   if (url.username || url.password || url.search || url.hash) {
-    throw new Error("VOICE_OIDC_ISSUER (auth.issuer) must not contain credentials, a query or a fragment")
+    throw new Error("HUB_OIDC_ISSUER (auth.issuer) must not contain credentials, a query or a fragment")
   }
   if (url.protocol === "http:" && insecure) {
-    if (!isLoopbackHost(url.hostname)) throw new Error("VOICE_OIDC_INSECURE_ISSUER only allows a plain http issuer on loopback (dev only)")
+    if (!isLoopbackHost(url.hostname)) throw new Error("HUB_OIDC_INSECURE_ISSUER only allows a plain http issuer on loopback (dev only)")
   } else if (url.protocol !== "https:") {
-    throw new Error(`VOICE_OIDC_ISSUER (auth.issuer) must be an https:// URL, got ${JSON.stringify(raw)}`)
+    throw new Error(`HUB_OIDC_ISSUER (auth.issuer) must be an https:// URL, got ${JSON.stringify(raw)}`)
   }
   return url.toString().replace(/\/+$/, "")
 }
 
 /** Auth settings from env over hub.json. Throws (without echoing secrets) when oidc is incomplete. */
 function authConfig(env: Env, file: HubAuth = {}): AuthConfig {
-  const mode = (env.VOICE_AUTH?.trim() || file.mode || "pairing").toLowerCase()
+  const mode = (env.HUB_AUTH?.trim() || file.mode || "pairing").toLowerCase()
   if (mode === "pairing") return { mode: "pairing" }
-  if (mode !== "oidc") throw new Error(`VOICE_AUTH must be "pairing" or "oidc", got ${JSON.stringify(env.VOICE_AUTH)}`)
-  const insecure = env.VOICE_OIDC_INSECURE_ISSUER === "1"
-  const issuer = issuerURL(env.VOICE_OIDC_ISSUER?.trim() || file.issuer || GOOGLE_ISSUER, insecure)
+  if (mode !== "oidc") throw new Error(`HUB_AUTH must be "pairing" or "oidc", got ${JSON.stringify(env.HUB_AUTH)}`)
+  const insecure = env.HUB_OIDC_INSECURE_ISSUER === "1"
+  const issuer = issuerURL(env.HUB_OIDC_ISSUER?.trim() || file.issuer || GOOGLE_ISSUER, insecure)
   const required = (value: string | undefined, name: string): string => {
-    if (!value) throw new Error(`${name} is required for VOICE_AUTH=oidc`)
+    if (!value) throw new Error(`${name} is required for HUB_AUTH=oidc`)
     return value
   }
-  const clientId = required(env.VOICE_OIDC_CLIENT_ID?.trim() || file.clientId, "VOICE_OIDC_CLIENT_ID (auth.clientId)")
-  const clientSecret = required(env.VOICE_OIDC_CLIENT_SECRET?.trim() || file.clientSecret, "VOICE_OIDC_CLIENT_SECRET (auth.clientSecret)")
-  const allowed = emailList(env.VOICE_OIDC_ALLOWED ?? file.allowed)
-  const admins = emailList(env.VOICE_ADMIN_EMAILS ?? file.admins)
-  if (allowed.length === 0) throw new Error("VOICE_OIDC_ALLOWED (auth.allowed) is required for VOICE_AUTH=oidc: list emails and/or @domain entries")
-  if (admins.length === 0) throw new Error("VOICE_ADMIN_EMAILS (auth.admins) needs at least one admin email for VOICE_AUTH=oidc")
+  const clientId = required(env.HUB_OIDC_CLIENT_ID?.trim() || file.clientId, "HUB_OIDC_CLIENT_ID (auth.clientId)")
+  const clientSecret = required(env.HUB_OIDC_CLIENT_SECRET?.trim() || file.clientSecret, "HUB_OIDC_CLIENT_SECRET (auth.clientSecret)")
+  const allowed = emailList(env.HUB_OIDC_ALLOWED ?? file.allowed)
+  const admins = emailList(env.HUB_ADMIN_EMAILS ?? file.admins)
+  if (allowed.length === 0) throw new Error("HUB_OIDC_ALLOWED (auth.allowed) is required for HUB_AUTH=oidc: list emails and/or @domain entries")
+  if (admins.length === 0) throw new Error("HUB_ADMIN_EMAILS (auth.admins) needs at least one admin email for HUB_AUTH=oidc")
   const bad = allowed.find((entry) => !EMAIL.test(entry) && !DOMAIN.test(entry))
-  if (bad !== undefined) throw new Error(`VOICE_OIDC_ALLOWED (auth.allowed): ${JSON.stringify(bad)} is not an email or @domain`)
+  if (bad !== undefined) throw new Error(`HUB_OIDC_ALLOWED (auth.allowed): ${JSON.stringify(bad)} is not an email or @domain`)
   const badAdmin = admins.find((entry) => !EMAIL.test(entry))
-  if (badAdmin !== undefined) throw new Error(`VOICE_ADMIN_EMAILS (auth.admins): ${JSON.stringify(badAdmin)} is not an email`)
+  if (badAdmin !== undefined) throw new Error(`HUB_ADMIN_EMAILS (auth.admins): ${JSON.stringify(badAdmin)} is not an email`)
   const auth = { mode: "oidc" as const, issuer, clientId, allowed, admins, ...(insecure ? { insecureIssuer: true as const } : {}) }
   // A getter: printed as [Getter], skipped by JSON.stringify.
   Object.defineProperty(auth, "clientSecret", { get: () => clientSecret, enumerable: false })
   return auth as unknown as OidcConfig
 }
 
-export function centralConfig(env: Env = process.env, home: string = homedir(), file: HubFile = {}): CentralConfig {
-  const host = env.VOICE_HOST || file.host || "127.0.0.1"
-  const port = int(env.VOICE_PORT, file.port ?? 4097, 0)
+export function centralConfig(rawEnv: Env = process.env, home: string = homedir(), file: HubFile = {}): CentralConfig {
+  const env = hubEnv(rawEnv)
+  const host = env.HUB_HOST || file.host || "127.0.0.1"
+  const port = int(env.HUB_PORT, file.port ?? 4097, 0)
   // A wildcard bind address is no origin a browser uses: default to the loopback one (Docker -p 127.0.0.1:…).
   const linkHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host
-  const publicURL = (env.VOICE_PUBLIC_URL || file.publicURL || `http://${linkHost.includes(":") ? `[${linkHost}]` : linkHost}:${port}`).replace(/\/+$/, "")
+  const publicURL = (env.HUB_PUBLIC_URL || file.publicURL || `http://${linkHost.includes(":") ? `[${linkHost}]` : linkHost}:${port}`).replace(/\/+$/, "")
   if (!/^https?:\/\/[^\s/]+$/.test(publicURL)) {
-    throw new Error(`VOICE_PUBLIC_URL must be an http(s) origin without a path, got ${JSON.stringify(publicURL)}`)
+    throw new Error(`HUB_PUBLIC_URL must be an http(s) origin without a path, got ${JSON.stringify(publicURL)}`)
   }
   return {
     host,
     port,
     publicURL,
-    stateDir: env.VOICE_STATE_DIR || file.stateDir || path.join(home, ".local", "state", "opencode-voice"),
+    stateDir: env.HUB_STATE_DIR || file.stateDir || path.join(stateBase(home), APP_DIR),
     apiKey: env.OPENROUTER_API_KEY || undefined,
-    sttModel: env.VOICE_STT_MODEL || "openai/gpt-4o-mini-transcribe",
-    ttsModel: env.VOICE_TTS_MODEL || "microsoft/mai-voice-2.1-flash",
-    voice: env.VOICE_VOICE || "en-US-Harper:MAI-Voice-2.1-Flash",
-    maxAudioBytes: int(env.VOICE_MAX_AUDIO_BYTES, 10 * 1024 * 1024),
-    maxSpeechChars: int(env.VOICE_MAX_SPEECH_CHARS, 800),
-    turnTimeoutMs: int(env.VOICE_TURN_TIMEOUT_MS, 600_000),
+    sttModel: env.HUB_STT_MODEL || "openai/gpt-4o-mini-transcribe",
+    ttsModel: env.HUB_TTS_MODEL || "microsoft/mai-voice-2.1-flash",
+    voice: env.HUB_VOICE || "en-US-Harper:MAI-Voice-2.1-Flash",
+    maxAudioBytes: int(env.HUB_MAX_AUDIO_BYTES, 10 * 1024 * 1024),
+    maxSpeechChars: int(env.HUB_MAX_SPEECH_CHARS, 800),
+    turnTimeoutMs: int(env.HUB_TURN_TIMEOUT_MS, 600_000),
     // Push services want a contact: an https URL or mailto. The public URL works for hosted hubs.
-    vapidSubject: env.VOICE_VAPID_SUBJECT || (publicURL.startsWith("https://") ? publicURL : "mailto:opencode-voice@localhost"),
+    vapidSubject: env.HUB_VAPID_SUBJECT || (publicURL.startsWith("https://") ? publicURL : "mailto:opencode-hub@localhost"),
     ...(file.speech ? { speech: file.speech } : {}),
     auth: authConfig(env, file.auth),
   }
 }
 
-/** Reads hub.json (if any) and the environment. Throws on an invalid file or public URL. */
+export interface LoadOptions {
+  /** Where one-time migration notices go (default console). */
+  readonly log?: (message: string) => void
+}
+
+/**
+ * Reads hub.json (if any) and the environment. Throws on an invalid file or public URL. On first start,
+ * copies the legacy opencode-voice hub.json and state directory to their default opencode-hub locations
+ * (never for paths set by env or hub.json; the old copies are kept).
+ */
 export function loadCentralConfig(
   env: Env = process.env,
   home: string = homedir(),
+  options: LoadOptions = {},
 ): { config: CentralConfig; warnings: string[]; path: string; loaded: boolean } {
+  const resolved = hubEnv(env)
+  const migrate = options.log ? { log: options.log } : {}
   const file = hubConfigPath(env, home)
+  if (!resolved.HUB_CONFIG) migrateLegacy(path.join(configBase(env, home), LEGACY_APP_DIR, "hub.json"), file, migrate)
   const { file: hub, warnings } = readHubFile(file, home)
-  return { config: centralConfig(env, home, hub), warnings, path: file, loaded: hub !== undefined }
+  const config = centralConfig(env, home, hub)
+  if (!resolved.HUB_STATE_DIR && !hub?.stateDir) {
+    // hub.pid is the spoke's auto-start lock for the legacy location, not state.
+    migrateLegacy(path.join(stateBase(home), LEGACY_APP_DIR), config.stateDir, { ...migrate, skip: ["hub.pid"] })
+  }
+  return { config, warnings, path: file, loaded: hub !== undefined }
 }

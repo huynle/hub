@@ -24,10 +24,10 @@ function pushHarness(failures: Record<string, number> = {}) {
 }
 
 describe("config", () => {
-  test("VAPID subject from VOICE_VAPID_SUBJECT, else the https public URL, else a local mailto", () => {
-    expect(centralConfig({}).vapidSubject).toBe("mailto:opencode-voice@localhost")
-    expect(centralConfig({ VOICE_PUBLIC_URL: "https://voice.example.com" }).vapidSubject).toBe("https://voice.example.com")
-    expect(centralConfig({ VOICE_VAPID_SUBJECT: "mailto:me@x.y" }).vapidSubject).toBe("mailto:me@x.y")
+  test("VAPID subject from HUB_VAPID_SUBJECT, else the https public URL, else a local mailto", () => {
+    expect(centralConfig({}).vapidSubject).toBe("mailto:opencode-hub@localhost")
+    expect(centralConfig({ HUB_PUBLIC_URL: "https://voice.example.com" }).vapidSubject).toBe("https://voice.example.com")
+    expect(centralConfig({ HUB_VAPID_SUBJECT: "mailto:me@x.y" }).vapidSubject).toBe("mailto:me@x.y")
   })
 })
 

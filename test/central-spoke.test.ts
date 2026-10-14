@@ -171,7 +171,7 @@ describe("turns", () => {
 
   test("the hub waits a grace period past the turn timeout so the spoke's own timeout result wins", async () => {
     expect(TURN_GRACE_MS).toBe(15_000)
-    h = harness({ env: { VOICE_TURN_TIMEOUT_MS: "100" }, timing: { turnGraceMs: 400 } })
+    h = harness({ env: { HUB_TURN_TIMEOUT_MS: "100" }, timing: { turnGraceMs: 400 } })
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     client.ws.addEventListener("message", (event) => {
       const frame = JSON.parse(String(event.data))
@@ -184,7 +184,7 @@ describe("turns", () => {
   })
 
   test("turn timeout is 504 and releases the session", async () => {
-    h = harness({ env: { VOICE_TURN_TIMEOUT_MS: "100" }, timing: { turnGraceMs: 50 } })
+    h = harness({ env: { HUB_TURN_TIMEOUT_MS: "100" }, timing: { turnGraceMs: 50 } })
     await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     const res = await h.api("/api/sessions/ses_1/turn", { method: "POST", json: { text: "slow" } })
     expect(res.status).toBe(504)

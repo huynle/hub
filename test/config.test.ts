@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, statSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { configPath, isExposed, normalize, readConfig, setSession, withServer, writeConfig } from "../src/config"
+import { configPath, isExposed, prepareConfigPath, normalize, readConfig, setSession, withServer, writeConfig } from "../src/config"
 
 describe("config", () => {
   test("defaults to off with the local server", () => {
@@ -91,8 +91,56 @@ describe("config", () => {
   })
 
   test("config path honors overrides", () => {
-    expect(configPath({ OPENCODE_VOICE_CONFIG: "/x/c.json" })).toBe("/x/c.json")
-    expect(configPath({ XDG_CONFIG_HOME: "/cfg" })).toBe("/cfg/opencode-voice/config.json")
+    expect(configPath({ OPENCODE_HUB_CONFIG: "/x/c.json" })).toBe("/x/c.json")
+    expect(configPath({ XDG_CONFIG_HOME: "/cfg" })).toBe("/cfg/opencode-hub/config.json")
+    expect(configPath({}, "/home/me")).toBe("/home/me/.config/opencode-hub/config.json")
+  })
+
+  test("the legacy OPENCODE_VOICE_CONFIG is a fallback; the new name wins", () => {
+    expect(configPath({ OPENCODE_VOICE_CONFIG: "/old/c.json" })).toBe("/old/c.json")
+    expect(configPath({ OPENCODE_VOICE_CONFIG: "/old/c.json", OPENCODE_HUB_CONFIG: "/new/c.json" })).toBe("/new/c.json")
+  })
+})
+
+describe("config migration from opencode-voice", () => {
+  const legacyHome = () => {
+    const home = mkdtempSync(path.join(tmpdir(), "hub-home-"))
+    const legacy = path.join(home, ".config", "opencode-voice", "config.json")
+    mkdirSync(path.dirname(legacy), { recursive: true })
+    writeFileSync(legacy, JSON.stringify({ server: "https://hub.example.com", mode: "always", token: "t" }))
+    chmodSync(legacy, 0o600)
+    return { home, legacy }
+  }
+
+  test("copies the legacy config (mode 0600) on first start and keeps the old file", () => {
+    const { home, legacy } = legacyHome()
+    const lines: string[] = []
+    const file = prepareConfigPath({}, home, (m) => lines.push(m))
+    expect(file).toBe(path.join(home, ".config", "opencode-hub", "config.json"))
+    expect(readConfig(file, "mac")).toMatchObject({ server: "https://hub.example.com", mode: "always", token: "t" })
+    expect(statSync(file).mode & 0o777).toBe(0o600)
+    expect(existsSync(legacy)).toBe(true)
+    expect(lines).toHaveLength(1)
+    // second start: already migrated, nothing logged
+    prepareConfigPath({}, home, (m) => lines.push(m))
+    expect(lines).toHaveLength(1)
+  })
+
+  test("an explicit config path bypasses migration", () => {
+    const { home } = legacyHome()
+    const explicit = path.join(home, "elsewhere.json")
+    const lines: string[] = []
+    expect(prepareConfigPath({ OPENCODE_HUB_CONFIG: explicit }, home, (m) => lines.push(m))).toBe(explicit)
+    expect(existsSync(path.join(home, ".config", "opencode-hub"))).toBe(false)
+    expect(lines).toEqual([])
+  })
+
+  test("an existing new config is never overwritten", () => {
+    const { home } = legacyHome()
+    const file = path.join(home, ".config", "opencode-hub", "config.json")
+    writeConfig(file, normalize({ server: "http://127.0.0.1:4097" }, "mac"))
+    prepareConfigPath({}, home, () => {})
+    expect(readConfig(file, "mac").server).toBe("http://127.0.0.1:4097")
   })
 })
 

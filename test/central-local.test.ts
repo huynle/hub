@@ -11,7 +11,7 @@ afterEach(async () => {
 
 /** A hub on 127.0.0.1 with its public URL on the same loopback origin. */
 function local(): Harness {
-  const h = harness({ env: { VOICE_HOST: "127.0.0.1", VOICE_PUBLIC_URL: "" } })
+  const h = harness({ env: { HUB_HOST: "127.0.0.1", HUB_PUBLIC_URL: "" } })
   running.push(h)
   return h
 }
@@ -84,7 +84,7 @@ describe("first machine on a local hub", () => {
       body: JSON.stringify({ deviceCode }),
     }).then((r) => r.json() as Promise<Record<string, any>>)
   const fresh = (env: Record<string, string> = {}) => {
-    const h = harness({ noDevice: true, env: { VOICE_HOST: "127.0.0.1", VOICE_PUBLIC_URL: "", ...env } })
+    const h = harness({ noDevice: true, env: { HUB_HOST: "127.0.0.1", HUB_PUBLIC_URL: "", ...env } })
     running.push(h)
     return h
   }
@@ -131,14 +131,14 @@ describe("first machine on a local hub", () => {
   })
 
   test("not when the public URL is not loopback (a hub behind a reverse proxy)", async () => {
-    const h = fresh({ VOICE_PUBLIC_URL: "https://voice.example.com" })
+    const h = fresh({ HUB_PUBLIC_URL: "https://voice.example.com" })
     const start = await enroll(h)
     expect(start.autoApproved).toBeUndefined()
     expect(start.approveURL).toStartWith("https://voice.example.com/approve?code=")
   })
 
   test("not when the hub listens on every interface", async () => {
-    const h = fresh({ VOICE_HOST: "0.0.0.0", VOICE_PUBLIC_URL: "http://127.0.0.1:4999" })
+    const h = fresh({ HUB_HOST: "0.0.0.0", HUB_PUBLIC_URL: "http://127.0.0.1:4999" })
     const start = await enroll(h, {}, `http://127.0.0.1:${port(h)}`)
     expect(start.autoApproved).toBeUndefined()
   })

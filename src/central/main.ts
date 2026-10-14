@@ -17,31 +17,32 @@ export function parseHubArgs(argv: readonly string[]): HubArgs {
 }
 
 export function hubHelp(version: string): string {
-  return `opencode-voice hub ${version}
+  return `opencode-hub ${version}
 
-The voice server for opencode-voice: serves the voice web app, pairs phones and browsers, enrolls
-OpenCode machines, and does speech (STT/TTS) and push notifications.
+OpenCode Hub: the web console for your OpenCode sessions. Serves the web app, pairs phones and
+browsers, enrolls OpenCode machines, and does push notifications and (optional) Voice speech.
 
-Usage: opencode-voice-hub [--help | --version]
+Usage: opencode-hub [--help | --version]
 
-Configuration: environment variables over ~/.config/opencode-voice/hub.json ($VOICE_HUB_CONFIG).
-  VOICE_HOST / VOICE_PORT   listen address (default 127.0.0.1 / 4097)
-  VOICE_PUBLIC_URL          origin used in links and cookies (default http://<host>:<port>)
-  VOICE_STATE_DIR           machines, devices, keys (default ~/.local/state/opencode-voice)
+Configuration: environment variables over ~/.config/opencode-hub/hub.json ($HUB_CONFIG).
+  HUB_HOST / HUB_PORT       listen address (default 127.0.0.1 / 4097)
+  HUB_PUBLIC_URL            origin used in links and cookies (default http://<host>:<port>)
+  HUB_STATE_DIR             machines, devices, keys (default ~/.local/state/opencode-hub)
   OPENROUTER_API_KEY        default speech key; or set speech providers in the web app (Settings → Speech)
-  VOICE_HUB_CONFIG          path of hub.json
+  HUB_CONFIG                path of hub.json
 
 Multi-user (sign in with Google or another OpenID Connect provider):
-  VOICE_AUTH=oidc           default "pairing" (one owner)
-  VOICE_OIDC_ISSUER         default https://accounts.google.com
-  VOICE_OIDC_CLIENT_ID      OAuth client ID (required)
-  VOICE_OIDC_CLIENT_SECRET  OAuth client secret (required; never logged)
-  VOICE_OIDC_ALLOWED        who may sign in: emails and/or @domain entries, comma separated (required)
-  VOICE_ADMIN_EMAILS        admin emails, comma separated (at least one)
+  HUB_AUTH=oidc             default "pairing" (one owner)
+  HUB_OIDC_ISSUER           default https://accounts.google.com
+  HUB_OIDC_CLIENT_ID        OAuth client ID (required)
+  HUB_OIDC_CLIENT_SECRET    OAuth client secret (required; never logged)
+  HUB_OIDC_ALLOWED          who may sign in: emails and/or @domain entries, comma separated (required)
+  HUB_ADMIN_EMAILS          admin emails, comma separated (at least one)
   Register <public URL>/auth/callback as the redirect URI.
 
+The former VOICE_* names (opencode-voice) still work, with a deprecation warning.
 While no device is paired, the log shows a pairing code for the first one (open <public URL>/pair).
-Docs: https://github.com/huynle/opencode-voice#running-the-hub
+Docs: https://github.com/huynle/opencode-hub#running-the-hub
 `
 }
 
@@ -57,9 +58,9 @@ export function authStartupLines(config: CentralConfig): { info: string[]; warni
   ]
   const warnings: string[] = []
   if (!config.publicURL.startsWith("https://") && !isLoopbackURL(config.publicURL)) {
-    warnings.push(`VOICE_PUBLIC_URL ${config.publicURL} is not https: sign-in cookies travel unencrypted and most providers refuse the redirect URI`)
+    warnings.push(`HUB_PUBLIC_URL ${config.publicURL} is not https: sign-in cookies travel unencrypted and most providers refuse the redirect URI`)
   }
-  if (auth.insecureIssuer) warnings.push(`VOICE_OIDC_INSECURE_ISSUER is set: plain-http issuer ${auth.issuer} allowed (development only)`)
+  if (auth.insecureIssuer) warnings.push(`HUB_OIDC_INSECURE_ISSUER is set: plain-http issuer ${auth.issuer} allowed (development only)`)
   return { info, warnings }
 }
 
@@ -81,7 +82,7 @@ export function runHub(options: RunHubOptions): void {
     return
   }
   if (args.action === "error") {
-    console.error(`[voice] ${args.message}`)
+    console.error(`[opencode-hub] ${args.message}`)
     process.exit(2)
   }
 
@@ -89,28 +90,28 @@ export function runHub(options: RunHubOptions): void {
   try {
     loaded = loadCentralConfig()
   } catch (cause) {
-    console.error(`[voice] ${cause instanceof Error ? cause.message : cause}`)
+    console.error(`[opencode-hub] ${cause instanceof Error ? cause.message : cause}`)
     process.exit(1)
   }
-  for (const warning of loaded.warnings) console.warn(`[voice] warning: ${warning}`)
+  for (const warning of loaded.warnings) console.warn(`[opencode-hub] warning: ${warning}`)
   const config = loaded.config
   const central = startCentral({ config, web: options.web, version: options.version })
 
-  console.log(`[voice] opencode-voice hub ${options.version} listening on ${central.url} (public URL ${central.publicURL})`)
-  console.log(`[voice] state: ${config.stateDir}`)
-  console.log(`[voice] config: ${loaded.loaded ? loaded.path : `${loaded.path} (not found; using env and defaults)`}`)
+  console.log(`[opencode-hub] OpenCode Hub ${options.version} listening on ${central.url} (public URL ${central.publicURL})`)
+  console.log(`[opencode-hub] state: ${config.stateDir}`)
+  console.log(`[opencode-hub] config: ${loaded.loaded ? loaded.path : `${loaded.path} (not found; using env and defaults)`}`)
   const authLines = authStartupLines(config)
-  for (const line of authLines.info) console.log(`[voice] ${line}`)
-  for (const line of authLines.warnings) console.warn(`[voice] warning: ${line}`)
+  for (const line of authLines.info) console.log(`[opencode-hub] ${line}`)
+  for (const line of authLines.warnings) console.warn(`[opencode-hub] warning: ${line}`)
   const speech = central.speechSettings.view()
   if (speech.ready.reason) {
-    console.log(`[voice] speech is not set up yet: ${speech.ready.reason} (or OPENROUTER_API_KEY, or speech.stt/tts in hub.json)`)
+    console.log(`[opencode-hub] speech is not set up yet: ${speech.ready.reason} (or OPENROUTER_API_KEY, or speech.stt/tts in hub.json)`)
   }
 
   // While no device is paired, keep a fresh bootstrap pairing code in the log.
   const bootstrap = () => {
     const code = central.auth.bootstrapCode()
-    if (code) console.log(`[voice] Pair your first device at ${central.publicURL}/pair with code ${code.code}`)
+    if (code) console.log(`[opencode-hub] Pair your first device at ${central.publicURL}/pair with code ${code.code}`)
     return code !== undefined
   }
   let timer: ReturnType<typeof setInterval> | undefined
@@ -124,7 +125,7 @@ export function runHub(options: RunHubOptions): void {
   const shutdown = async (signal: string) => {
     if (stopping) return
     stopping = true
-    console.log(`[voice] ${signal}: shutting down`)
+    console.log(`[opencode-hub] ${signal}: shutting down`)
     clearInterval(timer)
     await central.stop()
     process.exit(0)

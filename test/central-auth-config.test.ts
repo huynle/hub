@@ -6,11 +6,11 @@ import { centralConfig, emailAllowed, readHubFile } from "../src/central/config"
 
 const HOME = "/home/user"
 const OIDC = {
-  VOICE_AUTH: "oidc",
-  VOICE_OIDC_CLIENT_ID: "client-123",
-  VOICE_OIDC_CLIENT_SECRET: "s3cret-value",
-  VOICE_OIDC_ALLOWED: "Alice@Example.com, @example.org",
-  VOICE_ADMIN_EMAILS: "admin@example.com",
+  HUB_AUTH: "oidc",
+  HUB_OIDC_CLIENT_ID: "client-123",
+  HUB_OIDC_CLIENT_SECRET: "s3cret-value",
+  HUB_OIDC_ALLOWED: "Alice@Example.com, @example.org",
+  HUB_ADMIN_EMAILS: "admin@example.com",
 }
 
 function hubFile(content: unknown, mode = 0o600): string {
@@ -24,11 +24,11 @@ function hubFile(content: unknown, mode = 0o600): string {
 describe("auth config", () => {
   test("pairing is the default", () => {
     expect(centralConfig({}, HOME).auth).toEqual({ mode: "pairing" })
-    expect(centralConfig({ VOICE_AUTH: "pairing" }, HOME).auth).toEqual({ mode: "pairing" })
+    expect(centralConfig({ HUB_AUTH: "pairing" }, HOME).auth).toEqual({ mode: "pairing" })
   })
 
   test("unknown mode is refused", () => {
-    expect(() => centralConfig({ VOICE_AUTH: "ldap" }, HOME)).toThrow(/VOICE_AUTH/)
+    expect(() => centralConfig({ HUB_AUTH: "ldap" }, HOME)).toThrow(/HUB_AUTH/)
   })
 
   test("oidc from env: defaults to Google, lowercases lists, admins are allowed", () => {
@@ -51,17 +51,17 @@ describe("auth config", () => {
   })
 
   test("oidc requires client ID, secret, allow-list and at least one admin", () => {
-    for (const key of ["VOICE_OIDC_CLIENT_ID", "VOICE_OIDC_CLIENT_SECRET", "VOICE_OIDC_ALLOWED", "VOICE_ADMIN_EMAILS"]) {
+    for (const key of ["HUB_OIDC_CLIENT_ID", "HUB_OIDC_CLIENT_SECRET", "HUB_OIDC_ALLOWED", "HUB_ADMIN_EMAILS"]) {
       const env: Record<string, string> = { ...OIDC }
       delete env[key]
       expect(() => centralConfig(env, HOME)).toThrow(new RegExp(key))
     }
-    expect(() => centralConfig({ ...OIDC, VOICE_ADMIN_EMAILS: " , " }, HOME)).toThrow(/VOICE_ADMIN_EMAILS/)
+    expect(() => centralConfig({ ...OIDC, HUB_ADMIN_EMAILS: " , " }, HOME)).toThrow(/HUB_ADMIN_EMAILS/)
   })
 
   test("errors never contain the secret", () => {
     try {
-      centralConfig({ ...OIDC, VOICE_OIDC_ISSUER: "http://idp.example.com" }, HOME)
+      centralConfig({ ...OIDC, HUB_OIDC_ISSUER: "http://idp.example.com" }, HOME)
       throw new Error("expected a throw")
     } catch (cause) {
       expect(String(cause)).not.toContain("s3cret-value")
@@ -69,21 +69,21 @@ describe("auth config", () => {
   })
 
   test("allow-list entries must be emails or @domain", () => {
-    expect(() => centralConfig({ ...OIDC, VOICE_OIDC_ALLOWED: "alice" }, HOME)).toThrow(/VOICE_OIDC_ALLOWED/)
-    expect(() => centralConfig({ ...OIDC, VOICE_OIDC_ALLOWED: "@" }, HOME)).toThrow(/VOICE_OIDC_ALLOWED/)
-    expect(() => centralConfig({ ...OIDC, VOICE_ADMIN_EMAILS: "@example.com" }, HOME)).toThrow(/VOICE_ADMIN_EMAILS/)
+    expect(() => centralConfig({ ...OIDC, HUB_OIDC_ALLOWED: "alice" }, HOME)).toThrow(/HUB_OIDC_ALLOWED/)
+    expect(() => centralConfig({ ...OIDC, HUB_OIDC_ALLOWED: "@" }, HOME)).toThrow(/HUB_OIDC_ALLOWED/)
+    expect(() => centralConfig({ ...OIDC, HUB_ADMIN_EMAILS: "@example.com" }, HOME)).toThrow(/HUB_ADMIN_EMAILS/)
   })
 
   test("issuer must be https; loopback http only with the dev flag", () => {
-    expect(() => centralConfig({ ...OIDC, VOICE_OIDC_ISSUER: "http://idp.example.com" }, HOME)).toThrow(/https/)
-    expect(() => centralConfig({ ...OIDC, VOICE_OIDC_ISSUER: "http://127.0.0.1:5555" }, HOME)).toThrow(/https/)
-    expect(() => centralConfig({ ...OIDC, VOICE_OIDC_ISSUER: "http://idp.example.com", VOICE_OIDC_INSECURE_ISSUER: "1" }, HOME)).toThrow(/loopback/)
-    const auth = centralConfig({ ...OIDC, VOICE_OIDC_ISSUER: "http://127.0.0.1:5555/", VOICE_OIDC_INSECURE_ISSUER: "1" }, HOME).auth
+    expect(() => centralConfig({ ...OIDC, HUB_OIDC_ISSUER: "http://idp.example.com" }, HOME)).toThrow(/https/)
+    expect(() => centralConfig({ ...OIDC, HUB_OIDC_ISSUER: "http://127.0.0.1:5555" }, HOME)).toThrow(/https/)
+    expect(() => centralConfig({ ...OIDC, HUB_OIDC_ISSUER: "http://idp.example.com", HUB_OIDC_INSECURE_ISSUER: "1" }, HOME)).toThrow(/loopback/)
+    const auth = centralConfig({ ...OIDC, HUB_OIDC_ISSUER: "http://127.0.0.1:5555/", HUB_OIDC_INSECURE_ISSUER: "1" }, HOME).auth
     expect(auth).toMatchObject({ issuer: "http://127.0.0.1:5555", insecureIssuer: true })
-    expect(centralConfig({ ...OIDC, VOICE_OIDC_ISSUER: "https://idp.example.com/realms/x/" }, HOME).auth).toMatchObject({
+    expect(centralConfig({ ...OIDC, HUB_OIDC_ISSUER: "https://idp.example.com/realms/x/" }, HOME).auth).toMatchObject({
       issuer: "https://idp.example.com/realms/x",
     })
-    expect(() => centralConfig({ ...OIDC, VOICE_OIDC_ISSUER: "https://idp.example.com/?q=1" }, HOME)).toThrow(/VOICE_OIDC_ISSUER/)
+    expect(() => centralConfig({ ...OIDC, HUB_OIDC_ISSUER: "https://idp.example.com/?q=1" }, HOME)).toThrow(/HUB_OIDC_ISSUER/)
   })
 
   test("hub.json auth object; env wins per field", () => {
@@ -94,8 +94,8 @@ describe("auth config", () => {
     expect(warnings).toEqual([])
     const auth = centralConfig({}, HOME, hub).auth
     expect(auth).toMatchObject({ mode: "oidc", clientId: "file-client", allowed: ["bob@example.com"], admins: ["admin@example.com"] })
-    expect(centralConfig({ VOICE_OIDC_CLIENT_ID: "env-client" }, HOME, hub).auth).toMatchObject({ clientId: "env-client" })
-    expect(centralConfig({ VOICE_AUTH: "pairing" }, HOME, hub).auth).toEqual({ mode: "pairing" })
+    expect(centralConfig({ HUB_OIDC_CLIENT_ID: "env-client" }, HOME, hub).auth).toMatchObject({ clientId: "env-client" })
+    expect(centralConfig({ HUB_AUTH: "pairing" }, HOME, hub).auth).toEqual({ mode: "pairing" })
   })
 
   test("hub.json: invalid auth values throw; the secret is ignored in a shared file", () => {
@@ -106,7 +106,7 @@ describe("auth config", () => {
     const { file: hub, warnings } = readHubFile(shared, HOME)
     expect(warnings.join("\n")).toMatch(/clientSecret/)
     expect(warnings.join("\n")).not.toContain("leaky")
-    expect(() => centralConfig({}, HOME, hub)).toThrow(/VOICE_OIDC_CLIENT_SECRET/)
+    expect(() => centralConfig({}, HOME, hub)).toThrow(/HUB_OIDC_CLIENT_SECRET/)
     const { warnings: unknown } = readHubFile(hubFile({ auth: { mode: "pairing", foo: 1 } }), HOME)
     expect(unknown.join("\n")).toMatch(/auth.foo/)
   })
