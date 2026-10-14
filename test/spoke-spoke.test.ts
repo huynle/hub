@@ -634,6 +634,14 @@ describe("Spoke", () => {
     await Bun.sleep(10)
     await server.request({ op: "steer", sessionID: "ses_a", text: "next turn" })
     expect(calls.model.at(-1)).toEqual({ sessionID: "ses_a", model: { providerID: "anthropic", id: "claude-haiku", variant: "fast" } })
+    const beforeTurn = calls.model.length
+    models.set("ses_a", { providerID: "fallback", id: "voice" })
+    const turn = server.request({ op: "turn", sessionID: "ses_a", text: "push to talk", voiceStyle: true })
+    await until(() => calls.prompt.length >= 3)
+    expect(calls.model).toHaveLength(beforeTurn + 1)
+    host.push({ type: "session.inbox.delivered", data: { sessionID: "ses_a", inboxID: "msg_3" } })
+    host.push({ type: "session.execution.succeeded", data: { sessionID: "ses_a" } })
+    await turn
   })
 
   test("normalizes timeline history, paginates it, and returns full tool detail", async () => {
