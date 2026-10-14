@@ -1,4 +1,4 @@
-// Session browser on the hub: catalog fields, 403 for sessions without voice, enabling voice
+// Session browser on the hub: catalog fields, remote control without voice (speech stays gated), enabling voice
 // (POST /api/sessions/:id/expose) and new sessions (POST /api/machines/:machineID/sessions).
 import { afterEach, describe, expect, test } from "bun:test"
 import { harness, session, spoke, waitFor, type Harness } from "./central-harness"
@@ -57,29 +57,57 @@ describe("catalog", () => {
       blockers: [],
       conversation: false,
     })
-    expect(sessions.find((s: any) => s.id === "ses_off")).toMatchObject({ exposed: false, state: "idle", status: [] })
+    expect(sessions.find((s: any) => s.id === "ses_off")).toMatchObject({ exposed: false, state: "idle", status: [{ id: "ses_off", state: "idle" }] })
   })
 })
 
 describe("sessions without voice", () => {
-  test("session endpoints answer 403 not_exposed and never reach the spoke", async () => {
+  test("speech endpoints answer 403 not_exposed and never reach the spoke", async () => {
     h = harness()
     const { client } = await machine()
     const seen = answer(client, () => ({}))
-    const calls: Array<[string, string, unknown?]> = [
-      ["POST", "turn", { text: "hi" }],
-      ["POST", "utterance", { text: "hi" }],
-      ["POST", "interrupt"],
-      ["POST", "conversation", { on: true }],
-      ["POST", "permission", { requestID: "per_1", decision: "once" }],
-      ["GET", "context"],
-    ]
-    for (const [method, action, json] of calls) {
-      const res = await h.api(`/api/sessions/ses_off/${action}`, { method, ...(json ? { json } : {}) })
+    for (const [action, json] of [["utterance", { text: "hi" }], ["conversation", { on: true }]] as const) {
+      const res = await post(`/api/sessions/ses_off/${action}`, json)
       expect(res.status).toBe(403)
       expect(await res.json()).toEqual({ error: "Voice is not enabled for this session", code: "not_exposed" })
     }
     expect(seen).toEqual([])
+  })
+
+  test("inspection and typed control reach the spoke without Voice", async () => {
+    h = harness()
+    const { client } = await machine()
+    const seen = answer(client, (req) => {
+      if (req.op === "turn") return { outcome: "succeeded", reply: "ok" }
+      if (req.op === "context") return { messages: [] }
+      if (req.op === "timeline") return { items: [] }
+      if (req.op === "models") return { models: [] }
+      if (req.op === "stop") return { stopped: [req.sessionID] }
+      return {}
+    })
+    const turn = await post("/api/sessions/ses_off/turn", { text: "hi" })
+    expect(turn.status).toBe(200)
+    expect(await turn.json()).toEqual({ outcome: "succeeded", reply: "ok" })
+    expect((await post("/api/sessions/ses_off/interrupt")).status).toBe(204)
+    const stop = await post("/api/sessions/ses_off/stop")
+    expect(stop.status).toBe(200)
+    expect(await stop.json()).toEqual({ stopped: ["ses_off"] })
+    for (const action of ["context", "timeline", "models"]) expect((await h.api(`/api/sessions/ses_off/${action}`)).status).toBe(200)
+    expect(seen.map((r) => r.op)).toEqual(["turn", "interrupt", "stop", "context", "timeline", "models"])
+    // A typed turn in a Voice-off session is not styled for speech.
+    expect(seen[0]).toMatchObject({ op: "turn", sessionID: "ses_off", text: "hi", voiceStyle: false })
+  })
+
+  test("a typed turn steers while the session tree is running", async () => {
+    h = harness()
+    const { client } = await machine()
+    const seen = answer(client, (req) => (req.op === "steer" ? { inboxID: "inb_1" } : undefined))
+    client.send({ t: "event", event: { type: "session.execution.started", data: { sessionID: "ses_off" } } })
+    await waitFor(() => h.registry.session("ses_off")?.state === "working")
+    const res = await post("/api/sessions/ses_off/turn", { text: "use the other file" })
+    expect(res.status).toBe(202)
+    expect(await res.json()).toEqual({ mode: "steer", inboxID: "inb_1" })
+    expect(seen).toEqual([{ op: "steer", sessionID: "ses_off", text: "use the other file" }])
   })
 
   test("GET /api/sessions/:id returns basic info with exposed:false", async () => {
@@ -87,7 +115,7 @@ describe("sessions without voice", () => {
     await machine()
     const res = await h.api("/api/sessions/ses_off")
     expect(res.status).toBe(200)
-    expect(await res.json()).toMatchObject({ id: "ses_off", exposed: false, state: "idle", projectName: "webshop", status: [], activity: [] })
+    expect(await res.json()).toMatchObject({ id: "ses_off", exposed: false, state: "idle", projectName: "webshop", status: [{ id: "ses_off" }], activity: [] })
     expect(await (await h.api("/api/sessions/ses_on")).json()).toMatchObject({ id: "ses_on", exposed: true })
   })
 })
@@ -181,14 +209,15 @@ describe("per-session models", () => {
     const { client } = await machine()
     const seen = answer(client, () => ({ models: [] }))
     expect((await h.api("/api/sessions/ses_missing/models")).status).toBe(404)
-    expect((await h.api("/api/sessions/ses_off/models")).status).toBe(403)
+    expect((await h.api("/api/sessions/ses_off/models")).status).toBe(200)
     expect((await h.api("/api/sessions/ses_on/model-prefs", { method: "PUT", json: { voice: { providerID: "bad space", modelID: "x" } } })).status).toBe(400)
-    expect(seen).toEqual([])
+    // Only the Voice-off session's catalog request reached the spoke; invalid input never does.
+    expect(seen).toEqual([{ op: "models", sessionID: "ses_off" }])
   })
 })
 
 describe("timeline history and details", () => {
-  test("proxies bounded pages and full details only for the owned exposed session", async () => {
+  test("proxies bounded pages and full details for owned sessions, with or without Voice", async () => {
     h = harness()
     const { client } = await machine()
     const seen = answer(client, (req) => {
@@ -202,7 +231,7 @@ describe("timeline history and details", () => {
       { op: "timeline", sessionID: "ses_on", limit: 25 },
       { op: "timelinePart", sessionID: "ses_on", messageID: "msg_1", partID: "tool_1" },
     ])
-    expect((await h.api("/api/sessions/ses_off/timeline")).status).toBe(403)
+    expect((await h.api("/api/sessions/ses_off/timeline")).status).toBe(200)
     expect((await h.api("/api/sessions/ses_missing/timeline")).status).toBe(404)
     expect((await h.api("/api/sessions/ses_on/timeline?limit=500")).status).toBe(400)
   })

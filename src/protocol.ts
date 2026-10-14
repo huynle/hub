@@ -167,6 +167,8 @@ export type ServerRequest =
   /** Conversation mode: deliver an utterance with delivery "steer" and return at once (replies arrive as events). */
   | { readonly op: "steer"; readonly sessionID: string; readonly text: string }
   | { readonly op: "interrupt"; readonly sessionID: string }
+  /** Interrupt the session's whole tree: running descendants deepest first, then the root. */
+  | { readonly op: "stop"; readonly sessionID: string }
   /** Switch the session to the voice orchestrator agent (on) or back to its previous agent (off). */
   | { readonly op: "conversation"; readonly sessionID: string; readonly on: boolean }
   | { readonly op: "models"; readonly sessionID: string }
@@ -198,6 +200,7 @@ export interface ResultFor {
   openLink: { readonly url: string }
   steer: { readonly inboxID: string }
   interrupt: Record<string, never>
+  stop: { readonly stopped: readonly string[] }
   conversation: { readonly agent: string }
   models: { readonly models: readonly AvailableModel[] }
   modelPrefs: { readonly prefs: SessionModelPrefs; readonly defaults: SessionModelPrefs }
@@ -301,6 +304,7 @@ function isServerRequest(v: unknown): v is ServerRequest {
       return nonEmpty(v.sessionID) && nonEmpty(v.requestID) && ["once", "always", "reject"].includes(v.decision as string)
     case "context":
     case "interrupt":
+    case "stop":
     case "models":
     case "modelPrefs":
       return nonEmpty(v.sessionID)

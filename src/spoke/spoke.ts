@@ -25,7 +25,7 @@ import { pollEnrollment, startEnrollment } from "./enroll"
 import { HerdrWatcher, openInHerdr, type HerdrRunner } from "./herdr"
 import type { LocalHubResult } from "./localhub"
 import { PresenceBook } from "./presence"
-import { browserSessions, isExposed, SessionTracker, shouldForward, type EventLike, type SessionDetails } from "./tracker"
+import { browserSessions, isExposed, isReported, SessionTracker, shouldForward, type EventLike, type SessionDetails } from "./tracker"
 import { watchConfig, type ConfigWatcher } from "./watch"
 
 export type SpokeErrorName = "not_connected" | "not_enrolled" | "invalid" | "unreachable"
@@ -173,6 +173,7 @@ const FALLBACK_AGENT = "build"
 const LOCAL_HUB_MAX_RETRY_MS = 15 * 60_000
 const ENROLL_RETRY_MS = 500
 const NOT_SHARED = "This session is not shared with voice"
+const UNKNOWN_SESSION = "Unknown session"
 /** Events after which the service re-lists its sessions (other processes' sessions appear, change, go). */
 const LISTING_EVENTS = new Set(["session.created", "session.renamed", "session.deleted"])
 
@@ -706,7 +707,8 @@ export class Spoke {
     // Session browser ops are not gated by exposure: they are how a session gets exposed.
     if (req.op === "expose") return this.expose(req.sessionID, req.on)
     if (req.op === "create") return this.create(req.directory, req.title, req.herdrWorkspace)
-    if (!isExposed(this.config, this.tracker, req.sessionID)) throw new Error(NOT_SHARED)
+    // Inspection and control need a session this process knows; Voice (conversation) is gated separately.
+    if (!isReported(this.config, this.tracker, req.sessionID)) throw new Error(UNKNOWN_SESSION)
     switch (req.op) {
       case "turn":
         return this.turn(req.sessionID, req.text, req.voiceStyle)
@@ -755,18 +757,21 @@ export class Spoke {
       case "timelinePart":
         return { detail: boundedTimelinePart(await this.host.context(req.sessionID), req.messageID, req.partID) }
       case "steer": {
-        await this.applyVoiceModel(req.sessionID)
+        const voice = isExposed(this.config, this.tracker, req.sessionID)
+        if (voice) await this.applyVoiceModel(req.sessionID)
         const inbox = await this.host.prompt({
           sessionID: req.sessionID,
           text: req.text,
           delivery: "steer",
-          metadata: { source: "opencode-voice", mode: "conversation" },
+          metadata: { source: "opencode-voice", mode: voice ? "conversation" : "remote" },
         })
         return { inboxID: inbox.id } satisfies ResultFor["steer"]
       }
       case "interrupt":
         await this.host.interrupt(req.sessionID)
         return {}
+      case "stop":
+        return this.stopTree(req.sessionID)
       case "conversation":
         return this.setConversation(req.sessionID, req.on)
     }
@@ -782,6 +787,23 @@ export class Spoke {
 
   private modelPrefsResult(sessionID: string): ResultFor["modelPrefs"] {
     return { prefs: structuredClone(this.modelPrefs.get(sessionID) ?? {}), defaults: this.modelDefaults() }
+  }
+
+  /**
+   * Stops a whole session tree: running descendants deepest first, then the root (always, so a pending
+   * retry or queued run is cancelled too). A descendant that already settled is not an error.
+   */
+  private async stopTree(sessionID: string): Promise<ResultFor["stop"]> {
+    const root = this.tracker.rootOf(sessionID)
+    const order = [...this.tracker.runningBelow(root), root]
+    for (const id of order) {
+      try {
+        await this.host.interrupt(id)
+      } catch (cause) {
+        if (id === root) throw cause
+      }
+    }
+    return { stopped: order }
   }
 
   /** Applies a saved Voice override at the boundary before the next turn; never changes a running tree. */
@@ -856,7 +878,7 @@ export class Spoke {
 
   private async turn(sessionID: string, text: string, voiceStyle: boolean): Promise<TurnResult> {
     if (this.running.has(sessionID)) throw new Error("A voice turn is already running for this session")
-    await this.applyVoiceModel(sessionID)
+    if (isExposed(this.config, this.tracker, sessionID)) await this.applyVoiceModel(sessionID)
     this.running.add(sessionID)
     if (voiceStyle) this.voiceTurns.set(sessionID, (this.voiceTurns.get(sessionID) ?? 0) + 1)
     try {

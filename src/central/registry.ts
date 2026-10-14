@@ -119,7 +119,7 @@ export interface NowActivity {
 
 /** Session browser fields, computed for a session and the subagent sessions below it. */
 interface BrowserFields {
-  /** Voice is enabled for the session (false: listed for discovery only; session ops answer 403). */
+  /** Voice is enabled for the session. Inspection and control do not depend on it; speech does. */
   readonly exposed: boolean
   /** blocked if anything in the tree waits for the user, else error/working/idle. */
   readonly state: SessionStatus["state"]
@@ -677,6 +677,12 @@ export class Registry {
     return false
   }
 
+  /** Something in the session's tree is working or waiting for the user (typed input steers then). */
+  running(sessionID: string): boolean {
+    const state = this.browserFields(sessionID).state
+    return state === "working" || state === "blocked"
+  }
+
   /** Status tree of the root session that contains `sessionID`. */
   status(sessionID: string): LiveStatus[] | undefined {
     const board = this.boards.get(sessionID) ?? [...this.boards.values()].find((b) => b.get(sessionID))
@@ -716,7 +722,7 @@ export class Registry {
             ...fields,
             processID,
             machineID: conn.machine.id,
-            status: fields.exposed ? (this.status(s.id) ?? []) : [],
+            status: this.status(s.id) ?? [],
             busy: this.active.has(s.id),
             conversation: this.conversations.has(s.id),
           }
@@ -738,7 +744,7 @@ export class Registry {
     }
     if (!info) return undefined
     const fields = this.browserFields(sessionID)
-    const status = fields.exposed ? (this.status(sessionID) ?? []) : []
+    const status = this.status(sessionID) ?? []
     const own = status.find((s) => s.id === sessionID)
     return {
       id: info.id,
@@ -753,14 +759,13 @@ export class Registry {
       busy: this.active.has(sessionID),
       conversation: this.conversations.has(sessionID),
       status,
-      activity: fields.exposed ? this.activity(sessionID) : [],
+      activity: this.activity(sessionID),
     }
   }
 
   /** Exposure, overall state, pending blockers and current activity of a session and its subtree. */
   private browserFields(sessionID: string): BrowserFields {
     const exposed = this.exposed(sessionID) === true
-    if (!exposed) return { exposed, state: "idle", blockers: [] }
     const status = this.status(sessionID) ?? []
     const tree = new Set([sessionID])
     for (let grew = true; grew; ) {
@@ -911,9 +916,8 @@ export class Registry {
    * 5. else none.
    */
   owner(sessionID: string): string | undefined {
-    // Processes that report the session without exposing it would refuse the request.
     const tenant = this.sessionTenant(sessionID)
-    const all = [...this.conns.values()].filter((c) => this.tenant(c) === tenant && c.sessions.get(sessionID)?.exposed !== false)
+    const all = [...this.conns.values()].filter((c) => this.tenant(c) === tenant)
     const reporters = all.filter((c) => this.reports(c, sessionID))
     if (reporters.length === 0) return undefined
     const recent = (list: Conn[]) => this.recent(list, sessionID)
@@ -965,9 +969,9 @@ export class Registry {
 
   /** Creates boards for newly reported root sessions, nests reported children, drops boards nobody reports. */
   private syncBoards(): void {
-    // Only exposed sessions get status boards: nothing is forwarded for the others.
+    // Every reported session gets a status board, Voice or not: spokes forward events for all of them.
     const reported = new Map<string, SessionInfo>()
-    for (const conn of this.conns.values()) for (const s of this.visible(conn)) if (isOn(s)) reported.set(s.id, s)
+    for (const conn of this.conns.values()) for (const s of this.visible(conn)) reported.set(s.id, s)
 
     const rootOf = (id: string): string => {
       const seen = new Set<string>()

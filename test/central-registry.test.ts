@@ -460,6 +460,9 @@ describe("session browser", () => {
     registry.observe("c1", ev("session.tool.input.started", { sessionID: "ses_kid", id: "tool_1", name: "bash" }))
     registry.observe("c1", ev("session.tool.called", { sessionID: "ses_kid", id: "tool_1", summary: "bun test" }))
     registry.observe("c1", ev("permission.asked", { sessionID: "ses_kid", id: "per_1", action: "shell", resources: ["rm -rf x"] }))
+    registry.observe("c1", ev("session.execution.started", { sessionID: "ses_off" }))
+    registry.observe("c1", ev("session.tool.input.started", { sessionID: "ses_off", id: "tool_9", name: "read" }))
+    registry.observe("c1", ev("session.tool.called", { sessionID: "ses_off", id: "tool_9", summary: "a.ts" }))
     const sessions = registry.catalog()[0]!.processes[0]!.sessions
     const byID = new Map(sessions.map((s) => [s.id, s]))
     expect(byID.get("ses_1")).toMatchObject({
@@ -477,14 +480,16 @@ describe("session browser", () => {
       blockers: [{ kind: "permission", id: "per_1", summary: "shell: rm -rf x", sessionID: "ses_kid", sessionTitle: "title ses_kid" }],
     })
     expect(byID.get("ses_kid")).toMatchObject({ state: "blocked", now: { kind: "tool", tool: "bash" } })
-    expect(byID.get("ses_off")).toMatchObject({ exposed: false, state: "idle", status: [], blockers: [], projectName: "webshop" })
-    expect(byID.get("ses_off")!.now).toBeUndefined()
+    // Voice off only disables speech: status, blockers and activity are tracked like any other session.
+    expect(byID.get("ses_off")).toMatchObject({ exposed: false, state: "working", blockers: [], projectName: "webshop" })
+    expect(byID.get("ses_off")!.status.map((s) => s.id)).toEqual(["ses_off"])
     expect(byID.get("ses_old")).toMatchObject({ exposed: true, state: "idle" })
-    expect(registry.session("ses_off")).toMatchObject({ id: "ses_off", exposed: false, state: "idle", project: "/u/webshop", activity: [] })
+    expect(registry.session("ses_off")).toMatchObject({ id: "ses_off", exposed: false, state: "working", project: "/u/webshop" })
+    expect(registry.session("ses_off")!.activity.length).toBeGreaterThan(0)
     expect(registry.session("ses_1")).toMatchObject({ exposed: true, state: "blocked", now: { kind: "tool" }, projectName: "voice" })
   })
 
-  test("a session is exposed when any reporting process exposes it; unexposed reporters never own it", () => {
+  test("a session is exposed when any reporting process exposes it; any reporter may own it", () => {
     registry.connect("c1", laptop, hello("p1", "service"))
     registry.setSessions("c1", [session("ses_1", { exposed: false, owned: true }), session("ses_2", { exposed: false })])
     registry.connect("c2", laptop, hello("p2"))
@@ -492,8 +497,9 @@ describe("session browser", () => {
     expect(registry.exposed("ses_1")).toBe(true)
     expect(registry.exposed("ses_2")).toBe(false)
     expect(registry.exposed("ses_none")).toBeUndefined()
-    expect(registry.owner("ses_1")).toBe("c2")
-    expect(registry.owner("ses_2")).toBeUndefined()
+    // c1 viewed or ran ses_1 recently (owned), so it runs turns even with Voice off.
+    expect(registry.owner("ses_1")).toBe("c1")
+    expect(registry.owner("ses_2")).toBe("c1")
   })
 
   test("expose goes to a reporting service process first, else the most recent reporter", () => {

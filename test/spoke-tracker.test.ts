@@ -113,21 +113,23 @@ describe("exposure", () => {
     expect(eventSessionID(ev("server.connected", {}))).toBeUndefined()
   })
 
-  test("shouldForward requires a forwarded type and an exposed session", () => {
+  test("shouldForward requires a forwarded type and a known session, not Voice exposure", () => {
     const t = tracker()
     const config = { mode: "session" as const, sessions: ["ses_a"] }
     expect(shouldForward(config, t, ev("session.execution.started", { sessionID: "ses_child" }))).toBe(true)
-    expect(shouldForward(config, t, ev("session.execution.started", { sessionID: "ses_b" }))).toBe(false)
+    expect(shouldForward(config, t, ev("session.execution.started", { sessionID: "ses_b" }))).toBe(true)
+    expect(shouldForward(config, t, ev("session.execution.started", { sessionID: "ses_unknown" }))).toBe(false)
     expect(shouldForward(config, t, ev("session.inbox.enqueued", { sessionID: "ses_a", inboxID: "m" }))).toBe(false)
     expect(shouldForward({ mode: "off", sessions: [] }, t, ev("session.created", { sessionID: "ses_a" }))).toBe(false)
   })
 
-  test("conversation-mode events are forwarded for exposed sessions only", () => {
+  test("timeline events are forwarded for known sessions whether or not Voice is on", () => {
     const t = tracker()
     const config = { mode: "session" as const, sessions: ["ses_a"] }
     for (const type of ["session.text.ended", "session.inbox.delivered", "session.agent.selected"]) {
       expect(shouldForward(config, t, ev(type, { sessionID: "ses_a" }))).toBe(true)
-      expect(shouldForward(config, t, ev(type, { sessionID: "ses_b" }))).toBe(false)
+      expect(shouldForward(config, t, ev(type, { sessionID: "ses_b" }))).toBe(true)
+      expect(shouldForward({ mode: "off", sessions: [] }, t, ev(type, { sessionID: "ses_a" }))).toBe(false)
     }
   })
 })
@@ -208,12 +210,13 @@ describe("browserSessions", () => {
     ])
   })
 
-  test("session mode marks exposure and leaves out children of unexposed sessions", () => {
+  test("session mode marks Voice exposure and keeps children of unexposed sessions for inspection", () => {
     const sessions = browserSessions({ mode: "session", sessions: ["ses_a"] }, tracker(), T0)
     expect(sessions.map((s) => [s.id, s.exposed])).toEqual([
       ["ses_a", true],
       ["ses_child", true],
       ["ses_b", false],
+      ["ses_b_kid", false],
     ])
   })
 

@@ -96,7 +96,7 @@ interface Route extends RouteInfo {
   readonly handle: Handler
   readonly pattern: RegExp
   readonly keys: string[]
-  /** Session routes refused (403 not_exposed) while voice is off for the session. */
+  /** Speech routes refused (403 not_exposed) while Voice is off for the session; inspection and control are not. */
   readonly exposed: boolean
 }
 
@@ -542,7 +542,7 @@ export function startCentral(options: CentralOptions): Central {
       registry.setPresence(device.id, params.session!, visible)
       return new Response(null, { status: 204 })
     }),
-    route("POST", "/api/sessions/:session/turn", "session", ({ request, server, params }) => turn(request, server, params.session!), true),
+    route("POST", "/api/sessions/:session/turn", "session", ({ request, server, params }) => turn(request, server, params.session!)),
     route("POST", "/api/sessions/:session/utterance", "session", ({ request, params }) => utterance(request, params.session!), true),
     route(
       "POST",
@@ -552,11 +552,12 @@ export function startCentral(options: CentralOptions): Central {
         await spokes.request(ownerOf(params.session!), { op: "interrupt", sessionID: params.session! })
         return new Response(null, { status: 204 })
       },
-      true,
     ),
+    route("POST", "/api/sessions/:session/stop", "session", async ({ params }) =>
+      Response.json(await spokes.request(ownerOf(params.session!), { op: "stop", sessionID: params.session! }), { headers: NO_STORE })),
     route("POST", "/api/sessions/:session/conversation", "session", ({ request, params }) => conversation(request, params.session!), true),
     route("GET", "/api/sessions/:session/models", "session", async ({ params }) =>
-      Response.json(await spokes.request(ownerOf(params.session!), { op: "models", sessionID: params.session! }), { headers: NO_STORE }), true),
+      Response.json(await spokes.request(ownerOf(params.session!), { op: "models", sessionID: params.session! }), { headers: NO_STORE })),
     route("GET", "/api/sessions/:session/model-prefs", "session", async ({ params, user }) => {
       const prefs = store.modelPrefs(user.id, params.session!)
       const defaults = await spokes.request(ownerOf(params.session!), {
@@ -566,13 +567,13 @@ export function startCentral(options: CentralOptions): Central {
         worker: prefs.worker ?? null,
       })
       return Response.json({ prefs, defaults: defaults.defaults }, { headers: NO_STORE })
-    }, true),
+    }),
     route("PUT", "/api/sessions/:session/model-prefs", "session", async ({ request, params, user }) => {
       const change = modelPrefsInput(await request.json())
       const reply = await spokes.request(ownerOf(params.session!), { op: "setModelPrefs", sessionID: params.session!, ...change })
       const prefs = store.setModelPrefs(user.id, params.session!, change)
       return Response.json({ prefs, defaults: reply.defaults }, { headers: NO_STORE })
-    }, true),
+    }),
     route("GET", "/api/sessions/:session/timeline", "session", async ({ params, url }) => {
       const limitRaw = url.searchParams.get("limit")
       const limit = limitRaw === null ? undefined : Number(limitRaw)
@@ -580,17 +581,16 @@ export function startCentral(options: CentralOptions): Central {
       const cursor = url.searchParams.get("cursor") ?? undefined
       if (cursor && cursor.length > 4096) return error(400, "cursor is too long")
       return Response.json(await spokes.request(ownerOf(params.session!), { op: "timeline", sessionID: params.session!, ...(limit ? { limit } : {}), ...(cursor ? { cursor } : {}) }), { headers: NO_STORE })
-    }, true),
+    }),
     route("GET", "/api/sessions/:session/timeline/messages/:message/parts/:part", "session", async ({ params }) =>
-      Response.json(await spokes.request(ownerOf(params.session!), { op: "timelinePart", sessionID: params.session!, messageID: params.message!, partID: params.part! }), { headers: NO_STORE }), true),
+      Response.json(await spokes.request(ownerOf(params.session!), { op: "timelinePart", sessionID: params.session!, messageID: params.message!, partID: params.part! }), { headers: NO_STORE })),
     route(
       "GET",
       "/api/sessions/:session/context",
       "session",
       async ({ params }) => Response.json(await spokes.request(ownerOf(params.session!), { op: "context", sessionID: params.session! })),
-      true,
     ),
-    route("POST", "/api/sessions/:session/permission", "session", ({ request, params }) => permission(request, params.session!), true),
+    route("POST", "/api/sessions/:session/permission", "session", ({ request, params }) => permission(request, params.session!)),
 
     // machines: the caller must own the machine
     route("POST", "/api/machines/:machine/sessions", "machine", ({ request, params }) => createSession(request, params.machine!)),
@@ -742,10 +742,16 @@ export function startCentral(options: CentralOptions): Central {
     const text = typeof raw === "string" ? raw.trim() : ""
     if (!text) return error(400, "Empty prompt")
     const connID = ownerOf(sessionID)
+    // While anything in the tree runs, typed input redirects the current work instead of queueing.
+    if (registry.running(sessionID)) {
+      const { inboxID } = await spokes.request(connID, { op: "steer", sessionID, text })
+      return Response.json({ mode: "steer", inboxID }, { status: 202 })
+    }
     const release = registry.beginTurn(sessionID)
     server.timeout(request, 0)
     try {
-      return Response.json(await spokes.request(connID, { op: "turn", sessionID, text, voiceStyle: true }))
+      const voiceStyle = registry.exposed(sessionID) === true
+      return Response.json(await spokes.request(connID, { op: "turn", sessionID, text, voiceStyle }))
     } finally {
       release()
     }

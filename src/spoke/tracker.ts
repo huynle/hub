@@ -198,6 +198,13 @@ export class SessionTracker {
     }
   }
 
+  /** Running sessions strictly below a root, deepest first. */
+  runningBelow(root: string): string[] {
+    return [...this.running]
+      .filter((id) => id !== root && this.lineage(id).includes(root))
+      .sort((a, b) => this.lineage(b).length - this.lineage(a).length)
+  }
+
   needsInfo(): string[] {
     return [...this.entries.values()].filter((e) => !e.info).map((e) => e.id)
   }
@@ -276,10 +283,15 @@ export function isExposed(config: ExposureConfig, tracker: SessionTracker, sessi
   return tracker.lineage(sessionID).some((id) => config.sessions.includes(id))
 }
 
+/** Remote inspection and control: any session this process knows while connected (mode not "off"). Voice is separate. */
+export function isReported(config: ExposureConfig, tracker: SessionTracker, sessionID: string): boolean {
+  return config.mode !== "off" && (tracker.has(sessionID) || isExposed(config, tracker, sessionID))
+}
+
 export function shouldForward(config: ExposureConfig, tracker: SessionTracker, event: EventLike): boolean {
   if (!FORWARDED_EVENTS.has(event.type)) return false
   const sessionID = eventSessionID(event)
-  return sessionID !== undefined && isExposed(config, tracker, sessionID)
+  return sessionID !== undefined && isReported(config, tracker, sessionID)
 }
 
 /** Most sessions in one snapshot frame, and its size budget (the protocol refuses frames over 1 MB). */
@@ -287,8 +299,8 @@ export const SNAPSHOT_MAX = 500
 export const SNAPSHOT_MAX_BYTES = 900_000
 
 /**
- * The snapshot for the session browser: every known session with its exposure, except subagent
- * children of unexposed sessions. Over the limits, open, then exposed, then most recent sessions are kept.
+ * The snapshot for the session browser: every known session with its Voice exposure. Over the limits,
+ * open, then exposed, then most recent sessions are kept.
  */
 export function browserSessions(
   config: ExposureConfig,
@@ -308,7 +320,6 @@ export function browserSessions(
       const terminal = limits.terminal?.(s.id)
       return { ...s, exposed: isExposed(config, tracker, s.id), ...(terminal ? { open: true, terminal } : {}) }
     })
-    .filter((s) => s.exposed || !s.parentID)
   const max = limits.max ?? SNAPSHOT_MAX
   const maxBytes = limits.maxBytes ?? SNAPSHOT_MAX_BYTES
   if (all.length <= max && JSON.stringify(all).length <= maxBytes) return all
