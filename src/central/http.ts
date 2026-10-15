@@ -4,7 +4,7 @@
 import type { Server } from "bun"
 import { diskAssets, type WebAssets } from "./assets"
 import path from "node:path"
-import type { EnrollStart, ModelSelection, PermissionDecision, TurnResult } from "../protocol"
+import { PROMPT_IMAGE_MIMES, promptImagesProblem, type EnrollStart, type ModelSelection, type PermissionDecision, type PromptImage, type TurnResult } from "../protocol"
 import { isLoopbackAddress, isLoopbackHost, isLoopbackURL, loopbackOrigins } from "../loopback"
 import { speakable } from "../speakable"
 import { Auth, RateLimitError, ValidationError } from "./auth"
@@ -598,6 +598,7 @@ export function startCentral(options: CentralOptions): Central {
     }),
     route("GET", "/api/sessions/:session/timeline/messages/:message/parts/:part", "session", async ({ params }) =>
       Response.json(await spokes.request(ownerOf(params.session!), { op: "timelinePart", sessionID: params.session!, messageID: params.message!, partID: params.part! }), { headers: NO_STORE })),
+    route("GET", "/api/sessions/:session/timeline/messages/:message/files/:index", "session", ({ params }) => timelineFile(params.session!, params.message!, params.index!)),
     route(
       "GET",
       "/api/sessions/:session/context",
@@ -767,14 +768,24 @@ export function startCentral(options: CentralOptions): Central {
   }
 
   async function turn(request: Request, server: Server<SpokeSocketData>, sessionID: string): Promise<Response> {
-    const raw = (await body(request)).text
+    const input = await body(request)
+    const raw = input.text
     const text = typeof raw === "string" ? raw.trim() : ""
-    if (!text) return error(400, "Empty prompt")
+    if (input.images !== undefined) {
+      const problem = promptImagesProblem(input.images)
+      if (problem) return error(400, problem)
+    }
+    // Only the validated fields go on; an empty list is the same as none.
+    const images = Array.isArray(input.images) && input.images.length
+      ? (input.images as PromptImage[]).map(({ mime, data, name }) => ({ mime, data, ...(name ? { name } : {}) }))
+      : undefined
+    if (!text && !images) return error(400, "Empty prompt")
     if (text.length > MAX_PROMPT_CHARS) return error(400, `Prompt longer than ${MAX_PROMPT_CHARS} characters`)
+    const attached = images ? { images } : {}
     const connID = ownerOf(sessionID)
     // While anything in the tree runs, typed input redirects the current work instead of queueing.
     if (registry.running(sessionID)) {
-      const { inboxID } = await spokes.request(connID, { op: "steer", sessionID, text })
+      const { inboxID } = await spokes.request(connID, { op: "steer", sessionID, text, ...attached })
       return Response.json({ mode: "steer", inboxID }, { status: 202 })
     }
     // A stop or interrupt releases the lock and answers this request at once, even if the spoke never does.
@@ -786,10 +797,24 @@ export function startCentral(options: CentralOptions): Central {
     server.timeout(request, 0)
     try {
       const voiceStyle = registry.exposed(sessionID) === true
-      return Response.json(await Promise.race([spokes.request(connID, { op: "turn", sessionID, text, voiceStyle }), stopped]))
+      return Response.json(await Promise.race([spokes.request(connID, { op: "turn", sessionID, text, voiceStyle, ...attached }), stopped]))
     } finally {
       release()
     }
+  }
+
+  /** GET …/timeline/messages/:message/files/:index: one image of a user message, as bytes. */
+  async function timelineFile(sessionID: string, messageID: string, rawIndex: string): Promise<Response> {
+    const index = /^\d{1,3}$/.test(rawIndex) ? Number(rawIndex) : NaN
+    if (!Number.isInteger(index) || messageID.length > 300) return error(400, "Expected an attachment index 0–999")
+    const { file, tooLarge } = await spokes.request(ownerOf(sessionID), { op: "timelineFile", sessionID, messageID, index })
+    if (tooLarge) return error(413, "This image is too large to show here")
+    // Only image types that are safe to render inline are served (never SVG or HTML).
+    if (!file || typeof file.data !== "string" || !PROMPT_IMAGE_MIMES.includes(file.mime)) return error(404, "No such image")
+    const bytes = Buffer.from(file.data, "base64")
+    return new Response(bytes, {
+      headers: { "content-type": file.mime, "content-length": String(bytes.length), "cache-control": "private, no-store", "x-content-type-options": "nosniff" },
+    })
   }
 
   /** Connection that owns the session, or a 409. */

@@ -267,3 +267,83 @@ describe("timeline history and details", () => {
     expect((await h.api("/api/sessions/ses_on/timeline?limit=500")).status).toBe(400)
   })
 })
+
+describe("image prompts", () => {
+  const pngBytes = (size = 32) => {
+    const bytes = Buffer.alloc(size)
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes)
+    return bytes
+  }
+  const png = pngBytes().toString("base64")
+  const image = { mime: "image/png", data: png, name: "shot.png" }
+
+  test("a turn forwards images; image-only prompts are allowed", async () => {
+    h = harness()
+    const { client } = await machine()
+    const seen = answer(client, (req) => (req.op === "turn" ? { outcome: "succeeded", reply: "a cat" } : undefined))
+    const res = await post("/api/sessions/ses_off/turn", { text: "  ", images: [image] })
+    expect(res.status).toBe(200)
+    expect(seen).toEqual([{ op: "turn", sessionID: "ses_off", text: "", voiceStyle: false, images: [image] }])
+    // No images key at all without images (older spokes keep working).
+    await post("/api/sessions/ses_off/turn", { text: "plain", images: [] })
+    expect(seen[1]).toEqual({ op: "turn", sessionID: "ses_off", text: "plain", voiceStyle: false })
+  })
+
+  test("a steer while running forwards images too", async () => {
+    h = harness()
+    const { client } = await machine()
+    const seen = answer(client, (req) => (req.op === "steer" ? { inboxID: "inb_1" } : undefined))
+    client.send({ t: "event", event: { type: "session.execution.started", data: { sessionID: "ses_off" } } })
+    await waitFor(() => h.registry.session("ses_off")?.state === "working")
+    const res = await post("/api/sessions/ses_off/turn", { text: "this one", images: [image] })
+    expect(res.status).toBe(202)
+    expect(seen).toEqual([{ op: "steer", sessionID: "ses_off", text: "this one", images: [image] }])
+  })
+
+  test("invalid images answer 400 with a clear message and never reach the spoke", async () => {
+    h = harness()
+    const { client } = await machine()
+    const seen = answer(client, () => ({}))
+    const big = pngBytes(Math.floor(512 * 1024 * 0.9)).toString("base64")
+    const cases: Array<[unknown, RegExp]> = [
+      [Array.from({ length: 5 }, () => image), /at most 4/],
+      [[{ ...image, mime: "image/svg+xml" }], /type must be/],
+      [[{ ...image, data: "%%%" }], /base64/],
+      [[{ ...image, mime: "image/jpeg" }], /does not match/],
+      [[{ ...image, data: pngBytes(512 * 1024 + 1).toString("base64") }], /larger than 512 KB/],
+      [[{ ...image, data: big }, { ...image, data: big }], /together/],
+      ["nope", /array/],
+    ]
+    for (const [images, message] of cases) {
+      const res = await post("/api/sessions/ses_off/turn", { text: "x", images })
+      expect(res.status).toBe(400)
+      expect(((await res.json()) as any).error).toMatch(message)
+    }
+    expect((await post("/api/sessions/ses_off/turn", { text: "", images: [] })).status).toBe(400)
+    expect(seen).toEqual([])
+  })
+
+  test("serves a user message's image with its type, uncached; 404 without one, 413 when too large", async () => {
+    h = harness()
+    const { client } = await machine()
+    const seen = answer(client, (req) => {
+      if (req.op !== "timelineFile") return undefined
+      if (req.messageID === "big") return { tooLarge: true }
+      if (req.messageID === "svg") return { file: { mime: "image/svg+xml", data: png } }
+      return req.index === 0 ? { file: image } : {}
+    })
+    const res = await h.api("/api/sessions/ses_on/timeline/messages/msg_1/files/0")
+    expect(res.status).toBe(200)
+    expect(res.headers.get("content-type")).toBe("image/png")
+    expect(res.headers.get("cache-control")).toBe("private, no-store")
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff")
+    expect(Buffer.from(await res.arrayBuffer()).equals(pngBytes())).toBe(true)
+    expect(seen).toEqual([{ op: "timelineFile", sessionID: "ses_on", messageID: "msg_1", index: 0 }])
+    expect((await h.api("/api/sessions/ses_on/timeline/messages/msg_1/files/1")).status).toBe(404)
+    expect((await h.api("/api/sessions/ses_on/timeline/messages/big/files/0")).status).toBe(413)
+    expect((await h.api("/api/sessions/ses_on/timeline/messages/svg/files/0")).status).toBe(404)
+    expect((await h.api("/api/sessions/ses_on/timeline/messages/msg_1/files/x")).status).toBe(400)
+    expect((await h.api("/api/sessions/ses_on/timeline/messages/msg_1/files/1000")).status).toBe(400)
+    expect((await h.api("/api/sessions/ses_missing/timeline/messages/msg_1/files/0")).status).toBe(404)
+  })
+})
