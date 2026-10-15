@@ -315,7 +315,7 @@ describe("Spoke", () => {
     const server = fakeCentral({
       onFrame: (m, ws) => {
         if (m.t !== "req") return
-        const result = m.req.op === "pairCode" ? { code: "111222", url: "https://v/pair", expiresAt: 9 } : m.req.op === "handoff" ? { notified: 2 } : { url: m.req.sessionID ? `https://v/s/${m.req.sessionID}` : "https://v/" }
+        const result = m.req.op === "pairCode" ? { code: "111222", url: "https://v/pair", expiresAt: 9 } : m.req.op === "handoff" ? { notified: 2 } : { url: m.req.sessionID ? `https://v/s/${m.req.sessionID}${m.req.voice ? "?voice=1" : ""}` : "https://v/" }
         ws.send(JSON.stringify({ t: "res", id: m.id, ok: true, result }))
       },
     })
@@ -325,6 +325,7 @@ describe("Spoke", () => {
     expect(await spoke.handoff("ses_a")).toEqual({ notified: 2 })
     expect(await spoke.openLink("ses_a")).toEqual({ url: "https://v/s/ses_a" })
     expect(await spoke.openLink()).toEqual({ url: "https://v/" }) // home page: no session
+    expect(await spoke.openLink("ses_a", true)).toEqual({ url: "https://v/s/ses_a?voice=1" })
     spoke.setMode("off")
     await expect(spoke.pairCode()).rejects.toMatchObject({ name: "not_connected" })
   })

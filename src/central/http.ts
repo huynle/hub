@@ -132,7 +132,8 @@ const SPEECH_TEST_TEXT = "Hi! This is how I will sound when I read replies to yo
 const SPEECH_TEST_MAX_CHARS = 300
 const APP_ROUTES = /^\/(?:|pair|approve|new|settings|s\/[^/]+)$/
 const STATIC_PATH = /^(?:\/[A-Za-z0-9_-][A-Za-z0-9._-]*)+$/
-const LOGIN_NEXT = /^\/(?:s\/[A-Za-z0-9_-]+)?$/
+/** Where a one-time sign-in link may land: home, or a session (with Voice mode starting: `?voice=1`). */
+const LOGIN_NEXT = /^\/(?:s\/[A-Za-z0-9_-]+(?:\?voice=1)?)?$/
 const CONTENT_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",

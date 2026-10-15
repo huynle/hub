@@ -150,7 +150,8 @@ export type SpokeRequest =
   | { readonly op: "pairCode" }
   | { readonly op: "handoff"; readonly sessionID: string }
   /** A one-time sign-in link to a session's page, or to the home page without a session. */
-  | { readonly op: "openLink"; readonly sessionID?: string }
+  /** `voice`: land on the session with Voice mode starting (`?voice=1`). */
+  | { readonly op: "openLink"; readonly sessionID?: string; readonly voice?: boolean }
 
 // ---------- server → spoke ----------
 
@@ -358,7 +359,7 @@ function isSpokeRequest(v: unknown): v is SpokeRequest {
   if (!isObj(v)) return false
   if (v.op === "pairCode") return true
   if (v.op === "handoff") return nonEmpty(v.sessionID)
-  if (v.op === "openLink") return v.sessionID === undefined || nonEmpty(v.sessionID)
+  if (v.op === "openLink") return (v.sessionID === undefined || nonEmpty(v.sessionID)) && (v.voice === undefined || typeof v.voice === "boolean")
   return false
 }
 

@@ -345,6 +345,17 @@ async function desktop(browser: Browser): Promise<void> {
     await mock("/mock/fail", { expose: false })
   })
 
+  await check("desktop: /s/<id>?voice=1 (from /voice) starts Voice mode and drops the param", async () => {
+    await page.goto(`${BASE}/s/ses_10?voice=1`)
+    await page.locator(".voice-bar .voice-state").getByText(/Listening|Thinking/).waitFor({ timeout: 10_000 })
+    assert(!page.url().includes("voice=1"), `param removed: ${page.url()}`)
+    const { log } = (await (await fetch(`${BASE}/mock/log`)).json()) as { log: Array<{ method: string; path: string; body?: any }> }
+    const last = log.filter((e) => e.method === "POST" && e.path.endsWith("/conversation")).at(-1)
+    assert(last?.path.includes("ses_10") && last.body?.on === true, `conversation on for ses_10: ${JSON.stringify(last)}`)
+    await page.locator(".voice-bar").getByRole("button", { name: "End", exact: true }).click()
+    await page.locator(".voice-bar").waitFor({ state: "detached" })
+  })
+
   await check("desktop: Dictate fills the draft of the session on screen; each session keeps its own draft; leaving mid-recording cancels", async () => {
     const go = (href: string) =>
       page.evaluate((h) => {
@@ -528,6 +539,41 @@ async function notifications(browser: Browser): Promise<void> {
   await context.close()
 }
 
+/**
+ * Audio blocked until a tap, as Chrome's autoplay policy does for a link opened from the terminal (headless
+ * Chromium does not apply the policy itself): the AudioContext stays suspended and the page has no activation.
+ */
+const GESTURE_POLICY = `(() => {
+  let tapped = false
+  addEventListener("pointerdown", () => (tapped = true), true)
+  const state = Object.getOwnPropertyDescriptor(BaseAudioContext.prototype, "state").get
+  Object.defineProperty(BaseAudioContext.prototype, "state", { get() { return tapped ? state.call(this) : "suspended" }, configurable: true })
+  const resume = AudioContext.prototype.resume
+  AudioContext.prototype.resume = function () { return tapped ? resume.call(this) : new Promise(() => {}) }
+  Object.defineProperty(navigator, "userActivation", { get: () => ({ hasBeenActive: tapped, isActive: tapped }), configurable: true })
+})()`
+
+async function tapToStart(browser: Browser): Promise<void> {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, permissions: ["microphone"] })
+  await context.addInitScript(GESTURE_POLICY)
+  const page = await context.newPage()
+  const errors: string[] = []
+  page.on("pageerror", (e) => errors.push(e.message))
+  await check("voice link: when the browser needs a tap, a Tap to start button starts Voice mode", async () => {
+    await page.goto(`${BASE}/s/ses_mock?voice=1`)
+    const tap = page.getByRole("button", { name: "Tap to start Voice mode" })
+    await tap.waitFor({ timeout: 10_000 })
+    assert((await page.locator(".voice-error").count()) === 0, "no error shown, only the button")
+    assert(!page.url().includes("voice=1"), "param removed")
+    await shot(page, "voice-tap-to-start")
+    await tap.click()
+    await page.locator(".voice-bar .voice-state").getByText(/Listening|Thinking/).waitFor({ timeout: 10_000 })
+    assert((await tap.count()) === 0, "the button is gone once Voice mode is on")
+  })
+  await check("voice link: no page errors", async () => assert(!errors.length, errors.join("; ")))
+  await context.close()
+}
+
 async function phone(browser: Browser): Promise<void> {
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 })
   const page = await context.newPage()
@@ -587,6 +633,8 @@ try {
   await phone(browser)
   await mock("/mock/reset")
   await notifications(browser)
+  await mock("/mock/reset")
+  await tapToStart(browser)
 } catch (e) {
   failures++
   results.push(`✗ setup: ${(e as Error).message}`)

@@ -48,8 +48,8 @@ export interface VoiceState {
   readonly held: string
   readonly paused: boolean
   readonly agent?: string
-  /** The last failure to turn Voice mode on, for the session it was for. */
-  readonly error?: { readonly sessionID: string; readonly message: string }
+  /** The last failure to turn Voice mode on, for the session it was for; `gesture`: the browser waits for a tap. */
+  readonly error?: { readonly sessionID: string; readonly message: string; readonly gesture?: boolean }
 }
 
 const OFF: VoiceState = { phase: "off", voice: "off", level: 0, held: "", paused: false }
@@ -79,6 +79,11 @@ export class VoiceController<C extends VoiceConversation = VoiceConversation> {
     return this.state.error?.sessionID === sessionID ? this.state.error.message : undefined
   }
 
+  /** Starting Voice mode for `sessionID` failed only for want of a tap (e.g. opened from a link). */
+  needsTap(sessionID: string): boolean {
+    return this.state.error?.sessionID === sessionID && this.state.error.gesture === true
+  }
+
   /** The Voice button of `sessionID`. */
   toggle(sessionID: string): Promise<void> {
     return this.isOn(sessionID) ? this.stop() : this.start(sessionID)
@@ -95,6 +100,7 @@ export class VoiceController<C extends VoiceConversation = VoiceConversation> {
     if (this.state.phase !== "off") await this.stop()
     const run = ++this.run
     let failure = ""
+    let gesture = false
     this.set({ ...OFF, phase: "starting", sessionID, voice: "starting" })
     const exposed = await this.deps.expose(sessionID)
     if (run !== this.run) return
@@ -108,8 +114,9 @@ export class VoiceController<C extends VoiceConversation = VoiceConversation> {
       agent: (message) => this.sinks.get(sessionID)?.agent(message),
       note: (text, kind) => {
         // A failure to start is kept as the session's error (shown by its view) rather than repeated as a note.
-        if (kind === "err" && run === this.run && this.state.phase === "starting") {
+        if ((kind === "err" || kind === "gesture") && run === this.run && this.state.phase === "starting") {
           failure = text
+          gesture = kind === "gesture"
           return
         }
         const sink = this.sinks.get(sessionID)
@@ -117,8 +124,9 @@ export class VoiceController<C extends VoiceConversation = VoiceConversation> {
         else this.deps.notify(text, kind)
       },
       ended: () => {
-        // The conversation ended itself (the hub turned it off, "pause listening", an error).
-        if (run !== this.run || this.conversation !== conversation) return
+        // The conversation ended itself (the hub turned it off, "pause listening", an error). While it is still
+        // starting, start() sees the failed start and keeps the reason.
+        if (run !== this.run || this.conversation !== conversation || this.state.phase === "starting") return
         this.run++
         this.conversation = undefined
         this.set(OFF)
@@ -131,7 +139,7 @@ export class VoiceController<C extends VoiceConversation = VoiceConversation> {
     if (!started) {
       this.run++
       this.conversation = undefined
-      return this.set({ ...OFF, error: { sessionID, message: failure || "Could not start Voice mode." } })
+      return this.set({ ...OFF, error: { sessionID, message: failure || "Could not start Voice mode.", ...(gesture ? { gesture } : {}) } })
     }
     this.set({ ...this.state, phase: "on", agent: conversation.agent })
   }

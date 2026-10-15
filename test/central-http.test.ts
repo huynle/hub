@@ -130,7 +130,7 @@ describe("devices", () => {
 describe("login links", () => {
   test("rejects off-site or odd next targets", async () => {
     h = harness()
-    for (const next of ["//evil.test/s/x", "https://evil.test/", "/api/me", "/\\evil.test", "s/x"]) {
+    for (const next of ["//evil.test/s/x", "https://evil.test/", "/api/me", "/\\evil.test", "s/x", "/s/x?voice=2", "/s/x?next=//evil.test", "/?voice=1", "/s/x?voice=1&x=1"]) {
       const { code } = h.auth.issueLoginCode()
       const res = await h.api(`/login?code=${code}&next=${encodeURIComponent(next)}`, { cookie: null, origin: null })
       expect(res.status).toBe(400)
@@ -140,6 +140,10 @@ describe("login links", () => {
     const ok = await h.api(`/login?code=${code}&next=/`, { cookie: null, origin: null })
     expect(ok.status).toBe(302)
     expect(ok.headers.get("location")).toBe("/#speech") // this hub has no speech key yet
+    const voice = h.auth.issueLoginCode()
+    const withVoice = await h.api(`/login?code=${voice.code}&next=${encodeURIComponent("/s/ses_1?voice=1")}`, { cookie: null, origin: null })
+    expect(withVoice.status).toBe(302)
+    expect(withVoice.headers.get("location")).toBe("/s/ses_1?voice=1#speech")
   })
 })
 

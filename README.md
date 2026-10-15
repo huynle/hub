@@ -37,8 +37,10 @@ repository): it works for connecting to a hub that runs elsewhere, but a local h
 until you build the app. To run a hub yourself, use the npm package, a [release binary](#running-the-hub)
 or Docker, or run `npm install && npm run build:web` in a source checkout.
 
-Then run **`/hub`** in OpenCode (`/voice` still works as an alias). The first time, it offers **Set up
-OpenCode Hub** with two paths.
+Then run **`/hub`** in OpenCode to set up and configure the hub connection. The first time, it offers
+**Set up OpenCode Hub** with two paths. **`/voice`** talks to the session on screen: it connects (running
+the setup first when needed), shares the session for Voice and opens it in the browser with Voice mode
+starting.
 
 ### Local: everything on this computer
 
@@ -50,8 +52,8 @@ OpenCode Hub** with two paths.
    pick a provider and paste its API key (one [OpenRouter](https://openrouter.ai/keys) key covers both
    directions, or point both at your own OpenAI-compatible servers), **Save**, then **Test voice**. Keys
    stay on this computer in `~/.local/state/opencode-hub`.
-3. `/hub` → **Talk on this device** opens the current session; **Open hub** opens the home page any time.
-   **Conversation** on a session page is the hands-free Voice loop.
+3. **`/voice`** in a session opens it in the browser with Voice mode (the hands-free loop) starting;
+   `/hub` → **Open hub in browser** opens the home page any time.
 
 ### Your own hub (phones anywhere)
 
@@ -186,7 +188,7 @@ The web app, speech and phones live on the hub.
 | Entry | File | Role |
 |---|---|---|
 | server | `server.ts` → `src/index.ts` | Starts the process-wide spoke (`src/spoke/`), `hub.*` RPC (also under the legacy id `voice.*`), the `voice` agent, short-reply and orchestrator `context` hook |
-| tui | `tui.ts` → `src/tui.ts` | `/hub` dialog (alias `/voice`); reports the sessions it shows (`hub.presence`) |
+| tui | `tui.ts` → `src/tui.ts` | `/hub` dialog and `/voice`; reports the sessions it shows (`hub.presence`) |
 | rpc | `rpc.ts` → `src/rpc.ts` | `HubRpc` (id `hub`; `VoiceRpc` is the deprecated id `voice`): `status / setServer / checkServer / enroll / startLocalHub / setMode / setSession / pairCode / handoff / openLink / conversation / presence` |
 
 OpenCode resolves a local plugin directory as `<dir>/server`, `<dir>/tui` and `<dir>/rpc` (`package.json`
@@ -203,16 +205,29 @@ OpenCode resolves a local plugin directory as `<dir>/server`, `<dir>/tui` and `<
   sessions). Every reported session can be inspected and controlled in both modes; in `session` mode the
   others are listed with `exposed: false` so the phone can offer "Enable voice", and only Voice
   (conversation mode, utterances) is refused for them.
-- **/hub** (alias **/voice**): before this machine is enrolled (or after the hub revoked it), **Set up
-  OpenCode Hub**: On this computer (local hub, every session or only chosen ones), Connect to a hub… (URL
-  checked with `hub.checkServer`, i.e. `GET <url>/healthz`, then device-code approval in the browser), or Not now; a
-  configured remote server comes first as "Connect to <host>". The decisions are pure functions in
-  `src/setup.ts`. Once set up: Talk on this device, Open hub (home page via a one-time sign-in link;
-  starts a local hub first when it is down, `hub.startLocalHub`), Send to phone, Conversation mode on/off,
-  This session on/off, Mode, Pair a phone, and Server (Set up again…).
-- **One-time links** (`hub.openLink`, `sessionID` optional): `<hub>/login?code=…&next=/s/<id>` or `next=/`.
-  While speech is not usable (see `ready` below) the hub redirects to `<next>#speech`, and the page opens
-  Settings → Speech.
+- **/hub** configures the hub connection. Before this machine is enrolled (or after the hub revoked it),
+  **Set up OpenCode Hub**: On this computer (local hub, every session or only chosen ones), Connect to a
+  hub… (URL checked with `hub.checkServer`, i.e. `GET <url>/healthz`, then device-code approval in the
+  browser), or Not now; a configured remote server comes first as "Connect to <host>". The decisions are
+  pure functions in `src/setup.ts`. Once set up, the title shows the server and connection state, and the
+  menu has: **Server** (keep it, Change server URL… with the same reachability check, Use a hub on this
+  computer, Set up again…), **Start local hub** (a local server that is not answering), **This machine:
+  approved / waiting for approval / revoked**, **Mode**, **This session on/off** (mode "This session
+  only"), **Pair a phone**, **Open hub in browser** (home page via a one-time sign-in link; starts a local
+  hub first when it is down, `hub.startLocalHub`), and for a shared session **Send to phone** and
+  **Conversation mode on/off**.
+- **/voice** (no menu; `src/voice-command.ts`): with a session on screen, it (1) runs the /hub setup when
+  the machine is not set up (then continues once connected; a hub that still waits for approval says to run
+  /voice again), asks for a mode when sharing is off, and connects (starting a local hub when needed); (2)
+  shares the session for Voice (`hub.setSession` in "This session only" mode); (3) opens
+  `<hub>/s/<session>?voice=1` through a one-time sign-in link (`hub.openLink {sessionID, voice: true}`).
+  The page turns Voice mode on for that session (turning it off in any other session first) and removes
+  `?voice=1` from the address. When the browser will not start audio without a tap (a link opened from the
+  terminal), the page shows **Tap to start Voice mode** instead of an error. The `voice` agent keeps its
+  name.
+- **One-time links** (`hub.openLink`, `sessionID` and `voice` optional): `<hub>/login?code=…&next=/s/<id>`
+  (with `voice`: `next=/s/<id>?voice=1`) or `next=/`; `/login` accepts no other `next`. While speech is not
+  usable (see `ready` below) the hub redirects to `<next>#speech`, and the page opens Settings → Speech.
 - One active spoke per process (`globalThis` singleton); the shared background service
   (`opencode serve --service`) also lists its root sessions from the last `list.days` days, at most
   `list.max`, newest first (no subagent children, nothing archived; `src/spoke/listing.ts`), plus sessions
@@ -291,8 +306,9 @@ not persist those potentially sensitive details.
   is refused for sessions not shared with Voice. Replies reach the hub as forwarded
   `session.text.ended`, `session.inbox.delivered` and `session.agent.selected` events.
 - State is per process and in memory; the hub re-sends `conversation on` after a reconnect.
-- From the terminal: `/hub → Conversation mode` toggles it for the current session (same code path),
-  then offers to send the session to your phone.
+- From the terminal: `/voice` opens the current session in the browser with Voice mode starting; `/hub →
+  Conversation mode` toggles conversation mode only (same code path as the phone), then offers to send the
+  session to your phone.
 
 ## Central server
 
@@ -758,7 +774,7 @@ laptop to the providers in your config.
    first machine is approved by itself, the mode is set, and the hub opens.
 2. Speech: on the page (Settings → Speech), or in `~/.config/opencode-hub/hub.json` (`chmod 600`;
    examples below).
-3. `/hub → Talk on this device` / **Open hub** open the page with a one-time sign-in link; no
+3. `/voice` / `/hub` → **Open hub in browser** open the page with a one-time sign-in link; no
    pairing needed. To use a phone on the same network, the hub must listen beyond loopback (see notes).
 
 Or run the hub yourself: `scripts/hub-local.sh` (foreground, reads `hub.json`), or keep it running with
@@ -873,7 +889,7 @@ day one; everything below keeps working with a one-time warning where noted.
 |---|---|
 | npm `@huynle/opencode-voice` | `@huynle/opencode-hub` |
 | `opencode plugin add github:huynle/opencode-voice` | `github:huynle/opencode-hub` |
-| `/voice` | `/hub` (`/voice` kept as an alias) |
+| `/voice` | `/hub` for the connection; `/voice` (0.5.1) opens the session with Voice mode |
 | `opencode-voice-hub` command | `opencode-hub` (`opencode-voice-hub` kept as an alias) |
 | binaries `opencode-voice-hub-<os>-<arch>` | `opencode-hub-<os>-<arch>` |
 | image `ghcr.io/huynle/opencode-voice-hub` | `ghcr.io/huynle/opencode-hub` |

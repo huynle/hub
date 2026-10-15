@@ -433,3 +433,4 @@ p.small.ok { color: var(--ok, inherit); }
 .voice-bar { flex-wrap: wrap; }
 .voice-hint { flex-basis: 100%; margin: 2px 0 0; color: var(--muted, inherit); }
 button.link { background: none; border: 0; padding: 0; color: var(--accent, #fab283); text-decoration: underline; cursor: pointer; font: inherit; }
+.tap-to-start { display: block; width: 100%; padding: 14px; font-size: 1.05em; margin-bottom: 8px; }

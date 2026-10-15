@@ -25,9 +25,13 @@ import { VoicePill } from "./VoicePill"
 import { Transcript, type TickState } from "./Transcript"
 import { Icon, IconButton, Menu, STATE_LABEL, StatusIcon, ago, now } from "./ui"
 import { formatElapsed } from "../core/feedback-core"
+import { takeVoiceParam } from "../core/voice-autostart"
 
 const PRESENCE_MS = 30_000
 const SUMMARY_THROTTLE_MS = 2000
+
+/** The session a ?voice=1 link asked to start Voice mode in, until its view starts it. */
+let voiceRequest: string | undefined
 
 export function SessionView(props: { id: string }) {
   const id = props.id
@@ -306,7 +310,9 @@ export function SessionView(props: { id: string }) {
   const vs = voiceState
   const voiceHere = () => vs().phase !== "off" && vs().sessionID === id
   const voiceElsewhere = () => vs().phase !== "off" && vs().sessionID !== undefined && vs().sessionID !== id
-  const voiceError = () => (vs().error?.sessionID === id ? vs().error!.message : undefined)
+  const voiceError = () => (vs().error?.sessionID === id && !vs().error!.gesture ? vs().error!.message : undefined)
+  /** The browser blocked starting Voice mode until the user taps (e.g. opened from /voice): a big button. */
+  const voiceNeedsTap = () => vs().error?.sessionID === id && vs().error!.gesture === true
   const voiceBlocked = () => {
     const setup = speechSetup(speechReady() ?? undefined, me()?.publicURL)
     return setup?.micBlocked ? "Set up speech in Settings to use the microphone" : undefined
@@ -342,6 +348,19 @@ export function SessionView(props: { id: string }) {
     await voice.toggle(id)
     if (voice.isOn(id) && voice.state.phase === "on") note(`Voice mode on${voice.state.agent ? ` (${voice.state.agent} agent)` : ""}. Speak naturally; say “stop” to interrupt, “pause listening” to end.`, "sys")
   }
+
+  // /s/<id>?voice=1 (from /voice in the TUI): Voice mode on once the session is known; the param goes away.
+  // Kept outside the view: replacing the URL may mount the view again.
+  const autostart = takeVoiceParam(location.href)
+  if (autostart.voice) {
+    voiceRequest = id
+    navigate(autostart.path, { replace: true })
+  }
+  createEffect(() => {
+    if (voiceRequest !== id || !found() || voiceBlocked()) return
+    voiceRequest = undefined
+    if (!voiceHere()) void toggleVoice()
+  })
 
   // ---------- lifecycle ----------
   onMount(() => {
@@ -497,6 +516,11 @@ export function SessionView(props: { id: string }) {
                 notifyHint={voiceNotifyHint()}
                 onAllowNotifications={() => void allowVoiceNotifications()}
               />
+            </Show>
+            <Show when={voiceNeedsTap()}>
+              <button type="button" class="btn primary tap-to-start" onClick={() => void toggleVoice()}>
+                Tap to start Voice mode
+              </button>
             </Show>
             <Show when={voiceError()}>
               <p class="note err voice-error" role="alert">

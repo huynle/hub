@@ -505,8 +505,8 @@ export class Spoke {
   }
 
   /** A one-time sign-in link to the session's page, or to the home page without a session. */
-  openLink(sessionID?: string): Promise<ResultFor["openLink"]> {
-    return this.ask(sessionID ? { op: "openLink", sessionID } : { op: "openLink" })
+  openLink(sessionID?: string, voice = false): Promise<ResultFor["openLink"]> {
+    return this.ask(sessionID ? { op: "openLink", sessionID, ...(voice ? { voice: true } : {}) } : { op: "openLink" })
   }
 
   /**

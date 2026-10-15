@@ -67,7 +67,8 @@ const methods = {
   pairCode: { input: empty, output: obj({ code: str, url: str, expiresAt: num }, ["code", "url", "expiresAt"]), errors },
   handoff: { input: obj({ sessionID: str }, ["sessionID"]), output: obj({ notified: num }, ["notified"]), errors },
   /** One-time sign-in link: the session's page, or the home page without sessionID. */
-  openLink: { input: obj({ sessionID: str }), output: obj({ url: str }, ["url"]), errors },
+  /** voice: land on the session with Voice mode starting (`/s/<id>?voice=1`). */
+  openLink: { input: obj({ sessionID: str, voice: bool }), output: obj({ url: str }, ["url"]), errors },
   /**
    * TUI presence: the sessions this TUI shows (route root and open tabs), sent on change and every 15 s.
    * `reporter` identifies the TUI; each report replaces its previous one.

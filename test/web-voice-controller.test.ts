@@ -122,6 +122,35 @@ describe("VoiceController", () => {
     expect(h.notes.at(-1)).toEqual(["Voice mode was turned off.", undefined])
   })
 
+  test("a start the browser blocked until a tap keeps a gesture error: the view offers Tap to start", async () => {
+    const h = harness({ autoStart: false })
+    const a = h.controller.start("A")
+    await Bun.sleep(0)
+    h.convs[0]!.ui.note("Tap to start Voice mode", "gesture")
+    h.convs[0]!.startResult.resolve(false)
+    await a
+    expect(h.controller.state).toMatchObject({ phase: "off", error: { sessionID: "A", message: "Tap to start Voice mode", gesture: true } })
+    expect(h.controller.needsTap("A")).toBe(true)
+    expect(h.controller.needsTap("B")).toBe(false)
+    // The real conversation stops itself (ended) before its start resolves false: the error survives.
+    const again = h.controller.start("A")
+    await Bun.sleep(0)
+    h.convs[1]!.ui.note("Tap to start Voice mode", "gesture")
+    await h.convs[1]!.stop()
+    h.convs[1]!.startResult.resolve(false)
+    await again
+    expect(h.controller.needsTap("A")).toBe(true)
+    h.convs.splice(1, 1)
+    // An ordinary failure is not a tap request.
+    const b = h.controller.start("B")
+    await Bun.sleep(0)
+    h.convs[1]!.ui.note("Microphone permission was denied.", "err")
+    h.convs[1]!.startResult.resolve(false)
+    await b
+    expect(h.controller.needsTap("B")).toBe(false)
+    expect(h.controller.errorFor("B")).toBe("Microphone permission was denied.")
+  })
+
   test("End (the Voice bar) is the same as toggling off", async () => {
     const h = harness()
     await h.controller.toggle("A")

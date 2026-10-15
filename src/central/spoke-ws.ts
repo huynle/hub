@@ -261,7 +261,7 @@ export class SpokeHub {
       }
       case "openLink": {
         const { code } = auth.issueLoginCode(owner)
-        const next = req.sessionID ? `/s/${encodeURIComponent(req.sessionID)}` : "/"
+        const next = req.sessionID ? `/s/${encodeURIComponent(req.sessionID)}${req.voice ? "?voice=1" : ""}` : "/"
         return { url: `${publicURL}/login?code=${code}&next=${next}` }
       }
     }

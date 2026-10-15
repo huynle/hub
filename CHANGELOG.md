@@ -2,6 +2,14 @@
 
 ## 0.5.1 (unreleased)
 
+- **`/hub` and `/voice` are separate commands.** `/hub` configures the hub connection: server URL and
+  connection state, change the server (reachability checked) or use a hub on this computer, start the
+  local hub, approval status, mode, this session on/off, pair a phone, open the hub in the browser.
+  `/voice` has no menu: it sets up and connects first when needed, shares the session for Voice and opens
+  it in the browser with Voice mode starting (`/s/<id>?voice=1` through a one-time sign-in link; the hub's
+  `openLink` op takes `voice: true` and `/login` accepts `?voice=1`). When the browser needs a tap before
+  it plays or records, the Voice bar shows **Tap to start Voice mode** instead of an error. "Talk on this
+  device" is gone from `/hub` (use `/voice`).
 - **"Voice mode on" notification.** While Voice mode is on, a silent persistent notification says which
   session and what Voice is doing ("API server · listening", updated at most every 3 s) with **End** (ends
   Voice mode through the page, or with no page open turns conversation mode off at the hub) and **Open**;

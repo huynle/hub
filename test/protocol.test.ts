@@ -46,6 +46,8 @@ describe("parseSpokeMessage", () => {
   test("spokes may only send their own request ops", () => {
     expect(parseSpokeMessage(j({ t: "req", id: "1", req: { op: "pairCode" } }))).toBeDefined()
     expect(parseSpokeMessage(j({ t: "req", id: "1", req: { op: "handoff", sessionID: "ses_1" } }))).toBeDefined()
+    expect(parseSpokeMessage(j({ t: "req", id: "1", req: { op: "openLink", sessionID: "ses_1", voice: true } }))).toBeDefined()
+    expect(parseSpokeMessage(j({ t: "req", id: "1", req: { op: "openLink", sessionID: "ses_1", voice: "yes" } }))).toBeUndefined()
     expect(parseSpokeMessage(j({ t: "req", id: "1", req: { op: "turn", sessionID: "ses_1", text: "x", voiceStyle: true } }))).toBeUndefined()
   })
 })

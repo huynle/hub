@@ -326,6 +326,22 @@ describe("spoke requests", () => {
     expect(reuse.status).toBe(401)
   })
 
+  test("openLink with voice lands on the session with ?voice=1 through the sign-in redirect", async () => {
+    h = harness({ env: { OPENROUTER_API_KEY: "sk-or-v1-test-0123456789" } })
+    const client = await spoke(h)
+    client.send({ t: "req", id: "r2", req: { op: "openLink", sessionID: "ses_1", voice: true } })
+    const res = await client.next((f) => f.t === "res" && f.id === "r2")
+    const url = new URL(res.result.url)
+    expect(url.searchParams.get("next")).toBe("/s/ses_1?voice=1")
+    const login = await h.api(`/login${url.search}`, { cookie: null, origin: null })
+    expect(login.status).toBe(302)
+    expect(login.headers.get("location")).toBe("/s/ses_1?voice=1")
+    // voice without a session is just the home page.
+    client.send({ t: "req", id: "r3", req: { op: "openLink", voice: true } })
+    const home = await client.next((f) => f.t === "res" && f.id === "r3")
+    expect(new URL(home.result.url).searchParams.get("next")).toBe("/")
+  })
+
   test("openLink without a session signs in to the home page; with speech ready there is no setup detour", async () => {
     h = harness({ env: { OPENROUTER_API_KEY: "sk-or-v1-test-0123456789" } })
     const client = await spoke(h)

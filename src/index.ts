@@ -162,7 +162,8 @@ export default Plugin.define({
         run(rpc, (s) => (s.setSession(String(input(value).sessionID ?? ""), Boolean(input(value).on)), {})),
       pairCode: (_value, rpc) => run(rpc, (s) => s.pairCode()),
       handoff: (value, rpc) => run(rpc, (s) => s.handoff(String(input(value).sessionID ?? ""))),
-      openLink: (value, rpc) => run(rpc, (s) => s.openLink(input(value).sessionID ? String(input(value).sessionID) : undefined)),
+      openLink: (value, rpc) =>
+        run(rpc, (s) => s.openLink(input(value).sessionID ? String(input(value).sessionID) : undefined, input(value).voice === true)),
       conversation: (value, rpc) =>
         run(rpc, (s) => s.setConversation(String(input(value).sessionID ?? ""), Boolean(input(value).on))),
       presence: (value, rpc) =>
