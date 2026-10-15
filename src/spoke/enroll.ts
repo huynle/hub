@@ -41,7 +41,7 @@ function isStart(v: any): v is EnrollStart {
 
 export async function startEnrollment(server: string, machineName: string, options: EnrollOptions = {}): Promise<EnrollStart> {
   const body = await post(server, "/spoke/enroll", { machineName }, options)
-  if (!isStart(body)) throw new Error("Invalid enrollment reply from the voice server")
+  if (!isStart(body)) throw new Error("Invalid enrollment reply from the hub")
   return body
 }
 

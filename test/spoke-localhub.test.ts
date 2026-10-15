@@ -2,10 +2,10 @@
 // (hub.pid lock), detached `bun bin/hub.ts` with output to hub.log, then wait for /healthz.
 import { beforeEach, describe, expect, test } from "bun:test"
 import { EventEmitter } from "node:events"
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync, utimesSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync, utimesSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { ensureLocalHub, hubScript, resolveHubRuntime, type LocalHubOptions, type SpawnLike } from "../src/spoke/localhub"
+import { defaultStateDir, ensureLocalHub, hubScript, resolveHubRuntime, type LocalHubOptions, type SpawnLike } from "../src/spoke/localhub"
 
 interface Spawned {
   command: string
@@ -61,7 +61,7 @@ const options = (extra: Partial<LocalHubOptions> = {}): LocalHubOptions => ({
     clock += ms
   },
   waitMs: 10_000,
-  env: { PATH: "/usr/bin", VOICE_PORT: "9999", VOICE_HOST: "0.0.0.0" },
+  env: { PATH: "/usr/bin", HUB_PORT: "9999", HUB_HOST: "0.0.0.0" },
   pid: 4242,
   ...extra,
 })
@@ -77,7 +77,7 @@ beforeEach(() => {
   clock = 1_000_000
   nextPid = 5000
   // By default the hub comes up as soon as it is spawned.
-  onSpawn = (s) => up.add(`http://127.0.0.1:${s.options.env.VOICE_PORT}`)
+  onSpawn = (s) => up.add(`http://127.0.0.1:${s.options.env.HUB_PORT}`)
 })
 
 describe("ensureLocalHub", () => {
@@ -106,20 +106,51 @@ describe("ensureLocalHub", () => {
     expect(s.options.cwd).toBe("/repo/opencode-voice")
     expect(s.options.stdio[0]).toBe("ignore")
     expect(typeof s.options.stdio[1]).toBe("number")
-    expect(s.options.env).toMatchObject({ PATH: "/usr/bin", VOICE_HOST: "127.0.0.1", VOICE_PORT: "4321", VOICE_PUBLIC_URL: "http://127.0.0.1:4321" })
+    expect(s.options.env).toMatchObject({ PATH: "/usr/bin", HUB_HOST: "127.0.0.1", HUB_PORT: "4321", HUB_PUBLIC_URL: "http://127.0.0.1:4321" })
     expect(s.child.unrefed).toBe(true)
     expect(statSync(path.join(dir, "hub.log")).mode & 0o777).toBe(0o600)
     expect(lock()).toMatchObject({ pid: 5000, port: 4321 })
   })
 
   test("localhost and [::1] servers bind the matching loopback address and keep their public origin", async () => {
-    onSpawn = (s) => up.add(`http://${s.options.env.VOICE_HOST === "::1" ? "[::1]" : s.options.env.VOICE_HOST}:${s.options.env.VOICE_PORT}`)
+    onSpawn = (s) => up.add(`http://${s.options.env.HUB_HOST === "::1" ? "[::1]" : s.options.env.HUB_HOST}:${s.options.env.HUB_PORT}`)
     up.add("http://localhost:4400") // never consulted for the readiness check: we probe what we started
     await ensureLocalHub("http://localhost:4401/", options())
-    expect(spawned[0]!.options.env).toMatchObject({ VOICE_HOST: "127.0.0.1", VOICE_PORT: "4401", VOICE_PUBLIC_URL: "http://localhost:4401" })
+    expect(spawned[0]!.options.env).toMatchObject({ HUB_HOST: "127.0.0.1", HUB_PORT: "4401", HUB_PUBLIC_URL: "http://localhost:4401" })
     // a separate machine state: the first hub's live lock would (rightly) block a second hub on another port
     await ensureLocalHub("http://[::1]:4402", options({ stateDir: mkdtempSync(path.join(tmpdir(), "voice-localhub-")) }))
-    expect(spawned[1]!.options.env).toMatchObject({ VOICE_HOST: "::1", VOICE_PORT: "4402", VOICE_PUBLIC_URL: "http://[::1]:4402" })
+    expect(spawned[1]!.options.env).toMatchObject({ HUB_HOST: "::1", HUB_PORT: "4402", HUB_PUBLIC_URL: "http://[::1]:4402" })
+  })
+
+  test("legacy VOICE_HOST/PORT/PUBLIC_URL of the parent never reach the hub (they would only warn)", async () => {
+    await ensureLocalHub("http://127.0.0.1:4321", options({ env: { PATH: "/usr/bin", VOICE_PORT: "9999", VOICE_HOST: "0.0.0.0", VOICE_PUBLIC_URL: "https://x.example.com" } }))
+    const env = spawned[0]!.options.env
+    expect(env).toMatchObject({ HUB_HOST: "127.0.0.1", HUB_PORT: "4321", HUB_PUBLIC_URL: "http://127.0.0.1:4321" })
+    expect(env.VOICE_PORT).toBeUndefined()
+    expect(env.VOICE_HOST).toBeUndefined()
+    expect(env.VOICE_PUBLIC_URL).toBeUndefined()
+  })
+
+  test("without a state dir: ~/.local/state/opencode-hub, migrated from opencode-voice first (without its lock)", async () => {
+    const home = mkdtempSync(path.join(tmpdir(), "hub-home-"))
+    const legacy = path.join(home, ".local", "state", "opencode-voice")
+    mkdirSync(legacy, { recursive: true, mode: 0o700 })
+    writeFileSync(path.join(legacy, "machines.json"), "[]", { mode: 0o600 })
+    writeFileSync(path.join(legacy, "hub.pid"), JSON.stringify({ pid: 4242, port: 4321, started: clock }))
+    const lines: string[] = []
+    const result = await ensureLocalHub("http://127.0.0.1:4321", options({ stateDir: undefined, home, env: { PATH: "/usr/bin" }, log: (m) => lines.push(m) }))
+    expect(result).toEqual({ status: "started", pid: 5000 })
+    const state = path.join(home, ".local", "state", "opencode-hub")
+    expect(readFileSync(path.join(state, "machines.json"), "utf8")).toBe("[]")
+    expect(existsSync(path.join(state, "hub.log"))).toBe(true)
+    expect(existsSync(path.join(legacy, "machines.json"))).toBe(true)
+    expect(lines).toHaveLength(1)
+  })
+
+  test("defaultStateDir: HUB_STATE_DIR, then the legacy VOICE_STATE_DIR, then ~/.local/state/opencode-hub", () => {
+    expect(defaultStateDir({ HUB_STATE_DIR: "/new", VOICE_STATE_DIR: "/old" }, "/home/me")).toBe("/new")
+    expect(defaultStateDir({ VOICE_STATE_DIR: "/old" }, "/home/me")).toBe("/old")
+    expect(defaultStateDir({}, "/home/me")).toBe("/home/me/.local/state/opencode-hub")
   })
 
   test("only one starter: a fresh lock held by a live process means busy", async () => {
@@ -205,7 +236,7 @@ describe("ensureLocalHub", () => {
     const s = spawned[0]!
     expect(s.command).toBe("/opt/opencode/bin/opencode")
     expect(s.args).toEqual(["/repo/opencode-voice/bin/hub.ts"])
-    expect(s.options.env).toMatchObject({ BUN_BE_BUN: "1", VOICE_PORT: "4321" })
+    expect(s.options.env).toMatchObject({ BUN_BE_BUN: "1", HUB_PORT: "4321" })
     expect(s.options.env.OPENCODE_SERVER_PASSWORD).toBeUndefined()
   })
 

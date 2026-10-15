@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
-// Central voice server entry point: `bun bin/hub.ts [--help | --version]`, configured by VOICE_* env vars
-// over ~/.config/opencode-voice/hub.json ($VOICE_HUB_CONFIG); see src/central/config.ts. Serves the built
-// web app (web/dist, `npm run build:web`) from disk. The standalone binaries embed it instead
+// OpenCode Hub entry point (`opencode-hub`, alias `opencode-voice-hub`): `bun bin/hub.ts [--help | --version]`,
+// configured by HUB_* env vars over ~/.config/opencode-hub/hub.json ($HUB_CONFIG); see src/central/config.ts. Serves the
+// built web app (web/dist, `npm run build:web`) from disk. The standalone binaries embed it instead
 // (scripts/build-binaries.sh).
 import { readFileSync } from "node:fs"
 import path from "node:path"

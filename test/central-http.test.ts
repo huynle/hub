@@ -95,7 +95,7 @@ describe("devices", () => {
   })
 
   test("pair cookie is Secure when the public URL is https", async () => {
-    h = harness({ env: { VOICE_PUBLIC_URL: "https://voice.example.com" } })
+    h = harness({ env: { HUB_PUBLIC_URL: "https://voice.example.com" } })
     const { code } = h.auth.issuePairCode()
     const res = await h.api("/api/pair", { ...post({ code, deviceName: "p" }), cookie: null, origin: "https://voice.example.com" })
     expect(res.headers.get("set-cookie")).toContain("; Secure")
@@ -166,7 +166,7 @@ describe("static files", () => {
 
 describe("speech", () => {
   test("transcribe maps content type, enforces size and type", async () => {
-    h = harness({ env: { VOICE_MAX_AUDIO_BYTES: "100" } })
+    h = harness({ env: { HUB_MAX_AUDIO_BYTES: "100" } })
     const audio = (type: string, size: number) => h.api("/api/transcribe", { method: "POST", headers: { "content-type": type }, body: new Uint8Array(size) })
     const ok = await audio("audio/webm;codecs=opus", 10)
     expect(await ok.json()).toEqual({ text: "heard 10 webm" })
@@ -176,7 +176,7 @@ describe("speech", () => {
   })
 
   test("speak makes the text speakable and capped; OpenRouter errors are 502", async () => {
-    h = harness({ env: { VOICE_MAX_SPEECH_CHARS: "20" } })
+    h = harness({ env: { HUB_MAX_SPEECH_CHARS: "20" } })
     const res = await h.api("/api/speak", post({ text: "**Hello** there, this is a long reply" }))
     expect(res.headers.get("content-type")).toBe("audio/mpeg")
     expect(await res.text()).toBe("mp3:Hello there, this…")

@@ -1,8 +1,10 @@
 // Per-machine spoke configuration, shared by every OpenCode process on the machine and edited
-// from the /voice dialog. Holds the machine token, so it is written with mode 0600.
+// from the /hub dialog. Holds the machine token, so it is written with mode 0600.
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
+import { hubEnv, type Env } from "./env"
+import { APP_DIR, configBase, LEGACY_APP_DIR, migrateLegacy } from "./migrate"
 
 export type Mode = "off" | "always" | "session"
 
@@ -73,10 +75,23 @@ export function formatModelRef(ref: ModelRef): string {
 
 const modelRef = (v: unknown) => (typeof v === "string" && v.length <= 200 && MODEL_REF.test(v) ? v : undefined)
 
-export function configPath(env: Readonly<Record<string, string | undefined>> = process.env): string {
-  if (env.OPENCODE_VOICE_CONFIG) return env.OPENCODE_VOICE_CONFIG
-  const base = env.XDG_CONFIG_HOME || path.join(homedir(), ".config")
-  return path.join(base, "opencode-voice", "config.json")
+/** $OPENCODE_HUB_CONFIG (legacy $OPENCODE_VOICE_CONFIG), else ~/.config/opencode-hub/config.json. */
+export function configPath(env: Env = process.env, home: string = homedir()): string {
+  const explicit = hubEnv(env).OPENCODE_HUB_CONFIG
+  if (explicit) return explicit
+  return path.join(configBase(env, home), APP_DIR, "config.json")
+}
+
+/**
+ * configPath, after copying the legacy ~/.config/opencode-voice/config.json to the default location on
+ * first start (never for an explicit path; the old file is kept).
+ */
+export function prepareConfigPath(env: Env = process.env, home: string = homedir(), log?: (message: string) => void): string {
+  const file = configPath(env, home)
+  if (!hubEnv(env).OPENCODE_HUB_CONFIG) {
+    migrateLegacy(path.join(configBase(env, home), LEGACY_APP_DIR, "config.json"), file, log ? { log } : {})
+  }
+  return file
 }
 
 export function defaults(machineName: string): VoiceConfig {

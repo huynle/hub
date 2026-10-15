@@ -1,6 +1,6 @@
 {
-  "name": "OpenCode Voice",
-  "short_name": "Voice",
+  "name": "OpenCode Hub",
+  "short_name": "Hub",
   "description": "Talk to your OpenCode sessions, answer permission requests, and get notified when they need you.",
   "id": "/",
   "start_url": "/",

@@ -1,7 +1,7 @@
 export interface VoiceOptions {
   readonly host: string
   readonly port: number
-  /** Base URL used in /voice links when the page is reached through a proxy (e.g. tailscale serve). */
+  /** Base URL used in /hub links when the page is reached through a proxy (e.g. tailscale serve). */
   readonly publicURL?: string
   readonly sttModel: string
   readonly ttsModel: string

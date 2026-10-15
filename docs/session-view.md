@@ -14,11 +14,11 @@ in their terminals. 0.4.0 lists those first.
     `terminals` frame with the Herdr workspaces (id, label, pane directories by frequency).
     Errors (no herdr, server down) are silent: no Herdr data.
   - **TUI presence** (always): the TUI plugin reports the session it is showing (route) and its open
-    tabs to the server-side spoke via RPC `voice.presence({sessionIDs})` on change and every 15 s; the
+    tabs to the server-side spoke via RPC `hub.presence({sessionIDs})` on change and every 15 s; the
     spoke treats a session as open while any TUI reported it within 45 s (`terminal.source: "tui"`).
     Herdr wins when both apply.
 - **History window**: other root sessions only from the last `list.days` days (default 30), at most
-  `list.max` (default 100), newest first. Config `~/.config/opencode-voice/config.json`:
+  `list.max` (default 100), newest first. Config `~/.config/opencode-hub/config.json`:
   `"list": {"days": 30, "max": 100}` (days 1–365, max 1–500).
 - **Always included** regardless of the window: open sessions, running or blocked sessions, sessions in
   conversation mode, voice-enabled sessions in `session` mode, and sessions the hub asks to keep

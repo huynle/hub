@@ -1,4 +1,4 @@
-// Central voice server: HTTP routes (web UI, JSON API, SSE, enrollment) and the spoke WebSocket.
+// OpenCode Hub: HTTP routes (web UI, JSON API, SSE, enrollment) and the spoke WebSocket.
 // Phones authenticate with the `voice_device` cookie; spokes with machine bearer tokens. Source IPs
 // (including loopback) are never trusted.
 import type { Server } from "bun"
@@ -256,7 +256,7 @@ export function startCentral(options: CentralOptions): Central {
     // Push goes to the session owner's devices only; an alert without an owner goes nowhere.
     if (!alert.owner) return
     notifier.notify(alert.kind, alert.sessionID, alert.title, alert.detail, alert.text, alert.owner).catch((cause) => {
-      console.error("[voice] push notification failed:", cause instanceof Error ? cause.message : cause)
+      console.error("[opencode-hub] push notification failed:", cause instanceof Error ? cause.message : cause)
     })
   })
 
@@ -298,19 +298,19 @@ export function startCentral(options: CentralOptions): Central {
     } catch (cause) {
       if (!(cause instanceof OidcError)) throw cause
       if (cause.audited) store.audit({ actor: "system", action: "signin.denied", detail: cause.reason })
-      else console.warn(`[voice] sign-in refused: ${cause.reason}`)
+      else console.warn(`[opencode-hub] sign-in refused: ${cause.reason}`)
       return deny(cause.status, "Sign-in failed", cause.message)
     }
     const { identity, next } = result
     if (!emailAllowed(settings, identity.email)) {
       store.audit({ actor: "system", action: "signin.denied", target: identity.email, detail: "not allowed" })
-      return deny(403, "Not allowed", `${identity.email} is not allowed to use this voice hub. Ask its admin to add you.`)
+      return deny(403, "Not allowed", `${identity.email} is not allowed to use this hub. Ask its admin to add you.`)
     }
     const role = settings.admins.includes(identity.email) ? "admin" : "user"
     const existing = store.userByEmail(identity.email)
     if (existing?.disabled) {
       store.audit({ actor: "system", action: "signin.denied", target: identity.email, detail: "disabled" })
-      return deny(403, "Account disabled", "Your account on this voice hub is disabled. Ask its admin.")
+      return deny(403, "Account disabled", "Your account on this hub is disabled. Ask its admin.")
     }
     const user = store.upsertUser({ email: identity.email, ...(identity.name ? { name: identity.name } : {}), role })
     if (user.role === "admin" && store.migrateLocal(user.id)) broadcast({ type: "catalog" })
@@ -366,7 +366,7 @@ export function startCentral(options: CentralOptions): Central {
         })
         if (auto && auth.approveEnrollment(start.userCode)) {
           autoApproved = true
-          console.log(`[voice] local hub: approved the first machine (code ${start.userCode}) without confirmation; later machines need approval`)
+          console.log(`[opencode-hub] local hub: approved the first machine (code ${start.userCode}) without confirmation; later machines need approval`)
           return Response.json({ ...start, autoApproved: true } satisfies EnrollStart)
         }
         broadcast({ type: "enrollment" }, { admins: true })
@@ -393,7 +393,7 @@ export function startCentral(options: CentralOptions): Central {
     if (!LOGIN_NEXT.test(next)) return error(400, "Invalid next path")
     const ownerID = auth.redeemLogin(url.searchParams.get("code"))
     if (!ownerID) {
-      return new Response("This sign-in link has expired or was already used. Run /voice again.", {
+      return new Response("This sign-in link has expired or was already used. Run /hub again.", {
         status: 401,
         headers: { "content-type": "text/plain; charset=utf-8" },
       })
@@ -1056,7 +1056,7 @@ function failure(cause: unknown): Response {
   if (cause instanceof SpokeError) return error(502, cause.message)
   if (cause instanceof OidcError) return authPage(cause.status, "Sign-in failed", cause.message)
   if (cause instanceof RequestTimeoutError) return error(504, cause.message)
-  console.error("[voice] request failed:", cause)
+  console.error("[opencode-hub] request failed:", cause)
   return error(500, cause instanceof Error ? cause.message : String(cause))
 }
 

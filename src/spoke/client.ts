@@ -121,16 +121,16 @@ export class SpokeConnection {
   request<R extends SpokeRequest>(req: R): Promise<ResultFor[R["op"]]> {
     const id = `s${++this.nextID}`
     return new Promise((resolve, reject) => {
-      if (this.state !== "connected") return reject(new Error("Not connected to the voice server"))
+      if (this.state !== "connected") return reject(new Error("Not connected to the hub"))
       const timer = setTimeout(() => {
         this.pending.delete(id)
-        reject(new Error("Voice server timed out"))
+        reject(new Error("The hub timed out"))
       }, this.options.requestTimeoutMs ?? 15_000)
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timer })
       if (!this.send({ t: "req", id, req })) {
         clearTimeout(timer)
         this.pending.delete(id)
-        reject(new Error("Not connected to the voice server"))
+        reject(new Error("Not connected to the hub"))
       }
     })
   }
@@ -158,7 +158,7 @@ export class SpokeConnection {
     }
     socket.onmessage = (ev) => this.receive(ev.data)
     socket.onerror = () => {
-      this.lastError = this.welcomed ? "Connection error" : "Could not connect to the voice server"
+      this.lastError = this.welcomed ? "Connection error" : "Could not connect to the hub"
     }
     socket.onclose = (ev) => {
       if (this.socket !== socket) return
@@ -186,14 +186,14 @@ export class SpokeConnection {
         try {
           this.options.onWelcome?.(frame)
         } catch (cause) {
-          console.error("[opencode-voice] welcome handler failed", cause)
+          console.error("[opencode-hub] welcome handler failed", cause)
         }
         return
       case "bye":
         if (frame.reason === "revoked") {
           this.stopped = true
           clearTimeout(this.retry)
-          this.lastError = "This machine was revoked on the voice server"
+          this.lastError = "This machine was revoked on the hub"
           this.setState("revoked")
           this.drop(1000, "revoked")
           this.failPending("revoked")
@@ -248,7 +248,7 @@ export class SpokeConnection {
   private failPending(reason: string): void {
     for (const [id, pending] of this.pending) {
       clearTimeout(pending.timer)
-      pending.reject(new Error(`Voice server ${reason}`))
+      pending.reject(new Error(`Hub ${reason}`))
       this.pending.delete(id)
     }
   }

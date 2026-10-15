@@ -5,8 +5,15 @@
 
 export const VOICE_AGENT = "voice"
 
+/** metadata.source of the prompts the hub sends. opencode-voice (<= 0.4) wrote "opencode-voice". */
+export const PROMPT_SOURCE = "opencode-hub"
+const PROMPT_SOURCES: readonly unknown[] = [PROMPT_SOURCE, "opencode-voice"]
+/** True for prompt metadata written by the hub, under either name. */
+export const isHubPrompt = (metadata: unknown): boolean =>
+  typeof metadata === "object" && metadata !== null && PROMPT_SOURCES.includes((metadata as { source?: unknown }).source)
+
 export const VOICE_AGENT_DESCRIPTION =
-  "Voice front-end: short spoken replies; delegates real work to background subagents. Used by opencode-voice conversation mode."
+  "Voice front-end: short spoken replies; delegates real work to background subagents. Used by OpenCode Hub conversation mode."
 
 export const ORCHESTRATOR_PROMPT = `You are a voice agent: the voice front-end of an OpenCode session. The user is talking to you hands-free from their phone. Everything they send is a live speech-to-text transcript, and everything you write is read aloud to them.
 

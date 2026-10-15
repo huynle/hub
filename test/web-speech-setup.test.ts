@@ -23,7 +23,7 @@ describe("speechSetup", () => {
 
   test("a loopback hub says the keys stay on this computer", () => {
     for (const url of ["http://127.0.0.1:4097", "http://localhost:4555", "http://[::1]:4097"]) {
-      expect(speechSetup({ stt: false, tts: false, reason: REASON }, url)!.storage).toBe("Keys are stored on this computer in ~/.local/state/opencode-voice")
+      expect(speechSetup({ stt: false, tts: false, reason: REASON }, url)!.storage).toBe("Keys are stored on this computer in ~/.local/state/opencode-hub")
     }
     expect(speechSetup({ stt: false, tts: false, reason: REASON }, "http://10.0.0.20:4097")!.storage).toBeUndefined()
     expect(speechSetup({ stt: false, tts: false, reason: REASON }, "not a url")!.storage).toBeUndefined()

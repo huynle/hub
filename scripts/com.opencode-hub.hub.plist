@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template: keep a local OpenCode Hub running on macOS (launchd). Not installed by anything.
+  Install (replace __REPO__ and __HOME__ first):
+    sed -e "s|__REPO__|$PWD|g" -e "s|__HOME__|$HOME|g" scripts/com.opencode-hub.hub.plist \
+      > ~/Library/LaunchAgents/com.opencode-hub.hub.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.opencode-hub.hub.plist
+  Remove:
+    launchctl bootout gui/$(id -u)/com.opencode-hub.hub && rm ~/Library/LaunchAgents/com.opencode-hub.hub.plist
+  The hub reads ~/.config/opencode-hub/hub.json (mode 0600). Only one hub per machine at a time:
+  with this agent loaded, the plugin's auto-start finds it running and does nothing.
+
+  Upgrading from opencode-voice: this replaces com.opencode-voice.hub. Remove the old agent first:
+    launchctl bootout gui/$(id -u)/com.opencode-voice.hub && rm ~/Library/LaunchAgents/com.opencode-voice.hub.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.opencode-hub.hub</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__REPO__/scripts/hub-local.sh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__HOME__/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>__HOME__/.local/state/opencode-hub/hub.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.local/state/opencode-hub/hub.log</string>
+</dict>
+</plist>

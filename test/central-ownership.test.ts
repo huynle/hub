@@ -54,7 +54,7 @@ describe("enrollment", () => {
 
   test("oidc mode: no loopback auto-approve and no bootstrap pairing code", async () => {
     idp = fakeProvider()
-    h = harness({ env: oidcEnv(idp, { VOICE_HOST: "127.0.0.1", VOICE_PUBLIC_URL: "" }), noDevice: true })
+    h = harness({ env: oidcEnv(idp, { HUB_HOST: "127.0.0.1", HUB_PUBLIC_URL: "" }), noDevice: true })
     const { start, poll } = await enroll(h)
     expect(start.autoApproved).toBeUndefined()
     expect(await poll()).toEqual({ status: "pending" })
@@ -62,7 +62,7 @@ describe("enrollment", () => {
   })
 
   test("pairing mode keeps loopback auto-approve and the bootstrap code", async () => {
-    h = harness({ env: { VOICE_HOST: "127.0.0.1", VOICE_PUBLIC_URL: "" }, noDevice: true })
+    h = harness({ env: { HUB_HOST: "127.0.0.1", HUB_PUBLIC_URL: "" }, noDevice: true })
     expect(h.auth.bootstrapCode()).toBeDefined()
     const { start } = await enroll(h)
     expect(start.autoApproved).toBe(true)

@@ -1,7 +1,35 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
 
+**opencode-voice is now OpenCode Hub** (`@huynle/opencode-hub`, `github:huynle/opencode-hub`): a remote
+console for your OpenCode sessions, with Voice as an optional feature instead of the access boundary.
+Existing installs keep working; see [Migrating from opencode-voice](README.md#migrating-from-opencode-voice).
+
+- **Rename**: npm `@huynle/opencode-hub`, command `opencode-hub` (alias `opencode-voice-hub`), binaries
+  `opencode-hub-<os>-<arch>`, image `ghcr.io/huynle/opencode-hub`, plugin ids `opencode-hub` /
+  `opencode-hub.tui`, TUI command **`/hub`** (`/voice` kept as an alias), RPC id `hub` (the server also
+  registers the legacy `voice` id), log prefix `[opencode-hub]`, prompt metadata `source: "opencode-hub"`
+  (readers accept `"opencode-voice"`). The `voice` agent keeps its name.
+- **Environment**: `HUB_*` variables (`HUB_HOST`, `HUB_PORT`, `HUB_PUBLIC_URL`, `HUB_STATE_DIR`,
+  `HUB_CONFIG`, `HUB_AUTH`, `HUB_OIDC_*`, `HUB_ADMIN_EMAILS`, `HUB_STT_MODEL`, `HUB_TTS_MODEL`,
+  `HUB_VOICE`, `HUB_MAX_*`, `HUB_TURN_TIMEOUT_MS`, `HUB_VAPID_SUBJECT`) and `OPENCODE_HUB_CONFIG`. The
+  legacy `VOICE_*` / `OPENCODE_VOICE_CONFIG` names are still read as fallbacks (the new name wins) with a
+  one-time deprecation warning each. The Docker image now sets `HUB_HOST`/`HUB_PORT`/`HUB_STATE_DIR`:
+  container overrides of `VOICE_HOST`/`VOICE_PORT`/`VOICE_STATE_DIR` must be renamed.
+- **Config and state**: `~/.config/opencode-hub/config.json`, `~/.config/opencode-hub/hub.json` and
+  `~/.local/state/opencode-hub/`. On first start the legacy `opencode-voice` files are copied there
+  (modes kept, legacy files never deleted, logged once); explicit paths are used as they are.
+- **Remote console**: every session a connected process reports is inspectable and controllable without
+  Voice; Voice gates only conversation mode and utterances. `POST /api/sessions/:id/turn` steers while the
+  session is busy (`{mode: "turn" | "steer"}`), `POST /api/sessions/:id/stop` stops the whole tree
+  (descendants first), `GET …/summary` (context usage, todos, MCP, branch, change stats) and
+  `GET …/diff?file=` (per-file patch, on demand), and per-user read marks (`POST …/read`, `GET /api/reads`).
+- **Releases** publish to npm through trusted publishing (OIDC) instead of an `NPM_TOKEN`.
+- **Legacy package**: `packages/opencode-voice-shim/` is a final `@huynle/opencode-voice` 0.5.0 that
+  depends on and re-exports `@huynle/opencode-hub` and prints a one-line rename notice. It is published by
+  hand: after `@huynle/opencode-hub@0.5.0` is on npm, `cd packages/opencode-voice-shim && npm publish
+  --access public`, then `npm deprecate @huynle/opencode-voice@"<0.5.0" "Renamed to @huynle/opencode-hub"`.
 - The phone now has separate per-session Voice and Worker model selectors, including model variants.
   Changes apply to the next turn or task; machine configuration remains the fallback.
 - Thinking, tools and subagents now appear inline with the conversation in compact expandable rows inspired

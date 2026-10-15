@@ -139,7 +139,7 @@ export class Push {
       const status = statusOf(result.reason)
       const endpoint = targets[index]!.endpoint
       if (status === 404 || status === 410) this.store.dropPushSubscription(endpoint)
-      else console.error(`[voice] push to ${hostOf(endpoint)} failed: ${status ?? (result.reason as Error)?.message}`)
+      else console.error(`[opencode-hub] push to ${hostOf(endpoint)} failed: ${status ?? (result.reason as Error)?.message}`)
     })
     return delivered
   }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds standalone hub executables (Bun runtime + hub + the built web app embedded; nothing else to install) into
-# dist/opencode-voice-hub-<os>-<arch>[.exe] and writes dist/SHA256SUMS.
+# dist/opencode-hub-<os>-<arch>[.exe] and writes dist/SHA256SUMS.
 #
 #   scripts/build-binaries.sh                      # every target
 #   scripts/build-binaries.sh darwin-arm64 linux-x64
@@ -24,14 +24,14 @@ for target in "${TARGETS[@]}"; do
     *" $target "*) ;;
     *) echo "unknown target: $target (one of: ${ALL[*]})" >&2; exit 2 ;;
   esac
-  out="dist/opencode-voice-hub-$target"
+  out="dist/opencode-hub-$target"
   [[ $target == windows-* ]] && out="$out.exe"
   echo "==> $out"
   bun build --compile --minify --sourcemap --target="bun-$target" .build/hub.ts --outfile "$out"
 done
 
 cd dist
-files=(opencode-voice-hub-*)
+files=(opencode-hub-*)
 if command -v sha256sum >/dev/null; then
   sha256sum "${files[@]}" > SHA256SUMS
 else

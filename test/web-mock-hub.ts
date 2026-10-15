@@ -373,7 +373,7 @@ const signedIn = (id: string, location: string) =>
 const safeNext = (next: string | null) => (next && next.startsWith("/") && !next.startsWith("//") && !next.includes("\\") ? next : "/")
 const page = (title: string, text: string) =>
   new Response(
-    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title><link rel="stylesheet" href="/app.css"></head><body><main id="view"><div class="card stack"><h1>${title}</h1><p>${text}</p><p><a class="btn primary" href="/">Back to OpenCode Voice</a></p></div></main></body></html>`,
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title><link rel="stylesheet" href="/app.css"></head><body><main id="view"><div class="card stack"><h1>${title}</h1><p>${text}</p><p><a class="btn primary" href="/">Back to OpenCode Hub</a></p></div></main></body></html>`,
     { status: 403, headers: { "content-type": "text/html; charset=utf-8" } },
   )
 const machinesOf = (user: MockUser) => [

@@ -6,21 +6,21 @@ has always been.
 
 ## Auth modes
 
-| `VOICE_AUTH` | Who can use the hub | How a browser gets access |
+| `HUB_AUTH` | Who can use the hub | How a browser gets access |
 |---|---|---|
-| `pairing` (default) | One owner (the implicit user `local`) | Pairing code (`/voice → Pair a phone`, or the bootstrap code in the log), one-time login links |
+| `pairing` (default) | One owner (the implicit user `local`) | Pairing code (`/hub → Pair a phone`, or the bootstrap code in the log), one-time login links |
 | `oidc` | Users allowed by the allow-list | "Sign in with Google" (any OpenID Connect issuer); pairing codes and login links still work and belong to the issuing machine's owner |
 
 `oidc` settings (env, or the `auth` object in `hub.json`):
 
 | Env | hub.json | Default | Meaning |
 |---|---|---|---|
-| `VOICE_AUTH` | `auth.mode` | `pairing` | `pairing` or `oidc` |
-| `VOICE_OIDC_ISSUER` | `auth.issuer` | `https://accounts.google.com` | Issuer; discovery at `<issuer>/.well-known/openid-configuration` |
-| `VOICE_OIDC_CLIENT_ID` | `auth.clientId` | — | Required for `oidc` |
-| `VOICE_OIDC_CLIENT_SECRET` | `auth.clientSecret` | — | Required for `oidc` (secret: never logged, never returned) |
-| `VOICE_OIDC_ALLOWED` | `auth.allowed` | — | Comma list of emails and/or `@domain` entries. Required for `oidc` (no open sign-up) |
-| `VOICE_ADMIN_EMAILS` | `auth.admins` | — | Comma list of admin emails (also allowed). At least one required for `oidc` |
+| `HUB_AUTH` | `auth.mode` | `pairing` | `pairing` or `oidc` |
+| `HUB_OIDC_ISSUER` | `auth.issuer` | `https://accounts.google.com` | Issuer; discovery at `<issuer>/.well-known/openid-configuration` |
+| `HUB_OIDC_CLIENT_ID` | `auth.clientId` | — | Required for `oidc` |
+| `HUB_OIDC_CLIENT_SECRET` | `auth.clientSecret` | — | Required for `oidc` (secret: never logged, never returned) |
+| `HUB_OIDC_ALLOWED` | `auth.allowed` | — | Comma list of emails and/or `@domain` entries. Required for `oidc` (no open sign-up) |
+| `HUB_ADMIN_EMAILS` | `auth.admins` | — | Comma list of admin emails (also allowed). At least one required for `oidc` |
 
 The redirect URI to register with the provider is `<publicURL>/auth/callback`.
 
@@ -152,7 +152,7 @@ Details the contract above leaves open, as implemented in `src/central/`:
   process of another user reporting the same ID is ignored for it: no listing, routing, status or events
   (events nesting a child under someone else's session are dropped too). A spoke `handoff` for another
   user's session is refused.
-- **Admins from the config** (`VOICE_ADMIN_EMAILS`) are made admin at every sign-in; a role change through
+- **Admins from the config** (`HUB_ADMIN_EMAILS`) are made admin at every sign-in; a role change through
   the API lasts until that person signs in again while still listed.
 - **Sign-in device**: a browser already signed in as the same user keeps its device; otherwise a new
   device named from the user agent is created. A one-time login link signs the browser in as the
@@ -162,7 +162,7 @@ Details the contract above leaves open, as implemented in `src/central/`:
   invalid `state` are not audited (they are unauthenticated and could flood the ring).
 - **Google** documents `iss` as `https://accounts.google.com` or `accounts.google.com`; both are accepted
   for that issuer.
-- **Dev only**: `VOICE_OIDC_INSECURE_ISSUER=1` allows a plain-http issuer on loopback (tests and local
+- **Dev only**: `HUB_OIDC_INSECURE_ISSUER=1` allows a plain-http issuer on loopback (tests and local
   development with a fake provider).
 - **Switching back** from `oidc` to `pairing` re-enables `local` as admin; records owned by other users
   stay theirs (their devices keep working; the owner can manage them through the admin API).

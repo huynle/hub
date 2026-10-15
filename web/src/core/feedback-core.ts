@@ -627,6 +627,6 @@ export function speechSetup(ready: SpeechReadyView | undefined, publicURL: strin
   return {
     reason: ready.reason || "Choose a speech provider and add its API key in Settings → Speech.",
     micBlocked: !ready.stt,
-    ...(local ? { storage: "Keys are stored on this computer in ~/.local/state/opencode-voice" } : {}),
+    ...(local ? { storage: "Keys are stored on this computer in ~/.local/state/opencode-hub" } : {}),
   }
 }
