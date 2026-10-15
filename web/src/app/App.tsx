@@ -5,9 +5,12 @@ import { Home } from "./Home"
 import { ensureMe, hub, loadSpeechReady, me, startEvents } from "./hub"
 import { drawerOpen, isPhone, setDrawerOpen, sidebarCollapsed, toggleSidebar } from "./layout"
 import { NewSession } from "./NewSession"
+import { syncPush } from "./push"
 import { navigate, route } from "./router"
 import { SessionView } from "./Session"
 import { Settings } from "./Settings"
+import { dictation, voiceState } from "./voice"
+import { VoicePill } from "./VoicePill"
 import { Sidebar } from "./Sidebar"
 import { currentToast, dismissToast } from "./toast"
 import { IconButton } from "./ui"
@@ -21,6 +24,7 @@ export function App() {
       if (!(await ensureMe())) return
       startEvents()
       void loadSpeechReady()
+      void syncPush()
       setReady(true)
     } catch (e) {
       setError(`Cannot reach the hub: ${(e as Error).message}`)
@@ -37,6 +41,11 @@ export function App() {
   )
   createEffect(() => {
     if (!me() && ready() && route().name !== "pair") setReady(false)
+  })
+  // A dictation belongs to the session it was started in: leaving that session cancels it.
+  createEffect(() => {
+    const r = route()
+    dictation.viewing(r.name === "session" ? r.id : undefined)
   })
   onMount(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -83,6 +92,11 @@ export function App() {
             <main class="main">
               <Show when={sidebarCollapsed() && !isPhone()}>
                 <IconButton icon="sidebar" label="Show sidebar (⌘B)" class="expand-sidebar" onClick={toggleSidebar} />
+              </Show>
+              <Show when={voiceState().phase !== "off" && route().name !== "session"}>
+                <div class="voice-strip">
+                  <VoicePill />
+                </div>
               </Show>
               <Show when={hub.connection === "down"}>
                 <div class="conn-banner" role="status">

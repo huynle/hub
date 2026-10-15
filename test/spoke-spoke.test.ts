@@ -315,7 +315,7 @@ describe("Spoke", () => {
     const server = fakeCentral({
       onFrame: (m, ws) => {
         if (m.t !== "req") return
-        const result = m.req.op === "pairCode" ? { code: "111222", url: "https://v/pair", expiresAt: 9 } : m.req.op === "handoff" ? { notified: 2 } : { url: m.req.sessionID ? `https://v/s/${m.req.sessionID}` : "https://v/" }
+        const result = m.req.op === "pairCode" ? { code: "111222", url: "https://v/pair", expiresAt: 9 } : m.req.op === "handoff" ? { notified: 2 } : { url: m.req.sessionID ? `https://v/s/${m.req.sessionID}${m.req.voice ? "?voice=1" : ""}` : "https://v/" }
         ws.send(JSON.stringify({ t: "res", id: m.id, ok: true, result }))
       },
     })
@@ -325,6 +325,7 @@ describe("Spoke", () => {
     expect(await spoke.handoff("ses_a")).toEqual({ notified: 2 })
     expect(await spoke.openLink("ses_a")).toEqual({ url: "https://v/s/ses_a" })
     expect(await spoke.openLink()).toEqual({ url: "https://v/" }) // home page: no session
+    expect(await spoke.openLink("ses_a", true)).toEqual({ url: "https://v/s/ses_a?voice=1" })
     spoke.setMode("off")
     await expect(spoke.pairCode()).rejects.toMatchObject({ name: "not_connected" })
   })
@@ -722,6 +723,20 @@ describe("Spoke", () => {
     await turn
   })
 
+  test("model catalog entries are keyed by their OpenCode id, not the upstream modelID (gateway aliases)", async () => {
+    const { spoke, server, host, calls, catalog } = setup({ mode: "always", token: "tok" })
+    // A gateway provider: OpenCode id "claude-opus-5-5" sends modelID "claude/claude-opus-5-5" upstream.
+    catalog.splice(0, catalog.length, { id: "claude-opus-5-5", providerID: "omniroute", modelID: "claude/claude-opus-5-5", name: "Claude Opus 5.5", enabled: true, status: "active", variants: [{ id: "high" }] } as never)
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    await until(() => lastSessions(server)?.sessions.length === 1)
+    const listed = await server.request({ op: "models", sessionID: "ses_a" })
+    expect(listed.result).toEqual({ models: [{ providerID: "omniroute", modelID: "claude-opus-5-5", name: "Claude Opus 5.5", enabled: true, status: "active", variants: ["high"] }] })
+    await server.request({ op: "setModelPrefs", sessionID: "ses_a", voice: { providerID: "omniroute", modelID: "claude-opus-5-5", variant: "high" } })
+    await server.request({ op: "steer", sessionID: "ses_a", text: "hi" })
+    expect(calls.model.at(-1)).toEqual({ sessionID: "ses_a", model: { providerID: "omniroute", id: "claude-opus-5-5", variant: "high" } })
+  })
+
   test("normalizes timeline history, paginates it, and returns full tool detail", async () => {
     const { spoke, server, host, messages } = setup({ mode: "always", token: "tok" })
     await until(() => spoke.status().connection === "connected")
@@ -748,6 +763,66 @@ describe("Spoke", () => {
     const detail = await server.request({ op: "timelinePart", sessionID: "ses_a", messageID: "a1", partID: "1" })
     expect(detail.result).toEqual({ detail: { name: "read", state: { status: "completed", input: { filePath: "/work/a.ts" }, content: [{ type: "text", text: "FULL OUTPUT" }] }, time: { created: 4, completed: 6 } } })
     expect((await server.request({ op: "timelinePart", sessionID: "ses_a", messageID: "other", partID: "1" })).ok).toBe(false)
+  })
+})
+
+// ---------- image attachments ----------
+
+describe("prompt images", () => {
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]).toString("base64")
+  const images = [{ mime: "image/png", data: png, name: "shot.png" }, { mime: "image/png", data: png }]
+  const files = [{ uri: `data:image/png;base64,${png}`, name: "shot.png" }, { uri: `data:image/png;base64,${png}` }]
+
+  test("turn passes images to OpenCode as inline data-URL attachments", async () => {
+    const { spoke, server, host, calls, messages } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    const response = server.request({ op: "turn", sessionID: "ses_a", text: "", voiceStyle: false, images })
+    await until(() => calls.prompt.length === 1)
+    expect(calls.prompt[0]).toEqual({ sessionID: "ses_a", text: "", files, metadata: { source: "opencode-hub" } })
+    messages.set("ses_a", [{ id: "msg_1", type: "user", text: "" }, { id: "a1", type: "assistant", content: [{ type: "text", text: "A screenshot." }] }])
+    host.push({ type: "session.inbox.delivered", data: { sessionID: "ses_a", inboxID: "msg_1" } })
+    host.push({ type: "session.execution.succeeded", data: { sessionID: "ses_a" } })
+    expect(await response).toMatchObject({ ok: true, result: { outcome: "succeeded", reply: "A screenshot." } })
+  })
+
+  test("steer passes images too; prompts without images carry no files", async () => {
+    const { spoke, server, calls } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    await server.request({ op: "steer", sessionID: "ses_a", text: "look", images })
+    await server.request({ op: "steer", sessionID: "ses_a", text: "plain" })
+    expect(calls.prompt[0]).toMatchObject({ sessionID: "ses_a", text: "look", delivery: "steer", files })
+    expect(calls.prompt[1]).not.toHaveProperty("files")
+  })
+
+  test("timeline lists user attachments (image-only messages too) and timelineFile serves image bytes", async () => {
+    const { spoke, server, host, messages } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    const big = "A".repeat(950_000)
+    messages.set("ses_a", [
+      { id: "u1", type: "user", text: "what is this?", time: { created: 1 }, files: [
+        { data: png, mime: "image/png", source: { type: "inline" }, name: "shot.png" },
+        { data: "aGVsbG8=", mime: "text/plain", source: { type: "uri", uri: "file:///work/notes.txt" }, name: "notes.txt" },
+      ] },
+      { id: "u2", type: "user", text: "", time: { created: 2 }, files: [{ data: big, mime: "image/jpeg", source: { type: "inline" } }] },
+      { id: "u3", type: "user", text: "", time: { created: 3 } },
+    ])
+    const page = await server.request({ op: "timeline", sessionID: "ses_a" })
+    expect((page.result as any).items).toEqual([
+      { key: "u1:text", messageID: "u1", sessionID: "ses_a", kind: "user", text: "what is this?", at: 1, files: [
+        { index: 0, mime: "image/png", name: "shot.png" },
+        { index: 1, mime: "text/plain", name: "notes.txt" },
+      ] },
+      { key: "u2:text", messageID: "u2", sessionID: "ses_a", kind: "user", text: "", at: 2, files: [{ index: 0, mime: "image/jpeg" }] },
+    ])
+    const file = await server.request({ op: "timelineFile", sessionID: "ses_a", messageID: "u1", index: 0 })
+    expect(file.result).toEqual({ file: { mime: "image/png", data: png, name: "shot.png" } })
+    // Only images are served; missing ones answer without a file; too big ones say so.
+    expect((await server.request({ op: "timelineFile", sessionID: "ses_a", messageID: "u1", index: 1 })).result).toEqual({})
+    expect((await server.request({ op: "timelineFile", sessionID: "ses_a", messageID: "u1", index: 5 })).result).toEqual({})
+    expect((await server.request({ op: "timelineFile", sessionID: "ses_a", messageID: "nope", index: 0 })).result).toEqual({})
+    expect((await server.request({ op: "timelineFile", sessionID: "ses_a", messageID: "u2", index: 0 })).result).toEqual({ tooLarge: true })
   })
 })
 

@@ -1,6 +1,9 @@
-// Right rail of a session (bottom sheet on phones): Server, Context, MCP and Changes from
-// GET /api/sessions/:id/summary; a changed file opens the diff viewer over the transcript.
-import { For, Show, createResource, createSignal } from "solid-js"
+// Right rail of a session (bottom sheet on phones): Environment, Context, Connectors (MCP) and Changes from
+// GET /api/sessions/:id/summary; a changed file opens the diff viewer over the transcript. Each card collapses
+// from its header (chevron); collapsed cards are remembered per device.
+import { For, Show, createResource, createSignal, type JSX } from "solid-js"
+import { loadCollapsed, toggleCollapsed } from "../core/environment-core"
+import { hub } from "./hub"
 import { parsePatch } from "../lib/diff"
 import type { Found } from "../lib/store"
 import { enc, getJSON, sessionPath } from "./api"
@@ -25,6 +28,25 @@ export interface Summary {
 /** How many changed files the spoke did not list (0 when it listed them all). */
 export const unlistedFiles = (c: NonNullable<Summary["changes"]>) => (c.truncated && c.totalFiles ? Math.max(0, c.totalFiles - c.files.length) : 0)
 
+const [collapsed, setCollapsed] = createSignal(loadCollapsed(localStorage))
+
+/** A rail card whose header (title, chevron) collapses it. */
+function Card(props: { id: string; title: string; label?: string; extra?: JSX.Element; children: JSX.Element; domID?: string }) {
+  const open = () => !collapsed().has(props.id)
+  return (
+    <section class={`rail-card${open() ? "" : " collapsed"}`} aria-label={props.label ?? props.title} id={props.domID} data-card={props.id}>
+      <h3>
+        <button type="button" class="card-toggle" aria-expanded={open()} onClick={() => setCollapsed(toggleCollapsed(localStorage, props.id))}>
+          <Icon name="chevron" class="card-chevron" />
+          <span>{props.title}</span>
+        </button>
+        {props.extra}
+      </h3>
+      <Show when={open()}>{props.children}</Show>
+    </section>
+  )
+}
+
 const tokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 100_000 ? 0 : 1)}k` : String(n))
 
 export function Rail(props: {
@@ -37,23 +59,26 @@ export function Rail(props: {
 }) {
   const s = () => props.found?.session
   const source = () => (s()?.open ? (s()?.terminal?.source === "herdr" ? "herdr" : "tui") : "background")
+  const connectors = () => {
+    const mcp = props.summary?.mcp
+    return mcp?.length ? `Connectors · ${mcp.filter((m) => m.status === "connected").length} connected` : "Connectors"
+  }
   return (
     <aside class="rail" aria-label="Session details">
       <div class="rail-head">
         <span class="rail-title">Details</span>
         <IconButton icon="close" label="Close details" onClick={props.onClose} />
       </div>
-      <section class="rail-card" aria-label="Server">
-        <h3>Server</h3>
+      <Card id="environment" title="Environment">
         <Show when={props.found} fallback={<p class="muted small">Not reported by any connected machine.</p>}>
           {(f) => (
             <dl class="kv">
               <dt>Machine</dt>
               <dd>
-                <span class={`online-dot${f().machine.online ? " on" : ""}`} aria-hidden="true" />
-                {f().machine.name} <span class="muted">· {f().machine.online ? "online" : "offline"}</span>
+                <span class={`online-dot${f().machine.online && hub.connection === "live" ? " on" : ""}`} aria-hidden="true" />
+                {f().machine.name} <span class="muted">· {hub.connection !== "live" ? "Connecting" : f().machine.online ? "online" : "offline"}</span>
               </dd>
-              <dt>Folder</dt>
+              <dt>Project</dt>
               <dd class="mono" title={props.summary?.directory ?? f().session.directory}>
                 {basename(props.summary?.directory ?? f().session.directory)}
               </dd>
@@ -67,9 +92,8 @@ export function Rail(props: {
             </dl>
           )}
         </Show>
-      </section>
-      <section class="rail-card" aria-label="Context">
-        <h3>Context</h3>
+      </Card>
+      <Card id="context" title="Context">
         <Show when={props.summary?.context} fallback={<p class="muted small">{props.loading ? "Loading…" : "No usage reported yet."}</p>}>
           {(c) => (
             <>
@@ -87,9 +111,8 @@ export function Rail(props: {
             </>
           )}
         </Show>
-      </section>
-      <section class="rail-card" aria-label="MCP servers">
-        <h3>MCP</h3>
+      </Card>
+      <Card id="mcp" title={connectors()} label="MCP servers">
         <Show when={props.summary?.mcp?.length} fallback={<p class="muted small">{props.loading ? "Loading…" : "No MCP servers."}</p>}>
           <ul class="mcp-list">
             <For each={props.summary!.mcp}>
@@ -103,10 +126,12 @@ export function Rail(props: {
             </For>
           </ul>
         </Show>
-      </section>
-      <section class="rail-card" aria-label="Changes" id="rail-changes">
-        <h3>
-          Changes
+      </Card>
+      <Card
+        id="changes"
+        title="Changes"
+        domID="rail-changes"
+        extra={
           <Show when={props.summary?.changes}>
             {(c) => (
               <span class="diffstat">
@@ -114,7 +139,8 @@ export function Rail(props: {
               </span>
             )}
           </Show>
-        </h3>
+        }
+      >
         <Show
           when={props.summary?.changes}
           fallback={
@@ -146,7 +172,7 @@ export function Rail(props: {
             </Show>
           )}
         </Show>
-      </section>
+      </Card>
     </aside>
   )
 }

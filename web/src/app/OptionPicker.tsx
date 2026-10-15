@@ -1,7 +1,7 @@
 // A searchable option list in a dialog (speech models and voices): loads options, ranks matches, offers the
 // typed text as a custom value. Arrow keys move, Enter picks.
 import { For, Show, createEffect, createMemo, createSignal, on } from "solid-js"
-import { filterPicker, stepActive, type PickerOption } from "../core/picker-core"
+import { filterPicker, pickerGroup, stepActive, type PickerOption } from "../core/picker-core"
 import { errorText } from "./api"
 import { Dialog } from "./ui"
 
@@ -9,7 +9,10 @@ export interface OptionPickerRequest {
   title: string
   noun: string
   current: string
-  load: () => Promise<PickerOption[]>
+  /** Options, or options with a note shown above the list (e.g. "showing all"). */
+  load: () => Promise<PickerOption[] | { options: PickerOption[]; note?: string }>
+  /** Rows grouped by provider (the id up to its last "/"), with a header per group. */
+  grouped?: boolean
   onPick: (value: string) => void
 }
 
@@ -17,13 +20,22 @@ export function OptionPicker(props: { request: OptionPickerRequest | undefined; 
   const [query, setQuery] = createSignal("")
   const [options, setOptions] = createSignal<PickerOption[] | undefined>()
   const [error, setError] = createSignal("")
+  const [note, setNote] = createSignal("")
   const [active, setActive] = createSignal(0)
   const load = () => {
     const req = props.request
     if (!req) return
     setOptions(undefined)
     setError("")
-    req.load().then(setOptions, (e) => setError(errorText(e)))
+    setNote("")
+    req.load().then(
+      (loaded) => {
+        if (Array.isArray(loaded)) return setOptions(loaded)
+        setNote(loaded.note ?? "")
+        setOptions(loaded.options)
+      },
+      (e) => setError(errorText(e)),
+    )
   }
   createEffect(
     on(
@@ -36,7 +48,7 @@ export function OptionPicker(props: { request: OptionPickerRequest | undefined; 
       },
     ),
   )
-  const result = createMemo(() => filterPicker(options() ?? [], query(), { current: props.request?.current }))
+  const result = createMemo(() => filterPicker(options() ?? [], query(), { current: props.request?.current, grouped: props.request?.grouped }))
   const values = () => [...result().items.map((i) => i.id), ...(result().custom ? [result().custom!] : [])]
   const pick = (value: string) => {
     const req = props.request
@@ -84,10 +96,16 @@ export function OptionPicker(props: { request: OptionPickerRequest | undefined; 
           </button>
         </Show>
       </p>
+      <Show when={note()}>
+        <p class="muted small picker-note">{note()}</p>
+      </Show>
       <ul class="picker-list" role="listbox">
         <For each={result().items}>
           {(item, i) => (
             <li>
+              <Show when={props.request?.grouped && (i() === 0 || pickerGroup(result().items[i() - 1]!.id) !== pickerGroup(item.id))}>
+                <div class="picker-group muted small">{pickerGroup(item.id) || "Other"}</div>
+              </Show>
               <button type="button" class={`picker-opt${active() === i() ? " active" : ""}`} aria-selected={!!item.current} onClick={() => pick(item.id)}>
                 <span class="po-name">{item.id}</span>
                 <Show when={item.name}>

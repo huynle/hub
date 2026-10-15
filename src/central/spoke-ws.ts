@@ -13,13 +13,13 @@ import {
   type SpokeRequest,
 } from "../protocol"
 import type { Auth } from "./auth"
-import type { PushDetail, PushKind } from "./push"
+import type { PushDetail, PushExtra, PushKind } from "./push"
 import type { Registry } from "./registry"
 import { newID, type Store } from "./store"
 
 /** Push notifications (implemented by Push in push.ts) to `ownerID`'s devices. Returns the number of devices notified. */
 export interface Notifier {
-  notify(kind: PushKind, sessionID: string, title: string, detail?: PushDetail, body?: string, ownerID?: string): Promise<number>
+  notify(kind: PushKind, sessionID: string, title: string, detail?: PushDetail, body?: string, ownerID?: string, extra?: PushExtra): Promise<number>
 }
 
 /** The spoke answered with an error, or disconnected before answering. */
@@ -261,7 +261,7 @@ export class SpokeHub {
       }
       case "openLink": {
         const { code } = auth.issueLoginCode(owner)
-        const next = req.sessionID ? `/s/${encodeURIComponent(req.sessionID)}` : "/"
+        const next = req.sessionID ? `/s/${encodeURIComponent(req.sessionID)}${req.voice ? "?voice=1" : ""}` : "/"
         return { url: `${publicURL}/login?code=${code}&next=${next}` }
       }
     }

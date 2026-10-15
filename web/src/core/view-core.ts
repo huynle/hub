@@ -91,6 +91,8 @@ export interface ViewProcess {
   kind: string
   directory: string
   pid: number
+  /** The OpenCode version the process reported (hubs since 0.2). */
+  opencodeVersion?: string
   sessions: ViewSession[]
 }
 export interface ViewMachine {

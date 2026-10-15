@@ -118,6 +118,7 @@ describe("route table", () => {
       "POST /api/sessions/:session/conversation",
       "POST /api/sessions/:session/permission",
       "GET /api/sessions/:session/context",
+      "GET /api/sessions/:session/timeline/messages/:message/files/:index",
       "POST /api/sessions/:session/stop",
       "GET /api/sessions/:session/summary",
       "GET /api/sessions/:session/diff",

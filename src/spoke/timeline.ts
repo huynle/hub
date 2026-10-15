@@ -1,3 +1,12 @@
+import { PROMPT_IMAGE_MIMES, type PromptImage } from "../protocol"
+
+/** An attachment of a user message: its position in the message's files (for timelineFile), type and name. */
+export interface TimelineFile {
+  readonly index: number
+  readonly mime: string
+  readonly name?: string
+}
+
 export interface TimelineItem {
   readonly key: string
   readonly messageID: string
@@ -9,6 +18,7 @@ export interface TimelineItem {
   readonly state?: "running" | "done" | "failed"
   readonly at?: number
   readonly completed?: number
+  readonly files?: readonly TimelineFile[]
 }
 
 const record = (value: unknown): Record<string, any> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : {}
@@ -22,7 +32,8 @@ export function timelineItems(sessionID: string, messages: readonly unknown[]): 
     const at = typeof message.time?.created === "number" ? message.time.created : undefined
     if (message.type === "user") {
       const text = typeof message.text === "string" ? message.text : Array.isArray(message.content) ? message.content.filter((p: any) => p?.type === "text").map((p: any) => p.text).join("") : ""
-      if (text) out.push({ key: `${message.id}:text`, messageID: message.id, sessionID, kind: "user", text, ...(at === undefined ? {} : { at }) })
+      const files = userFiles(message.files)
+      if (text || files.length) out.push({ key: `${message.id}:text`, messageID: message.id, sessionID, kind: "user", text, ...(at === undefined ? {} : { at }), ...(files.length ? { files } : {}) })
       continue
     }
     if (message.type !== "assistant" || !Array.isArray(message.content)) continue
@@ -39,6 +50,31 @@ export function timelineItems(sessionID: string, messages: readonly unknown[]): 
     })
   }
   return out
+}
+
+/** Attachment metadata (never the bytes) of a user message's files. */
+function userFiles(raw: unknown): TimelineFile[] {
+  if (!Array.isArray(raw)) return []
+  return raw.flatMap((file, index) => {
+    const f = record(file)
+    if (typeof f.mime !== "string") return []
+    return [{ index, mime: f.mime, ...(typeof f.name === "string" && f.name ? { name: f.name.slice(0, 200) } : {}) }]
+  })
+}
+
+/** Largest attachment served (base64 characters), so the answer fits in one frame. */
+export const TIMELINE_FILE_MAX_BASE64 = 900_000
+
+/**
+ * The image at `index` of a user message: only the prompt image types are served (never SVG or other
+ * files); nothing when there is no such image; `tooLarge` when its bytes would not fit in a frame.
+ */
+export function timelineFile(messages: readonly unknown[], messageID: string, index: number): { file?: PromptImage; tooLarge?: boolean } {
+  const message = messages.map(record).find((item) => item.id === messageID && item.type === "user")
+  const file = Array.isArray(message?.files) ? record(message.files[index]) : {}
+  if (typeof file.mime !== "string" || !PROMPT_IMAGE_MIMES.includes(file.mime) || typeof file.data !== "string" || !file.data) return {}
+  if (file.data.length > TIMELINE_FILE_MAX_BASE64) return { tooLarge: true }
+  return { file: { mime: file.mime, data: file.data, ...(typeof file.name === "string" && file.name ? { name: file.name.slice(0, 200) } : {}) } }
 }
 
 export function timelinePart(messages: readonly unknown[], messageID: string, partID: string): unknown {

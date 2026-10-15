@@ -3,6 +3,7 @@
 // Progress cues (earcons, "Working on it." …) are scheduled by feedback-core and played by cues.
 // The pure parts live in core/conversation-core; this file owns the browser APIs (mic, Web Audio, wake lock,
 // media session). Ported from the 0.4 web/conversation.js; behavior unchanged except the mic device choice.
+import { gestureBlocked } from "../core/voice-autostart"
 import { Endpointer, EnergyVad, SpeechQueue, encodeWav, parseCommand, splitSentences } from "../core/conversation-core"
 import { CuePlayer } from "../core/cues"
 import { CueScheduler, isWorking, subagentChanges, type StatusEntry } from "../core/feedback-core"
@@ -11,6 +12,21 @@ import type { ApiInit } from "../app/api"
 const SENT_LABEL_MS = 2500
 const CUE_TICK_MS = 1000
 const SILENCE_SECONDS = 2
+
+/** Shown (as a button) when the browser starts Voice mode only after a tap, e.g. when opened from /voice. */
+export const TAP_TO_START = "Tap to start Voice mode"
+const GESTURE_ERROR = "GestureRequired"
+const RESUME_WAIT_MS = 500
+
+const userActivated = () => (navigator as Navigator & { userActivation?: { hasBeenActive: boolean } }).userActivation?.hasBeenActive ?? true
+
+async function micPermission(): Promise<"granted" | "denied" | "prompt" | "unknown"> {
+  try {
+    return (await navigator.permissions.query({ name: "microphone" as PermissionName })).state
+  } catch {
+    return "unknown"
+  }
+}
 
 export type ConversationState = "starting" | "listening" | "hearing" | "transcribing" | "sent" | "speaking" | "paused" | "off"
 export type Tick = "sent" | "heard" | "failed"
@@ -73,6 +89,8 @@ export class Conversation<B = unknown> {
   private wakeLock?: WakeLockSentinel
   private warnedAutoplay = false
   private state: ConversationState | undefined
+  /** Bumped by start() and stop(); a start that sees another value was cancelled. */
+  private attempt = 0
 
   constructor({ sessionID, api, player, ui, options = {} }: { sessionID: string; api: Api; player: HTMLAudioElement; ui: ConversationUI<B>; options?: ConversationOptions }) {
     this.sessionID = sessionID
@@ -96,6 +114,9 @@ export class Conversation<B = unknown> {
   /** Mic first (a refusal leaves the server untouched), then the server flag. Returns false on failure. */
   async start(): Promise<boolean> {
     if (this.active) return true
+    // stop() while starting cancels this start: nothing may keep listening afterwards.
+    const attempt = ++this.attempt
+    const cancelled = () => attempt !== this.attempt
     this.ui.state("starting")
     this.cuePlayer.unlock() // still inside the tap
     if (this.opts.background) this.startSilence()
@@ -105,33 +126,54 @@ export class Conversation<B = unknown> {
       this.ui.state("off")
       return false
     }
+    let stream: MediaStream
     try {
-      this.stream = await navigator.mediaDevices.getUserMedia(micConstraints(this.opts.deviceId))
+      stream = await navigator.mediaDevices.getUserMedia(micConstraints(this.opts.deviceId))
     } catch (e) {
+      if (cancelled()) return false
       const err = e as Error
-      this.ui.note(err.name === "NotAllowedError" ? "Microphone permission was denied. Allow it in the browser's site settings." : `Microphone: ${err.message}`, "err")
+      if (gestureBlocked({ error: err.name, micPermission: await micPermission(), activated: userActivated() })) {
+        this.ui.note(TAP_TO_START, "gesture")
+      } else {
+        this.ui.note(err.name === "NotAllowedError" ? "Microphone permission was denied. Allow it in the browser's site settings." : `Microphone: ${err.message}`, "err")
+      }
       this.ui.state("off")
       this.stopSilence()
       return false
     }
+    if (cancelled()) {
+      stream.getTracks().forEach((t) => t.stop())
+      return false
+    }
+    this.stream = stream
     try {
       const { agent } = await (await this.api(`${this.path}/conversation`, { method: "POST", json: { on: true } })).json()
       this.agent = agent
     } catch (e) {
       this.release()
       this.stopSilence()
+      if (cancelled()) return false
       this.ui.note(`Could not start Voice mode: ${(e as Error).message}`, "err")
       this.ui.state("off")
+      return false
+    }
+    if (cancelled()) {
+      // Stopped while the hub was turning conversation mode on: turn it off again.
+      this.release()
+      await this.api(`${this.path}/conversation`, { method: "POST", json: { on: false } }).catch(() => {})
       return false
     }
     this.active = true
     try {
       await this.listen()
     } catch (e) {
-      this.ui.note(`Could not start listening: ${(e as Error).message}`, "err")
+      if (cancelled()) return false
+      if ((e as Error).name === GESTURE_ERROR) this.ui.note(TAP_TO_START, "gesture")
+      else this.ui.note(`Could not start listening: ${(e as Error).message}`, "err")
       await this.stop()
       return false
     }
+    if (cancelled()) return false
     if (this.opts.background) this.mediaSession()
     else void this.lockScreen()
     document.addEventListener("visibilitychange", this.onVisibility)
@@ -144,7 +186,9 @@ export class Conversation<B = unknown> {
     const w = window as unknown as { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext }
     const AudioCtx = (w.AudioContext || w.webkitAudioContext)!
     const ctx = (this.ctx = new AudioCtx())
-    await ctx.resume().catch(() => {})
+    // Without a tap the browser keeps the context suspended (autoplay policy): nothing would be heard.
+    await Promise.race([ctx.resume().catch(() => {}), new Promise((r) => setTimeout(r, RESUME_WAIT_MS))])
+    if (gestureBlocked({ audioState: ctx.state, activated: userActivated() })) throw Object.assign(new Error(TAP_TO_START), { name: GESTURE_ERROR })
     this.source = ctx.createMediaStreamSource(this.stream!)
     this.sink = ctx.createGain()
     this.sink.gain.value = 0 // keeps the tap pulled by the graph without making a sound
@@ -345,40 +389,17 @@ export class Conversation<B = unknown> {
     this.refresh()
   }
 
-  /** Lock screen / notification controls (Android Chrome shows them while media plays). */
+  /**
+   * Lock screen / notification controls (Android Chrome shows them while media plays). The metadata ("Voice
+   * mode on", the session title) and the pause/stop → End handlers are app-level (web/src/app/voice.ts); the
+   * conversation only reports whether it plays.
+   */
   private mediaSession(): void {
-    const ms = navigator.mediaSession
-    if (!ms) return
-    try {
-      if ("MediaMetadata" in window) {
-        ms.metadata = new MediaMetadata({
-          title: this.opts.title(),
-          artist: "OpenCode Hub",
-          artwork: [
-            { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
-            { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
-          ],
-        })
-      }
-      ms.setActionHandler("pause", () => this.pause())
-      ms.setActionHandler("play", () => this.resume())
-      ms.playbackState = this.paused ? "paused" : "playing"
-    } catch {
-      // unsupported action or metadata: controls are best-effort
-    }
+    if (navigator.mediaSession) navigator.mediaSession.playbackState = this.paused ? "paused" : "playing"
   }
 
   private clearMediaSession(): void {
-    const ms = navigator.mediaSession
-    if (!ms) return
-    try {
-      ms.metadata = null
-      ms.setActionHandler("pause", null)
-      ms.setActionHandler("play", null)
-      ms.playbackState = "none"
-    } catch {
-      // ignore
-    }
+    if (navigator.mediaSession) navigator.mediaSession.playbackState = "none"
   }
 
   /** A silent looping <audio> while listening with the screen off (keeps the page alive; lock-screen controls). */
@@ -473,6 +494,7 @@ export class Conversation<B = unknown> {
 
   /** Turns everything off; `post: false` when the server already did (SSE) or the page is going away. */
   async stop({ post = true, keepalive = false }: { post?: boolean; keepalive?: boolean } = {}): Promise<void> {
+    this.attempt++
     const wasActive = this.active
     this.active = false
     this.paused = false

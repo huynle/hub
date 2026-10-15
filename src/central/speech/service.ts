@@ -2,6 +2,7 @@
 // changes apply at once), proxies model lists for the settings page, and caches them for 10 minutes.
 import { OpenAICompatible } from "./openai"
 import { OpenRouter } from "./openrouter"
+import { speechModelList, withCurrent, type SpeechModelInfo, type SpeechModelList } from "./models"
 import { SpeechError, upstreamDetail, type SpeechProvider } from "./provider"
 import {
   lowerLayers,
@@ -44,15 +45,13 @@ export interface SpeechServiceOptions {
 
 export type SpeechKind = "stt" | "tts"
 
-export interface ModelInfo {
-  readonly id: string
-  readonly name: string
-}
+export type ModelInfo = SpeechModelInfo
+export type ModelList = SpeechModelList
 
 export class SpeechService {
   private readonly fetch: typeof globalThis.fetch
   private readonly now: () => number
-  private readonly cache = new Map<string, { at: number; models: ModelInfo[] }>()
+  private readonly cache = new Map<string, { at: number; body: unknown }>()
 
   constructor(private readonly options: SpeechServiceOptions) {
     this.fetch = options.fetch ?? globalThis.fetch
@@ -98,8 +97,12 @@ export class SpeechService {
     return this.provider("tts", userID).speak(text, tts.speed, signal)
   }
 
-  /** Models offered by the configured provider for `kind` (a user's effective provider when given). */
-  async models(kind: SpeechKind, userID?: string): Promise<ModelInfo[]> {
+  /**
+   * Models offered by the configured provider for `kind` (a user's effective provider when given), the
+   * configured model first and marked `current`. OpenRouter filters by output modality; other providers list
+   * everything, so their models are classified here (the full list with a `note` when nothing is labeled).
+   */
+  async models(kind: SpeechKind, userID?: string): Promise<ModelList> {
     const settings = this.options.store.speechSettings()
     const user = this.userSettings(userID)
     const resolved: Resolved = kind === "stt" ? resolveStt(settings, this.options.defaults, user) : resolveTts(settings, this.options.defaults, user)
@@ -110,21 +113,22 @@ export class SpeechService {
     // Per scope: a list fetched with one user's key is never served to another.
     const cacheKey = `${userID ?? ""} ${url}`
     const cached = this.cache.get(cacheKey)
-    if (cached && this.now() - cached.at < MODELS_CACHE_MS) return cached.models
-
-    let models: ModelInfo[]
-    try {
-      // OpenRouter's list is public: no key is sent. Other providers usually need theirs.
-      const headers: Record<string, string> = !openrouter && resolved.apiKey ? { authorization: `Bearer ${resolved.apiKey}` } : {}
-      const response = await this.fetch(url, { headers, signal: AbortSignal.timeout(MODELS_TIMEOUT_MS) })
-      if (!response.ok) throw new SpeechError(`Model list failed (${response.status}): ${await upstreamDetail(response)}`, response.status)
-      models = parseModels(await response.json())
-    } catch (cause) {
-      if (!openrouter) return []
-      throw cause instanceof SpeechError ? cause : new SpeechError(`Model list failed: ${cause instanceof Error ? cause.message : cause}`)
+    let body: unknown
+    if (cached && this.now() - cached.at < MODELS_CACHE_MS) body = cached.body
+    else {
+      try {
+        // OpenRouter's list is public: no key is sent. Other providers usually need theirs.
+        const headers: Record<string, string> = !openrouter && resolved.apiKey ? { authorization: `Bearer ${resolved.apiKey}` } : {}
+        const response = await this.fetch(url, { headers, signal: AbortSignal.timeout(MODELS_TIMEOUT_MS) })
+        if (!response.ok) throw new SpeechError(`Model list failed (${response.status}): ${await upstreamDetail(response)}`, response.status)
+        body = await response.json()
+      } catch (cause) {
+        if (!openrouter) return withCurrent([], resolved.model)
+        throw cause instanceof SpeechError ? cause : new SpeechError(`Model list failed: ${cause instanceof Error ? cause.message : cause}`)
+      }
+      this.cache.set(cacheKey, { at: this.now(), body })
     }
-    this.cache.set(cacheKey, { at: this.now(), models })
-    return models
+    return openrouter ? withCurrent(parseModels(body), resolved.model) : speechModelList(kind, body, resolved.model)
   }
 
   private userSettings(userID: string | undefined): StoredSpeech | undefined {

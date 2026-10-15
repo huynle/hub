@@ -2,10 +2,10 @@
 // Mock hub for manual/browser checks of the console (not a test file): serves the built web/dist (run
 // `npm run build:web` first) and fakes
 // the hub API + SSE per the conversation contract. Usage: `bun test/web-mock-hub.ts [port]` (default 4311).
-// Control: POST /mock/transcripts {texts: string[]} (queued /api/transcribe answers), POST /mock/emit {…SSE message},
+// Control: POST /mock/transcripts {texts: string[]} (queued /api/transcribe answers; POST /mock/reset-transcripts empties the queue), POST /mock/emit {…SSE message},
 // POST /mock/status {sessions} (status tree of ses_mock, root first; emitted as SSE status),
 // POST /mock/activity {sessionID?, item} (stored for GET /api/sessions/ses_mock and emitted as SSE activity),
-// GET /mock/log (recorded API calls), POST /mock/reset.
+// GET /mock/log (recorded API calls), POST /mock/reset, POST /mock/workstation {on} (a second online machine), POST /mock/push {endpoints} (the push subscriptions the hub holds).
 // Also fakes presence, push prefs (incl. `say`), devices and the speech settings API (keys masked as last4).
 // Session browser (VF6): ~40 sessions on "laptop" (6 workspaces incl. worktrees, blocked/working/unexposed ones,
 // a standalone process) plus an offline machine. Sessions carry exposed/project/projectName/now/state/blockers;
@@ -34,10 +34,14 @@
 // POST /mock/fail {prefs?} (PUT /api/prefs/view answers 502).
 // Console (0.5): every session is inspectable and controllable with Voice off (only conversation and utterance
 // answer 403 not_exposed); GET …/timeline (+ parts), …/model-prefs (GET/PUT), …/models, …/summary, …/diff?file=,
-// POST …/read (GET /api/reads), …/stop, …/permission; POST …/turn answers 202 {mode:"steer"} while the tree runs,
+// GET …/timeline/messages/:message/files/:index (a 1×1 PNG; ses_mock's first user message lists one image),
+// POST …/read (GET /api/reads), …/stop, …/permission; POST …/turn {text, images?} (up to 4 PNG/JPEG/WebP/GIF images;
+// text may be empty with images; the log keeps each image's mime, name and base64 length) answers 202 {mode:"steer"} while the tree runs,
 // else runs the turn (ses_mock: working → streamed reply → idle; text containing "fail" → 409).
 import { existsSync, readFileSync, statSync } from "node:fs"
 import path from "node:path"
+import { speechModelList } from "../src/central/speech/models"
+import gatewayModels from "./fixtures/openai-compatible-gateway-models.json"
 
 const WEB = path.join(import.meta.dir, "..", "web", "dist")
 const PORT = Number(process.argv[2] ?? 4311)
@@ -61,6 +65,8 @@ type Status = { id: string; title: string; state: string; blockers: unknown[]; p
 let status: Status[] = [{ id: SESSION, title: "Mock session", state: "idle", blockers: [] }]
 let activity: Array<Record<string, unknown>> = []
 type Fixture = {
+  /** The machine reporting it (default mac_1). */
+  machine?: string
   id: string
   title: string
   directory: string
@@ -162,8 +168,11 @@ function fixtures(): Fixture[] {
 }
 let sessions = fixtures()
 let created = 0
-let fail = { expose: false, create: false, models: false, prefs: false }
+let fail = { expose: false, create: false, models: false, prefs: false, modelPrefs: false }
 let serviceConnected = true
+/** A second online machine ("workstation", mac_5) with its own service and one session; POST /mock/workstation {on}. */
+let workstation = false
+const WORKSTATION_DIR = "/home/user/work/ml-lab"
 let herdr = { on: true, fail: false }
 type ViewPrefs = { hiddenSessions: string[]; hiddenWorkspaces: string[]; pinnedSessions: string[]; pinnedWorkspaces: string[] }
 const PREF_LISTS = ["hiddenSessions", "hiddenWorkspaces", "pinnedSessions", "pinnedWorkspaces"] as const
@@ -204,7 +213,12 @@ const mockSession = () => ({
   open: true,
   terminal: { source: "herdr", workspaceID: "w_gen", workspace: "general", title: "Mock session", status: herdrStatus(status[0]?.state ?? "idle") },
 })
-let pushPrefs: Record<string, boolean> = { handoff: true, blocked: true, finished: false, say: false }
+let pushPrefs: Record<string, boolean> = { handoff: true, question: true, permission: true, finished: false, failed: false, say: false }
+let quietHours: { start: string; end: string; timeZone: string } | null = null
+/** Push subscription endpoints the fake hub holds for this device; tests fake PushManager in the page. */
+let pushEndpoints: string[] = []
+let mutedSessions: string[] = []
+let pushTests = 0
 let keys: Record<string, string | undefined> = { stt: "sk-or-v1-mock-stt-1234", tts: undefined }
 const seedSpeech = () => ({
   stt: { provider: "openrouter", model: "openai/whisper-1", language: "en" as string | undefined, baseURL: undefined as string | undefined },
@@ -401,7 +415,7 @@ const mainMachines = () => [
       terminals: herdr.on ? { herdr: { workspaces: HERDR } } : {},
       processes: [
         ...(serviceConnected
-          ? [{ id: "proc_1", kind: "service", directory: "/home/user", pid: 4242, sessions: [mockSession(), ...sessions.map(catalogSession)] }]
+          ? [{ id: "proc_1", kind: "service", directory: "/home/user", pid: 4242, opencodeVersion: "2.0.26", sessions: [mockSession(), ...sessions.filter((s) => !s.machine).map(catalogSession)] }]
           : []),
         {
           id: "proc_2",
@@ -416,6 +430,30 @@ const mainMachines = () => [
       ],
     },
     { id: "mac_2", name: "desktop", created: Date.now() - 86_400_000, lastSeen: Date.now() - 3 * 3_600_000, online: false, processes: [] },
+    ...(workstation
+      ? [
+          {
+            id: "mac_5",
+            name: "workstation",
+            created: Date.now() - 5 * 86_400_000,
+            lastSeen: Date.now(),
+            online: true,
+            processes: [
+              {
+                id: "proc_ws",
+                kind: "service",
+                directory: "/home/user",
+                pid: 5050,
+                opencodeVersion: "2.0.25",
+                sessions: [
+                  catalogSession({ id: "ses_ws_1", title: "Train the ranking model", directory: WORKSTATION_DIR, projectName: "ml-lab", project: WORKSTATION_DIR, updated: Date.now() - 3_600_000, exposed: true, state: "idle", blockers: [] }),
+                  ...sessions.filter((s) => s.machine === "mac_5").map(catalogSession),
+                ],
+              },
+            ],
+          },
+        ]
+      : []),
 ]
 
 /** A WAV tone (~55 ms per character, 0.4–4 s) standing in for TTS audio. */
@@ -545,12 +583,40 @@ async function scenario() {
 
 let reads: Record<string, Record<string, number>> = {}
 let modelPrefs: Record<string, { voice?: unknown; worker?: unknown }> = {}
-const MODELS = [
-  { providerID: "anthropic", modelID: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", enabled: true, status: "active", variants: ["default", "high", "max"] },
-  { providerID: "anthropic", modelID: "claude-haiku-4-5", name: "Claude Haiku 4.5", enabled: true, status: "active", variants: [] },
-  { providerID: "openai", modelID: "gpt-5", name: "GPT-5", enabled: true, status: "active", variants: ["low", "medium", "high"] },
-  { providerID: "openrouter", modelID: "qwen/qwen3-coder", name: "Qwen3 Coder", enabled: true, status: "active", variants: [] },
-]
+/** A realistic catalog: a gateway provider with hundreds of aliased models, native providers, effort variants. */
+const MODELS = (() => {
+  const efforts = ["low", "medium", "high"]
+  const list: Array<{ providerID: string; modelID: string; name: string; enabled: boolean; status: string; variants: string[] }> = [
+    { providerID: "anthropic", modelID: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", enabled: true, status: "active", variants: ["default", "high", "max"] },
+    { providerID: "anthropic", modelID: "claude-haiku-4-5", name: "Claude Haiku 4.5", enabled: true, status: "active", variants: [] },
+    { providerID: "anthropic", modelID: "claude-opus-4-1", name: "Claude Opus 4.1", enabled: true, status: "active", variants: ["default", "high"] },
+    { providerID: "anthropic", modelID: "claude-3-haiku", name: "Claude 3 Haiku", enabled: false, status: "deprecated", variants: [] },
+    { providerID: "openai", modelID: "gpt-5", name: "GPT-5", enabled: true, status: "active", variants: efforts },
+    { providerID: "openai", modelID: "gpt-5-mini", name: "GPT-5 mini", enabled: true, status: "active", variants: efforts },
+    { providerID: "openai", modelID: "gpt-4.1", name: "GPT-4.1", enabled: true, status: "active", variants: [] },
+    { providerID: "openrouter", modelID: "qwen/qwen3-coder", name: "Qwen3 Coder", enabled: true, status: "active", variants: [] },
+    { providerID: "google", modelID: "gemini-2.5-pro", name: "Gemini 2.5 Pro", enabled: true, status: "active", variants: ["low", "high"] },
+    { providerID: "google", modelID: "gemini-2.5-flash", name: "Gemini 2.5 Flash", enabled: true, status: "active", variants: [] },
+  ]
+  const vendors = ["anthropic", "openai", "google", "meta-llama", "mistralai", "qwen", "deepseek", "moonshotai", "x-ai", "z-ai"]
+  for (let i = 0; i < 40; i++) {
+    const vendor = vendors[i % vendors.length]!
+    list.push({ providerID: "openrouter", modelID: `${vendor}/model-${i + 1}`, name: `${vendor}: Model ${i + 1}`, enabled: true, status: i % 13 === 0 ? "beta" : "active", variants: i % 4 === 0 ? efforts : [] })
+  }
+  // The gateway: OpenCode ids are short aliases ("claude-opus-5-5"); the upstream modelID is not shown.
+  for (const [id, name, variants] of [
+    ["claude-opus-5-5", "Claude Opus 5.5", ["high", "max"]],
+    ["claude-sonnet-5-5", "Claude Sonnet 5.5", ["high", "max"]],
+    ["claude-haiku-5-5", "Claude Haiku 5.5", []],
+    ["gpt-6-sol", "GPT-6 Sol", ["none", "low", "medium", "high", "xhigh", "max"]],
+    ["kimi-k3", "Kimi K3", []],
+  ] as const) list.push({ providerID: "omniroute", modelID: id, name, enabled: true, status: "active", variants: [...variants] })
+  for (let i = 0; i < 180; i++) {
+    const vendor = vendors[(i * 3) % vendors.length]!
+    list.push({ providerID: "omniroute", modelID: `${vendor}/gw-${String(i + 1).padStart(3, "0")}`, name: `${vendor} gateway model ${i + 1}`, enabled: true, status: "active", variants: i % 9 === 0 ? efforts : [] })
+  }
+  return list
+})()
 const MODEL_DEFAULTS = { voice: { providerID: "anthropic", modelID: "claude-haiku-4-5" }, worker: { providerID: "anthropic", modelID: "claude-sonnet-4-5", variant: "high" } }
 const CHANGES = [
   { file: "web/src/app/Session.tsx", status: "modified", additions: 42, deletions: 7 },
@@ -576,12 +642,14 @@ function timelineOf(id: string, title: string) {
   const t0 = Date.now() - 20 * 60_000
   const m = (n: number) => `msg_${id}_${n}`
   return [
-    { key: `${m(1)}:text`, messageID: m(1), sessionID: id, kind: "user", text: `Please look at “${title || "this"}” and fix what's broken.`, at: t0 },
+    { key: `${m(1)}:text`, messageID: m(1), sessionID: id, kind: "user", text: `Please look at “${title || "this"}” and fix what's broken.`, at: t0, ...(id === SESSION ? { files: [{ index: 0, mime: "image/png", name: "screenshot.png" }] } : {}) },
     { key: `${m(2)}:0`, messageID: m(2), partID: "0", sessionID: id, kind: "reasoning", text: "The failing test is in the picker. Read it first, then run the suite.", state: "done", at: t0 + 1000, completed: t0 + 13_400 },
     { key: `${m(2)}:1`, messageID: m(2), partID: "1", sessionID: id, kind: "tool", name: "read", state: "done", at: t0 + 14_000, completed: t0 + 14_200 },
     { key: `${m(2)}:2`, messageID: m(2), partID: "2", sessionID: id, kind: "tool", name: "bash", state: "failed", at: t0 + 15_000, completed: t0 + 21_000 },
     { key: `${m(2)}:3`, messageID: m(2), partID: "3", sessionID: id, kind: "tool", name: "edit", state: "done", at: t0 + 22_000, completed: t0 + 22_500 },
     { key: `${m(2)}:4`, messageID: m(2), partID: "4", sessionID: id, kind: "assistant", text: "I fixed the ranking in **filterPicker** and re-ran the suite:\n\n- `bun test test/web-picker.test.ts` → 8 pass\n- no other failures\n\n```ts\nranked.sort((a, b) => a.rank - b.rank || a.index - b.index)\n```\nAnything else?", at: t0 + 30_000 },
+    // Claude-style reasoning: only an encrypted signature is stored, no readable text.
+    { key: `${m(3)}:0`, messageID: m(3), partID: "0", sessionID: id, kind: "reasoning", text: "", state: "done", at: t0 + 31_000, completed: t0 + 33_000 },
   ]
 }
 
@@ -606,11 +674,26 @@ async function mockTurn(text: string): Promise<Record<string, unknown>> {
   return { outcome: "succeeded", reply }
 }
 
+/** A 1×1 PNG served for message images. */
+const PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+
+/** The hub's image checks, roughly: at most 4, known types, base64 data. */
+function imagesProblem(images: unknown): string | undefined {
+  if (images === undefined) return undefined
+  if (!Array.isArray(images)) return "images must be an array"
+  if (images.length > 4) return "Attach at most 4 images"
+  for (const image of images) {
+    if (!["image/png", "image/jpeg", "image/webp", "image/gif"].includes(image?.mime)) return "Unsupported image type"
+    if (typeof image.data !== "string" || !/^[A-Za-z0-9+/]+={0,2}$/.test(image.data)) return "Image data must be base64"
+  }
+  return images.reduce((sum: number, i: any) => sum + i.data.length, 0) > 750_000 ? "Images together are too large" : undefined
+}
+
 async function consoleRoute(request: Request, url: URL, user: MockUser): Promise<Response | undefined> {
   const p = url.pathname
   const m = request.method
   if (p === "/api/reads" && m === "GET") return Response.json({ reads: reads[user.id] ?? {} })
-  const match = /^\/api\/sessions\/([^/]+)\/(timeline|model-prefs|models|summary|diff|read|stop|turn|permission)(?:\/messages\/([^/]+)\/parts\/([^/]+))?$/.exec(p)
+  const match = /^\/api\/sessions\/([^/]+)\/(timeline|model-prefs|models|summary|diff|read|stop|turn|permission)(?:\/messages\/([^/]+)\/(?:parts\/([^/]+)|files\/(\d+)))?$/.exec(p)
   if (!match) return undefined
   const id = decodeURIComponent(match[1]!)
   const fixture = id === SESSION ? { title: "Mock session", directory: `${HOME}/opencode-voice` } : id === BOB_SESSION ? bobSession() : sessions.find((x) => x.id === id) ?? (id === "ses_scratch" ? { title: "Scratch experiment", directory: "/tmp/scratch" } : undefined)
@@ -618,12 +701,19 @@ async function consoleRoute(request: Request, url: URL, user: MockUser): Promise
   const body = async () => (await request.json().catch(() => ({}))) as Record<string, any>
   switch (match[2]) {
     case "timeline":
+      if (match[5] !== undefined) {
+        if (match[5] !== "0") return Response.json({ error: "No such image" }, { status: 404 })
+        return new Response(Buffer.from(PIXEL_PNG, "base64"), { headers: { "content-type": "image/png", "cache-control": "private, no-store" } })
+      }
       if (match[3]) return Response.json({ detail: { name: "bash", state: { status: "error", input: { command: "bun test" }, error: "1 test failed" }, time: { start: Date.now() - 60_000, end: Date.now() - 54_000 } } })
       return Response.json({ items: timelineOf(id, fixture.title) })
     case "model-prefs":
       if (m === "PUT") {
         const change = await body()
+        log[log.length - 1]!.body = change
+        if (fail.modelPrefs) return Response.json({ error: "OpenCode did not answer" }, { status: 502 })
         modelPrefs[id] = { ...(modelPrefs[id] ?? {}), ...change }
+        for (const key of ["voice", "worker"] as const) if (modelPrefs[id]![key] === null) delete modelPrefs[id]![key]
       }
       return Response.json({ prefs: modelPrefs[id] ?? {}, defaults: MODEL_DEFAULTS })
     case "models":
@@ -668,9 +758,11 @@ async function consoleRoute(request: Request, url: URL, user: MockUser): Promise
       return new Response(null, { status: 204 })
     }
     case "turn": {
-      const { text } = await body()
-      if (typeof text !== "string" || !text.trim()) return Response.json({ error: "Empty prompt" }, { status: 400 })
-      log[log.length - 1]!.body = { text }
+      const { text, images } = await body()
+      const problem = imagesProblem(images)
+      if (problem) return Response.json({ error: problem }, { status: 400 })
+      if (typeof text !== "string" || (!text.trim() && !images?.length)) return Response.json({ error: "Empty prompt" }, { status: 400 })
+      log[log.length - 1]!.body = { text, ...(images?.length ? { images: images.map((i: any) => ({ mime: i.mime, name: i.name, length: i.data.length })) } : {}) }
       if (text.includes("fail")) return Response.json({ error: "No OpenCode process for this session is connected" }, { status: 409 })
       if (treeState(id) !== "idle") return Response.json({ mode: "steer", inboxID: `inb_${++inbox}` }, { status: 202 })
       if (id === SESSION) return Response.json(await mockTurn(text))
@@ -693,6 +785,10 @@ const server = Bun.serve({
     if (p.startsWith("/api/") && p !== "/api/events") log.push({ at: Date.now(), method: m, path: p, contentType: request.headers.get("content-type") ?? undefined })
     const last = () => log[log.length - 1]!
 
+    if (p === "/mock/reset-transcripts" && m === "POST") {
+      transcripts = []
+      return Response.json({ queued: 0 })
+    }
     if (p === "/mock/transcripts" && m === "POST") {
       transcripts.push(...((await json()).texts ?? []))
       return Response.json({ queued: transcripts.length })
@@ -765,7 +861,7 @@ const server = Bun.serve({
       emitCatalog()
       return Response.json({ mode: authMode, as: loginAs })
     }
-    if (p === "/mock/log") return Response.json({ log, transcripts, conversation, pushPrefs, speech, keys, users, audit, enrollments, userSpeech: Object.fromEntries(userSpeech), viewPrefs: Object.fromEntries(viewPrefs), herdr })
+    if (p === "/mock/log") return Response.json({ log, transcripts, conversation, pushPrefs, quietHours, pushEndpoints, mutedSessions, pushTests, speech, keys, users, audit, enrollments, userSpeech: Object.fromEntries(userSpeech), viewPrefs: Object.fromEntries(viewPrefs), herdr })
     if (p === "/mock/reset" && m === "POST") {
       scenarioRun++
       log = []
@@ -773,7 +869,7 @@ const server = Bun.serve({
       activity = []
       status = [{ id: SESSION, title: "Mock session", state: "idle", blockers: [] }]
       sessions = fixtures()
-      fail = { expose: false, create: false, models: false, prefs: false }
+      fail = { expose: false, create: false, models: false, prefs: false, modelPrefs: false }
       reads = {}
       modelPrefs = {}
       turnRun++
@@ -788,7 +884,23 @@ const server = Bun.serve({
       userSpeech = new Map()
       speech = seedSpeech()
       keys = { stt: "sk-or-v1-mock-stt-1234", tts: undefined }
+      pushPrefs = { handoff: true, question: true, permission: true, finished: false, failed: false, say: false }
+      quietHours = null
+      pushEndpoints = []
+      mutedSessions = []
+      pushTests = 0
+      workstation = false
       emitCatalog()
+      return Response.json({ ok: true })
+    }
+    if (p === "/mock/workstation" && m === "POST") {
+      workstation = (await json()).on !== false
+      emitCatalog()
+      return Response.json({ ok: true })
+    }
+    if (p === "/mock/push" && m === "POST") {
+      // Acts as the hub losing (or holding) this device's subscriptions, e.g. after a move to a new origin.
+      pushEndpoints = (await json()).endpoints ?? []
       return Response.json({ ok: true })
     }
 
@@ -919,14 +1031,15 @@ const server = Bun.serve({
       last().body = body
       await Bun.sleep(250)
       if (fail.create) return Response.json({ error: "OpenCode could not create the session" }, { status: 502 })
-      if (decodeURIComponent(match[1]!) !== "mac_1" || !serviceConnected) {
+      const onMachine = decodeURIComponent(match[1]!)
+      if (!(onMachine === "mac_1" || (onMachine === "mac_5" && workstation)) || !serviceConnected) {
         return Response.json({ error: "The background service of this machine is not connected" }, { status: 409 })
       }
       if (typeof body.directory !== "string" || !body.directory.startsWith("/")) return Response.json({ error: "directory must be absolute" }, { status: 400 })
       const ws = projectOf(body.directory)
       const id = `ses_new_${++created}`
       const title = typeof body.title === "string" && body.title.trim() ? body.title.trim() : ""
-      const fixture: Fixture = { id, title, directory: body.directory, project: ws?.[0], projectName: ws?.[1], updated: Date.now(), exposed: true, state: "idle", blockers: [] }
+      const fixture: Fixture = { ...(onMachine === "mac_5" ? { machine: "mac_5" } : {}), id, title, directory: body.directory, project: ws?.[0], projectName: ws?.[1], updated: Date.now(), exposed: true, state: "idle", blockers: [] }
       let result: Record<string, unknown> = { sessionID: id }
       if (typeof body.herdrWorkspace === "string") {
         const target = HERDR.find((w) => w.id === body.herdrWorkspace)
@@ -964,6 +1077,7 @@ const server = Bun.serve({
       if (action === "presence") return new Response(null, { status: 204 })
       if (action === "conversation" && m === "POST") {
         const body = await json()
+        last().body = body
         s.conversation = !!body.on
         emit({ type: "conversation", sessionID: id, on: s.conversation })
         return Response.json({ on: s.conversation, agent: "voice" })
@@ -983,12 +1097,45 @@ const server = Bun.serve({
       emit({ type: "prefs", userID: user.id })
       return Response.json({ prefs: prefsOf(user.id) })
     }
-    if (p === "/api/push/prefs" && m === "GET") return Response.json({ prefs: pushPrefs })
+    const pushView = (endpoint?: string | null) => ({
+      prefs: pushPrefs,
+      quietHours,
+      muted: mutedSessions,
+      subscriptions: pushEndpoints.length,
+      ...(endpoint ? { subscribed: pushEndpoints.includes(endpoint) } : {}),
+    })
+    if (p === "/api/push/prefs" && m === "GET") return Response.json(pushView(url.searchParams.get("endpoint")))
     if (p === "/api/push/prefs" && m === "PUT") {
       const body = await json()
       last().body = body
       for (const [k, v] of Object.entries(body)) if (k in pushPrefs && typeof v === "boolean") pushPrefs[k] = v
+      if ("quietHours" in body) quietHours = body.quietHours
+      return Response.json(pushView())
+    }
+    if (p === "/api/push/key" && m === "GET") return Response.json({ publicKey: "BNbxGYNMhEIi9zrneh7mqV4oUanjLUK3m-mYZBc62frMKrEoMk88r3Lk596T0ck9xlT-hA0ITRxIFxeuybYCcQ8" })
+    if (p === "/api/push/subscribe" && m === "POST") {
+      const body = await json()
+      last().body = body
+      const endpoint = body.subscription?.endpoint
+      if (typeof endpoint !== "string") return Response.json({ error: "Invalid push subscription" }, { status: 400 })
+      if (!pushEndpoints.includes(endpoint)) pushEndpoints.push(endpoint)
       return Response.json({ prefs: pushPrefs })
+    }
+    if (p === "/api/push/unsubscribe" && m === "POST") {
+      const body = await json()
+      pushEndpoints = pushEndpoints.filter((e) => e !== body.endpoint)
+      return new Response(null, { status: 204 })
+    }
+    if (p === "/api/push/test" && m === "POST") {
+      pushTests++
+      return Response.json({ sent: pushEndpoints.length, failed: [], subscriptions: pushEndpoints.length })
+    }
+    if (p === "/api/push/mute" && m === "PUT") {
+      const body = await json()
+      last().body = body
+      mutedSessions = mutedSessions.filter((id) => id !== body.sessionID)
+      if (body.muted) mutedSessions.push(body.sessionID)
+      return Response.json({ muted: mutedSessions })
     }
     if (p === "/api/devices") {
       const current = { id: user.id === "u_bob" ? "dev_bob_chrome" : "dev_1", name: "Chrome", lastSeen: Date.now(), current: true }
@@ -1023,12 +1170,9 @@ const server = Bun.serve({
     if (p === "/api/settings/speech/models" && m === "GET") {
       await Bun.sleep(300)
       if (fail.models) return Response.json({ error: "OpenRouter is unreachable" }, { status: 502 })
-      const kind = url.searchParams.get("kind")
-      return Response.json(
-        kind === "stt"
-          ? [{ id: "openai/whisper-1", name: "Whisper" }, { id: "openai/gpt-4o-transcribe", name: "GPT-4o Transcribe" }]
-          : [{ id: "tts-1", name: "TTS 1" }, { id: "tts-1-hd", name: "TTS 1 HD" }, { id: "gpt-4o-mini-tts", name: "GPT-4o mini TTS" }],
-      )
+      const kind = url.searchParams.get("kind") === "stt" ? "stt" : "tts"
+      // A big OpenAI-compatible gateway list (trimmed real fixture), classified like the hub does.
+      return Response.json(speechModelList(kind, gatewayModels, speech[kind].model))
     }
     if (p === "/api/settings/speech/test" && m === "POST") {
       last().body = await json()

@@ -1,5 +1,82 @@
 # Changelog
 
+## 0.5.1 (unreleased)
+
+- **New sessions, composer first.** `/new` is a big "Describe a task or ask a question" composer (with
+  images) and a row under it: **Environment** (your machines; online first with process and OpenCode
+  version, offline ones disabled; ✓ on the choice), **Project** (searchable Herdr workspaces and known
+  folders), the folder's **branch**, and **Open in Herdr tab**. Submitting creates the session on that
+  machine and sends the prompt as its first turn; the last environment and folder are remembered per
+  device. The session rail's **Server** card is now a collapsible **Environment** card (machine and
+  status, project, branch, where it is open), and every rail card collapses from its header (remembered),
+  with MCP shown as **Connectors · N connected**.
+- **`/hub` and `/voice` are separate commands.** `/hub` configures the hub connection: server URL and
+  connection state, change the server (reachability checked) or use a hub on this computer, start the
+  local hub, approval status, mode, this session on/off, pair a phone, open the hub in the browser.
+  `/voice` has no menu: it sets up and connects first when needed, shares the session for Voice and opens
+  it in the browser with Voice mode starting (`/s/<id>?voice=1` through a one-time sign-in link; the hub's
+  `openLink` op takes `voice: true` and `/login` accepts `?voice=1`). When the browser needs a tap before
+  it plays or records, the Voice bar shows **Tap to start Voice mode** instead of an error. "Talk on this
+  device" is gone from `/hub` (use `/voice`).
+- **"Voice mode on" notification.** While Voice mode is on, a silent persistent notification says which
+  session and what Voice is doing ("API server · listening", updated at most every 3 s) with **End** (ends
+  Voice mode through the page, or with no page open turns conversation mode off at the hub) and **Open**;
+  it closes when Voice mode ends or the page unloads. The lock screen's media controls show "Voice mode on"
+  and the session title, and pause/stop end Voice mode (before, pause muted listening). Without
+  notification permission the Voice bar offers **Allow notifications**.
+- **Notifications that arrive.** Settings → Notifications shows the real state of this device (permission,
+  service worker, and whether this hub holds its subscription) and warns when nothing would arrive; **Enable
+  notifications on this device** registers the worker and subscribes; the app re-subscribes by itself when
+  permission is granted but the hub lost the subscription (e.g. after the hub moved to a new address), and
+  the service worker follows `pushsubscriptionchange`. **Send test notification** (`POST /api/push/test`,
+  only the caller's device, at most one per 10 s) reports where it went or the push service's status.
+  Preferences can't be mistaken for working notifications any more: they say they apply once subscribed.
+- **Personal notifications.** Separate toggles for questions, permissions, failed runs (split from
+  finished), finished runs, hand-offs and Voice replies (0.5.0 prefs are migrated: blocked → question +
+  permission, finished → finished + failed); quiet hours per device in its time zone; **Mute
+  notifications** per session (⋯ menu, per user, `PUT /api/push/mute`). Questions, permissions and failures
+  go out with high urgency and a one-hour TTL, stay on screen, vibrate and re-alert per session and kind; a
+  permission shows what it is (fetched by the service worker, never in the payload) with **Allow once** /
+  **Reject**.
+- **Image attachments**: the composer's **+** button attaches images (file picker, which offers the camera
+  on phones), as do paste and drag-and-drop; up to 4 per message, shown as removable thumbnails, and a
+  message may be images only. The browser re-encodes each image before sending (longest side at most
+  1600 px, JPEG with stepped-down quality, PNG kept for small transparent images; GIFs become their first
+  frame; camera metadata such as location is dropped) so each stays under ~180 KB and all under ~700 KB of
+  base64. `POST /api/sessions/:id/turn` takes `images: [{mime, data, name?}]` (validated by the hub and
+  the spoke: at most 4, PNG/JPEG/WebP/GIF whose bytes match, ≤ 512 KB each, ≤ 750,000 base64 characters
+  together) and the spoke passes them to OpenCode as inline (data URL) file attachments, for turns and
+  steers alike. Utterances (Voice mode) stay text-only; a message with images sent while Voice mode is on
+  goes as a typed turn.
+- **Images in the transcript**: user messages show their image attachments as thumbnails, loaded on
+  demand from the owner-scoped `GET /api/sessions/:id/timeline/messages/:message/files/:index`; other
+  attached files show as named chips.
+- **Fix: thoughts always expand.** "Thought for Ns" opens even when the provider stored no readable
+  reasoning (Claude usually keeps only an encrypted signature) and then says so; live reasoning deltas go
+  into the thought of the same message instead of a second, empty row when a session is opened mid-run.
+- **Fix: speech model lists of OpenAI-compatible gateways.** `GET /api/settings/speech/models` answers
+  `{models, note?}`: a gateway's full `/models` list is narrowed to speech-to-text or text-to-speech models
+  (never chat, image, embedding, rerank or music models), the configured model is always offered first, and
+  when nothing is labeled every model shows with a note. The pickers group models by provider.
+- **Fix: Voice and Worker model menus.** The spoke listed models by their upstream `modelID` instead of
+  OpenCode's catalog `id`, so models of gateway providers with aliases (e.g. `claude-opus-5-5` sent as
+  `claude/claude-opus-5-5`) could not be selected or switched to. The menus now handle catalogs of hundreds
+  of models (at most 100 rows rendered with a count, arrows + Enter, number keys only outside the search box so
+  digits can be typed), have a Back button in the variant step, never hide every model when a catalog
+  reports them all disabled, and report a failed save.
+- **Fix: dictation and Voice mode stay with their session.** Stopping Voice mode while it was still starting
+  (waiting for the microphone or the hub), or leaving the session meanwhile, left a hidden conversation
+  listening that sent what the user said, including dictation in another session, to the first session. A
+  start that is stopped now releases the microphone and turns conversation mode off again. Dictation is
+  app-level: the text goes into the draft of the session where recording started (never sent), leaving that
+  session while recording cancels it (a notice says so), and each session keeps its own unsent draft.
+- **Voice mode is one app-level toggle.** The Voice button turns Voice mode on for the session (turning
+  Voice on first when needed) and off again, and shows a pressed state while on. Only one session is in Voice
+  mode at a time: turning it on in another session first turns the current one off (conversation mode off,
+  microphone released, playback stopped). Voice mode keeps running while other sessions are viewed; they show
+  a "Voice: <session>" pill (a link back, with End) and the sidebar marks the session. A failure to turn it on
+  leaves Voice mode off and shows the error in that session. Dictation mutes Voice mode while it records.
+
 ## 0.5.0
 
 **opencode-voice is now OpenCode Hub** (`@huynle/opencode-hub`, `github:huynle/opencode-hub`): a remote

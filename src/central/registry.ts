@@ -97,6 +97,8 @@ export interface Alert {
   readonly detail?: "permission" | "form" | "succeeded" | "failed"
   /** say: the spoken text. */
   readonly text?: string
+  /** blocked permission: the request ID. */
+  readonly requestID?: string
   /** Tenant (user ID) that owns the session; push goes to this user's devices only. */
   readonly owner?: string
 }
@@ -419,7 +421,7 @@ export class Registry {
     if (event.type === "permission.asked" && typeof data.id === "string" && sessionID) {
       if (this.permissions.has(data.id)) return // the same request forwarded by another process
       this.permissions.set(data.id, { connID, sessionID })
-      this.alert("blocked", sessionID, "permission")
+      this.alert("blocked", sessionID, "permission", undefined, data.id)
     }
     if (event.type === "form.created" && sessionID) {
       const formID = (data.form as Record<string, unknown> | undefined)?.id
@@ -1036,7 +1038,7 @@ export class Registry {
     }
   }
 
-  private alert(kind: Alert["kind"], sessionID: string, detail: Alert["detail"], text?: string): void {
+  private alert(kind: Alert["kind"], sessionID: string, detail: Alert["detail"], text?: string, requestID?: string): void {
     const entry = [...this.boards].find(([, board]) => board.get(sessionID))
     if (!entry) return
     const [rootID, board] = entry
@@ -1046,6 +1048,7 @@ export class Registry {
       title: board.get(rootID)?.title ?? rootID,
       ...(detail ? { detail } : {}),
       ...(text !== undefined ? { text } : {}),
+      ...(requestID !== undefined ? { requestID } : {}),
     }
     const owner = this.sessionTenant(rootID)
     for (const listener of this.alertListeners) listener(owner ? { ...alert, owner } : alert)

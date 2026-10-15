@@ -1,14 +1,19 @@
-// Composer (textarea, Send/Steer, Stop, Dictate, Voice mode split button with mic picker, model menus) and the
-// inline Voice bar shown above it in Voice mode.
+// Composer (textarea, image attachments, Send/Steer, Stop, Dictate, Voice mode split button with mic picker,
+// model menus) and the inline Voice bar shown above it in Voice mode. Images come from the + button (file
+// picker; phones offer the camera there), paste, or drag-and-drop onto the composer.
 import { For, Show, createEffect, createSignal, onCleanup } from "solid-js"
 import { Portal } from "solid-js/web"
-import type { ComposerView } from "../lib/composer"
+import type { ComposerImage, ComposerView } from "../lib/composer"
+import { IMAGE_LIMITS, IMAGE_TYPES } from "../lib/images"
+import { imageFiles } from "./attach"
 import type { ConversationState } from "../voice/conversation"
 import { levelMeter, listMics, micDevice, setMicDevice } from "../voice/audio"
 import { Icon } from "./ui"
 
 export function Composer(props: {
   draft: string
+  images: readonly ComposerImage[]
+  attaching: boolean
   view: ComposerView
   error?: string
   voiceOn: boolean
@@ -19,6 +24,8 @@ export function Composer(props: {
   voiceModel: string
   workerModel: string
   onInput: (text: string) => void
+  onAttach: (files: File[]) => void
+  onDetach: (id: string) => void
   onSubmit: () => void
   onStop: () => void
   onDictate: () => void
@@ -26,6 +33,9 @@ export function Composer(props: {
   onModel: (kind: "voice" | "worker") => void
 }) {
   let area!: HTMLTextAreaElement
+  let picker!: HTMLInputElement
+  const [dragging, setDragging] = createSignal(false)
+  const full = () => props.images.length >= IMAGE_LIMITS.maxImages
   const fit = () => {
     area.style.height = "auto"
     area.style.height = `${Math.min(area.scrollHeight, 280)}px`
@@ -37,10 +47,25 @@ export function Composer(props: {
   const label = () => (props.view.primary === "steer" ? "Steer" : "Send")
   return (
     <form
-      class="composer"
+      class={`composer${dragging() ? " dragging" : ""}`}
       onSubmit={(e) => {
         e.preventDefault()
-        if (props.view.canSubmit) props.onSubmit()
+        if (props.view.canSubmit && !props.attaching) props.onSubmit()
+      }}
+      onDragOver={(e) => {
+        if (![...(e.dataTransfer?.types ?? [])].includes("Files")) return
+        e.preventDefault()
+        setDragging(true)
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false)
+      }}
+      onDrop={(e) => {
+        const files = imageFiles(e.dataTransfer)
+        setDragging(false)
+        if (!files.length) return
+        e.preventDefault()
+        props.onAttach(files)
       }}
     >
       <Show when={props.error}>
@@ -52,6 +77,25 @@ export function Composer(props: {
         <p class="composer-hint muted small">{props.view.hint}</p>
       </Show>
       <div class="composer-box">
+        <Show when={props.images.length || props.attaching}>
+          <ul class="attachments" aria-label="Attached images">
+            <For each={props.images}>
+              {(image) => (
+                <li class="attachment">
+                  <img src={image.preview} alt={image.name} title={image.name} />
+                  <button type="button" class="attachment-remove" aria-label={`Remove ${image.name}`} title="Remove" onClick={() => props.onDetach(image.id)}>
+                    <Icon name="close" />
+                  </button>
+                </li>
+              )}
+            </For>
+            <Show when={props.attaching}>
+              <li class="attachment busy" aria-label="Preparing image">
+                <span class="spinner small" />
+              </li>
+            </Show>
+          </ul>
+        </Show>
         <textarea
           ref={area}
           rows={1}
@@ -59,15 +103,43 @@ export function Composer(props: {
           aria-label="Message"
           placeholder={props.voiceOn ? "Voice mode is on — talk, or type here" : props.view.primary === "steer" ? "Steer the running session…" : "Reply…"}
           onInput={(e) => props.onInput(e.currentTarget.value)}
+          onPaste={(e) => {
+            const files = imageFiles(e.clipboardData)
+            if (!files.length) return
+            e.preventDefault()
+            props.onAttach(files)
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey && !e.isComposing && !(matchMedia("(max-width: 760px)").matches && "ontouchstart" in window)) {
               e.preventDefault()
-              if (props.view.canSubmit) props.onSubmit()
+              if (props.view.canSubmit && !props.attaching) props.onSubmit()
             }
           }}
         />
+        <input
+          ref={picker}
+          type="file"
+          class="sr-only"
+          tabIndex={-1}
+          aria-hidden="true"
+          data-testid="attach-input"
+          accept={IMAGE_TYPES.join(",")}
+          multiple
+          onChange={(e) => {
+            const files = [...(e.currentTarget.files ?? [])]
+            e.currentTarget.value = ""
+            if (files.length) props.onAttach(files)
+          }}
+        />
         <div class="composer-actions">
-          <button type="button" class="icon-btn" aria-label="Attach (coming later)" title="Attachments are not supported yet" disabled>
+          <button
+            type="button"
+            class="icon-btn"
+            aria-label="Attach images"
+            title={full() ? `At most ${IMAGE_LIMITS.maxImages} images per message` : "Attach images (or paste / drop them here)"}
+            disabled={full() || props.attaching}
+            onClick={() => picker.click()}
+          >
             <Icon name="plus" />
           </button>
           <span class="grow" />
@@ -102,7 +174,7 @@ export function Composer(props: {
               <Icon name="stop" /> Stop
             </button>
           </Show>
-          <button type="submit" class={`btn primary send ${props.view.primary}`} disabled={!props.view.canSubmit}>
+          <button type="submit" class={`btn primary send ${props.view.primary}`} disabled={!props.view.canSubmit || props.attaching}>
             <Show when={props.view.primary === "send"} fallback={label()}>
               <Icon name="send" />
               <span class="sr-only">{label()}</span>
@@ -217,7 +289,19 @@ const VOICE_LABEL: Record<ConversationState, string> = {
   off: "Off",
 }
 
-export function VoiceBar(props: { state: ConversationState; level: number; held: string; working: boolean; model: string; onMute: () => void; onEnd: () => void; onModel: () => void }) {
+export function VoiceBar(props: {
+  state: ConversationState
+  level: number
+  held: string
+  working: boolean
+  model: string
+  onMute: () => void
+  onEnd: () => void
+  onModel: () => void
+  /** Notifications are not allowed: offer them so Voice mode shows in the notification shade. */
+  notifyHint?: boolean
+  onAllowNotifications?: () => void
+}) {
   const label = () => (props.state === "listening" && props.working ? "Thinking" : VOICE_LABEL[props.state])
   const bars = [0.5, 0.8, 1, 0.7, 0.45]
   return (
@@ -241,6 +325,14 @@ export function VoiceBar(props: { state: ConversationState; level: number; held:
       <button type="button" class="btn small end" onClick={props.onEnd}>
         End
       </button>
+      <Show when={props.notifyHint}>
+        <p class="voice-hint small">
+          Allow notifications to keep a “Voice mode on” notification with an End button while the screen is off.{" "}
+          <button type="button" class="link" onClick={() => props.onAllowNotifications?.()}>
+            Allow notifications
+          </button>
+        </p>
+      </Show>
     </div>
   )
 }

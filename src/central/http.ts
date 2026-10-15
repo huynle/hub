@@ -4,7 +4,7 @@
 import type { Server } from "bun"
 import { diskAssets, type WebAssets } from "./assets"
 import path from "node:path"
-import type { EnrollStart, ModelSelection, PermissionDecision, TurnResult } from "../protocol"
+import { PROMPT_IMAGE_MIMES, promptImagesProblem, type EnrollStart, type ModelSelection, type PermissionDecision, type PromptImage, type TurnResult } from "../protocol"
 import { isLoopbackAddress, isLoopbackHost, isLoopbackURL, loopbackOrigins } from "../loopback"
 import { speakable } from "../speakable"
 import { Auth, RateLimitError, ValidationError } from "./auth"
@@ -15,7 +15,7 @@ import { BusyError, Registry } from "./registry"
 import { audioFormat, SpeechError } from "./speech/provider"
 import { SpeechService } from "./speech/service"
 import { RequestTimeoutError, RequestTooLargeError, SpokeError, SpokeHub, type Notifier, type SpokeSocketData } from "./spoke-ws"
-import { DEFAULT_PUSH_PREFS, LOCAL_USER, Store, VIEW_PREF_KEYS, type DeviceRecord, type PushPrefs, type UserRecord, type ViewPrefs } from "./store"
+import { LOCAL_USER, PUSH_PREF_KEYS, quietHoursInput, Store, VIEW_PREF_KEYS, type DeviceRecord, type LegacyPushPrefs, type PushPrefs, type UserRecord, type ViewPrefs } from "./store"
 
 export interface Speech {
   transcribe(audio: Uint8Array, format: string): Promise<string>
@@ -132,7 +132,8 @@ const SPEECH_TEST_TEXT = "Hi! This is how I will sound when I read replies to yo
 const SPEECH_TEST_MAX_CHARS = 300
 const APP_ROUTES = /^\/(?:|pair|approve|new|settings|s\/[^/]+)$/
 const STATIC_PATH = /^(?:\/[A-Za-z0-9_-][A-Za-z0-9._-]*)+$/
-const LOGIN_NEXT = /^\/(?:s\/[A-Za-z0-9_-]+)?$/
+/** Where a one-time sign-in link may land: home, or a session (with Voice mode starting: `?voice=1`). */
+const LOGIN_NEXT = /^\/(?:s\/[A-Za-z0-9_-]+(?:\?voice=1)?)?$/
 const CONTENT_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -265,10 +266,26 @@ export function startCentral(options: CentralOptions): Central {
   registry.subscribeAlerts((alert) => {
     // Push goes to the session owner's devices only; an alert without an owner goes nowhere.
     if (!alert.owner) return
-    notifier.notify(alert.kind, alert.sessionID, alert.title, alert.detail, alert.text, alert.owner).catch((cause) => {
+    const extra = alert.requestID ? { requestID: alert.requestID } : undefined
+    notifier.notify(alert.kind, alert.sessionID, alert.title, alert.detail, alert.text, alert.owner, extra).catch((cause) => {
       console.error("[opencode-hub] push notification failed:", cause instanceof Error ? cause.message : cause)
     })
   })
+
+  /** GET /api/push/prefs: the device's toggles and quiet hours, the user's muted sessions, and the subscriptions held. */
+  const pushPrefsView = (deviceID: string, userID: string, endpoint?: string | null) => {
+    const mine = store.pushSubscriptions().filter((s) => s.deviceID === deviceID)
+    return Response.json(
+      {
+        prefs: store.pushPrefs(deviceID),
+        quietHours: store.quietHours(deviceID) ?? null,
+        muted: store.mutedSessions(userID),
+        subscriptions: mine.length,
+        ...(endpoint ? { subscribed: mine.some((s) => s.endpoint === endpoint) } : {}),
+      },
+      { headers: NO_STORE },
+    )
+  }
 
   const cookie = (token: string, maxAge = COOKIE_MAX_AGE) =>
     `${COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secure ? "; Secure" : ""}`
@@ -501,6 +518,8 @@ export function startCentral(options: CentralOptions): Central {
       const input = await body(request)
       const target = pushTarget(input.subscription)
       if (!target) return error(400, "Invalid push subscription")
+      // pushsubscriptionchange: the service worker sends the endpoint it replaces.
+      if (typeof input.oldEndpoint === "string" && input.oldEndpoint !== target.endpoint) store.removePushSubscription(device.id, input.oldEndpoint)
       store.addPushSubscription(device.id, target)
       const prefs = prefsInput(input.prefs)
       return Response.json({ prefs: prefs ? store.setPushPrefs(device.id, prefs) : store.pushPrefs(device.id) })
@@ -512,15 +531,35 @@ export function startCentral(options: CentralOptions): Central {
       }
       return new Response(null, { status: 204 })
     }),
-    route("GET", "/api/push/prefs", "user", ({ device }) =>
-      Response.json({
-        prefs: store.pushPrefs(device.id),
-        subscriptions: store.pushSubscriptions().filter((s) => s.deviceID === device.id).length,
-      }),
-    ),
-    route("PUT", "/api/push/prefs", "user", async ({ request, device }) =>
-      Response.json({ prefs: store.setPushPrefs(device.id, prefsInput(await body(request)) ?? {}) }),
-    ),
+    route("GET", "/api/push/prefs", "user", ({ device, user, url }) => pushPrefsView(device.id, user.id, url.searchParams.get("endpoint"))),
+    route("PUT", "/api/push/prefs", "user", async ({ request, device, user }) => {
+      const input = await body(request)
+      if ("quietHours" in input) {
+        const quiet = input.quietHours === null ? null : quietHoursInput(input.quietHours)
+        if (quiet === undefined) return error(400, "quietHours must be {start: \"HH:MM\", end: \"HH:MM\", timeZone} or null")
+        store.setQuietHours(device.id, quiet)
+      }
+      const prefs = prefsInput(input)
+      if (prefs) store.setPushPrefs(device.id, prefs)
+      return pushPrefsView(device.id, user.id)
+    }),
+    route("PUT", "/api/push/mute", "user", async ({ request, user }) => {
+      const input = await body(request)
+      const sessionID = input.sessionID
+      if (typeof sessionID !== "string" || !sessionID || sessionID.length > 200 || typeof input.muted !== "boolean") {
+        return error(400, "Expected {sessionID, muted}")
+      }
+      return Response.json({ muted: store.setSessionMuted(user.id, sessionID, input.muted) })
+    }),
+    route("POST", "/api/push/test", "user", async ({ device }) => {
+      const subscriptions = store.pushSubscriptions().filter((s) => s.deviceID === device.id).length
+      if (subscriptions === 0) return Response.json({ sent: 0, failed: [], subscriptions })
+      const result = await push.test(device.id)
+      if ("limited" in result) {
+        return Response.json({ error: "Wait a few seconds before sending another test" }, { status: 429, headers: { "retry-after": String(result.retryAfter) } })
+      }
+      return Response.json({ ...result, subscriptions: store.pushSubscriptions().filter((s) => s.deviceID === device.id).length })
+    }),
     // The caller's own settings (pairing mode: the single owner's are the server default).
     route("GET", "/api/settings/speech", "user", ({ user }) => Response.json(speechSettings.view(speechScope(user.id)), { headers: NO_STORE })),
     // Raw JSON: anything but an object is refused by the validator.
@@ -598,6 +637,7 @@ export function startCentral(options: CentralOptions): Central {
     }),
     route("GET", "/api/sessions/:session/timeline/messages/:message/parts/:part", "session", async ({ params }) =>
       Response.json(await spokes.request(ownerOf(params.session!), { op: "timelinePart", sessionID: params.session!, messageID: params.message!, partID: params.part! }), { headers: NO_STORE })),
+    route("GET", "/api/sessions/:session/timeline/messages/:message/files/:index", "session", ({ params }) => timelineFile(params.session!, params.message!, params.index!)),
     route(
       "GET",
       "/api/sessions/:session/context",
@@ -767,14 +807,24 @@ export function startCentral(options: CentralOptions): Central {
   }
 
   async function turn(request: Request, server: Server<SpokeSocketData>, sessionID: string): Promise<Response> {
-    const raw = (await body(request)).text
+    const input = await body(request)
+    const raw = input.text
     const text = typeof raw === "string" ? raw.trim() : ""
-    if (!text) return error(400, "Empty prompt")
+    if (input.images !== undefined) {
+      const problem = promptImagesProblem(input.images)
+      if (problem) return error(400, problem)
+    }
+    // Only the validated fields go on; an empty list is the same as none.
+    const images = Array.isArray(input.images) && input.images.length
+      ? (input.images as PromptImage[]).map(({ mime, data, name }) => ({ mime, data, ...(name ? { name } : {}) }))
+      : undefined
+    if (!text && !images) return error(400, "Empty prompt")
     if (text.length > MAX_PROMPT_CHARS) return error(400, `Prompt longer than ${MAX_PROMPT_CHARS} characters`)
+    const attached = images ? { images } : {}
     const connID = ownerOf(sessionID)
     // While anything in the tree runs, typed input redirects the current work instead of queueing.
     if (registry.running(sessionID)) {
-      const { inboxID } = await spokes.request(connID, { op: "steer", sessionID, text })
+      const { inboxID } = await spokes.request(connID, { op: "steer", sessionID, text, ...attached })
       return Response.json({ mode: "steer", inboxID }, { status: 202 })
     }
     // A stop or interrupt releases the lock and answers this request at once, even if the spoke never does.
@@ -786,10 +836,24 @@ export function startCentral(options: CentralOptions): Central {
     server.timeout(request, 0)
     try {
       const voiceStyle = registry.exposed(sessionID) === true
-      return Response.json(await Promise.race([spokes.request(connID, { op: "turn", sessionID, text, voiceStyle }), stopped]))
+      return Response.json(await Promise.race([spokes.request(connID, { op: "turn", sessionID, text, voiceStyle, ...attached }), stopped]))
     } finally {
       release()
     }
+  }
+
+  /** GET …/timeline/messages/:message/files/:index: one image of a user message, as bytes. */
+  async function timelineFile(sessionID: string, messageID: string, rawIndex: string): Promise<Response> {
+    const index = /^\d{1,3}$/.test(rawIndex) ? Number(rawIndex) : NaN
+    if (!Number.isInteger(index) || messageID.length > 300) return error(400, "Expected an attachment index 0–999")
+    const { file, tooLarge } = await spokes.request(ownerOf(sessionID), { op: "timelineFile", sessionID, messageID, index })
+    if (tooLarge) return error(413, "This image is too large to show here")
+    // Only image types that are safe to render inline are served (never SVG or HTML).
+    if (!file || typeof file.data !== "string" || !PROMPT_IMAGE_MIMES.includes(file.mime)) return error(404, "No such image")
+    const bytes = Buffer.from(file.data, "base64")
+    return new Response(bytes, {
+      headers: { "content-type": file.mime, "content-length": String(bytes.length), "cache-control": "private, no-store", "x-content-type-options": "nosniff" },
+    })
   }
 
   /** Connection that owns the session, or a 409. */
@@ -1003,11 +1067,11 @@ function pushTarget(value: unknown): { endpoint: string; keys: { p256dh: string;
   return { endpoint, keys: { p256dh, auth } }
 }
 
-/** Boolean pref fields from untrusted input; undefined when nothing applies. */
-function prefsInput(value: unknown): Partial<PushPrefs> | undefined {
+/** Boolean pref fields (and 0.5.0's `blocked`) from untrusted input; undefined when nothing applies. */
+function prefsInput(value: unknown): (Partial<PushPrefs> & LegacyPushPrefs) | undefined {
   if (typeof value !== "object" || value === null) return undefined
-  const prefs: Partial<PushPrefs> = {}
-  for (const key of Object.keys(DEFAULT_PUSH_PREFS) as Array<keyof PushPrefs>) {
+  const prefs: Partial<PushPrefs> & LegacyPushPrefs = {}
+  for (const key of [...PUSH_PREF_KEYS, "blocked"] as const) {
     const v = (value as Record<string, unknown>)[key]
     if (typeof v === "boolean") prefs[key] = v
   }

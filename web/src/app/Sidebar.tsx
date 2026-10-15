@@ -7,6 +7,7 @@ import { sessionMenu } from "./actions"
 import { enrollments, me, rows } from "./hub"
 import { route, sessionHref } from "./router"
 import { Icon, IconButton, Menu, StatusIcon } from "./ui"
+import { voiceState } from "./voice"
 
 const GROUP_KEY = "hub.sidebar.groupBy"
 const SORT_KEY = "hub.sidebar.sort"
@@ -119,14 +120,20 @@ export function Sidebar(props: { onClose: () => void; onCollapse: () => void; ph
 
 function SideRow(props: { row: SessionRow; active: boolean; onPick: () => void }) {
   const r = () => props.row
+  const voiceHere = () => voiceState().phase !== "off" && voiceState().sessionID === r().id
   return (
-    <li class={`side-row${props.active ? " active" : ""}${r().unread ? " unread" : ""}`}>
+    <li class={`side-row${props.active ? " active" : ""}${r().unread ? " unread" : ""}${voiceHere() ? " voice-here" : ""}`}>
       <a href={sessionHref(r().id)} class="side-row-link" aria-current={props.active ? "page" : undefined} onClick={props.onPick} title={`${r().title} · ${r().where} · ${r().machineName}`}>
         <StatusIcon state={r().state} />
         <span class="side-title">{r().title}</span>
-        <Show when={r().conversation || r().exposed}>
-          <span class={`voice-badge${r().conversation ? " live" : ""}`} title={r().conversation ? "Voice conversation on" : "Voice on"}>
-            <Icon name={r().conversation ? "wave" : "mic"} />
+        <Show when={r().conversation || r().exposed || voiceHere()}>
+          <span
+            class={`voice-badge${r().conversation || voiceHere() ? " live" : ""}`}
+            role="img"
+            aria-label={voiceHere() ? "Voice mode on here" : r().conversation ? "Voice conversation on" : "Voice on"}
+            title={voiceHere() ? "Voice mode on here" : r().conversation ? "Voice conversation on" : "Voice on"}
+          >
+            <Icon name={r().conversation || voiceHere() ? "wave" : "mic"} />
           </span>
         </Show>
         <Show when={r().unread}>

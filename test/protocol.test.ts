@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { encode, parseServerMessage, parseSpokeMessage, PROTOCOL_VERSION } from "../src/protocol"
+import { encode, MAX_PROMPT_IMAGE_BYTES, MAX_PROMPT_IMAGES, MAX_PROMPT_IMAGES_BASE64, parseServerMessage, parseSpokeMessage, promptImagesProblem, PROTOCOL_VERSION } from "../src/protocol"
 
 const hello = {
   t: "hello",
@@ -46,6 +46,8 @@ describe("parseSpokeMessage", () => {
   test("spokes may only send their own request ops", () => {
     expect(parseSpokeMessage(j({ t: "req", id: "1", req: { op: "pairCode" } }))).toBeDefined()
     expect(parseSpokeMessage(j({ t: "req", id: "1", req: { op: "handoff", sessionID: "ses_1" } }))).toBeDefined()
+    expect(parseSpokeMessage(j({ t: "req", id: "1", req: { op: "openLink", sessionID: "ses_1", voice: true } }))).toBeDefined()
+    expect(parseSpokeMessage(j({ t: "req", id: "1", req: { op: "openLink", sessionID: "ses_1", voice: "yes" } }))).toBeUndefined()
     expect(parseSpokeMessage(j({ t: "req", id: "1", req: { op: "turn", sessionID: "ses_1", text: "x", voiceStyle: true } }))).toBeUndefined()
   })
 })
@@ -165,5 +167,54 @@ describe("open-in-terminal fields", () => {
     const r = (req: unknown) => JSON.stringify({ t: "req", id: "c", req })
     expect(parseServerMessage(r({ op: "create", directory: "/home/user/p", herdrWorkspace: "w7" }))).toBeDefined()
     expect(parseServerMessage(r({ op: "create", directory: "/home/user/p", herdrWorkspace: "" }))).toBeUndefined()
+  })
+})
+
+describe("prompt images", () => {
+  const png = (size = 64) => {
+    const bytes = Buffer.alloc(size)
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes)
+    return bytes.toString("base64")
+  }
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4]).toString("base64")
+  const r = (req: unknown) => JSON.stringify({ t: "req", id: "i", req })
+
+  test("accepts up to four well-formed images and names", () => {
+    expect(promptImagesProblem([{ mime: "image/png", data: png(), name: "shot.png" }, { mime: "image/jpeg", data: jpeg }])).toBeUndefined()
+    expect(promptImagesProblem(Array.from({ length: MAX_PROMPT_IMAGES }, () => ({ mime: "image/png", data: png() })))).toBeUndefined()
+  })
+
+  test("refuses too many, bad mime, bad base64, wrong magic bytes, oversize and bad names", () => {
+    expect(promptImagesProblem("x")).toMatch(/array/)
+    expect(promptImagesProblem(Array.from({ length: MAX_PROMPT_IMAGES + 1 }, () => ({ mime: "image/png", data: png() })))).toMatch(/at most 4/)
+    expect(promptImagesProblem([{ mime: "image/svg+xml", data: png() }])).toMatch(/type/)
+    expect(promptImagesProblem([{ mime: "image/png", data: "not base64!" }])).toMatch(/base64/)
+    expect(promptImagesProblem([{ mime: "image/png", data: "iVBORw0KGgp=" }])).toMatch(/base64/) // non-canonical padding
+    expect(promptImagesProblem([{ mime: "image/png", data: "" }])).toMatch(/base64|empty/)
+    expect(promptImagesProblem([{ mime: "image/jpeg", data: png() }])).toMatch(/not a image\/jpeg|does not match/)
+    expect(promptImagesProblem([{ mime: "image/png", data: png(MAX_PROMPT_IMAGE_BYTES + 1) }])).toMatch(/larger than/)
+    // Each under the per-image cap, together over the total cap.
+    const big = png(Math.floor(MAX_PROMPT_IMAGE_BYTES * 0.9))
+    expect(big.length * 2).toBeGreaterThan(MAX_PROMPT_IMAGES_BASE64)
+    expect(promptImagesProblem([{ mime: "image/png", data: big }, { mime: "image/png", data: big }])).toMatch(/together/)
+    expect(promptImagesProblem([{ mime: "image/png", data: png(), name: 5 }])).toMatch(/name/)
+    expect(promptImagesProblem([{ mime: "image/png", data: png(), name: "x".repeat(201) }])).toMatch(/name/)
+    expect(promptImagesProblem([null])).toBeDefined()
+  })
+
+  test("turn and steer carry images; text may be empty only with images", () => {
+    const images = [{ mime: "image/png", data: png(), name: "a.png" }]
+    expect(parseServerMessage(r({ op: "turn", sessionID: "s", text: "", voiceStyle: false, images }))).toBeDefined()
+    expect(parseServerMessage(r({ op: "steer", sessionID: "s", text: "", images }))).toBeDefined()
+    expect(parseServerMessage(r({ op: "turn", sessionID: "s", text: "", voiceStyle: false }))).toBeUndefined()
+    expect(parseServerMessage(r({ op: "turn", sessionID: "s", text: "", voiceStyle: false, images: [] }))).toBeUndefined()
+    expect(parseServerMessage(r({ op: "steer", sessionID: "s", text: "hi", images: [{ mime: "text/plain", data: png() }] }))).toBeUndefined()
+  })
+
+  test("timelineFile asks for one attachment of a message", () => {
+    expect(parseServerMessage(r({ op: "timelineFile", sessionID: "s", messageID: "m", index: 0 }))).toBeDefined()
+    expect(parseServerMessage(r({ op: "timelineFile", sessionID: "s", messageID: "m", index: -1 }))).toBeUndefined()
+    expect(parseServerMessage(r({ op: "timelineFile", sessionID: "s", messageID: "m", index: 1.5 }))).toBeUndefined()
+    expect(parseServerMessage(r({ op: "timelineFile", sessionID: "s", messageID: "", index: 0 }))).toBeUndefined()
   })
 })

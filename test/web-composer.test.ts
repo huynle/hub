@@ -64,3 +64,31 @@ describe("composerReducer", () => {
     expect(run(s, { type: "rejected", id: 99, message: "x" })).toEqual(s)
   })
 })
+
+describe("image attachments", () => {
+  const image = (id: string) => ({ id, mime: "image/jpeg", data: "/9j/AAAA", name: `${id}.jpg`, preview: `blob:${id}` })
+
+  test("attached images can be removed; images alone can be sent", () => {
+    const s = run(initialComposer(), { type: "attach", image: image("a") }, { type: "attach", image: image("b") }, { type: "detach", id: "a" })
+    expect(s.images.map((i) => i.id)).toEqual(["b"])
+    expect(composerView(s, { running: false, offline: false }).canSubmit).toBe(true)
+    expect(composerView(run(s, { type: "detach", id: "b" }), { running: false, offline: false }).canSubmit).toBe(false)
+  })
+
+  test("submit takes the images with the text; a rejection puts both back", () => {
+    const sent = run(initialComposer(), { type: "attach", image: image("a") }, { type: "submit", id: 1 })
+    expect(sent.images).toEqual([])
+    expect(sent.pending).toEqual([{ id: 1, text: "", images: [image("a")] }])
+    const back = run(sent, { type: "attach", image: image("b") }, { type: "rejected", id: 1, message: "too big" })
+    expect(back.images.map((i) => i.id)).toEqual(["a", "b"])
+    expect(back).toMatchObject({ draft: "", error: "too big" })
+  })
+
+  test("never more than four; an attach error shows until the next input", () => {
+    const four = run(initialComposer(), ...["a", "b", "c", "d", "e"].map((id) => ({ type: "attach" as const, image: image(id) })))
+    expect(four.images.map((i) => i.id)).toEqual(["a", "b", "c", "d"])
+    const failed = run(four, { type: "attachError", message: "Attach at most 4 images" })
+    expect(failed.error).toBe("Attach at most 4 images")
+    expect(run(failed, { type: "detach", id: "a" }).error).toBeUndefined()
+  })
+})

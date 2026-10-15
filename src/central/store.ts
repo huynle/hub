@@ -39,6 +39,8 @@ export interface UserRecord {
   modelPrefs?: Record<string, SessionModelPrefs>
   /** Session ID → when the user last read it (ms), least recently marked first. */
   reads?: Record<string, number>
+  /** Sessions whose notifications the user muted, oldest first. */
+  mutedSessions?: string[]
 }
 
 /** Workspace keys are the phone's group keys: `herdr:<workspaceID>` or a folder path. */
@@ -72,14 +74,82 @@ export interface MachineRecord {
 
 /** Which notifications a device wants. */
 export interface PushPrefs {
+  /** A session sent to the phone from the terminal. */
   handoff: boolean
-  blocked: boolean
+  /** A session asks a question (form). */
+  question: boolean
+  /** A session waits for a permission. */
+  permission: boolean
+  /** A root session's run succeeded. */
   finished: boolean
+  /** A root session's run failed. */
+  failed: boolean
   /** Conversation mode replies while no device is watching the session. */
   say: boolean
 }
 
-export const DEFAULT_PUSH_PREFS: Readonly<PushPrefs> = Object.freeze({ handoff: true, blocked: true, finished: false, say: true })
+export const PUSH_PREF_KEYS = ["handoff", "question", "permission", "finished", "failed", "say"] as const satisfies readonly (keyof PushPrefs)[]
+
+/** Defaults as in 0.5.0: hand-offs and anything blocking on, finished (which covered failures) off. */
+export const DEFAULT_PUSH_PREFS: Readonly<PushPrefs> = Object.freeze({
+  handoff: true,
+  question: true,
+  permission: true,
+  finished: false,
+  failed: false,
+  say: true,
+})
+
+/** 0.5.0's prefs: one toggle for questions and permissions, one for every finished run. */
+export interface LegacyPushPrefs {
+  blocked?: boolean
+}
+
+/** A device's quiet hours: local "HH:MM" times in an IANA time zone; start > end spans midnight. */
+export interface QuietHours {
+  start: string
+  end: string
+  timeZone: string
+}
+
+const CLOCK_TIME = /^([01]\d|2[0-3]):[0-5]\d$/
+
+/** A valid IANA time zone name for Intl. */
+export function validTimeZone(zone: unknown): zone is string {
+  if (typeof zone !== "string" || !zone || zone.length > 64) return false
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: zone })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Quiet hours from untrusted input, or undefined when invalid. */
+export function quietHoursInput(value: unknown): QuietHours | undefined {
+  if (typeof value !== "object" || value === null) return undefined
+  const { start, end, timeZone } = value as Record<string, unknown>
+  if (typeof start !== "string" || typeof end !== "string" || !CLOCK_TIME.test(start) || !CLOCK_TIME.test(end)) return undefined
+  if (!validTimeZone(timeZone)) return undefined
+  return { start, end, timeZone }
+}
+
+/** Most sessions a user can mute (oldest are forgotten first). */
+export const MUTED_SESSIONS_LIMIT = 500
+
+/** Current prefs from a stored (possibly 0.5.0) record. */
+function normalizePushPrefs(stored: (Partial<PushPrefs> & LegacyPushPrefs) | undefined): PushPrefs {
+  const out: PushPrefs = { ...DEFAULT_PUSH_PREFS }
+  if (!stored) return out
+  if (typeof stored.blocked === "boolean") {
+    out.question = stored.blocked
+    out.permission = stored.blocked
+    // 0.5.0's "finished" covered failed runs too.
+    if (typeof stored.finished === "boolean" && typeof stored.failed !== "boolean") out.failed = stored.finished
+  }
+  for (const key of PUSH_PREF_KEYS) if (typeof stored[key] === "boolean") out[key] = stored[key]
+  return out
+}
 
 export interface DeviceRecord {
   id: string
@@ -87,7 +157,8 @@ export interface DeviceRecord {
   tokenHash: string
   created: number
   lastSeen: number
-  pushPrefs?: Partial<PushPrefs>
+  pushPrefs?: Partial<PushPrefs> & LegacyPushPrefs
+  quietHours?: QuietHours
   ownerID: string
 }
 
@@ -290,19 +361,49 @@ export class Store {
 
   pushPrefs(deviceID: string): PushPrefs {
     const device = this.state.devices.find((d) => d.id === deviceID)
-    return { ...DEFAULT_PUSH_PREFS, ...device?.pushPrefs }
+    return normalizePushPrefs(device?.pushPrefs)
   }
 
-  setPushPrefs(deviceID: string, prefs: Partial<PushPrefs>): PushPrefs {
+  /** Applies the boolean toggles given; a legacy `blocked` sets question and permission. */
+  setPushPrefs(deviceID: string, prefs: Partial<PushPrefs> & LegacyPushPrefs): PushPrefs {
     const device = this.state.devices.find((d) => d.id === deviceID)
     if (!device) return { ...DEFAULT_PUSH_PREFS }
     const next = this.pushPrefs(deviceID)
-    for (const key of Object.keys(DEFAULT_PUSH_PREFS) as Array<keyof PushPrefs>) {
-      if (typeof prefs[key] === "boolean") next[key] = prefs[key]
-    }
+    if (typeof prefs.blocked === "boolean") next.question = next.permission = prefs.blocked
+    for (const key of PUSH_PREF_KEYS) if (typeof prefs[key] === "boolean") next[key] = prefs[key]
     device.pushPrefs = next
     this.save()
     return { ...next }
+  }
+
+  quietHours(deviceID: string): QuietHours | undefined {
+    const quiet = this.state.devices.find((d) => d.id === deviceID)?.quietHours
+    return quiet ? { ...quiet } : undefined
+  }
+
+  /** Sets (validated by the caller) or clears (null) a device's quiet hours. */
+  setQuietHours(deviceID: string, quiet: QuietHours | null): QuietHours | undefined {
+    const device = this.state.devices.find((d) => d.id === deviceID)
+    if (!device) return undefined
+    if (quiet) device.quietHours = { start: quiet.start, end: quiet.end, timeZone: quiet.timeZone }
+    else delete device.quietHours
+    this.save()
+    return this.quietHours(deviceID)
+  }
+
+  mutedSessions(userID: string): string[] {
+    return [...(this.user(userID)?.mutedSessions ?? [])]
+  }
+
+  setSessionMuted(userID: string, sessionID: string, muted: boolean): string[] {
+    const user = this.user(userID)
+    if (!user) return []
+    const list = (user.mutedSessions ?? []).filter((id) => id !== sessionID)
+    if (muted) list.push(sessionID)
+    while (list.length > MUTED_SESSIONS_LIMIT) list.shift()
+    user.mutedSessions = list
+    this.save()
+    return [...list]
   }
 
   private dropPush(match: (record: PushSubscriptionRecord) => boolean): boolean {
@@ -512,5 +613,9 @@ function migrate(state: StateData, t: number, options: StoreOptions): void {
   }
   for (const record of [...state.machines, ...state.devices]) {
     if (typeof record.ownerID !== "string" || !record.ownerID) record.ownerID = LOCAL_USER
+  }
+  // 0.5.0 push prefs ({handoff, blocked, finished, say}) → the split toggles.
+  for (const device of state.devices) {
+    if (device.pushPrefs && "blocked" in device.pushPrefs) device.pushPrefs = normalizePushPrefs(device.pushPrefs)
   }
 }

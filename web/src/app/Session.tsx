@@ -9,23 +9,30 @@ import { composerReducer, composerView, initialComposer, type ComposerAction } f
 import { treeRunning } from "../lib/store"
 import { transcriptBlocks, type Block } from "../lib/transcript"
 import { createStore } from "solid-js/store"
-import { Conversation, type ConversationState } from "../voice/conversation"
-import { micDevice, player, startDictation, unlockAudio, voicePrefs, type Dictation } from "../voice/audio"
+import { unlockAudio } from "../voice/audio"
 import { sessionMenu } from "./actions"
 import { api, errorText, getJSON, HttpError, sessionPath } from "./api"
+import { prepareImage } from "./attach"
+import { takeFirstTurn } from "./first-turn"
 import { Composer, VoiceBar } from "./Composer"
-import { hub, live, liveTick, lookup, markRead, me, onMessage, rows, setVoice, speechReady } from "./hub"
+import { hub, live, liveTick, lookup, markRead, me, onMessage, rows, speechReady } from "./hub"
 import { isPhone, railOpen, setRailOpen, toggleSidebar } from "./layout"
 import { ModelPicker, createModels, modelLabel, type ModelKind } from "./ModelMenu"
 import { DiffPanel, Rail, type Summary } from "./Rail"
 import { navigate } from "./router"
 import { toast } from "./toast"
+import { allowVoiceNotifications, dictation, dictationFor, drafts, voice, voiceNotifyHint, voiceState } from "./voice"
+import { VoicePill } from "./VoicePill"
 import { Transcript, type TickState } from "./Transcript"
 import { Icon, IconButton, Menu, STATE_LABEL, StatusIcon, ago, now } from "./ui"
 import { formatElapsed } from "../core/feedback-core"
+import { takeVoiceParam } from "../core/voice-autostart"
 
 const PRESENCE_MS = 30_000
 const SUMMARY_THROTTLE_MS = 2000
+
+/** The session a ?voice=1 link asked to start Voice mode in, until its view starts it. */
+let voiceRequest: string | undefined
 
 export function SessionView(props: { id: string }) {
   const id = props.id
@@ -118,36 +125,32 @@ export function SessionView(props: { id: string }) {
         at: timeline.get(`activity:${m.sessionID}:${item.id}`)?.at ?? item.at,
       })
       bump()
-    } else if ((m.type === "delta" || m.type === "reasoning") && rootID === id && typeof m.messageID === "string") {
-      const reasoning = m.type === "reasoning"
-      const key = `${m.messageID}:${reasoning ? "reasoning" : "text"}`
-      const previous = timeline.get(key)?.text ?? ""
+    } else if (m.type === "reasoning" && rootID === id && typeof m.messageID === "string" && typeof m.delta === "string") {
+      timeline.appendReasoning({ sessionID: m.sessionID, messageID: m.messageID, delta: m.delta })
+      bump()
+    } else if (m.type === "delta" && rootID === id && typeof m.messageID === "string" && typeof m.text === "string") {
+      const key = `${m.messageID}:text`
       timeline.upsert({
         key,
         messageID: m.messageID,
         sessionID: m.sessionID,
-        kind: reasoning ? "reasoning" : "assistant",
-        text: `${previous}${reasoning ? m.delta : m.text}`,
-        ...(reasoning ? { state: "running" } : { live: true }),
+        kind: "assistant",
+        text: `${timeline.get(key)?.text ?? ""}${m.text}`,
+        live: true,
         at: timeline.get(key)?.at ?? Date.now(),
       })
       // Text after reasoning ends that reasoning.
-      if (!reasoning) for (const r of timeline.rows()) if (r.kind === "reasoning" && r.state === "running" && r.sessionID === m.sessionID) timeline.upsert({ key: r.key, state: "done", completed: Date.now() } as never)
+      timeline.endReasoning(m.sessionID)
       bump()
     } else if (m.type === "status" && m.sessionID === id) {
       for (const text of statusNotes(lastStatus, m.sessions, id)) note(text, "sys")
       lastStatus = m.sessions
       if (!treeRunning(m.sessions)) {
-        for (const r of timeline.rows()) {
-          if (r.live) timeline.upsert({ key: r.key, live: false } as never)
-          if (r.kind === "reasoning" && r.state === "running") timeline.upsert({ key: r.key, state: "done" } as never)
-        }
+        for (const r of timeline.rows()) if (r.live) timeline.upsert({ key: r.key, live: false } as never)
+        timeline.endReasoning(undefined)
       }
-      convo()?.onStatus(m.sessions)
       bump()
       scheduleSummary()
-    } else if ((m.type === "say" || m.type === "heard" || m.type === "conversation") && m.sessionID === id) {
-      convo()?.onEvent(m)
     }
   })
 
@@ -205,18 +208,48 @@ export function SessionView(props: { id: string }) {
   const [picker, setPicker] = createSignal<ModelKind | undefined>()
 
   // ---------- composer ----------
-  const [composer, setComposer] = createSignal(initialComposer())
-  const act = (a: ComposerAction) => setComposer((s) => composerReducer(s, a))
+  // The draft lives in the app-level draft store, so it survives switching sessions and dictation can fill it.
+  const [composer, setComposer] = createSignal({ ...initialComposer(), draft: drafts.get(id) })
+  const act = (a: ComposerAction) => {
+    setComposer((s) => composerReducer(s, a))
+    drafts.set(id, composer().draft)
+  }
+  onCleanup(
+    drafts.subscribe((changed) => {
+      if (changed === id && drafts.get(id) !== composer().draft) setComposer((s) => composerReducer(s, { type: "input", text: drafts.get(id) }))
+    }),
+  )
   const view = () => composerView(composer(), { running: running(), offline: offline() })
   let submitSeq = 0
 
+  // Images are prepared one at a time, in the order they were added.
+  const [attaching, setAttaching] = createSignal(false)
+  let attachQueue = Promise.resolve()
+  function attach(files: File[]) {
+    attachQueue = attachQueue.then(async () => {
+      setAttaching(true)
+      try {
+        for (const file of files) {
+          try {
+            act({ type: "attach", image: await prepareImage(file, composer().images) })
+          } catch (e) {
+            act({ type: "attachError", message: errorText(e) })
+          }
+        }
+      } finally {
+        setAttaching(false)
+      }
+    })
+  }
+
   async function submit() {
     const text = composer().draft.trim()
-    if (!text) return
-    const c = convo()
-    if (c) {
+    const images = composer().images
+    if (!text && !images.length) return
+    // Voice mode speaks replies to utterances; a message with images goes as a typed turn instead.
+    if (voiceHere() && !images.length) {
       act({ type: "input", text: "" })
-      void c.sendTyped(text)
+      void voice.sendTyped(id, text)
       return
     }
     const sub = ++submitSeq
@@ -224,14 +257,15 @@ export function SessionView(props: { id: string }) {
     const sentAt = Date.now()
     batch(() => {
       act({ type: "submit", id: sub })
-      timeline.upsert({ key, kind: "user", text, at: sentAt })
+      timeline.upsert({ key, kind: "user", text, at: sentAt, ...(images.length ? { images: images.map(({ name, mime, preview }) => ({ name, mime, preview })) } : {}) })
       setTicks((t) => ({ ...t, [key]: "pending" }))
       bump()
     })
     stick = true
     toEnd()
     try {
-      const res = await api(`${sessionPath(id)}/turn`, { method: "POST", json: { text } })
+      const json = { text, ...(images.length ? { images: images.map(({ mime, data, name }) => ({ mime, data, name })) } : {}) }
+      const res = await api(`${sessionPath(id)}/turn`, { method: "POST", json })
       const result = await res.json().catch(() => ({}))
       act({ type: "accepted", id: sub })
       setTicks((t) => ({ ...t, [key]: res.status === 202 ? "sent" : "heard" }))
@@ -247,7 +281,7 @@ export function SessionView(props: { id: string }) {
       const message = e instanceof HttpError && e.status === 504 ? "OpenCode did not answer in time. The session may still be working." : errorText(e)
       batch(() => {
         act({ type: "rejected", id: sub, message })
-        timeline.upsert({ key, kind: "user", text: "" })
+        timeline.upsert({ key, kind: "user", text: "", images: [] })
         bump()
       })
     }
@@ -267,100 +301,79 @@ export function SessionView(props: { id: string }) {
   }
 
   // ---------- dictation ----------
-  const [dictating, setDictating] = createSignal<false | number>(false)
-  const [transcribing, setTranscribing] = createSignal(false)
-  let dictation: Dictation | undefined
-  async function dictate() {
-    if (dictation) {
-      const d = dictation
-      dictation = undefined
-      setDictating(false)
-      setTranscribing(true)
-      try {
-        const text = await d.finish()
-        if (!text) toast("Didn't catch that. Try again.")
-        else act({ type: "input", text: composer().draft ? `${composer().draft.replace(/\s+$/, "")} ${text}` : text })
-      } catch (e) {
-        toast(errorText(e), "err")
-      } finally {
-        setTranscribing(false)
-      }
-      return
-    }
-    try {
-      dictation = await startDictation((left) => setDictating(left))
-      setDictating(60)
-    } catch (e) {
-      toast(errorText(e), "err")
-    }
-  }
+  // App-level: the text goes into this session's draft; leaving the session while recording cancels it.
+  const dictated = () => dictationFor(id)
+  const dictate = () => dictation.toggle(id)
 
   // ---------- Voice mode ----------
-  const [convo, setConvo] = createSignal<Conversation<string> | undefined>()
-  const [voiceState, setVoiceState] = createSignal<ConversationState>("off")
-  const [level, setLevel] = createSignal(0)
-  const [held, setHeld] = createSignal("")
+  // App-level (one session at a time; it keeps running while other sessions are viewed). This view shows its
+  // bubbles and notes while on screen.
+  const vs = voiceState
+  const voiceHere = () => vs().phase !== "off" && vs().sessionID === id
+  const voiceElsewhere = () => vs().phase !== "off" && vs().sessionID !== undefined && vs().sessionID !== id
+  const voiceError = () => (vs().error?.sessionID === id && !vs().error!.gesture ? vs().error!.message : undefined)
+  /** The browser blocked starting Voice mode until the user taps (e.g. opened from /voice): a big button. */
+  const voiceNeedsTap = () => vs().error?.sessionID === id && vs().error!.gesture === true
   const voiceBlocked = () => {
     const setup = speechSetup(speechReady() ?? undefined, me()?.publicURL)
     return setup?.micBlocked ? "Set up speech in Settings to use the microphone" : undefined
   }
-
-  async function toggleVoice() {
-    const current = convo()
-    if (current) return void current.stop()
-    unlockAudio()
-    if (!exposed()) {
-      if (!(await setVoice(id, true))) return
-      // Wait (briefly) for the catalog to report Voice on before starting.
-      for (let i = 0; i < 25 && !exposed(); i++) await new Promise((r) => setTimeout(r, 200))
-    }
-    const c = new Conversation<string>({
-      sessionID: id,
-      api,
-      player,
-      ui: {
-        state: (name) => setVoiceState(name),
-        level: (x) => setLevel(x),
-        held: (text) => setHeld(text),
-        user: (text) => {
-          const key = `voice:${++localSeq}`
-          timeline.upsert({ key, kind: "user", text, at: Date.now() })
-          setTicks((t) => ({ ...t, [key]: "pending" }))
+  onCleanup(
+    voice.attach(id, {
+      user: (text) => {
+        const key = `voice:${++localSeq}`
+        timeline.upsert({ key, kind: "user", text, at: Date.now() })
+        setTicks((t) => ({ ...t, [key]: "pending" }))
+        bump()
+        return key
+      },
+      tick: (key, kind) => setTicks((t) => ({ ...t, [key]: kind })),
+      agent: (message) => {
+        const key = message.messageID ? `${message.messageID}:text` : `say:${++localSeq}`
+        const { mode, text } = reconcileSay(timeline.get(key)?.text ?? "", message.text)
+        if (mode !== "keep") {
+          timeline.upsert({ key, messageID: message.messageID, kind: "assistant", text, at: timeline.get(key)?.at ?? Date.now() })
           bump()
-          return key
-        },
-        tick: (key, kind) => setTicks((t) => ({ ...t, [key]: kind })),
-        agent: (message) => {
-          const key = message.messageID ? `${message.messageID}:text` : `say:${++localSeq}`
-          const { mode, text } = reconcileSay(timeline.get(key)?.text ?? "", message.text)
-          if (mode !== "keep") {
-            timeline.upsert({ key, messageID: message.messageID, kind: "assistant", text, at: timeline.get(key)?.at ?? Date.now() })
-            bump()
-          }
-        },
-        note: (text, kind) => note(text, kind ?? "sys"),
-        ended: () => {
-          setConvo(undefined)
-          setVoiceState("off")
-        },
+        }
       },
-      options: {
-        cues: voicePrefs.cues,
-        background: voicePrefs.background,
-        speed: () => voicePrefs.speed,
-        title: () => found()?.session.title || "OpenCode session",
-        status: status(),
-        deviceId: micDevice() || undefined,
-      },
-    })
-    setConvo(c)
-    const started = await c.start()
-    if (!started) setConvo(undefined)
-    else note(`Voice mode on${c.agent ? ` (${c.agent} agent)` : ""}. Speak naturally; say “stop” to interrupt, “pause listening” to end.`, "sys")
+      note: (text, kind) => note(text, kind ?? "sys"),
+    }),
+  )
+
+  /** The Voice button: Voice mode on here (turning it off elsewhere first), or off when it is on here. */
+  async function toggleVoice() {
+    if (!voiceHere()) {
+      unlockAudio()
+      dictation.cancel()
+    }
+    await voice.toggle(id)
+    if (voice.isOn(id) && voice.state.phase === "on") note(`Voice mode on${voice.state.agent ? ` (${voice.state.agent} agent)` : ""}. Speak naturally; say “stop” to interrupt, “pause listening” to end.`, "sys")
   }
+
+  // /s/<id>?voice=1 (from /voice in the TUI): Voice mode on once the session is known; the param goes away.
+  // Kept outside the view: replacing the URL may mount the view again.
+  const autostart = takeVoiceParam(location.href)
+  if (autostart.voice) {
+    voiceRequest = id
+    navigate(autostart.path, { replace: true })
+  }
+  createEffect(() => {
+    if (voiceRequest !== id || !found() || voiceBlocked()) return
+    voiceRequest = undefined
+    if (!voiceHere()) void toggleVoice()
+  })
 
   // ---------- lifecycle ----------
   onMount(() => {
+    // Started from /new: its prompt is this session's first turn.
+    const first = takeFirstTurn(id)
+    if (first) {
+      batch(() => {
+        act({ type: "input", text: first.text })
+        for (const image of first.images) act({ type: "attach", image })
+      })
+      void submit()
+    }
     void loadTimeline()
     void loadBacklog()
     void loadSummary()
@@ -370,20 +383,15 @@ export function SessionView(props: { id: string }) {
     presenceTimer = setInterval(() => document.visibilityState === "visible" && void presence(true), PRESENCE_MS)
     document.addEventListener("visibilitychange", onVisibility)
   })
-  const leave = () => {
-    convo()?.stop({ keepalive: true })
-    void presence(false, true)
-  }
+  const leave = () => void presence(false, true)
   window.addEventListener("pagehide", leave)
   onCleanup(() => {
     unsubscribe()
-    dictation?.cancel()
     clearInterval(presenceTimer)
     clearTimeout(summaryTimer)
     clearTimeout(readTimer)
     document.removeEventListener("visibilitychange", onVisibility)
     window.removeEventListener("pagehide", leave)
-    if (!player.paused) player.pause()
     leave()
   })
 
@@ -417,7 +425,7 @@ export function SessionView(props: { id: string }) {
     const s = found()?.session
     if (!s) return "Not connected"
     const pending = blockers().length
-    const agent = convo()?.agent ? `${convo()!.agent} agent` : s.conversation ? "Voice agent" : "Session agent"
+    const agent = voiceHere() && vs().agent ? `${vs().agent} agent` : s.conversation ? "Voice agent" : "Session agent"
     return `${agent} · ${pending ? `${pending} request${pending === 1 ? "" : "s"} waiting` : exposed() ? "Voice on" : "Voice off"}`
   }
   const changedFiles = () => summary()?.changes?.files.map((f) => f.file) ?? []
@@ -458,6 +466,9 @@ export function SessionView(props: { id: string }) {
             <button type="button" class="btn small changes" onClick={() => setDiffFile(changedFiles()[0])} aria-label="Show changes">
               <span class="add">+{summary()!.changes!.additions}</span> <span class="del">−{summary()!.changes!.deletions}</span>
             </button>
+          </Show>
+          <Show when={voiceElsewhere()}>
+            <VoicePill />
           </Show>
           <IconButton icon="rail" label={railOpen() ? "Hide details" : "Show details"} aria-pressed={railOpen()} onClick={() => setRailOpen(!railOpen())} />
         </header>
@@ -502,30 +513,50 @@ export function SessionView(props: { id: string }) {
 
         <div class="dock">
           <div class="column">
-            <Show when={convo()}>
+            <Show when={voiceHere()}>
               <VoiceBar
-                state={voiceState()}
-                level={level()}
-                held={held()}
+                state={vs().voice}
+                level={vs().level}
+                held={vs().held}
                 working={running()}
                 model={modelLabel(models.prefs(), "voice")}
-                onMute={() => (convo()!.paused ? convo()!.resume() : convo()!.pause())}
-                onEnd={() => void convo()?.stop()}
+                onMute={() => voice.mute()}
+                onEnd={() => void voice.end()}
                 onModel={() => setPicker("voice")}
+                notifyHint={voiceNotifyHint()}
+                onAllowNotifications={() => void allowVoiceNotifications()}
               />
+            </Show>
+            <Show when={voiceNeedsTap()}>
+              <button type="button" class="btn primary tap-to-start" onClick={() => void toggleVoice()}>
+                Tap to start Voice mode
+              </button>
+            </Show>
+            <Show when={voiceError()}>
+              <p class="note err voice-error" role="alert">
+                Voice mode: {voiceError()}
+              </p>
             </Show>
             <Composer
               draft={composer().draft}
+              images={composer().images}
+              attaching={attaching()}
               view={view()}
               error={composer().error}
-              voiceOn={!!convo()}
+              voiceOn={voiceHere()}
               voiceBlocked={voiceBlocked()}
-              dictating={dictating()}
-              transcribing={transcribing()}
+              dictating={dictated().recording}
+              transcribing={dictated().transcribing}
               metaLeft={metaLeft()}
               voiceModel={models.error() ? "unavailable" : modelLabel(models.prefs(), "voice")}
               workerModel={models.error() ? "unavailable" : modelLabel(models.prefs(), "worker")}
               onInput={(text) => act({ type: "input", text })}
+              onAttach={attach}
+              onDetach={(imageID) => {
+                const image = composer().images.find((i) => i.id === imageID)
+                if (image?.preview.startsWith("blob:")) URL.revokeObjectURL(image.preview)
+                act({ type: "detach", id: imageID })
+              }}
               onSubmit={() => void submit()}
               onStop={() => void stop()}
               onDictate={() => void dictate()}
