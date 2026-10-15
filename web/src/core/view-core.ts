@@ -205,6 +205,12 @@ export function roots(machine: ViewMachine | undefined): ViewSession[] {
   return [...merged.values()]
 }
 
+/** Whether the prefs hide a session (by ID, or by its project folder, own folder or Herdr workspace). */
+export function hiddenBy(prefs: ViewPrefs | undefined): (s: ViewSession) => boolean {
+  const hidden = hiddenSets(prefs)
+  return (s) => isHidden(s, hidden)
+}
+
 const hiddenSets = (prefs: ViewPrefs | undefined) => ({ sessions: new Set(prefs?.hiddenSessions ?? []), workspaces: new Set(prefs?.hiddenWorkspaces ?? []) })
 const herdrWorkspaces = (machine: ViewMachine | undefined): HerdrWorkspace[] => machine?.terminals?.herdr?.workspaces ?? []
 

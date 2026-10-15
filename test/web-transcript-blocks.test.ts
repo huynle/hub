@@ -1,0 +1,92 @@
+// Transcript layout (web/src/lib/transcript.ts), markdown (web/src/lib/markdown.ts) and patch parsing
+// (web/src/lib/diff.ts) for the session view.
+import { describe, expect, test } from "bun:test"
+import { transcriptBlocks } from "../web/src/lib/transcript"
+import { parseInline, parseMarkdown, safeHref } from "../web/src/lib/markdown"
+import { parsePatch } from "../web/src/lib/diff"
+
+describe("transcriptBlocks", () => {
+  test("user pills, assistant text, thoughts with duration, and consecutive tools folded into one group", () => {
+    const blocks = transcriptBlocks([
+      { key: "u1", kind: "user", text: "fix it", at: 1 },
+      { key: "r1", kind: "reasoning", text: "hmm", state: "done", at: 1000, completed: 13_400 },
+      { key: "t1", kind: "tool", name: "read", state: "done", at: 2 },
+      { key: "t2", kind: "tool", name: "bash", state: "failed", at: 3 },
+      { key: "t3", kind: "tool", name: "edit", state: "running", at: 4 },
+      { key: "a1", kind: "assistant", text: "Done.", at: 5 },
+      { key: "t4", kind: "tool", name: "bash", state: "done", at: 6 },
+    ])
+    expect(blocks.map((b) => b.type)).toEqual(["user", "thought", "tools", "assistant", "tools"])
+    expect(blocks[1]).toMatchObject({ type: "thought", seconds: 12, running: false })
+    expect(blocks[2]).toMatchObject({ type: "tools", failed: 1, running: 1 })
+    expect(blocks[2]!.type === "tools" && blocks[2]!.items.map((i) => i.key)).toEqual(["t1", "t2", "t3"])
+  })
+
+  test("subagent rows link to the child session; its own nested rows stay out of the transcript", () => {
+    const blocks = transcriptBlocks([
+      { key: "sub:kid", kind: "subagent", label: "Fix tests", state: "working", sessionID: "kid", depth: 0 },
+      { key: "k1", kind: "tool", name: "read", state: "done", sessionID: "kid", depth: 1 },
+      { key: "a1", kind: "assistant", text: "ok", depth: 0 },
+    ])
+    expect(blocks).toEqual([
+      { type: "subagent", key: "sub:kid", sessionID: "kid", label: "Fix tests", state: "working" },
+      { type: "assistant", key: "a1", text: "ok", live: false },
+    ])
+  })
+
+  test("running thought without timing; empty assistant text is skipped", () => {
+    const blocks = transcriptBlocks([
+      { key: "r", kind: "reasoning", state: "running", text: "" },
+      { key: "a", kind: "assistant", text: "" },
+    ])
+    expect(blocks).toEqual([{ type: "thought", key: "r", text: "", running: true }])
+  })
+})
+
+describe("markdown", () => {
+  test("paragraphs, headings, lists, fenced code, quotes and rules", () => {
+    const blocks = parseMarkdown("# Title\n\nSome *text* here.\nsame para\n\n- one\n- two\n\n1. first\n2. second\n\n```ts\nconst x = 1\n```\n> quoted\n\n---")
+    expect(blocks.map((b) => b.type)).toEqual(["heading", "paragraph", "list", "list", "code", "quote", "rule"])
+    expect(blocks[0]).toMatchObject({ type: "heading", level: 1 })
+    expect(blocks[2]).toMatchObject({ type: "list", ordered: false })
+    expect(blocks[3]).toMatchObject({ type: "list", ordered: true, start: 1 })
+    expect(blocks[4]).toEqual({ type: "code", lang: "ts", text: "const x = 1" })
+  })
+
+  test("an unterminated fence (still streaming) is still code", () => {
+    expect(parseMarkdown("```\npartial")).toEqual([{ type: "code", lang: "", text: "partial" }])
+  })
+
+  test("inline code, bold, italic and links; unsafe links become text", () => {
+    expect(parseInline("a `b` **c** _d_ [e](https://x.dev) [f](javascript:alert(1))")).toEqual([
+      { type: "text", text: "a " },
+      { type: "code", text: "b" },
+      { type: "text", text: " " },
+      { type: "strong", children: [{ type: "text", text: "c" }] },
+      { type: "text", text: " " },
+      { type: "em", children: [{ type: "text", text: "d" }] },
+      { type: "text", text: " " },
+      { type: "link", href: "https://x.dev", children: [{ type: "text", text: "e" }] },
+      { type: "text", text: " " },
+      { type: "text", text: "f" },
+    ])
+    expect(safeHref("mailto:a@b.c")).toBe("mailto:a@b.c")
+    expect(safeHref("data:text/html,x")).toBeUndefined()
+  })
+})
+
+describe("parsePatch", () => {
+  test("numbers old and new lines across hunks", () => {
+    const lines = parsePatch("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,3 +1,3 @@\n keep\n-old\n+new\n same\n@@ -10,1 +10,2 @@\n ctx\n+added")
+    expect(lines.filter((l) => l.type !== "meta").map((l) => [l.type, l.oldNo, l.newNo, l.text])).toEqual([
+      ["hunk", undefined, undefined, "@@ -1,3 +1,3 @@"],
+      ["context", 1, 1, "keep"],
+      ["del", 2, undefined, "old"],
+      ["add", undefined, 2, "new"],
+      ["context", 3, 3, "same"],
+      ["hunk", undefined, undefined, "@@ -10,1 +10,2 @@"],
+      ["context", 10, 10, "ctx"],
+      ["add", undefined, 11, "added"],
+    ])
+  })
+})
