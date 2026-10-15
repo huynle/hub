@@ -722,6 +722,20 @@ describe("Spoke", () => {
     await turn
   })
 
+  test("model catalog entries are keyed by their OpenCode id, not the upstream modelID (gateway aliases)", async () => {
+    const { spoke, server, host, calls, catalog } = setup({ mode: "always", token: "tok" })
+    // A gateway provider: OpenCode id "claude-opus-5-5" sends modelID "claude/claude-opus-5-5" upstream.
+    catalog.splice(0, catalog.length, { id: "claude-opus-5-5", providerID: "omniroute", modelID: "claude/claude-opus-5-5", name: "Claude Opus 5.5", enabled: true, status: "active", variants: [{ id: "high" }] } as never)
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    await until(() => lastSessions(server)?.sessions.length === 1)
+    const listed = await server.request({ op: "models", sessionID: "ses_a" })
+    expect(listed.result).toEqual({ models: [{ providerID: "omniroute", modelID: "claude-opus-5-5", name: "Claude Opus 5.5", enabled: true, status: "active", variants: ["high"] }] })
+    await server.request({ op: "setModelPrefs", sessionID: "ses_a", voice: { providerID: "omniroute", modelID: "claude-opus-5-5", variant: "high" } })
+    await server.request({ op: "steer", sessionID: "ses_a", text: "hi" })
+    expect(calls.model.at(-1)).toEqual({ sessionID: "ses_a", model: { providerID: "omniroute", id: "claude-opus-5-5", variant: "high" } })
+  })
+
   test("normalizes timeline history, paginates it, and returns full tool detail", async () => {
     const { spoke, server, host, messages } = setup({ mode: "always", token: "tok" })
     await until(() => spoke.status().connection === "connected")

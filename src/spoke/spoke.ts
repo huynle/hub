@@ -741,11 +741,14 @@ export class Spoke {
         const raw = await this.host.listModels?.() ?? []
         return {
           models: raw.flatMap((value: any) => {
-            if (!value || typeof value.providerID !== "string" || typeof value.modelID !== "string") return []
+            // `id` is OpenCode's catalog key (what switchModel takes); `modelID` is the id sent upstream, which
+            // differs for aliased models (a gateway's "claude-opus-5-5" → "claude/claude-opus-5-5").
+            const id = typeof value?.id === "string" && value.id ? value.id : value?.modelID
+            if (!value || typeof value.providerID !== "string" || typeof id !== "string") return []
             return [{
               providerID: value.providerID,
-              modelID: value.modelID,
-              name: typeof value.name === "string" ? value.name : value.modelID,
+              modelID: id,
+              name: typeof value.name === "string" ? value.name : id,
               enabled: value.enabled !== false,
               status: typeof value.status === "string" ? value.status : "active",
               variants: Array.isArray(value.variants) ? value.variants.flatMap((v: any) => typeof v?.id === "string" ? [v.id] : []) : [],

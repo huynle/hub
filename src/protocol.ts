@@ -11,6 +11,7 @@ export type PermissionDecision = "once" | "always" | "reject"
 
 export interface ModelSelection {
   readonly providerID: string
+  /** OpenCode's catalog id of the model (Model.Info `id`, what switchModel takes), not its upstream `modelID`. */
   readonly modelID: string
   readonly variant?: string
 }

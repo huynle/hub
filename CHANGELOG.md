@@ -22,6 +22,12 @@
   `{models, note?}`: a gateway's full `/models` list is narrowed to speech-to-text or text-to-speech models
   (never chat, image, embedding, rerank or music models), the configured model is always offered first, and
   when nothing is labeled every model shows with a note. The pickers group models by provider.
+- **Fix: Voice and Worker model menus.** The spoke listed models by their upstream `modelID` instead of
+  OpenCode's catalog `id`, so models of gateway providers with aliases (e.g. `claude-opus-5-5` sent as
+  `claude/claude-opus-5-5`) could not be selected or switched to. The menus now handle catalogs of hundreds
+  of models (at most 100 rows rendered with a count, arrows + Enter, number keys only outside the search box so
+  digits can be typed), have a Back button in the variant step, never hide every model when a catalog
+  reports them all disabled, and report a failed save.
 
 ## 0.5.0
 

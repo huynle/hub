@@ -166,7 +166,7 @@ function fixtures(): Fixture[] {
 }
 let sessions = fixtures()
 let created = 0
-let fail = { expose: false, create: false, models: false, prefs: false }
+let fail = { expose: false, create: false, models: false, prefs: false, modelPrefs: false }
 let serviceConnected = true
 let herdr = { on: true, fail: false }
 type ViewPrefs = { hiddenSessions: string[]; hiddenWorkspaces: string[]; pinnedSessions: string[]; pinnedWorkspaces: string[] }
@@ -549,12 +549,40 @@ async function scenario() {
 
 let reads: Record<string, Record<string, number>> = {}
 let modelPrefs: Record<string, { voice?: unknown; worker?: unknown }> = {}
-const MODELS = [
-  { providerID: "anthropic", modelID: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", enabled: true, status: "active", variants: ["default", "high", "max"] },
-  { providerID: "anthropic", modelID: "claude-haiku-4-5", name: "Claude Haiku 4.5", enabled: true, status: "active", variants: [] },
-  { providerID: "openai", modelID: "gpt-5", name: "GPT-5", enabled: true, status: "active", variants: ["low", "medium", "high"] },
-  { providerID: "openrouter", modelID: "qwen/qwen3-coder", name: "Qwen3 Coder", enabled: true, status: "active", variants: [] },
-]
+/** A realistic catalog: a gateway provider with hundreds of aliased models, native providers, effort variants. */
+const MODELS = (() => {
+  const efforts = ["low", "medium", "high"]
+  const list: Array<{ providerID: string; modelID: string; name: string; enabled: boolean; status: string; variants: string[] }> = [
+    { providerID: "anthropic", modelID: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", enabled: true, status: "active", variants: ["default", "high", "max"] },
+    { providerID: "anthropic", modelID: "claude-haiku-4-5", name: "Claude Haiku 4.5", enabled: true, status: "active", variants: [] },
+    { providerID: "anthropic", modelID: "claude-opus-4-1", name: "Claude Opus 4.1", enabled: true, status: "active", variants: ["default", "high"] },
+    { providerID: "anthropic", modelID: "claude-3-haiku", name: "Claude 3 Haiku", enabled: false, status: "deprecated", variants: [] },
+    { providerID: "openai", modelID: "gpt-5", name: "GPT-5", enabled: true, status: "active", variants: efforts },
+    { providerID: "openai", modelID: "gpt-5-mini", name: "GPT-5 mini", enabled: true, status: "active", variants: efforts },
+    { providerID: "openai", modelID: "gpt-4.1", name: "GPT-4.1", enabled: true, status: "active", variants: [] },
+    { providerID: "openrouter", modelID: "qwen/qwen3-coder", name: "Qwen3 Coder", enabled: true, status: "active", variants: [] },
+    { providerID: "google", modelID: "gemini-2.5-pro", name: "Gemini 2.5 Pro", enabled: true, status: "active", variants: ["low", "high"] },
+    { providerID: "google", modelID: "gemini-2.5-flash", name: "Gemini 2.5 Flash", enabled: true, status: "active", variants: [] },
+  ]
+  const vendors = ["anthropic", "openai", "google", "meta-llama", "mistralai", "qwen", "deepseek", "moonshotai", "x-ai", "z-ai"]
+  for (let i = 0; i < 40; i++) {
+    const vendor = vendors[i % vendors.length]!
+    list.push({ providerID: "openrouter", modelID: `${vendor}/model-${i + 1}`, name: `${vendor}: Model ${i + 1}`, enabled: true, status: i % 13 === 0 ? "beta" : "active", variants: i % 4 === 0 ? efforts : [] })
+  }
+  // The gateway: OpenCode ids are short aliases ("claude-opus-5-5"); the upstream modelID is not shown.
+  for (const [id, name, variants] of [
+    ["claude-opus-5-5", "Claude Opus 5.5", ["high", "max"]],
+    ["claude-sonnet-5-5", "Claude Sonnet 5.5", ["high", "max"]],
+    ["claude-haiku-5-5", "Claude Haiku 5.5", []],
+    ["gpt-6-sol", "GPT-6 Sol", ["none", "low", "medium", "high", "xhigh", "max"]],
+    ["kimi-k3", "Kimi K3", []],
+  ] as const) list.push({ providerID: "omniroute", modelID: id, name, enabled: true, status: "active", variants: [...variants] })
+  for (let i = 0; i < 180; i++) {
+    const vendor = vendors[(i * 3) % vendors.length]!
+    list.push({ providerID: "omniroute", modelID: `${vendor}/gw-${String(i + 1).padStart(3, "0")}`, name: `${vendor} gateway model ${i + 1}`, enabled: true, status: "active", variants: i % 9 === 0 ? efforts : [] })
+  }
+  return list
+})()
 const MODEL_DEFAULTS = { voice: { providerID: "anthropic", modelID: "claude-haiku-4-5" }, worker: { providerID: "anthropic", modelID: "claude-sonnet-4-5", variant: "high" } }
 const CHANGES = [
   { file: "web/src/app/Session.tsx", status: "modified", additions: 42, deletions: 7 },
@@ -648,7 +676,10 @@ async function consoleRoute(request: Request, url: URL, user: MockUser): Promise
     case "model-prefs":
       if (m === "PUT") {
         const change = await body()
+        log[log.length - 1]!.body = change
+        if (fail.modelPrefs) return Response.json({ error: "OpenCode did not answer" }, { status: 502 })
         modelPrefs[id] = { ...(modelPrefs[id] ?? {}), ...change }
+        for (const key of ["voice", "worker"] as const) if (modelPrefs[id]![key] === null) delete modelPrefs[id]![key]
       }
       return Response.json({ prefs: modelPrefs[id] ?? {}, defaults: MODEL_DEFAULTS })
     case "models":
@@ -800,7 +831,7 @@ const server = Bun.serve({
       activity = []
       status = [{ id: SESSION, title: "Mock session", state: "idle", blockers: [] }]
       sessions = fixtures()
-      fail = { expose: false, create: false, models: false, prefs: false }
+      fail = { expose: false, create: false, models: false, prefs: false, modelPrefs: false }
       reads = {}
       modelPrefs = {}
       turnRun++

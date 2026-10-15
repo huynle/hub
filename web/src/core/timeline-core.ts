@@ -29,8 +29,10 @@ export class ModelCatalog {
   groups(search = ""): Array<{ providerID: string; items: ModelItem[] }> {
     const query = fold(search.trim())
     const byProvider = new Map<string, ModelItem[]>()
+    // Disabled models are hidden, unless the catalog reports every model disabled (then nothing would show).
+    const hideDisabled = this.models.some((model) => model.enabled !== false)
     for (const model of this.models) {
-      if (model.enabled === false) continue
+      if (hideDisabled && model.enabled === false) continue
       if (query && !fold([model.name, model.modelID, model.providerID].join(" ")).includes(query)) continue
       const items = byProvider.get(model.providerID) ?? []
       items.push({ ...model, variants: [...(model.variants ?? [])] })

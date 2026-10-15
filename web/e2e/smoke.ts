@@ -197,12 +197,59 @@ async function desktop(browser: Browser): Promise<void> {
     await page.getByRole("button", { name: "Close diff" }).click()
   })
 
-  await check("desktop: model menu lists models with number keys", async () => {
-    await page.locator(".composer-meta .model-chip").nth(1).click()
-    await page.locator(".dialog .picker-opt").first().waitFor()
-    assert((await page.locator(".dialog .picker-opt kbd").first().textContent()) === "1", "number key hint")
+  await check("desktop: model menus handle a big catalog; pick a Voice model and a Worker model + variant", async () => {
+    const lastPut = async () => {
+      const { log } = (await (await fetch(`${BASE}/mock/log`)).json()) as { log: Array<{ method: string; path: string; body?: any }> }
+      return log.filter((e) => e.method === "PUT" && e.path.endsWith("/model-prefs")).at(-1)?.body
+    }
+    const chips = page.locator(".composer-meta .model-chip")
+    await chips.nth(0).getByText("Voice: claude-haiku-4-5").waitFor()
+    // Voice: search the big list, a typed digit stays in the search box, Enter picks the highlighted model.
+    await chips.nth(0).click()
+    const dialog = page.locator("dialog.picker[open]")
+    await dialog.locator(".picker-opt").first().waitFor()
+    assert((await dialog.locator(".picker-opt kbd").first().textContent()) === "1", "number key hint")
+    const status = (await dialog.getByRole("status").textContent()) ?? ""
+    assert(/^2\d\d models · showing 100/.test(status), `big catalog bounded: ${status}`)
+    await dialog.getByRole("searchbox").fill("")
+    await dialog.getByRole("searchbox").press("5")
+    assert((await dialog.getByRole("searchbox").inputValue()) === "5", "a digit typed in the search box is text")
+    await dialog.getByRole("searchbox").fill("haiku 5")
+    await dialog.locator(".picker-opt").first().waitFor()
+    assert((await dialog.locator(".picker-opt").count()) === 1, "one match for 'haiku 5'")
+    await dialog.getByRole("searchbox").press("Enter")
+    await dialog.waitFor({ state: "hidden" })
+    assert(JSON.stringify(await lastPut()) === JSON.stringify({ voice: { providerID: "omniroute", modelID: "claude-haiku-5-5" } }), `voice PUT body: ${JSON.stringify(await lastPut())}`)
+    await chips.nth(0).getByText("Voice: claude-haiku-5-5").waitFor()
+    // Worker: a model with variants → variant step (Back works) → pick "high".
+    await chips.nth(1).click()
+    await dialog.getByRole("searchbox").fill("gpt-6")
+    await dialog.locator(".picker-opt").getByText("GPT-6 Sol").click()
+    await dialog.getByText("Variant of GPT-6 Sol").waitFor()
+    await shot(page, "desktop-model-variants")
+    await dialog.getByRole("button", { name: "Back to models" }).click()
+    await dialog.getByRole("searchbox").waitFor()
+    await dialog.getByRole("searchbox").fill("gpt-6")
+    await dialog.locator(".picker-opt").getByText("GPT-6 Sol").click()
+    await dialog.getByRole("option", { name: /^high/ }).click()
+    await dialog.waitFor({ state: "hidden" })
+    assert(JSON.stringify(await lastPut()) === JSON.stringify({ worker: { providerID: "omniroute", modelID: "gpt-6-sol", variant: "high" } }), `worker PUT body: ${JSON.stringify(await lastPut())}`)
+    await chips.nth(1).getByText("Worker: gpt-6-sol · high").waitFor()
+    // The current model is marked when the menu opens again.
+    await chips.nth(1).click()
+    await dialog.getByRole("searchbox").fill("gpt-6")
+    assert((await dialog.locator('.picker-opt[aria-selected="true"]').textContent())?.includes("GPT-6 Sol"), "current model marked")
+    await dialog.getByRole("button", { name: "Close" }).click()
+    await dialog.waitFor({ state: "hidden" })
+    // A failed save is reported and the label stays.
+    await mock("/mock/fail", { modelPrefs: true })
+    await chips.nth(0).click()
+    await dialog.getByRole("searchbox").fill("kimi")
+    await dialog.locator(".picker-opt").first().click()
+    await page.getByText(/Couldn't set the Voice model/).waitFor()
+    await chips.nth(0).getByText("Voice: claude-haiku-5-5").waitFor()
+    await mock("/mock/fail", { modelPrefs: false })
     await shot(page, "desktop-model-picker")
-    await page.keyboard.press("Escape")
   })
 
   await check("desktop: a Voice-off session is inspectable and controllable", async () => {
