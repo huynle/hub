@@ -292,11 +292,23 @@ recent activity.
 
 ### Phone app (PWA)
 
-`web/` is a dependency-free PWA: `/` is the session browser (below), live over SSE; `/s/<id>` shows the conversation, blockers with Allow once / Always / Deny,
-a live activity feed, a tap-to-talk mic (60 s cap), hands-free Conversation mode (below), typed input, "Read replies aloud" and a
-voice speed slider; `/pair` and `/approve` handle pairing and machine approval; Settings has Voice (speed, progress cues,
-screen-off listening), Speech (STT/TTS providers), notification preferences, devices and machines (see
-[Voice feedback (phone)](#voice-feedback-phone)).
+`web/` is the OpenCode Hub console, a Solid + Vite + TypeScript PWA built to `web/dist` (`npm run build:web`;
+the Docker image, npm package and binaries ship the build). One store fed by the hub's SSE stream drives:
+
+- **Sidebar** (⌘B collapses; a drawer on phones): search, New session, Needs you, Running, Pinned, sessions open in a
+  terminal grouped by project (or server) with `+`, Recents; rows show status, Voice, an unread dot and a `⋯` menu
+  (pin, hide, stop, Voice on/off).
+- **`/`**: All sessions as a sortable, filterable table (a list on phones); filters and sort are kept per device.
+- **`/s/<id>`**: the transcript (markdown replies, "Thought for Ns", "Used N tools" with full details on demand,
+  subagent rows linking to their sessions), permission cards, and the composer: Send while idle, Steer while the
+  session tree runs, Stop for the whole tree, Dictate, Voice mode (hands-free, see below; turns Voice on first when
+  needed) with a microphone picker, and the Voice/Worker model menus. The right rail (a bottom sheet on phones) shows
+  the server, branch, context use, MCP servers and changed files with a diff viewer. Every session works with Voice
+  off; Voice only adds speech.
+- **`/new`**, **`/settings`** (account, notifications, Voice, Speech, machines and approvals, devices, admin),
+  **`/pair`**, **`/approve`**.
+
+Pure logic lives in `web/src/core` and `web/src/lib` (bun tests in `test/web-*.test.ts`).
 
 **Accounts** (multi-user hub, contract in [docs/multi-user.md](docs/multi-user.md); pure logic in
 `web/account-core.js`, tested with bun):
@@ -320,7 +332,7 @@ screen-off listening), Speech (STT/TTS providers), notification preferences, dev
 - A session link that is not yours (or is gone) shows **Session not found** with a link home.
 
 **Session browser** (`/`; contract in [docs/session-view.md](docs/session-view.md); pure logic in
-`web/view-core.js` and `web/browser-core.js`, tested with bun). Three tabs with counts:
+`web/src/core/view-core.ts` and `web/src/core/browser-core.ts`, tested with bun). Three tabs with counts:
 
 - **Open** (default): what is open in your terminals right now, like Herdr's sidebar. A **Needs you**
   strip first (blocked sessions from every machine, open or not, with the blocker and an Open button),
@@ -615,7 +627,7 @@ it again, say "pause listening", or leave the page to turn it off. Leaving the p
 
 ### Voice feedback (phone)
 
-Pure logic is in `web/feedback-core.js` (tested with bun); `web/cues.js` plays cues.
+Pure logic is in `web/src/core/feedback-core.ts` (tested with bun); `web/src/core/cues.ts` plays cues.
 
 - **Voice speed**: 0.75×–2.0× in 0.05 steps, next to "Read replies aloud" and in Settings → Voice
   (default 1.0×, stored per device in `localStorage`). It is applied on the phone as the audio
@@ -775,9 +787,15 @@ machines (a reverse proxy on the same host makes every request look local).
 ```sh
 git clone https://github.com/huynle/opencode-voice && cd opencode-voice
 npm install         # bun install works too
-npm test            # bun test
-npm run typecheck
+npm test            # bun test (scripts/test-ci.sh runs each file alone and builds the web app first)
+npm run typecheck   # hub and web app
+npm run build:web   # web/dist, served by `bun bin/hub.ts`
 ```
+
+Console development: `bun test/web-mock-hub.ts 4311` fakes a hub with fixtures (serves `web/dist`), and
+`npm run dev:web` serves the console with hot reload, proxying `/api` to it (`HUB_URL` for a real hub).
+`npm run test:e2e` runs a headless Chromium smoke test against the mock hub at desktop and phone sizes
+(`CHROMIUM_PATH` if Playwright's browsers are not installed; screenshots go to the temp dir).
 
 Point a project's `.opencode/opencode.jsonc` at your checkout to try changes:
 `{ "plugins": [{ "package": "/path/to/opencode-voice" }] }`. If the plugin is also installed globally,
