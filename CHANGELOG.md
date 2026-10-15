@@ -34,6 +34,12 @@
   start that is stopped now releases the microphone and turns conversation mode off again. Dictation is
   app-level: the text goes into the draft of the session where recording started (never sent), leaving that
   session while recording cancels it (a notice says so), and each session keeps its own unsent draft.
+- **Voice mode is one app-level toggle.** The Voice button turns Voice mode on for the session (turning
+  Voice on first when needed) and off again, and shows a pressed state while on. Only one session is in Voice
+  mode at a time: turning it on in another session first turns the current one off (conversation mode off,
+  microphone released, playback stopped). Voice mode keeps running while other sessions are viewed; they show
+  a "Voice: <session>" pill (a link back, with End) and the sidebar marks the session. A failure to turn it on
+  leaves Voice mode off and shows the error in that session. Dictation mutes Voice mode while it records.
 
 ## 0.5.0
 

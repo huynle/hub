@@ -1026,6 +1026,7 @@ const server = Bun.serve({
       if (action === "presence") return new Response(null, { status: 204 })
       if (action === "conversation" && m === "POST") {
         const body = await json()
+        last().body = body
         s.conversation = !!body.on
         emit({ type: "conversation", sessionID: id, on: s.conversation })
         return Response.json({ on: s.conversation, agent: "voice" })

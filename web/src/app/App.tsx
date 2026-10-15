@@ -8,7 +8,8 @@ import { NewSession } from "./NewSession"
 import { navigate, route } from "./router"
 import { SessionView } from "./Session"
 import { Settings } from "./Settings"
-import { dictation } from "./voice"
+import { dictation, voiceState } from "./voice"
+import { VoicePill } from "./VoicePill"
 import { Sidebar } from "./Sidebar"
 import { currentToast, dismissToast } from "./toast"
 import { IconButton } from "./ui"
@@ -89,6 +90,11 @@ export function App() {
             <main class="main">
               <Show when={sidebarCollapsed() && !isPhone()}>
                 <IconButton icon="sidebar" label="Show sidebar (⌘B)" class="expand-sidebar" onClick={toggleSidebar} />
+              </Show>
+              <Show when={voiceState().phase !== "off" && route().name !== "session"}>
+                <div class="voice-strip">
+                  <VoicePill />
+                </div>
               </Show>
               <Show when={hub.connection === "down"}>
                 <div class="conn-banner" role="status">

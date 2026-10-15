@@ -333,8 +333,11 @@ the Docker image, npm package and binaries ship the build). One store fed by the
 - **`/`**: All sessions as a sortable, filterable table (a list on phones); filters and sort are kept per device.
 - **`/s/<id>`**: the transcript (markdown replies, "Thought for Ns", "Used N tools" with full details on demand,
   subagent rows linking to their sessions), permission cards, and the composer: Send while idle, Steer while the
-  session tree runs, Stop for the whole tree, Dictate, Voice mode (hands-free, see below; turns Voice on first when
-  needed) with a microphone picker, and the Voice/Worker model menus. The right rail (a bottom sheet on phones) shows
+  session tree runs, Stop for the whole tree, Dictate (into this session's draft; leaving the session while
+  recording cancels it; each session keeps its own unsent draft), Voice mode (hands-free, see below; a toggle that
+  turns Voice on first when needed; one session at a time, so turning it on elsewhere turns the first one off; it
+  keeps running while you look at other sessions, which show a "Voice: <session>" pill with End) with a
+  microphone picker, and the Voice/Worker model menus. The right rail (a bottom sheet on phones) shows
   the server, branch, context use, MCP servers and changed files with a diff viewer. Every session works with Voice
   off; Voice only adds speech.
 - **`/new`**, **`/settings`** (account, notifications, Voice, Speech, machines and approvals, devices, admin),

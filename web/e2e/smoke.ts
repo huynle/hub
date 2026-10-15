@@ -277,6 +277,72 @@ async function desktop(browser: Browser): Promise<void> {
     await page.locator(".voice-bar").waitFor({ state: "detached" })
   })
 
+  await check("desktop: Voice mode is a toggle, one session at a time, with an indicator while viewing another session", async () => {
+    const go = (href: string) =>
+      page.evaluate((h) => {
+        const a = document.createElement("a")
+        a.href = h
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+      }, href)
+    const convoPosts = async () =>
+      ((await (await fetch(`${BASE}/mock/log`)).json()) as { log: Array<{ method: string; path: string; body?: any }> }).log
+        .filter((e) => e.method === "POST" && e.path.endsWith("/conversation"))
+        .map((e) => `${decodeURIComponent(e.path.split("/")[3]!)}:${e.body?.on}`)
+    await page.goto(`${BASE}/s/ses_mock`)
+    await page.locator(".msg.assistant").first().waitFor()
+    const button = page.locator(".split-main")
+    // Toggle on, then off, in A.
+    await page.getByRole("button", { name: "Start Voice mode" }).click()
+    await page.locator(".voice-bar").waitFor()
+    await page.locator(".voice-bar .voice-state").getByText(/Listening|Thinking/).waitFor()
+    assert((await button.getAttribute("aria-pressed")) === "true", "pressed while on")
+    assert(await page.locator(".split.on").isVisible(), "active style while on")
+    await page.getByRole("button", { name: "End Voice mode" }).click()
+    await page.locator(".voice-bar").waitFor({ state: "detached" })
+    assert((await button.getAttribute("aria-pressed")) === "false", "not pressed when off")
+    await page.waitForFunction(async () => {
+      const log = await (await fetch("/mock/log")).json()
+      return log.log.filter((e: any) => e.path.endsWith("/conversation")).at(-1)?.body?.on === false
+    })
+    // On in A; going to B keeps it on, with an indicator (top bar pill, sidebar row).
+    await page.getByRole("button", { name: "Start Voice mode" }).click()
+    await page.locator(".voice-bar .voice-state").getByText(/Listening|Thinking/).waitFor()
+    const before = (await convoPosts()).length
+    await go("/s/ses_10")
+    await page.waitForURL(/\/s\/ses_10$/)
+    await page.locator(".topbar .voice-pill").getByText("Mock session").waitFor()
+    assert((await page.locator(".voice-bar").count()) === 0, "no Voice bar in B")
+    assert(await page.locator(".sidebar .side-row.voice-here").first().isVisible(), "sidebar marks A")
+    assert((await convoPosts()).length === before, "navigating does not turn Voice mode off")
+    await shot(page, "desktop-voice-elsewhere")
+    // Turning it on in B turns A off first, then B on.
+    await page.getByRole("button", { name: "Start Voice mode" }).click()
+    await page.locator(".voice-bar .voice-state").getByText(/Listening|Thinking/).waitFor()
+    const posts = (await convoPosts()).slice(before)
+    assert(JSON.stringify(posts) === JSON.stringify(["ses_mock:false", "ses_10:true"]), `A off, then B on: ${posts.join(", ")}`)
+    assert((await page.locator(".topbar .voice-pill").count()) === 0, "no pill in the session in Voice mode")
+    // From A, the pill shows B; its End turns B off.
+    await go("/s/ses_mock")
+    await page.locator(".topbar .voice-pill").getByText("PWA icons").waitFor()
+    await page.locator(".topbar .voice-pill").getByRole("button", { name: "End Voice mode" }).click()
+    await page.locator(".topbar .voice-pill").waitFor({ state: "detached" })
+    assert((await convoPosts()).at(-1) === "ses_10:false", "pill End turns B off")
+    // On in A, then turning it on in a Voice-off session C fails: A is off and C shows the error.
+    await page.getByRole("button", { name: "Start Voice mode" }).click()
+    await page.locator(".voice-bar .voice-state").getByText(/Listening|Thinking/).waitFor()
+    await mock("/mock/fail", { expose: true })
+    await go("/s/ses_15")
+    await page.waitForURL(/\/s\/ses_15$/)
+    await page.locator(".topbar .voice-pill").waitFor()
+    await page.getByRole("button", { name: "Start Voice mode" }).click()
+    await page.locator(".voice-error").getByText(/Could not turn Voice on/).waitFor()
+    assert((await page.locator(".voice-pill").count()) === 0, "A is off")
+    assert((await convoPosts()).at(-1) === "ses_mock:false", "A was turned off")
+    await mock("/mock/fail", { expose: false })
+  })
+
   await check("desktop: Dictate fills the draft of the session on screen; each session keeps its own draft; leaving mid-recording cancels", async () => {
     const go = (href: string) =>
       page.evaluate((h) => {

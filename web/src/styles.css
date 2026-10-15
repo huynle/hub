@@ -299,6 +299,17 @@ pre.code { white-space: pre; font-size: 12px; }
 .split button:hover:not(:disabled) { background: var(--raise-2); color: var(--text); }
 .split button:disabled { opacity: 0.4; cursor: default; }
 .split-main { width: 32px; }
+.split.on { border-color: var(--accent); }
+.split.on .split-main { background: var(--accent); color: var(--accent-ink); }
+.split.on .split-main:hover:not(:disabled) { background: var(--accent); color: var(--accent-ink); filter: brightness(1.08); }
+.voice-pill { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 4px 0 8px; border: 1px solid var(--accent); border-radius: 999px; color: var(--accent); font-size: 12px; min-width: 0; max-width: 320px; }
+.voice-pill .icon { width: 14px; height: 14px; flex: none; }
+.voice-pill-link { color: inherit; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.voice-pill-link strong { color: var(--text); font-weight: 500; }
+.voice-pill .btn.small { height: 22px; padding: 0 8px; }
+.voice-strip { display: flex; justify-content: flex-end; padding: 8px 12px 0; }
+.side-row.voice-here .side-title { color: var(--accent); }
+.voice-error { margin: 0 0 8px; }
 .split-chev { width: 20px; border-left: 1px solid var(--line-2) !important; }
 .split-chev .icon { width: 12px; height: 12px; }
 .split.on { border-color: var(--accent); }

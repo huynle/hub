@@ -9,19 +9,19 @@ import { composerReducer, composerView, initialComposer, type ComposerAction } f
 import { treeRunning } from "../lib/store"
 import { transcriptBlocks, type Block } from "../lib/transcript"
 import { createStore } from "solid-js/store"
-import { Conversation, type ConversationState } from "../voice/conversation"
-import { micDevice, player, unlockAudio, voicePrefs } from "../voice/audio"
+import { unlockAudio } from "../voice/audio"
 import { sessionMenu } from "./actions"
 import { api, errorText, getJSON, HttpError, sessionPath } from "./api"
 import { prepareImage } from "./attach"
 import { Composer, VoiceBar } from "./Composer"
-import { hub, live, liveTick, lookup, markRead, me, onMessage, rows, setVoice, speechReady } from "./hub"
+import { hub, live, liveTick, lookup, markRead, me, onMessage, rows, speechReady } from "./hub"
 import { isPhone, railOpen, setRailOpen, toggleSidebar } from "./layout"
 import { ModelPicker, createModels, modelLabel, type ModelKind } from "./ModelMenu"
 import { DiffPanel, Rail, type Summary } from "./Rail"
 import { navigate } from "./router"
 import { toast } from "./toast"
-import { dictation, dictationFor, drafts } from "./voice"
+import { dictation, dictationFor, drafts, voice, voiceState } from "./voice"
+import { VoicePill } from "./VoicePill"
 import { Transcript, type TickState } from "./Transcript"
 import { Icon, IconButton, Menu, STATE_LABEL, StatusIcon, ago, now } from "./ui"
 import { formatElapsed } from "../core/feedback-core"
@@ -144,11 +144,8 @@ export function SessionView(props: { id: string }) {
         for (const r of timeline.rows()) if (r.live) timeline.upsert({ key: r.key, live: false } as never)
         timeline.endReasoning(undefined)
       }
-      convo()?.onStatus(m.sessions)
       bump()
       scheduleSummary()
-    } else if ((m.type === "say" || m.type === "heard" || m.type === "conversation") && m.sessionID === id) {
-      convo()?.onEvent(m)
     }
   })
 
@@ -244,11 +241,10 @@ export function SessionView(props: { id: string }) {
     const text = composer().draft.trim()
     const images = composer().images
     if (!text && !images.length) return
-    const c = convo()
     // Voice mode speaks replies to utterances; a message with images goes as a typed turn instead.
-    if (c && !images.length) {
+    if (voiceHere() && !images.length) {
       act({ type: "input", text: "" })
-      void c.sendTyped(text)
+      void voice.sendTyped(id, text)
       return
     }
     const sub = ++submitSeq
@@ -305,69 +301,46 @@ export function SessionView(props: { id: string }) {
   const dictate = () => dictation.toggle(id)
 
   // ---------- Voice mode ----------
-  const [convo, setConvo] = createSignal<Conversation<string> | undefined>()
-  const [voiceState, setVoiceState] = createSignal<ConversationState>("off")
-  const [level, setLevel] = createSignal(0)
-  const [held, setHeld] = createSignal("")
+  // App-level (one session at a time; it keeps running while other sessions are viewed). This view shows its
+  // bubbles and notes while on screen.
+  const vs = voiceState
+  const voiceHere = () => vs().phase !== "off" && vs().sessionID === id
+  const voiceElsewhere = () => vs().phase !== "off" && vs().sessionID !== undefined && vs().sessionID !== id
+  const voiceError = () => (vs().error?.sessionID === id ? vs().error!.message : undefined)
   const voiceBlocked = () => {
     const setup = speechSetup(speechReady() ?? undefined, me()?.publicURL)
     return setup?.micBlocked ? "Set up speech in Settings to use the microphone" : undefined
   }
-
-  async function toggleVoice() {
-    const current = convo()
-    if (current) return void current.stop()
-    unlockAudio()
-    if (!exposed()) {
-      if (!(await setVoice(id, true))) return
-      // Wait (briefly) for the catalog to report Voice on before starting.
-      for (let i = 0; i < 25 && !exposed() && !disposed; i++) await new Promise((r) => setTimeout(r, 200))
-    }
-    // The user left this session meanwhile: never start a conversation nobody can see or stop.
-    if (disposed) return
-    const c = new Conversation<string>({
-      sessionID: id,
-      api,
-      player,
-      ui: {
-        state: (name) => setVoiceState(name),
-        level: (x) => setLevel(x),
-        held: (text) => setHeld(text),
-        user: (text) => {
-          const key = `voice:${++localSeq}`
-          timeline.upsert({ key, kind: "user", text, at: Date.now() })
-          setTicks((t) => ({ ...t, [key]: "pending" }))
+  onCleanup(
+    voice.attach(id, {
+      user: (text) => {
+        const key = `voice:${++localSeq}`
+        timeline.upsert({ key, kind: "user", text, at: Date.now() })
+        setTicks((t) => ({ ...t, [key]: "pending" }))
+        bump()
+        return key
+      },
+      tick: (key, kind) => setTicks((t) => ({ ...t, [key]: kind })),
+      agent: (message) => {
+        const key = message.messageID ? `${message.messageID}:text` : `say:${++localSeq}`
+        const { mode, text } = reconcileSay(timeline.get(key)?.text ?? "", message.text)
+        if (mode !== "keep") {
+          timeline.upsert({ key, messageID: message.messageID, kind: "assistant", text, at: timeline.get(key)?.at ?? Date.now() })
           bump()
-          return key
-        },
-        tick: (key, kind) => setTicks((t) => ({ ...t, [key]: kind })),
-        agent: (message) => {
-          const key = message.messageID ? `${message.messageID}:text` : `say:${++localSeq}`
-          const { mode, text } = reconcileSay(timeline.get(key)?.text ?? "", message.text)
-          if (mode !== "keep") {
-            timeline.upsert({ key, messageID: message.messageID, kind: "assistant", text, at: timeline.get(key)?.at ?? Date.now() })
-            bump()
-          }
-        },
-        note: (text, kind) => note(text, kind ?? "sys"),
-        ended: () => {
-          setConvo(undefined)
-          setVoiceState("off")
-        },
+        }
       },
-      options: {
-        cues: voicePrefs.cues,
-        background: voicePrefs.background,
-        speed: () => voicePrefs.speed,
-        title: () => found()?.session.title || "OpenCode session",
-        status: status(),
-        deviceId: micDevice() || undefined,
-      },
-    })
-    setConvo(c)
-    const started = await c.start()
-    if (!started) setConvo(undefined)
-    else note(`Voice mode on${c.agent ? ` (${c.agent} agent)` : ""}. Speak naturally; say “stop” to interrupt, “pause listening” to end.`, "sys")
+      note: (text, kind) => note(text, kind ?? "sys"),
+    }),
+  )
+
+  /** The Voice button: Voice mode on here (turning it off elsewhere first), or off when it is on here. */
+  async function toggleVoice() {
+    if (!voiceHere()) {
+      unlockAudio()
+      dictation.cancel()
+    }
+    await voice.toggle(id)
+    if (voice.isOn(id) && voice.state.phase === "on") note(`Voice mode on${voice.state.agent ? ` (${voice.state.agent} agent)` : ""}. Speak naturally; say “stop” to interrupt, “pause listening” to end.`, "sys")
   }
 
   // ---------- lifecycle ----------
@@ -381,21 +354,15 @@ export function SessionView(props: { id: string }) {
     presenceTimer = setInterval(() => document.visibilityState === "visible" && void presence(true), PRESENCE_MS)
     document.addEventListener("visibilitychange", onVisibility)
   })
-  const leave = () => {
-    convo()?.stop({ keepalive: true })
-    void presence(false, true)
-  }
+  const leave = () => void presence(false, true)
   window.addEventListener("pagehide", leave)
-  let disposed = false
   onCleanup(() => {
-    disposed = true
     unsubscribe()
     clearInterval(presenceTimer)
     clearTimeout(summaryTimer)
     clearTimeout(readTimer)
     document.removeEventListener("visibilitychange", onVisibility)
     window.removeEventListener("pagehide", leave)
-    if (!player.paused) player.pause()
     leave()
   })
 
@@ -429,7 +396,7 @@ export function SessionView(props: { id: string }) {
     const s = found()?.session
     if (!s) return "Not connected"
     const pending = blockers().length
-    const agent = convo()?.agent ? `${convo()!.agent} agent` : s.conversation ? "Voice agent" : "Session agent"
+    const agent = voiceHere() && vs().agent ? `${vs().agent} agent` : s.conversation ? "Voice agent" : "Session agent"
     return `${agent} · ${pending ? `${pending} request${pending === 1 ? "" : "s"} waiting` : exposed() ? "Voice on" : "Voice off"}`
   }
   const changedFiles = () => summary()?.changes?.files.map((f) => f.file) ?? []
@@ -470,6 +437,9 @@ export function SessionView(props: { id: string }) {
             <button type="button" class="btn small changes" onClick={() => setDiffFile(changedFiles()[0])} aria-label="Show changes">
               <span class="add">+{summary()!.changes!.additions}</span> <span class="del">−{summary()!.changes!.deletions}</span>
             </button>
+          </Show>
+          <Show when={voiceElsewhere()}>
+            <VoicePill />
           </Show>
           <IconButton icon="rail" label={railOpen() ? "Hide details" : "Show details"} aria-pressed={railOpen()} onClick={() => setRailOpen(!railOpen())} />
         </header>
@@ -514,17 +484,22 @@ export function SessionView(props: { id: string }) {
 
         <div class="dock">
           <div class="column">
-            <Show when={convo()}>
+            <Show when={voiceHere()}>
               <VoiceBar
-                state={voiceState()}
-                level={level()}
-                held={held()}
+                state={vs().voice}
+                level={vs().level}
+                held={vs().held}
                 working={running()}
                 model={modelLabel(models.prefs(), "voice")}
-                onMute={() => (convo()!.paused ? convo()!.resume() : convo()!.pause())}
-                onEnd={() => void convo()?.stop()}
+                onMute={() => voice.mute()}
+                onEnd={() => void voice.end()}
                 onModel={() => setPicker("voice")}
               />
+            </Show>
+            <Show when={voiceError()}>
+              <p class="note err voice-error" role="alert">
+                Voice mode: {voiceError()}
+              </p>
             </Show>
             <Composer
               draft={composer().draft}
@@ -532,7 +507,7 @@ export function SessionView(props: { id: string }) {
               attaching={attaching()}
               view={view()}
               error={composer().error}
-              voiceOn={!!convo()}
+              voiceOn={voiceHere()}
               voiceBlocked={voiceBlocked()}
               dictating={dictated().recording}
               transcribing={dictated().transcribing}
