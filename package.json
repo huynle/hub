@@ -1,20 +1,23 @@
 {
-  "name": "@huynle/opencode-voice",
-  "version": "0.4.0",
-  "description": "Talk to your OpenCode sessions by voice from your phone or browser: hands-free conversation mode, a voice agent that delegates to subagents, live activity, and a self-hostable hub.",
+  "name": "@huynle/opencode-hub",
+  "version": "0.5.0",
+  "description": "A remote console for your OpenCode sessions: follow, steer and stop sessions from your phone or browser, with optional hands-free Voice and a self-hostable hub.",
   "license": "MIT",
   "author": "Huy Le",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/huynle/opencode-voice.git"
+    "url": "git+https://github.com/huynle/opencode-hub.git"
   },
-  "homepage": "https://github.com/huynle/opencode-voice#readme",
+  "homepage": "https://github.com/huynle/opencode-hub#readme",
   "bugs": {
-    "url": "https://github.com/huynle/opencode-voice/issues"
+    "url": "https://github.com/huynle/opencode-hub/issues"
   },
   "keywords": [
     "opencode",
     "opencode-plugin",
+    "hub",
+    "remote",
+    "console",
     "voice",
     "speech",
     "tts",
@@ -32,6 +35,7 @@
     "./package.json": "./package.json"
   },
   "bin": {
+    "opencode-hub": "bin/hub.ts",
     "opencode-voice-hub": "bin/hub.ts"
   },
   "files": [
@@ -40,11 +44,11 @@
     "rpc.ts",
     "src",
     "bin",
-    "web",
+    "web/dist",
     "docker",
     "Dockerfile",
     "scripts/hub-local.sh",
-    "scripts/com.opencode-voice.hub.plist",
+    "scripts/com.opencode-hub.hub.plist",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
@@ -57,7 +61,11 @@
   },
   "scripts": {
     "test": "bun test",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p web",
+    "build:web": "vite build --config web/vite.config.ts",
+    "dev:web": "vite --config web/vite.config.ts",
+    "test:e2e": "bun web/e2e/smoke.ts",
+    "prepack": "npm run build:web",
     "hub": "bun bin/hub.ts"
   },
   "dependencies": {
@@ -68,6 +76,10 @@
   "devDependencies": {
     "@types/bun": "^1.4.2",
     "@types/web-push": "^3.6.4",
-    "typescript": "^5.9.3"
+    "playwright-core": "^1.64.1",
+    "solid-js": "^1.9.17",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.4",
+    "vite-plugin-solid": "^2.11.14"
   }
 }

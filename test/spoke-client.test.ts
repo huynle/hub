@@ -165,6 +165,19 @@ describe("SpokeConnection", () => {
     expect(conn.state).toBe("connected")
   })
 
+  test("a result too large for one frame is answered with an error instead of breaking the connection", async () => {
+    const fake = fakeServer()
+    const conn = connect(fake.url, { handle: async () => ({ patch: '"'.repeat(600_000) }) })
+    await until(() => conn.state === "connected")
+    fake.send({ t: "req", id: "big", req: { op: "context", sessionID: "ses_a" } })
+    await until(() => fake.frames.some((f) => f.t === "res"))
+    const res = fake.frames.find((f) => f.t === "res")
+    expect(res).toMatchObject({ t: "res", id: "big", ok: false })
+    expect((res as { error?: string }).error).toContain("Result too large")
+    expect(fake.raw.every((text) => text.length <= 1_000_000)).toBe(true)
+    expect(conn.state).toBe("connected")
+  })
+
   test("request() resolves with the server's result and rejects on errors", async () => {
     const fake = fakeServer({
       onFrame: (m, ws) => {

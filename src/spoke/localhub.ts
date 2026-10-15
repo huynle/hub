@@ -1,4 +1,4 @@
-// Auto-start of a local hub for a loopback voice server. When nothing answers on the configured
+// Auto-start of a local hub for a loopback hub URL. When nothing answers on the configured
 // http://127.0.0.1:<port> (or localhost / [::1]), start `bun <this repo>/bin/hub.ts` as a detached
 // background process bound to that address, with output appended to hub.log. Without a bun install it
 // runs the hub with the current executable (OpenCode is a compiled Bun binary) and BUN_BE_BUN=1. A lockfile (hub.pid)
@@ -8,7 +8,9 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, st
 import { homedir } from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { hubEnv } from "../env"
 import { isLoopbackURL } from "../loopback"
+import { APP_DIR, LEGACY_APP_DIR, migrateLegacy, stateBase } from "../migrate"
 
 export interface ChildLike {
   readonly pid?: number
@@ -20,8 +22,15 @@ export interface ChildLike {
 export type SpawnLike = (command: string, args: readonly string[], options: object) => ChildLike
 
 export interface LocalHubOptions {
-  /** Where hub.pid and hub.log live (default $VOICE_STATE_DIR or ~/.local/state/opencode-voice). */
+  /**
+   * Where hub.pid and hub.log live (default $HUB_STATE_DIR or ~/.local/state/opencode-hub, migrated from
+   * ~/.local/state/opencode-voice first so the hub does not find a fresh, empty state directory).
+   */
   readonly stateDir?: string
+  /** Home directory for the default state directory (default os.homedir()). */
+  readonly home?: string
+  /** Where a one-time migration notice goes (default console). */
+  readonly log?: (message: string) => void
   /** This plugin's repository (default: resolved from this file). */
   readonly repoRoot?: string
   /** bun executable; shorthand for `runtime: {command: bun, env: {}}`. */
@@ -66,8 +75,8 @@ export function hubScript(root: string = repoRoot()): string {
   return path.join(root, "bin", "hub.ts")
 }
 
-export function defaultStateDir(env: Readonly<Record<string, string | undefined>> = process.env): string {
-  return env.VOICE_STATE_DIR || path.join(homedir(), ".local", "state", "opencode-voice")
+export function defaultStateDir(env: Readonly<Record<string, string | undefined>> = process.env, home: string = homedir()): string {
+  return hubEnv(env).HUB_STATE_DIR || path.join(stateBase(home), APP_DIR)
 }
 
 /** The runtime for this process: probes the real executable, PATH and home directory. */
@@ -113,7 +122,8 @@ export async function ensureLocalHub(server: string, options: LocalHubOptions = 
   const now = options.now ?? Date.now
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
   const alive = options.isAlive ?? pidAlive
-  const stateDir = options.stateDir ?? defaultStateDir(env)
+  const home = options.home ?? homedir()
+  const stateDir = options.stateDir ?? defaultStateDir(env, home)
   const lockFile = path.join(stateDir, "hub.pid")
   const logFile = path.join(stateDir, "hub.log")
   const bind = bindFor(url)
@@ -129,6 +139,9 @@ export async function ensureLocalHub(server: string, options: LocalHubOptions = 
 
   if (await answers(url.origin)) return { status: "running" }
 
+  if (options.stateDir === undefined && !hubEnv(env).HUB_STATE_DIR) {
+    migrateLegacy(path.join(stateBase(home), LEGACY_APP_DIR), stateDir, { skip: ["hub.pid"], ...(options.log ? { log: options.log } : {}) })
+  }
   mkdirSync(stateDir, { recursive: true, mode: 0o700 })
 
   // ---- the lock ----
@@ -143,7 +156,7 @@ export async function ensureLocalHub(server: string, options: LocalHubOptions = 
           status: "failed",
           error:
             `A local hub (pid ${existing.pid}) already runs on port ${existing.port}. ` +
-            `Point /voice → Server at http://127.0.0.1:${existing.port}, or stop that hub first.`,
+            `Point /hub → Server at http://127.0.0.1:${existing.port}, or stop that hub first.`,
         }
       }
       if (now() - existing.started < LOCK_STALE_MS) return { status: "busy", pid: existing.pid }
@@ -173,7 +186,9 @@ export async function ensureLocalHub(server: string, options: LocalHubOptions = 
     }
     const runtime = options.runtime ?? (options.bun ? { command: options.bun, env: {} } : currentHubRuntime(env))
     delete childEnv.BUN_BE_BUN // only the runtime decides whether its executable acts as bun
-    Object.assign(childEnv, runtime.env, { VOICE_HOST: bind.host, VOICE_PORT: String(bind.port), VOICE_PUBLIC_URL: url.origin })
+    // The address this hub must serve; legacy names would only lose to these and warn.
+    for (const legacy of ["VOICE_HOST", "VOICE_PORT", "VOICE_PUBLIC_URL"]) delete childEnv[legacy]
+    Object.assign(childEnv, runtime.env, { HUB_HOST: bind.host, HUB_PORT: String(bind.port), HUB_PUBLIC_URL: url.origin })
     child = (options.spawn ?? (nodeSpawn as unknown as SpawnLike))(runtime.command, [hubScript(root)], {
       cwd: root,
       detached: true,

@@ -1,6 +1,6 @@
 // Option picker for Settings → Speech (model and voice): option normalization, search, ranking, custom values.
 import { describe, expect, test } from "bun:test"
-import { filterPicker, pickerOptions, stepActive } from "../web/picker-core.js"
+import { filterPicker, pickerOptions, stepActive } from "../web/src/core/picker-core"
 
 const MODELS = pickerOptions([
   { id: "openai/gpt-4o-mini-tts", name: "OpenAI: GPT-4o mini TTS" },

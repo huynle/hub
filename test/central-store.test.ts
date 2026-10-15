@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { centralConfig } from "../src/central/config"
-import { hashToken, MODEL_PREFS_LIMIT, newToken, Store } from "../src/central/store"
+import { hashToken, MODEL_PREFS_LIMIT, newToken, READS_LIMIT, Store } from "../src/central/store"
 
 const tmp = () => mkdtempSync(path.join(tmpdir(), "voice-store-"))
 
@@ -14,7 +14,7 @@ describe("centralConfig", () => {
       host: "127.0.0.1",
       port: 4097,
       publicURL: "http://127.0.0.1:4097",
-      stateDir: "/home/u/.local/state/opencode-voice",
+      stateDir: "/home/u/.local/state/opencode-hub",
       apiKey: undefined,
       sttModel: "openai/gpt-4o-mini-transcribe",
       ttsModel: "microsoft/mai-voice-2.1-flash",
@@ -22,7 +22,7 @@ describe("centralConfig", () => {
       maxAudioBytes: 10 * 1024 * 1024,
       maxSpeechChars: 800,
       turnTimeoutMs: 600_000,
-      vapidSubject: "mailto:opencode-voice@localhost",
+      vapidSubject: "mailto:opencode-hub@localhost",
       auth: { mode: "pairing" },
     })
   })
@@ -30,15 +30,15 @@ describe("centralConfig", () => {
   test("reads env, strips trailing slash, ignores bad numbers", () => {
     const config = centralConfig(
       {
-        VOICE_HOST: "0.0.0.0",
-        VOICE_PORT: "4300",
-        VOICE_PUBLIC_URL: "https://voice.example.com/",
-        VOICE_STATE_DIR: "/data",
+        HUB_HOST: "0.0.0.0",
+        HUB_PORT: "4300",
+        HUB_PUBLIC_URL: "https://voice.example.com/",
+        HUB_STATE_DIR: "/data",
         OPENROUTER_API_KEY: "k",
-        VOICE_MAX_AUDIO_BYTES: "nope",
-        VOICE_MAX_SPEECH_CHARS: "-5",
-        VOICE_TURN_TIMEOUT_MS: "1000",
-        VOICE_STT_MODEL: "openai/whisper-1",
+        HUB_MAX_AUDIO_BYTES: "nope",
+        HUB_MAX_SPEECH_CHARS: "-5",
+        HUB_TURN_TIMEOUT_MS: "1000",
+        HUB_STT_MODEL: "openai/whisper-1",
       },
       "/home/u",
     )
@@ -54,12 +54,12 @@ describe("centralConfig", () => {
   })
 
   test("public URL defaults to host:port, and port 0 is allowed", () => {
-    expect(centralConfig({ VOICE_HOST: "0.0.0.0", VOICE_PORT: "0" }, "/h").port).toBe(0)
-    expect(centralConfig({ VOICE_PORT: "5000" }, "/h").publicURL).toBe("http://127.0.0.1:5000")
+    expect(centralConfig({ HUB_HOST: "0.0.0.0", HUB_PORT: "0" }, "/h").port).toBe(0)
+    expect(centralConfig({ HUB_PORT: "5000" }, "/h").publicURL).toBe("http://127.0.0.1:5000")
   })
 
   test("rejects a non-http public URL", () => {
-    expect(() => centralConfig({ VOICE_PUBLIC_URL: "ftp://x" }, "/h")).toThrow(/VOICE_PUBLIC_URL/)
+    expect(() => centralConfig({ HUB_PUBLIC_URL: "ftp://x" }, "/h")).toThrow(/HUB_PUBLIC_URL/)
   })
 })
 
@@ -153,5 +153,21 @@ describe("Store", () => {
     expect(store.modelPrefs(alice.id, "ses_0")).toEqual({})
     expect(store.modelPrefs(alice.id, `ses_${MODEL_PREFS_LIMIT}`).voice?.modelID).toBe(`m${MODEL_PREFS_LIMIT}`)
     expect(Store.open(dir).modelPrefs(alice.id, `ses_${MODEL_PREFS_LIMIT}`).voice?.modelID).toBe(`m${MODEL_PREFS_LIMIT}`)
+  })
+
+  test("read marks are per user, only move forward, persist and are bounded", () => {
+    const dir = tmp()
+    const store = Store.open(dir)
+    const alice = store.upsertUser({ email: "alice@example.test", role: "user" })
+    const bob = store.upsertUser({ email: "bob@example.test", role: "user" })
+    expect(store.markRead(alice.id, "ses_one", 100)).toEqual({ ses_one: 100 })
+    expect(store.markRead(alice.id, "ses_one", 50)).toEqual({ ses_one: 100 })
+    expect(store.reads(bob.id)).toEqual({})
+    expect(Store.open(dir).reads(alice.id)).toEqual({ ses_one: 100 })
+    for (let i = 0; i <= READS_LIMIT; i++) store.markRead(alice.id, `ses_${i}`, 200 + i)
+    const reads = store.reads(alice.id)
+    expect(Object.keys(reads)).toHaveLength(READS_LIMIT)
+    expect(reads.ses_one).toBeUndefined()
+    expect(reads[`ses_${READS_LIMIT}`]).toBe(200 + READS_LIMIT)
   })
 })

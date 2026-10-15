@@ -1,10 +1,10 @@
-// Central voice server: HTTP routes (web UI, JSON API, SSE, enrollment) and the spoke WebSocket.
+// OpenCode Hub: HTTP routes (web UI, JSON API, SSE, enrollment) and the spoke WebSocket.
 // Phones authenticate with the `voice_device` cookie; spokes with machine bearer tokens. Source IPs
 // (including loopback) are never trusted.
 import type { Server } from "bun"
 import { diskAssets, type WebAssets } from "./assets"
 import path from "node:path"
-import type { EnrollStart, ModelSelection, PermissionDecision } from "../protocol"
+import type { EnrollStart, ModelSelection, PermissionDecision, TurnResult } from "../protocol"
 import { isLoopbackAddress, isLoopbackHost, isLoopbackURL, loopbackOrigins } from "../loopback"
 import { speakable } from "../speakable"
 import { Auth, RateLimitError, ValidationError } from "./auth"
@@ -14,7 +14,7 @@ import { Push, type PushSender } from "./push"
 import { BusyError, Registry } from "./registry"
 import { audioFormat, SpeechError } from "./speech/provider"
 import { SpeechService } from "./speech/service"
-import { RequestTimeoutError, SpokeError, SpokeHub, type Notifier, type SpokeSocketData } from "./spoke-ws"
+import { RequestTimeoutError, RequestTooLargeError, SpokeError, SpokeHub, type Notifier, type SpokeSocketData } from "./spoke-ws"
 import { DEFAULT_PUSH_PREFS, LOCAL_USER, Store, VIEW_PREF_KEYS, type DeviceRecord, type PushPrefs, type UserRecord, type ViewPrefs } from "./store"
 
 export interface Speech {
@@ -24,8 +24,7 @@ export interface Speech {
 
 export interface CentralOptions {
   readonly config: CentralConfig
-  /** Directory with index.html and other static PWA files. */
-  /** web/ on disk; or pass `web` (e.g. files embedded in a compiled binary). */
+  /** The built web app (web/dist, see web/vite.config.ts) on disk; or pass `web` (e.g. files embedded in a compiled binary). */
   readonly webDir?: string
   readonly web?: WebAssets
   readonly version?: string
@@ -96,7 +95,7 @@ interface Route extends RouteInfo {
   readonly handle: Handler
   readonly pattern: RegExp
   readonly keys: string[]
-  /** Session routes refused (403 not_exposed) while voice is off for the session. */
+  /** Speech routes refused (403 not_exposed) while Voice is off for the session; inspection and control are not. */
   readonly exposed: boolean
 }
 
@@ -118,10 +117,20 @@ const VIEW_PREF_MAX_CHARS = 4096
 const DECISIONS = new Set<PermissionDecision>(["once", "always", "reject"])
 /** Longest utterance accepted for conversation mode (characters, after trimming). */
 export const MAX_UTTERANCE_CHARS = 4000
+/** Longest typed prompt or steer accepted (characters, after trimming); a bigger one would not fit in a frame. */
+export const MAX_PROMPT_CHARS = 100_000
+/** The shell's answer when the hub has no built web app (e.g. the plugin installed from GitHub). */
+const WEB_NOT_BUILT = [
+  "This hub has no built web app (web/dist).",
+  "",
+  "To run a hub, install it from npm (`opencode plugin add @huynle/opencode-hub`, or `bunx --package @huynle/opencode-hub opencode-hub`)",
+  "or use a release binary (https://github.com/huynle/opencode-hub/releases), which ship the web app.",
+  "In a source checkout, run `npm install && npm run build:web` first.",
+].join("\n")
 /** Preview text for POST /api/settings/speech/test. */
 const SPEECH_TEST_TEXT = "Hi! This is how I will sound when I read replies to you."
 const SPEECH_TEST_MAX_CHARS = 300
-const APP_ROUTES = /^\/(?:|pair|approve|s\/[^/]+)$/
+const APP_ROUTES = /^\/(?:|pair|approve|new|settings|s\/[^/]+)$/
 const STATIC_PATH = /^(?:\/[A-Za-z0-9_-][A-Za-z0-9._-]*)+$/
 const LOGIN_NEXT = /^\/(?:s\/[A-Za-z0-9_-]+)?$/
 const CONTENT_TYPES: Record<string, string> = {
@@ -152,7 +161,7 @@ const error = (status: number, message: string, code?: string) =>
 
 export function startCentral(options: CentralOptions): Central {
   const { config } = options
-  const web: WebAssets = options.web ?? diskAssets(options.webDir ?? path.join(import.meta.dir, "..", "..", "web"))
+  const web: WebAssets = options.web ?? diskAssets(options.webDir ?? path.join(import.meta.dir, "..", "..", "web", "dist"))
   const now = options.now ?? Date.now
   const store = Store.open(config.stateDir, now, { mode: config.auth.mode })
   // A machine's tenant is its owner (read live: ownership moves on migration).
@@ -257,7 +266,7 @@ export function startCentral(options: CentralOptions): Central {
     // Push goes to the session owner's devices only; an alert without an owner goes nowhere.
     if (!alert.owner) return
     notifier.notify(alert.kind, alert.sessionID, alert.title, alert.detail, alert.text, alert.owner).catch((cause) => {
-      console.error("[voice] push notification failed:", cause instanceof Error ? cause.message : cause)
+      console.error("[opencode-hub] push notification failed:", cause instanceof Error ? cause.message : cause)
     })
   })
 
@@ -299,19 +308,19 @@ export function startCentral(options: CentralOptions): Central {
     } catch (cause) {
       if (!(cause instanceof OidcError)) throw cause
       if (cause.audited) store.audit({ actor: "system", action: "signin.denied", detail: cause.reason })
-      else console.warn(`[voice] sign-in refused: ${cause.reason}`)
+      else console.warn(`[opencode-hub] sign-in refused: ${cause.reason}`)
       return deny(cause.status, "Sign-in failed", cause.message)
     }
     const { identity, next } = result
     if (!emailAllowed(settings, identity.email)) {
       store.audit({ actor: "system", action: "signin.denied", target: identity.email, detail: "not allowed" })
-      return deny(403, "Not allowed", `${identity.email} is not allowed to use this voice hub. Ask its admin to add you.`)
+      return deny(403, "Not allowed", `${identity.email} is not allowed to use this hub. Ask its admin to add you.`)
     }
     const role = settings.admins.includes(identity.email) ? "admin" : "user"
     const existing = store.userByEmail(identity.email)
     if (existing?.disabled) {
       store.audit({ actor: "system", action: "signin.denied", target: identity.email, detail: "disabled" })
-      return deny(403, "Account disabled", "Your account on this voice hub is disabled. Ask its admin.")
+      return deny(403, "Account disabled", "Your account on this hub is disabled. Ask its admin.")
     }
     const user = store.upsertUser({ email: identity.email, ...(identity.name ? { name: identity.name } : {}), role })
     if (user.role === "admin" && store.migrateLocal(user.id)) broadcast({ type: "catalog" })
@@ -326,7 +335,7 @@ export function startCentral(options: CentralOptions): Central {
       headers.append("set-cookie", cookie(token))
     }
     store.audit({ actor: user.id, action: "signin", target: deviceID })
-    // Speech not usable yet (e.g. no key): land on the page's speech setup (web/app.js opens it for #speech).
+    // Speech not usable yet (e.g. no key): land on the page's speech setup (the console opens Settings → Speech for #speech).
     const setup = !next.includes("#") && speechSettings.view(speechScope(user.id)).ready.reason ? "#speech" : ""
     headers.set("location", `${next}${setup}`)
     return new Response(null, { status: 302, headers })
@@ -367,7 +376,7 @@ export function startCentral(options: CentralOptions): Central {
         })
         if (auto && auth.approveEnrollment(start.userCode)) {
           autoApproved = true
-          console.log(`[voice] local hub: approved the first machine (code ${start.userCode}) without confirmation; later machines need approval`)
+          console.log(`[opencode-hub] local hub: approved the first machine (code ${start.userCode}) without confirmation; later machines need approval`)
           return Response.json({ ...start, autoApproved: true } satisfies EnrollStart)
         }
         broadcast({ type: "enrollment" }, { admins: true })
@@ -394,12 +403,12 @@ export function startCentral(options: CentralOptions): Central {
     if (!LOGIN_NEXT.test(next)) return error(400, "Invalid next path")
     const ownerID = auth.redeemLogin(url.searchParams.get("code"))
     if (!ownerID) {
-      return new Response("This sign-in link has expired or was already used. Run /voice again.", {
+      return new Response("This sign-in link has expired or was already used. Run /hub again.", {
         status: 401,
         headers: { "content-type": "text/plain; charset=utf-8" },
       })
     }
-    // Speech not usable yet (e.g. no key): land on the page's speech setup (web/app.js opens it for #speech).
+    // Speech not usable yet (e.g. no key): land on the page's speech setup (the console opens Settings → Speech for #speech).
     const setup = speechSettings.view(speechScope(ownerID)).ready.reason ? "#speech" : ""
     const headers = new Headers({ location: `${next}${setup}`, "cache-control": "no-store" })
     // A link signs in as the machine's owner: a browser signed in as someone else gets a new device.
@@ -460,6 +469,7 @@ export function startCentral(options: CentralOptions): Central {
       }
       return Response.json({ prefs }, { headers: NO_STORE })
     }),
+    route("GET", "/api/reads", "user", ({ user }) => Response.json({ reads: store.reads(user.id) }, { headers: NO_STORE })),
     route("POST", "/api/enrollments/:code/approve", "user", ({ params, user }) => decideEnrollment(params.code!, "approved", user)),
     route("POST", "/api/enrollments/:code/deny", "user", ({ params, user }) => decideEnrollment(params.code!, "denied", user)),
     route("GET", "/api/devices", "user", ({ device, user }) =>
@@ -542,7 +552,7 @@ export function startCentral(options: CentralOptions): Central {
       registry.setPresence(device.id, params.session!, visible)
       return new Response(null, { status: 204 })
     }),
-    route("POST", "/api/sessions/:session/turn", "session", ({ request, server, params }) => turn(request, server, params.session!), true),
+    route("POST", "/api/sessions/:session/turn", "session", ({ request, server, params }) => turn(request, server, params.session!)),
     route("POST", "/api/sessions/:session/utterance", "session", ({ request, params }) => utterance(request, params.session!), true),
     route(
       "POST",
@@ -550,13 +560,18 @@ export function startCentral(options: CentralOptions): Central {
       "session",
       async ({ params }) => {
         await spokes.request(ownerOf(params.session!), { op: "interrupt", sessionID: params.session! })
+        registry.cancelTurns(params.session!)
         return new Response(null, { status: 204 })
       },
-      true,
     ),
+    route("POST", "/api/sessions/:session/stop", "session", async ({ params }) => {
+      const result = await spokes.request(ownerOf(params.session!), { op: "stop", sessionID: params.session! })
+      registry.cancelTurns(params.session!)
+      return Response.json(result, { headers: NO_STORE })
+    }),
     route("POST", "/api/sessions/:session/conversation", "session", ({ request, params }) => conversation(request, params.session!), true),
     route("GET", "/api/sessions/:session/models", "session", async ({ params }) =>
-      Response.json(await spokes.request(ownerOf(params.session!), { op: "models", sessionID: params.session! }), { headers: NO_STORE }), true),
+      Response.json(await spokes.request(ownerOf(params.session!), { op: "models", sessionID: params.session! }), { headers: NO_STORE })),
     route("GET", "/api/sessions/:session/model-prefs", "session", async ({ params, user }) => {
       const prefs = store.modelPrefs(user.id, params.session!)
       const defaults = await spokes.request(ownerOf(params.session!), {
@@ -566,13 +581,13 @@ export function startCentral(options: CentralOptions): Central {
         worker: prefs.worker ?? null,
       })
       return Response.json({ prefs, defaults: defaults.defaults }, { headers: NO_STORE })
-    }, true),
+    }),
     route("PUT", "/api/sessions/:session/model-prefs", "session", async ({ request, params, user }) => {
       const change = modelPrefsInput(await request.json())
       const reply = await spokes.request(ownerOf(params.session!), { op: "setModelPrefs", sessionID: params.session!, ...change })
       const prefs = store.setModelPrefs(user.id, params.session!, change)
       return Response.json({ prefs, defaults: reply.defaults }, { headers: NO_STORE })
-    }, true),
+    }),
     route("GET", "/api/sessions/:session/timeline", "session", async ({ params, url }) => {
       const limitRaw = url.searchParams.get("limit")
       const limit = limitRaw === null ? undefined : Number(limitRaw)
@@ -580,17 +595,31 @@ export function startCentral(options: CentralOptions): Central {
       const cursor = url.searchParams.get("cursor") ?? undefined
       if (cursor && cursor.length > 4096) return error(400, "cursor is too long")
       return Response.json(await spokes.request(ownerOf(params.session!), { op: "timeline", sessionID: params.session!, ...(limit ? { limit } : {}), ...(cursor ? { cursor } : {}) }), { headers: NO_STORE })
-    }, true),
+    }),
     route("GET", "/api/sessions/:session/timeline/messages/:message/parts/:part", "session", async ({ params }) =>
-      Response.json(await spokes.request(ownerOf(params.session!), { op: "timelinePart", sessionID: params.session!, messageID: params.message!, partID: params.part! }), { headers: NO_STORE }), true),
+      Response.json(await spokes.request(ownerOf(params.session!), { op: "timelinePart", sessionID: params.session!, messageID: params.message!, partID: params.part! }), { headers: NO_STORE })),
     route(
       "GET",
       "/api/sessions/:session/context",
       "session",
       async ({ params }) => Response.json(await spokes.request(ownerOf(params.session!), { op: "context", sessionID: params.session! })),
-      true,
     ),
-    route("POST", "/api/sessions/:session/permission", "session", ({ request, params }) => permission(request, params.session!), true),
+    route("POST", "/api/sessions/:session/permission", "session", ({ request, params }) => permission(request, params.session!)),
+    route("GET", "/api/sessions/:session/summary", "session", async ({ params }) =>
+      Response.json(await spokes.request(ownerOf(params.session!), { op: "summary", sessionID: params.session! }), { headers: NO_STORE })),
+    route("GET", "/api/sessions/:session/diff", "session", async ({ params, url }) => {
+      const file = url.searchParams.get("file")
+      if (!file || file.length > 4096) return error(400, "Expected ?file=<path>")
+      const { patch } = await spokes.request(ownerOf(params.session!), { op: "diff", sessionID: params.session!, file })
+      return patch ? Response.json(patch, { headers: NO_STORE }) : error(404, "No changes for that file")
+    }),
+    route("POST", "/api/sessions/:session/read", "session", ({ params, user, device }) => {
+      const reads = store.markRead(user.id, params.session!, Date.now())
+      for (const listener of [...listeners]) {
+        if (listener.userID === user.id && listener.deviceID !== device.id) listener.send({ type: "reads", reads })
+      }
+      return Response.json({ reads }, { headers: NO_STORE })
+    }),
 
     // machines: the caller must own the machine
     route("POST", "/api/machines/:machine/sessions", "machine", ({ request, params }) => createSession(request, params.machine!)),
@@ -741,11 +770,23 @@ export function startCentral(options: CentralOptions): Central {
     const raw = (await body(request)).text
     const text = typeof raw === "string" ? raw.trim() : ""
     if (!text) return error(400, "Empty prompt")
+    if (text.length > MAX_PROMPT_CHARS) return error(400, `Prompt longer than ${MAX_PROMPT_CHARS} characters`)
     const connID = ownerOf(sessionID)
-    const release = registry.beginTurn(sessionID)
+    // While anything in the tree runs, typed input redirects the current work instead of queueing.
+    if (registry.running(sessionID)) {
+      const { inboxID } = await spokes.request(connID, { op: "steer", sessionID, text })
+      return Response.json({ mode: "steer", inboxID }, { status: 202 })
+    }
+    // A stop or interrupt releases the lock and answers this request at once, even if the spoke never does.
+    let cancel = () => {}
+    const stopped = new Promise<TurnResult>((resolve) => {
+      cancel = () => resolve({ outcome: "interrupted", message: "Stopped", reply: "" })
+    })
+    const release = registry.beginTurn(sessionID, () => cancel())
     server.timeout(request, 0)
     try {
-      return Response.json(await spokes.request(connID, { op: "turn", sessionID, text, voiceStyle: true }))
+      const voiceStyle = registry.exposed(sessionID) === true
+      return Response.json(await Promise.race([spokes.request(connID, { op: "turn", sessionID, text, voiceStyle }), stopped]))
     } finally {
       release()
     }
@@ -900,6 +941,9 @@ export function startCentral(options: CentralOptions): Central {
     const name = APP_ROUTES.test(pathname) ? "index.html" : STATIC_PATH.test(pathname) ? pathname.slice(1) : undefined
     const type = name && CONTENT_TYPES[path.extname(name).toLowerCase()]
     const bytes = name && type ? web.read(name) : undefined
+    if (name === "index.html" && !bytes) {
+      return new Response(WEB_NOT_BUILT, { status: 503, headers: { "content-type": "text/plain; charset=utf-8" } })
+    }
     if (!type || !bytes) return error(404, "Not found")
     const headers = new Headers({ "content-type": type })
     if (pathname === "/sw.js") {
@@ -1030,9 +1074,10 @@ function failure(cause: unknown): Response {
   if (cause instanceof SyntaxError) return error(400, "Invalid JSON")
   if (cause instanceof SpeechError) return error(502, cause.message)
   if (cause instanceof SpokeError) return error(502, cause.message)
+  if (cause instanceof RequestTooLargeError) return error(413, cause.message)
   if (cause instanceof OidcError) return authPage(cause.status, "Sign-in failed", cause.message)
   if (cause instanceof RequestTimeoutError) return error(504, cause.message)
-  console.error("[voice] request failed:", cause)
+  console.error("[opencode-hub] request failed:", cause)
   return error(500, cause instanceof Error ? cause.message : String(cause))
 }
 

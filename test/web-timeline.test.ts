@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { ModelCatalog, Timeline } from "../web/timeline-core.js"
+import { ModelCatalog, Timeline } from "../web/src/core/timeline-core"
 
 describe("ModelCatalog", () => {
   const models = [

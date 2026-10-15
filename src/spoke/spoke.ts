@@ -20,12 +20,13 @@ import { extractReply } from "../reply"
 import { TurnTracker } from "../turns"
 import { boundedTimelinePart, timelineItems } from "./timeline"
 import { SpokeConnection, type Backoff, type ConnectionState } from "./client"
-import { VOICE_AGENT } from "./conversation"
+import { PROMPT_SOURCE, VOICE_AGENT } from "./conversation"
 import { pollEnrollment, startEnrollment } from "./enroll"
 import { HerdrWatcher, openInHerdr, type HerdrRunner } from "./herdr"
 import type { LocalHubResult } from "./localhub"
 import { PresenceBook } from "./presence"
-import { browserSessions, isExposed, SessionTracker, shouldForward, type EventLike, type SessionDetails } from "./tracker"
+import { changeStats, contextUsage, filePatch, mcpServers } from "./summary"
+import { browserSessions, isExposed, isReported, SessionTracker, shouldForward, type EventLike, type SessionDetails } from "./tracker"
 import { watchConfig, type ConfigWatcher } from "./watch"
 
 export type SpokeErrorName = "not_connected" | "not_enrolled" | "invalid" | "unreachable"
@@ -79,6 +80,12 @@ export interface SpokeHost {
   listRecent?(options?: { days: number; max: number; include: readonly string[] }): Promise<Array<{ id: string } & SessionDetails>>
   /** Creates a session in a directory (service processes only). */
   createSession?(input: { directory: string; title?: string }): Promise<{ id: string }>
+  /** MCP servers and their status for a directory (raw OpenCode McpServer list). */
+  mcpList?(directory: string): Promise<ReadonlyArray<unknown>>
+  /** Working-tree changes of a directory (raw OpenCode FileDiffInfo list). */
+  vcsDiff?(directory: string): Promise<ReadonlyArray<unknown>>
+  /** Current branch of a directory. */
+  vcsBranch?(directory: string): Promise<string | undefined>
 }
 
 export interface SpokeOptions {
@@ -173,6 +180,7 @@ const FALLBACK_AGENT = "build"
 const LOCAL_HUB_MAX_RETRY_MS = 15 * 60_000
 const ENROLL_RETRY_MS = 500
 const NOT_SHARED = "This session is not shared with voice"
+const UNKNOWN_SESSION = "Unknown session"
 /** Events after which the service re-lists its sessions (other processes' sessions appear, change, go). */
 const LISTING_EVENTS = new Set(["session.created", "session.renamed", "session.deleted"])
 
@@ -233,7 +241,7 @@ export class Spoke {
       this.watcher = watchConfig(this.options.configFile, this.options.machineName, (c) => this.apply(c), { pollMs: this.options.pollMs })
       this.config = this.watcher.current()
     } catch (cause) {
-      console.error("[opencode-voice] config watch failed", cause)
+      console.error("[opencode-hub] config watch failed", cause)
     }
     void this.listen()
     this.apply(this.config)
@@ -431,7 +439,7 @@ export class Spoke {
       const starter = this.options.localHub
       if (!starter || !autoStartLocalHub || !isLoopbackURL(server)) throw unreachable(cause)
       const result = await starter(server)
-      if (result.status === "failed") throw new SpokeError("unreachable", `Could not start a local voice hub for ${server}: ${result.error}`)
+      if (result.status === "failed") throw new SpokeError("unreachable", `Could not start a local hub for ${server}: ${result.error}`)
       if (result.status === "skipped") throw unreachable(cause)
       localHub = result.status
       start = await this.retryEnrollment(server, machineName, abort.signal, result.status === "busy" ? 30 : 4).catch((again) => {
@@ -454,7 +462,7 @@ export class Spoke {
       })
       .catch((cause) => {
         enrollment.state = "error"
-        console.error("[opencode-voice] enrollment failed", cause)
+        console.error("[opencode-hub] enrollment failed", cause)
       })
     return {
       userCode: start.userCode,
@@ -489,14 +497,14 @@ export class Spoke {
   }
 
   /**
-   * Starts the local hub for the configured loopback server now (the user asked: "Open voice UI"), even
+   * Starts the local hub for the configured loopback server now (the user asked: "Open hub"), even
    * with autoStartLocalHub off, and reconnects at once when it answers.
    */
   async startLocalHub(): Promise<{ status: "started" | "running" | "busy" }> {
     const { server } = this.current()
     const starter = this.options.localHub
-    if (!isLoopbackURL(server)) throw new SpokeError("invalid", `${server} is not a local voice server`)
-    if (!starter) throw new SpokeError("invalid", "This OpenCode process cannot start a local voice hub")
+    if (!isLoopbackURL(server)) throw new SpokeError("invalid", `${server} is not a local hub`)
+    if (!starter) throw new SpokeError("invalid", "This OpenCode process cannot start a local hub")
     let result: LocalHubResult
     try {
       result = await starter(server)
@@ -505,9 +513,9 @@ export class Spoke {
     }
     if (result.status === "failed") {
       this.hub.message = result.error
-      throw new SpokeError("unreachable", `Could not start a local voice hub for ${server}: ${result.error}`)
+      throw new SpokeError("unreachable", `Could not start a local hub for ${server}: ${result.error}`)
     }
-    if (result.status === "skipped") throw new SpokeError("invalid", `Cannot start a local voice hub for ${server}: ${result.reason}`)
+    if (result.status === "skipped") throw new SpokeError("invalid", `Cannot start a local hub for ${server}: ${result.reason}`)
     this.hub.message = undefined
     const connection = this.connection
     if (connection && connection.state !== "connected" && (result.status === "started" || result.status === "running")) {
@@ -523,7 +531,7 @@ export class Spoke {
     const connection = this.connection
     if (!connection || connection.state !== "connected") {
       const hint = !this.config.token
-        ? "This machine is not connected to a voice server yet"
+        ? "This machine is not connected to a hub yet"
         : this.config.mode === "off"
           ? "Voice is off for this machine"
           : `Not connected to ${this.config.server}`
@@ -579,8 +587,8 @@ export class Spoke {
         this.sendTerminals(true)
       },
       onState: (state, error) => {
-        if (state === "revoked") console.error("[opencode-voice] this machine was revoked by the voice server")
-        else if (state === "error" && error) console.error(`[opencode-voice] ${error}; retrying`)
+        if (state === "revoked") console.error("[opencode-hub] this machine was revoked by the hub")
+        else if (state === "error" && error) console.error(`[opencode-hub] ${error}; retrying`)
         if (state === "error" && this.hub.retryOnError) {
           this.hub.retryOnError = false
           setTimeout(() => this.connection?.retryNow(), 0)
@@ -632,11 +640,11 @@ export class Spoke {
       if (result.status === "failed") {
         this.hub.message = result.error
         this.hub.cooldown = Math.min(this.hub.cooldown * 2, LOCAL_HUB_MAX_RETRY_MS)
-        console.error(`[opencode-voice] could not start a local voice hub for ${server}: ${result.error}`)
+        console.error(`[opencode-hub] could not start a local hub for ${server}: ${result.error}`)
         return
       }
       this.hub.message = undefined
-      if (result.status === "started") console.log(`[opencode-voice] started a local voice hub for ${server} (pid ${result.pid})`)
+      if (result.status === "started") console.log(`[opencode-hub] started a local hub for ${server} (pid ${result.pid})`)
       if (result.status === "started" || result.status === "running") this.connection?.retryNow()
     } finally {
       this.hub.pending = false
@@ -706,7 +714,8 @@ export class Spoke {
     // Session browser ops are not gated by exposure: they are how a session gets exposed.
     if (req.op === "expose") return this.expose(req.sessionID, req.on)
     if (req.op === "create") return this.create(req.directory, req.title, req.herdrWorkspace)
-    if (!isExposed(this.config, this.tracker, req.sessionID)) throw new Error(NOT_SHARED)
+    // Inspection and control need a session this process knows; Voice (conversation) is gated separately.
+    if (!isReported(this.config, this.tracker, req.sessionID)) throw new Error(UNKNOWN_SESSION)
     switch (req.op) {
       case "turn":
         return this.turn(req.sessionID, req.text, req.voiceStyle)
@@ -755,18 +764,28 @@ export class Spoke {
       case "timelinePart":
         return { detail: boundedTimelinePart(await this.host.context(req.sessionID), req.messageID, req.partID) }
       case "steer": {
-        await this.applyVoiceModel(req.sessionID)
+        const voice = isExposed(this.config, this.tracker, req.sessionID)
+        if (voice) await this.applyVoiceModel(req.sessionID)
         const inbox = await this.host.prompt({
           sessionID: req.sessionID,
           text: req.text,
           delivery: "steer",
-          metadata: { source: "opencode-voice", mode: "conversation" },
+          metadata: { source: PROMPT_SOURCE, mode: voice ? "conversation" : "remote" },
         })
         return { inboxID: inbox.id } satisfies ResultFor["steer"]
       }
       case "interrupt":
         await this.host.interrupt(req.sessionID)
         return {}
+      case "stop":
+        return this.stopTree(req.sessionID)
+      case "summary":
+        return this.summary(req.sessionID)
+      case "diff": {
+        const diffs = await this.host.vcsDiff?.(this.directoryOf(req.sessionID))
+        const patch = diffs && filePatch(diffs, req.file)
+        return patch ? { patch } : {}
+      }
       case "conversation":
         return this.setConversation(req.sessionID, req.on)
     }
@@ -782,6 +801,56 @@ export class Spoke {
 
   private modelPrefsResult(sessionID: string): ResultFor["modelPrefs"] {
     return { prefs: structuredClone(this.modelPrefs.get(sessionID) ?? {}), defaults: this.modelDefaults() }
+  }
+
+  private directoryOf(sessionID: string): string {
+    return this.tracker.directoryOf(sessionID) || this.host.directory
+  }
+
+  /** Right-rail data; each part is read independently and left out when it fails or is unsupported. */
+  private async summary(sessionID: string): Promise<ResultFor["summary"]> {
+    const directory = this.directoryOf(sessionID)
+    const optional = async <T>(read: (() => Promise<T | undefined>) | undefined): Promise<T | undefined> => {
+      if (!read) return undefined
+      try {
+        return await read()
+      } catch {
+        return undefined
+      }
+    }
+    const host = this.host
+    const [messages, models, mcp, diffs, branch] = await Promise.all([
+      optional(() => host.context(sessionID)),
+      optional(host.listModels && (() => host.listModels!())),
+      optional(host.mcpList && (() => host.mcpList!(directory))),
+      optional(host.vcsDiff && (() => host.vcsDiff!(directory))),
+      optional(host.vcsBranch && (() => host.vcsBranch!(directory))),
+    ])
+    const context = messages && contextUsage(messages, models ?? [])
+    return {
+      directory,
+      ...(branch ? { branch } : {}),
+      ...(context ? { context } : {}),
+      ...(mcp ? { mcp: mcpServers(mcp) } : {}),
+      ...(diffs ? { changes: changeStats(diffs) } : {}),
+    }
+  }
+
+  /**
+   * Stops a whole session tree: running descendants deepest first, then the root (always, so a pending
+   * retry or queued run is cancelled too). A descendant that already settled is not an error.
+   */
+  private async stopTree(sessionID: string): Promise<ResultFor["stop"]> {
+    const root = this.tracker.rootOf(sessionID)
+    const order = [...this.tracker.runningBelow(root), root]
+    for (const id of order) {
+      try {
+        await this.host.interrupt(id)
+      } catch (cause) {
+        if (id === root) throw cause
+      }
+    }
+    return { stopped: order }
   }
 
   /** Applies a saved Voice override at the boundary before the next turn; never changes a running tree. */
@@ -836,7 +905,7 @@ export class Spoke {
       void herdr.refresh()
       return undefined
     } catch (cause) {
-      console.error(`[opencode-voice] could not open ${sessionID} in Herdr`, errorText(cause))
+      console.error(`[opencode-hub] could not open ${sessionID} in Herdr`, errorText(cause))
       return `Could not open the session in Herdr: ${errorText(cause)}`
     }
   }
@@ -855,12 +924,12 @@ export class Spoke {
   }
 
   private async turn(sessionID: string, text: string, voiceStyle: boolean): Promise<TurnResult> {
-    if (this.running.has(sessionID)) throw new Error("A voice turn is already running for this session")
-    await this.applyVoiceModel(sessionID)
+    if (this.running.has(sessionID)) throw new Error("A turn is already running for this session")
+    if (isExposed(this.config, this.tracker, sessionID)) await this.applyVoiceModel(sessionID)
     this.running.add(sessionID)
     if (voiceStyle) this.voiceTurns.set(sessionID, (this.voiceTurns.get(sessionID) ?? 0) + 1)
     try {
-      const inbox = await this.host.prompt({ sessionID, text, metadata: { source: "opencode-voice" } })
+      const inbox = await this.host.prompt({ sessionID, text, metadata: { source: PROMPT_SOURCE } })
       const result = await this.turns.wait(inbox.id, { timeoutMs: this.options.turnTimeoutMs ?? 10 * 60_000 })
       let reply = ""
       try {
@@ -886,7 +955,7 @@ export class Spoke {
         for await (const event of this.host.events(this.abort.signal)) this.observe(event)
       } catch (cause) {
         if (this.abort.signal.aborted) return
-        console.error("[opencode-voice] event stream failed, retrying", cause)
+        console.error("[opencode-hub] event stream failed, retrying", cause)
       }
       if (this.abort.signal.aborted) return
       await new Promise((resolve) => setTimeout(resolve, 1000))
@@ -907,7 +976,7 @@ export class Spoke {
         if (compact) this.connection.send({ t: "event", event: compact })
       }
     } catch (cause) {
-      console.error("[opencode-voice] event handling failed", cause)
+      console.error("[opencode-hub] event handling failed", cause)
     }
   }
 
@@ -940,7 +1009,7 @@ export class Spoke {
       const sessions = (await this.host.listRecent?.({ days, max, include: [...keep] })) ?? []
       if (this.tracker.applyListing(sessions, Date.now(), keep)) this.scheduleSnapshot()
     } catch (cause) {
-      console.error("[opencode-voice] could not list recent sessions", errorText(cause))
+      console.error("[opencode-hub] could not list recent sessions", errorText(cause))
     }
   }
 

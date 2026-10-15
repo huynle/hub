@@ -1,6 +1,6 @@
-// The hub's web/ files behind one interface: read from disk (a checkout, the npm package, the Docker
+// The hub's web app files (web/dist) behind one interface: read from disk (a checkout, the npm package, the Docker
 // image) or from files embedded in a compiled binary (`bun build --compile`, see scripts/gen-web-entry.ts).
-import { existsSync, readFileSync, statSync } from "node:fs"
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
 import path from "node:path"
 
 export interface WebAssets {
@@ -22,7 +22,7 @@ export function diskAssets(dir: string): WebAssets {
 }
 
 /**
- * A name → path map, as `import f from "../web/app.js" with { type: "file" }` gives it: a path inside the
+ * A name → path map, as `import f from "../web/dist/index.html" with { type: "file" }` gives it: a path inside the
  * compiled binary ($bunfs), or the file on disk when the entry runs from source.
  */
 export function embeddedAssets(files: Readonly<Record<string, string>>): WebAssets {
@@ -42,7 +42,8 @@ export function embeddedAssets(files: Readonly<Record<string, string>>): WebAsse
 
 /** Files that belong in the page (not type declarations, not hidden files). */
 export function isWebAsset(name: string): boolean {
-  return !name.startsWith(".") && !name.endsWith(".d.ts")
+  const base = name.split("/").pop() ?? name
+  return !base.startsWith(".") && !base.endsWith(".d.ts") && !base.endsWith(".map")
 }
 
 /** Source of a module that embeds web/ files: `export default { "<name>": <embedded path>, … }`. */
@@ -59,4 +60,15 @@ export function webAssetModule(names: readonly string[], from: string): string {
     "} as Record<string, string>",
     "",
   ].join("\n")
+}
+
+/** Files under `dir` as "/"-separated paths relative to it ("index.html", "assets/index-x.js"), sorted. */
+export function webFiles(dir: string, prefix = ""): string[] {
+  const out: string[] = []
+  for (const entry of readdirSync(path.join(dir, prefix), { withFileTypes: true })) {
+    const name = prefix ? `${prefix}/${entry.name}` : entry.name
+    if (entry.isDirectory()) out.push(...webFiles(dir, name))
+    else if (entry.isFile()) out.push(name)
+  }
+  return out.sort()
 }

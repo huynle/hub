@@ -1,11 +1,11 @@
 import { spawn } from "node:child_process"
 import { Plugin } from "@opencode/plugin/tui"
 import { isLoopbackURL } from "./loopback"
-import { VoiceRpc } from "./rpc"
+import { HubRpc } from "./rpc"
 import { localServerFor, modeFor, needsSetup, parseServerInput, setupOptions, type SetupChoice } from "./setup"
 import { PresenceReporter, shownSessions } from "./tui-presence"
 
-// /voice: first-run setup (a hub on this computer, or your own voice server), then one dialog to choose
+// /hub (alias /voice): first-run setup (a hub on this computer, or your own hub), then one dialog to choose
 // what this machine shares and to open sessions on this device or a phone. Links are shown here, never
 // posted into the session, so they do not reach the model. Decisions live in src/setup.ts (tested).
 
@@ -35,7 +35,7 @@ type Choice = "talk" | "ui" | "send" | "conversation" | "toggle" | "mode" | "pai
 
 const MODE_LABEL: Record<Mode, string> = { always: "Always", session: "This session only", off: "Off" }
 
-const HUB_LOG = "~/.local/state/opencode-voice/hub.log"
+const HUB_LOG = "~/.local/state/opencode-hub/hub.log"
 const host = (server: string) => server.replace(/^https?:\/\//, "")
 
 function describeStatus(status: Status): string {
@@ -51,17 +51,17 @@ function describeStatus(status: Status): string {
           : status.connection === "error"
             ? `cannot reach ${where}`
             : `${where}`
-  return `Voice · ${state} · mode: ${MODE_LABEL[status.mode]}`
+  return `OpenCode Hub · ${state} · mode: ${MODE_LABEL[status.mode]}`
 }
 
 export default Plugin.define({
-  id: "opencode-voice.tui",
+  id: "opencode-hub.tui",
   setup(context) {
-    const voice = context.client.rpc(VoiceRpc) as unknown as Record<string, (input: unknown, options: unknown) => Promise<unknown>>
+    const hub = context.client.rpc(HubRpc) as unknown as Record<string, (input: unknown, options: unknown) => Promise<unknown>>
     const call = async <T>(method: string, input: Record<string, unknown> = {}) =>
-      (await voice[method]!(input, { location: context.location ?? context.data.location.default() })) as T
+      (await hub[method]!(input, { location: context.location ?? context.data.location.default() })) as T
     const toast = (message: string, variant: "info" | "success" | "warning" | "error" = "info") =>
-      context.ui.toast.show({ title: "Voice", message, variant })
+      context.ui.toast.show({ title: "OpenCode Hub", message, variant })
     const currentSession = () => {
       const route = context.ui.router.current() as { type: string; sessionID?: string }
       return route.type === "session" ? route.sessionID : undefined
@@ -84,26 +84,26 @@ export default Plugin.define({
       const opened = openURL(url)
       const copied = copyToClipboard(url)
       if (opened) return toast(`Opened ${what} in your browser${copied ? " (link copied)" : ""}`, "success")
-      await context.ui.dialog.alert({ title: "Voice", message: `Open this link${copied ? " (copied)" : ""}:\n\n${url}\n\nKeep it private.` })
+      await context.ui.dialog.alert({ title: "OpenCode Hub", message: `Open this link${copied ? " (copied)" : ""}:\n\n${url}\n\nKeep it private.` })
     }
 
     const talkHere = async (sessionID: string) => {
       const { url } = await call<{ url: string }>("openLink", { sessionID })
-      await showLink(url, "this session's voice page")
+      await showLink(url, "this session's page")
     }
 
     /**
-     * The voice page (the session's when it is shared, else the home page). A local hub is started first
+     * The hub page (the session's when it is shared, else the home page). A local hub is started first
      * when nothing answers; the hub lands on speech setup while no speech provider is usable.
      */
     const openUI = async (sessionID?: string) => {
       let s = await status(sessionID)
       if (s.connection !== "connected") {
-        if (!s.enrolled) throw new Error("This machine is not connected to a voice server yet. Run /voice to set it up.")
-        if (s.mode === "off") throw new Error("Voice is off for this machine. Run /voice → Mode first.")
+        if (!s.enrolled) throw new Error("This machine is not connected to a hub yet. Run /hub to set it up.")
+        if (s.mode === "off") throw new Error("Sharing is off for this machine. Run /hub → Mode first.")
         if (isLoopbackURL(s.server)) {
           const { status: started } = await call<{ status: string }>("startLocalHub")
-          if (started === "started") toast(`Started the local voice hub (log: ${HUB_LOG})`)
+          if (started === "started") toast(`Started the local hub (log: ${HUB_LOG})`)
         }
         toast(`Connecting to ${host(s.server)}…`)
         if (!(await waitFor((x) => x.connection === "connected", 20_000))) {
@@ -114,13 +114,13 @@ export default Plugin.define({
       }
       const shared = sessionID && s.sessionExposed ? sessionID : undefined
       const { url } = await call<{ url: string }>("openLink", shared ? { sessionID: shared } : {})
-      await showLink(url, "the voice page")
+      await showLink(url, "the hub")
     }
 
     const sendToPhone = async (sessionID: string) => {
       const { notified } = await call<{ notified: number }>("handoff", { sessionID })
       if (notified > 0) toast(`Notified ${notified} device${notified === 1 ? "" : "s"}`, "success")
-      else toast("No phone is paired yet. Use /voice → Pair a phone first.", "warning")
+      else toast("No phone is paired yet. Use /hub → Pair a phone first.", "warning")
     }
 
     const toggleConversation = async (sessionID: string, s: Status) => {
@@ -146,19 +146,19 @@ export default Plugin.define({
       return mode === "session" && sessionID ? " (this session is on)" : ""
     }
 
-    const chooseMode = async (s: Status, title = "Which sessions can voice see?") => {
+    const chooseMode = async (s: Status, title = "Which sessions can the hub see?") => {
       const mode = await context.ui.dialog.select<Mode>({
         title,
         current: s.mode === "off" ? "always" : s.mode,
         options: [
           { title: "Always", value: "always", description: "Every session in this OpenCode process" },
-          { title: "This session only", value: "session", description: "Only sessions you switch on with /voice" },
-          { title: "Off", value: "off", description: "Disconnect this process from the voice server" },
+          { title: "This session only", value: "session", description: "Only sessions you switch on with /hub" },
+          { title: "Off", value: "off", description: "Disconnect this process from the hub" },
         ],
       })
       if (!mode || mode === s.mode) return
       const note = await applyMode(mode)
-      toast(`Voice mode: ${MODE_LABEL[mode]}${note}`, "success")
+      toast(`Hub mode: ${MODE_LABEL[mode]}${note}`, "success")
     }
 
     const pairPhone = async () => {
@@ -176,12 +176,12 @@ export default Plugin.define({
       const failed = (s: Status) => s.enrollment === "denied" || s.enrollment === "expired" || s.enrollment === "error"
       const done = await waitFor((s) => failed(s) || s.enrolled, 15 * 60_000, 2000)
       if (!done) return
-      if (failed(done)) return toast(`Approval ${done.enrollment}. Run /voice to try again.`, "error")
-      if (done.mode !== "off") return toast(`Approved by ${host(done.server)}. Voice is set up.`, "success")
+      if (failed(done)) return toast(`Approval ${done.enrollment}. Run /hub to try again.`, "error")
+      if (done.mode !== "off") return toast(`Approved by ${host(done.server)}. The hub is set up.`, "success")
       toast(`Approved by ${host(done.server)}.`, "success")
-      await chooseMode(done, "Approved. Which sessions can voice see?")
+      await chooseMode(done, "Approved. Which sessions can the hub see?")
       const after = await status().catch(() => undefined)
-      if (after && after.mode !== "off") toast("Voice is set up. /voice → Open voice UI, or Talk on this device.", "success")
+      if (after && after.mode !== "off") toast("The hub is set up. /hub → Open hub, or Talk on this device.", "success")
     }
 
     /** Device-code approval: open the approve page, say what to look for, and watch for the result. */
@@ -195,7 +195,7 @@ export default Plugin.define({
         message:
           `${opened ? "Opened in your browser" : "Open"}:\n\n${enrolled.approveURL}\n\n` +
           `Check the code ${enrolled.userCode} and approve. A browser that is not paired with ${host(s.server)} yet asks for a ` +
-          `pairing code first: /voice → Pair a phone on a connected computer, or the code in the hub's log for the very first device. ` +
+          `pairing code first: /hub → Pair a phone on a connected computer, or the code in the hub's log for the very first device. ` +
           `You'll get a notice here once it is approved.`,
       })
     }
@@ -206,9 +206,9 @@ export default Plugin.define({
     const setupLocal = async (s: Status, choice: SetupChoice) => {
       const server = localServerFor(s.server)
       if (server !== s.server) await call("setServer", { server })
-      toast("Starting the local voice hub…")
+      toast("Starting the local hub…")
       const enrolled = await call<Enrolled>("enroll")
-      if (enrolled.localHub === "started") toast(`Started the local voice hub (log: ${HUB_LOG})`)
+      if (enrolled.localHub === "started") toast(`Started the local hub (log: ${HUB_LOG})`)
       if (!enrolled.autoApproved) {
         // This hub already knows other machines or devices: approve it like a remote server.
         await applyMode(modeFor(choice))
@@ -222,11 +222,11 @@ export default Plugin.define({
       await openUI(currentSession())
     }
 
-    /** Your own voice server: check that it answers, save it, enroll, approve in the browser, then pick a mode. */
+    /** Your own hub: check that it answers, save it, enroll, approve in the browser, then pick a mode. */
     const setupRemote = async (s: Status, server: string) => {
       const health = await call<{ ok: boolean; version?: string; error?: string }>("checkServer", { server })
       if (!health.ok) {
-        await context.ui.dialog.alert({ title: "Voice server not reachable", message: health.error ?? `Could not reach ${server}` })
+        await context.ui.dialog.alert({ title: "Hub not reachable", message: health.error ?? `Could not reach ${server}` })
         return
       }
       if (server !== s.server) await call("setServer", { server })
@@ -238,10 +238,10 @@ export default Plugin.define({
       let value = isLoopbackURL(s.server) ? "" : s.server
       for (;;) {
         const raw = await context.ui.dialog.prompt({
-          title: "Voice server URL",
-          description: "The address of a voice hub you or your team host. Changing it disconnects this machine from the current server.",
+          title: "Hub URL",
+          description: "The address of a hub you or your team host. Changing it disconnects this machine from the current server.",
           value,
-          placeholder: "https://voice.example.com",
+          placeholder: "https://hub.example.com",
         })
         if (raw === undefined || raw === null) return undefined
         const parsed = parseServerInput(raw)
@@ -253,7 +253,7 @@ export default Plugin.define({
 
     const runSetup = async (s: Status) => {
       const choice = await context.ui.dialog.select<SetupChoice>({
-        title: s.enrolled && s.connection === "revoked" ? `Set up voice · revoked by ${host(s.server)}` : "Set up voice",
+        title: s.enrolled && s.connection === "revoked" ? `Set up OpenCode Hub · revoked by ${host(s.server)}` : "Set up OpenCode Hub",
         options: setupOptions(s).map((o) => ({ title: o.title, value: o.value, description: o.description })),
       })
       switch (choice) {
@@ -274,11 +274,11 @@ export default Plugin.define({
 
     const changeServer = async (s: Status) => {
       const pick = await context.ui.dialog.select<"current" | "setup">({
-        title: `Voice server: ${s.server}`,
+        title: `Hub: ${s.server}`,
         current: "current",
         options: [
           { title: `Keep ${host(s.server)}`, value: "current", description: "No change" },
-          { title: "Set up again…", value: "setup", description: "This computer or another voice server (disconnects this machine from the current one)" },
+          { title: "Set up again…", value: "setup", description: "This computer or another hub (disconnects this machine from the current one)" },
         ],
       })
       if (pick === "setup") await runSetup({ ...s, enrolled: false })
@@ -293,12 +293,12 @@ export default Plugin.define({
       const options: Array<{ title: string; value: Choice; description?: string }> = []
 
       if (connected && sessionID && s.sessionExposed) {
-        options.push({ title: "Talk on this device", value: "talk", description: "Open this session's voice page in the browser" })
+        options.push({ title: "Talk on this device", value: "talk", description: "Open this session in the browser" })
         options.push({ title: "Send to phone", value: "send", description: "Notify your paired phones" })
       }
       if (s.mode !== "off" && (connected || local)) {
         options.push({
-          title: connected ? "Open voice UI" : "Start local hub / Open voice UI",
+          title: connected ? "Open hub" : "Start local hub / Open hub",
           value: "ui",
           description: connected ? "Every session, plus settings (speech provider and keys), in the browser" : "Starts the hub on this computer, then opens it",
         })
@@ -316,12 +316,12 @@ export default Plugin.define({
         options.push({
           title: `This session: ${s.sessionExposed ? "on" : "off"}`,
           value: "toggle",
-          description: s.sessionExposed ? "Stop sharing this session with voice" : "Share this session with voice",
+          description: s.sessionExposed ? "Stop sharing this session with the hub" : "Share this session with the hub",
         })
       }
       options.push({ title: `Mode: ${MODE_LABEL[s.mode]}`, value: "mode", description: "Always / This session only / Off" })
       if (connected) options.push({ title: "Pair a phone", value: "pair", description: "Show a pairing code for a new device" })
-      options.push({ title: `Server: ${host(s.server)}`, value: "server", description: "Set up again: this computer or another voice server" })
+      options.push({ title: `Server: ${host(s.server)}`, value: "server", description: "Set up again: this computer or another hub" })
 
       let title = describeStatus(s)
       if (s.connection === "error" && s.localHub) title += ` (local hub: ${s.localHub})`
@@ -341,7 +341,7 @@ export default Plugin.define({
           return toggleConversation(sessionID!, s)
         case "toggle":
           await call("setSession", { sessionID, on: !s.sessionExposed })
-          return toast(`This session is ${s.sessionExposed ? "no longer shared" : "shared"} with voice`, "success")
+          return toast(`This session is ${s.sessionExposed ? "no longer shared" : "shared"} with the hub`, "success")
         case "mode":
           return chooseMode(s)
         case "pair":
@@ -368,11 +368,12 @@ export default Plugin.define({
       mode: "global",
       commands: [
         {
-          id: "opencode-voice.open",
-          title: "Voice: set up, share, and talk to this session",
-          group: "Voice",
+          id: "opencode-hub.open",
+          title: "OpenCode Hub: set up, share, and open this session remotely",
+          group: "OpenCode Hub",
           palette: true,
-          slash: { name: "voice" },
+          // /voice was the opencode-voice command; kept as an alias with the same behavior.
+          slash: { name: "hub", aliases: ["voice"] },
           run: () =>
             void open().catch((cause) => {
               toast(errorMessage(cause), "error")

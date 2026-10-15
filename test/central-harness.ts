@@ -13,7 +13,7 @@ export interface Harness extends Central {
   cookie: string
   api(pathname: string, init?: RequestInit & { json?: unknown; cookie?: string | null; origin?: string | null }): Promise<Response>
   notified: Array<{ kind: string; sessionID: string; title: string; body?: string }>
-  /** VOICE_STATE_DIR of this server (state.json lives there). */
+  /** HUB_STATE_DIR of this server (state.json lives there). */
   stateDir: string
 }
 
@@ -30,9 +30,9 @@ export function harness(overrides: Partial<CentralOptions> & { env?: Record<stri
   const { env, noDevice, ...rest } = overrides
   const notified: Harness["notified"] = []
   const config = centralConfig({
-    VOICE_PORT: "0",
-    VOICE_PUBLIC_URL: PUBLIC,
-    VOICE_STATE_DIR: mkdtempSync(path.join(tmpdir(), "voice-state-")),
+    HUB_PORT: "0",
+    HUB_PUBLIC_URL: PUBLIC,
+    HUB_STATE_DIR: mkdtempSync(path.join(tmpdir(), "voice-state-")),
     ...env,
   })
   const central = startCentral({

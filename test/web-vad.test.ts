@@ -1,6 +1,6 @@
 // Conversation mode: energy-based voice activity detection on synthetic audio frames.
 import { describe, expect, test } from "bun:test"
-import { EnergyVad } from "../web/conversation-core.js"
+import { EnergyVad } from "../web/src/core/conversation-core"
 
 const RATE = 16_000
 const FRAME = 320 // 20 ms

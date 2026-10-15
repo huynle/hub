@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
-// Mock hub for manual/browser checks of the PWA's conversation mode (not a test file): serves web/ and fakes
+// Mock hub for manual/browser checks of the console (not a test file): serves the built web/dist (run
+// `npm run build:web` first) and fakes
 // the hub API + SSE per the conversation contract. Usage: `bun test/web-mock-hub.ts [port]` (default 4311).
 // Control: POST /mock/transcripts {texts: string[]} (queued /api/transcribe answers), POST /mock/emit {…SSE message},
 // POST /mock/status {sessions} (status tree of ses_mock, root first; emitted as SSE status),
@@ -31,14 +32,19 @@
 // a warning and no openedIn when Herdr fails). Control: POST /mock/prefs {…lists} (another device changed prefs:
 // stored and emitted), POST /mock/herdr {on?, fail?} (machine without Herdr; Herdr tab creation fails),
 // POST /mock/fail {prefs?} (PUT /api/prefs/view answers 502).
+// Console (0.5): every session is inspectable and controllable with Voice off (only conversation and utterance
+// answer 403 not_exposed); GET …/timeline (+ parts), …/model-prefs (GET/PUT), …/models, …/summary, …/diff?file=,
+// POST …/read (GET /api/reads), …/stop, …/permission; POST …/turn answers 202 {mode:"steer"} while the tree runs,
+// else runs the turn (ses_mock: working → streamed reply → idle; text containing "fail" → 409).
 import { existsSync, readFileSync, statSync } from "node:fs"
 import path from "node:path"
 
-const WEB = path.join(import.meta.dir, "..", "web")
+const WEB = path.join(import.meta.dir, "..", "web", "dist")
 const PORT = Number(process.argv[2] ?? 4311)
 const SESSION = "ses_mock"
 const TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
+  ".json": "application/json",
   ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".webmanifest": "application/manifest+json",
@@ -367,7 +373,7 @@ const signedIn = (id: string, location: string) =>
 const safeNext = (next: string | null) => (next && next.startsWith("/") && !next.startsWith("//") && !next.includes("\\") ? next : "/")
 const page = (title: string, text: string) =>
   new Response(
-    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title><link rel="stylesheet" href="/app.css"></head><body><main id="view"><div class="card stack"><h1>${title}</h1><p>${text}</p><p><a class="btn primary" href="/">Back to OpenCode Voice</a></p></div></main></body></html>`,
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title><link rel="stylesheet" href="/app.css"></head><body><main id="view"><div class="card stack"><h1>${title}</h1><p>${text}</p><p><a class="btn primary" href="/">Back to OpenCode Hub</a></p></div></main></body></html>`,
     { status: 403, headers: { "content-type": "text/html; charset=utf-8" } },
   )
 const machinesOf = (user: MockUser) => [
@@ -535,6 +541,145 @@ async function scenario() {
   setStatus([root("idle"), kid("ses_mock_kid", "Fix failing tests", "idle", k1), kid("ses_mock_kid2", "Update README", "idle", k2)])
 }
 
+// ---------- console (0.5): timeline, models, summary/diff, reads, stop, Send/Steer ----------
+
+let reads: Record<string, Record<string, number>> = {}
+let modelPrefs: Record<string, { voice?: unknown; worker?: unknown }> = {}
+const MODELS = [
+  { providerID: "anthropic", modelID: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", enabled: true, status: "active", variants: ["default", "high", "max"] },
+  { providerID: "anthropic", modelID: "claude-haiku-4-5", name: "Claude Haiku 4.5", enabled: true, status: "active", variants: [] },
+  { providerID: "openai", modelID: "gpt-5", name: "GPT-5", enabled: true, status: "active", variants: ["low", "medium", "high"] },
+  { providerID: "openrouter", modelID: "qwen/qwen3-coder", name: "Qwen3 Coder", enabled: true, status: "active", variants: [] },
+]
+const MODEL_DEFAULTS = { voice: { providerID: "anthropic", modelID: "claude-haiku-4-5" }, worker: { providerID: "anthropic", modelID: "claude-sonnet-4-5", variant: "high" } }
+const CHANGES = [
+  { file: "web/src/app/Session.tsx", status: "modified", additions: 42, deletions: 7 },
+  { file: "web/src/lib/composer.ts", status: "added", additions: 88, deletions: 0 },
+  { file: "web/old-app.js", status: "deleted", additions: 0, deletions: 120 },
+]
+const PATCH = [
+  "diff --git a/web/src/app/Session.tsx b/web/src/app/Session.tsx",
+  "--- a/web/src/app/Session.tsx",
+  "+++ b/web/src/app/Session.tsx",
+  "@@ -10,6 +10,9 @@ export function SessionView(props: { id: string }) {",
+  "   const found = () => lookup(id)",
+  "-  const running = () => false",
+  "+  const running = () => treeRunning(status())",
+  "+  const offline = () => !found()",
+  "+  const exposed = () => found()?.session.exposed !== false",
+  "   // ---------- timeline ----------",
+  "   const timeline = new Timeline()",
+].join("\n")
+
+/** History of a session: a user request, reasoning, a run of tools (one failed), a reply, a subagent. */
+function timelineOf(id: string, title: string) {
+  const t0 = Date.now() - 20 * 60_000
+  const m = (n: number) => `msg_${id}_${n}`
+  return [
+    { key: `${m(1)}:text`, messageID: m(1), sessionID: id, kind: "user", text: `Please look at “${title || "this"}” and fix what's broken.`, at: t0 },
+    { key: `${m(2)}:0`, messageID: m(2), partID: "0", sessionID: id, kind: "reasoning", text: "The failing test is in the picker. Read it first, then run the suite.", state: "done", at: t0 + 1000, completed: t0 + 13_400 },
+    { key: `${m(2)}:1`, messageID: m(2), partID: "1", sessionID: id, kind: "tool", name: "read", state: "done", at: t0 + 14_000, completed: t0 + 14_200 },
+    { key: `${m(2)}:2`, messageID: m(2), partID: "2", sessionID: id, kind: "tool", name: "bash", state: "failed", at: t0 + 15_000, completed: t0 + 21_000 },
+    { key: `${m(2)}:3`, messageID: m(2), partID: "3", sessionID: id, kind: "tool", name: "edit", state: "done", at: t0 + 22_000, completed: t0 + 22_500 },
+    { key: `${m(2)}:4`, messageID: m(2), partID: "4", sessionID: id, kind: "assistant", text: "I fixed the ranking in **filterPicker** and re-ran the suite:\n\n- `bun test test/web-picker.test.ts` → 8 pass\n- no other failures\n\n```ts\nranked.sort((a, b) => a.rank - b.rank || a.index - b.index)\n```\nAnything else?", at: t0 + 30_000 },
+  ]
+}
+
+function treeState(id: string): string {
+  if (id === SESSION) return status.some((x) => x.state === "blocked") ? "blocked" : status.some((x) => x.state === "working") ? "working" : "idle"
+  return sessions.find((x) => x.id === id)?.state ?? "idle"
+}
+
+let turnRun = 0
+/** A typed turn on ses_mock: working → streamed reply → idle (the POST answers when the turn ends). */
+async function mockTurn(text: string): Promise<Record<string, unknown>> {
+  const run = ++turnRun
+  const since = Date.now()
+  setStatus([{ id: SESSION, title: "Mock session", state: "working", blockers: [], since }])
+  addActivity(SESSION, { id: `tool_turn_${run}`, kind: "tool", tool: "bash", summary: "bun test", state: "running" })
+  await sleep(2500)
+  addActivity(SESSION, { id: `tool_turn_${run}`, kind: "tool", tool: "bash", summary: "bun test", state: "done" })
+  const reply = `Done: ${text}`
+  await streamText("text", SESSION, `msg_turn_${run}`, reply, 60, 6, () => run === turnRun)
+  if (run !== turnRun) return { outcome: "interrupted", message: "Stopped", reply: "" }
+  setStatus([{ id: SESSION, title: "Mock session", state: "idle", blockers: [] }])
+  return { outcome: "succeeded", reply }
+}
+
+async function consoleRoute(request: Request, url: URL, user: MockUser): Promise<Response | undefined> {
+  const p = url.pathname
+  const m = request.method
+  if (p === "/api/reads" && m === "GET") return Response.json({ reads: reads[user.id] ?? {} })
+  const match = /^\/api\/sessions\/([^/]+)\/(timeline|model-prefs|models|summary|diff|read|stop|turn|permission)(?:\/messages\/([^/]+)\/parts\/([^/]+))?$/.exec(p)
+  if (!match) return undefined
+  const id = decodeURIComponent(match[1]!)
+  const fixture = id === SESSION ? { title: "Mock session", directory: `${HOME}/opencode-voice` } : id === BOB_SESSION ? bobSession() : sessions.find((x) => x.id === id) ?? (id === "ses_scratch" ? { title: "Scratch experiment", directory: "/tmp/scratch" } : undefined)
+  if (!fixture) return Response.json({ error: "Not found" }, { status: 404 })
+  const body = async () => (await request.json().catch(() => ({}))) as Record<string, any>
+  switch (match[2]) {
+    case "timeline":
+      if (match[3]) return Response.json({ detail: { name: "bash", state: { status: "error", input: { command: "bun test" }, error: "1 test failed" }, time: { start: Date.now() - 60_000, end: Date.now() - 54_000 } } })
+      return Response.json({ items: timelineOf(id, fixture.title) })
+    case "model-prefs":
+      if (m === "PUT") {
+        const change = await body()
+        modelPrefs[id] = { ...(modelPrefs[id] ?? {}), ...change }
+      }
+      return Response.json({ prefs: modelPrefs[id] ?? {}, defaults: MODEL_DEFAULTS })
+    case "models":
+      if (fail.models) return Response.json({ error: "OpenCode did not answer" }, { status: 502 })
+      return Response.json({ models: MODELS })
+    case "summary":
+      return Response.json({
+        directory: fixture.directory,
+        branch: id === SESSION ? "feature/remote-session-console" : "main",
+        context: { used: 61_200, limit: 200_000, percent: 31, model: "Claude Sonnet 4.5" },
+        mcp: [{ name: "brain", status: "connected" }, { name: "github", status: "needs_auth" }, { name: "chrome", status: "failed", error: "spawn ENOENT" }],
+        ...(id === SESSION
+          ? { changes: { files: CHANGES, additions: 141, deletions: 130, totalFiles: CHANGES.length + 2, truncated: true } }
+          : { changes: { files: [], additions: 0, deletions: 0, totalFiles: 0, truncated: false } }),
+      })
+    case "diff": {
+      const file = url.searchParams.get("file")
+      const c = CHANGES.find((x) => x.file === file)
+      if (!c || id !== SESSION) return Response.json({ error: "No changes for that file" }, { status: 404 })
+      return Response.json({ ...c, patch: c.file.endsWith("Session.tsx") ? PATCH : "@@ -0,0 +1,2 @@\n+// new file\n+export {}", truncated: false })
+    }
+    case "read": {
+      reads[user.id] = { ...(reads[user.id] ?? {}), [id]: Date.now() }
+      return Response.json({ reads: reads[user.id] })
+    }
+    case "stop": {
+      const running = treeState(id) !== "idle"
+      if (id === SESSION) {
+        turnRun++
+        setStatus([{ id: SESSION, title: "Mock session", state: "idle", blockers: [] }])
+      }
+      return Response.json({ stopped: running ? [id] : [] })
+    }
+    case "permission": {
+      const { requestID } = await body()
+      const s = sessions.find((x) => x.id === id)
+      if (s) {
+        s.blockers = s.blockers.filter((b) => b.id !== requestID)
+        if (!s.blockers.length && s.state === "blocked") s.state = "working"
+        emitCatalog()
+      }
+      return new Response(null, { status: 204 })
+    }
+    case "turn": {
+      const { text } = await body()
+      if (typeof text !== "string" || !text.trim()) return Response.json({ error: "Empty prompt" }, { status: 400 })
+      log[log.length - 1]!.body = { text }
+      if (text.includes("fail")) return Response.json({ error: "No OpenCode process for this session is connected" }, { status: 409 })
+      if (treeState(id) !== "idle") return Response.json({ mode: "steer", inboxID: `inb_${++inbox}` }, { status: 202 })
+      if (id === SESSION) return Response.json(await mockTurn(text))
+      return Response.json({ outcome: "succeeded", reply: `You said: ${text}` })
+    }
+  }
+  return undefined
+}
+
 const server = Bun.serve({
   port: PORT,
   hostname: "127.0.0.1",
@@ -629,6 +774,9 @@ const server = Bun.serve({
       status = [{ id: SESSION, title: "Mock session", state: "idle", blockers: [] }]
       sessions = fixtures()
       fail = { expose: false, create: false, models: false, prefs: false }
+      reads = {}
+      modelPrefs = {}
+      turnRun++
       serviceConnected = true
       herdr = { on: true, fail: false }
       viewPrefs = new Map()
@@ -793,6 +941,8 @@ const server = Bun.serve({
       emitCatalog()
       return Response.json(result, { status: 201 })
     }
+    const consoleReply = await consoleRoute(request, url, user)
+    if (consoleReply) return consoleReply
     if ((match = /^\/api\/sessions\/([^/]+)(?:\/([a-z]+))?$/.exec(p)) && decodeURIComponent(match[1]!) !== SESSION) {
       const id = decodeURIComponent(match[1]!)
       const action = match[2]
@@ -807,7 +957,8 @@ const server = Bun.serve({
         emitCatalog()
         return Response.json({ exposed: s.exposed })
       }
-      if (!s.exposed) return Response.json(NOT_EXPOSED, { status: 403 })
+      // Inspection and control work with Voice off; only conversation and utterances need it.
+      if (!s.exposed && (action === "conversation" || action === "utterance")) return Response.json(NOT_EXPOSED, { status: 403 })
       if (!action && m === "GET") return Response.json({ ...catalogSession(s), activity: [] })
       if (action === "context") return Response.json({ messages: [{ role: "assistant", text: `Hi, this is “${s.title || "Untitled"}”.` }] })
       if (action === "presence") return new Response(null, { status: 204 })
@@ -905,11 +1056,6 @@ const server = Bun.serve({
       return Response.json({ inboxID }, { status: 202 })
     }
     if (p === `/api/sessions/${SESSION}/interrupt` && m === "POST") return new Response(null, { status: 204 })
-    if (p === `/api/sessions/${SESSION}/turn` && m === "POST") {
-      const body = await json()
-      last().body = body
-      return Response.json({ outcome: "succeeded", reply: `You said: ${body.text}` })
-    }
     if (p === "/api/speak" && m === "POST") {
       const body = await json()
       last().body = body
@@ -918,7 +1064,7 @@ const server = Bun.serve({
     }
     if (p.startsWith("/api/")) return notFound()
 
-    const file = /^\/(?:|pair|approve|s\/[^/]+)$/.test(p) ? path.join(WEB, "index.html") : path.resolve(WEB, `.${p}`)
+    const file = /^\/(?:|pair|approve|new|settings|s\/[^/]+)$/.test(p) ? path.join(WEB, "index.html") : path.resolve(WEB, `.${p}`)
     const type = TYPES[path.extname(file)]
     if (!type || !file.startsWith(WEB) || !existsSync(file) || !statSync(file).isFile()) return new Response("Not found", { status: 404 })
     return new Response(readFileSync(file), { headers: { "content-type": type, "cache-control": "no-cache" } })

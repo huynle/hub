@@ -33,7 +33,7 @@ describe("setupOptions", () => {
     const status = { ...fresh, server: "https://voice.example.com" }
     expect(values(status)).toEqual(["configured", "local", "local-session", "remote", "later"])
     expect(setupOptions(status)[0]!.title).toBe("Connect to voice.example.com")
-    expect(setupOptions(status).find((o) => o.value === "remote")!.title).toBe("Connect to a different voice server…")
+    expect(setupOptions(status).find((o) => o.value === "remote")!.title).toBe("Connect to a different hub…")
   })
 
   test("a revoked machine is told why", () => {
@@ -92,6 +92,6 @@ describe("checkServer", () => {
     const auth = await checkServer("https://voice.example.com", { fetch: fetchWith(() => new Response("login", { status: 302 })) })
     expect(auth).toEqual({ ok: false, error: expect.stringContaining("HTTP 302") })
     const other = await checkServer("https://voice.example.com", { fetch: fetchWith(() => new Response("<html>")) })
-    expect(other).toEqual({ ok: false, error: expect.stringContaining("not an opencode-voice hub") })
+    expect(other).toEqual({ ok: false, error: expect.stringContaining("not an OpenCode Hub") })
   })
 })

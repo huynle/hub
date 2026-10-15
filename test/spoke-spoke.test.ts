@@ -151,7 +151,7 @@ describe("Spoke", () => {
     expect(noToken.spoke.status()).toMatchObject({ connection: "off", enrolled: false })
   })
 
-  test("session mode exposes only listed sessions and their children, in snapshots and events", async () => {
+  test("session mode marks Voice exposure; events of every known session are forwarded", async () => {
     const { spoke, server, host } = setup({ mode: "session", sessions: ["ses_a"], token: "tok" })
     await until(() => spoke.status().connection === "connected")
     host.push(created("ses_a"))
@@ -167,7 +167,9 @@ describe("Spoke", () => {
     const events = forwarded(server)
     expect(events.map((e) => `${e.type}:${e.data.sessionID}`)).toEqual([
       "session.created:ses_a",
+      "session.created:ses_b",
       "session.created:ses_kid",
+      "session.execution.started:ses_b",
       "session.execution.started:ses_kid",
     ])
     expect(spoke.status("ses_kid").sessionExposed).toBe(true)
@@ -189,7 +191,7 @@ describe("Spoke", () => {
     host.push(created("ses_a"))
     const response = server.request({ op: "turn", sessionID: "ses_a", text: "what's up", voiceStyle: true })
     await until(() => calls.prompt.length === 1)
-    expect(calls.prompt[0]).toEqual({ sessionID: "ses_a", text: "what's up", metadata: { source: "opencode-voice" } })
+    expect(calls.prompt[0]).toEqual({ sessionID: "ses_a", text: "what's up", metadata: { source: "opencode-hub" } })
     expect(spoke.isVoiceTurn("ses_a")).toBe(true)
     messages.set("ses_a", [
       { id: "msg_1", type: "user", text: "what's up" },
@@ -213,12 +215,12 @@ describe("Spoke", () => {
     expect(await response).toMatchObject({ ok: true, result: { outcome: "failed", message: "model exploded", reply: "" } })
   })
 
-  test("turns on sessions that are not exposed are refused", async () => {
+  test("turns on sessions this process does not know are refused", async () => {
     const { spoke, server, calls } = setup({ mode: "session", sessions: ["ses_a"], token: "tok" })
     await until(() => spoke.status().connection === "connected")
     const res = await server.request({ op: "turn", sessionID: "ses_other", text: "x", voiceStyle: true })
     expect(res.ok).toBe(false)
-    expect(res.error).toMatch(/not shared/i)
+    expect(res.error).toMatch(/unknown session/i)
     expect(calls.prompt).toHaveLength(0)
   })
 
@@ -443,7 +445,7 @@ describe("Spoke", () => {
       sessionID: "ses_a",
       text: "make it blue",
       delivery: "steer",
-      metadata: { source: "opencode-voice", mode: "conversation" },
+      metadata: { source: "opencode-hub", mode: "conversation" },
     })
   })
 
@@ -528,23 +530,98 @@ describe("Spoke", () => {
     expect(calls.switch).toHaveLength(0)
   })
 
-  test("steer, interrupt and conversation are refused for sessions that are not exposed", async () => {
-    const { spoke, server, calls } = setup({ mode: "session", sessions: ["ses_a"], token: "tok" })
+  test("known sessions without Voice accept typed control and permissions; conversation stays Voice-only", async () => {
+    const { spoke, server, calls, host } = setup({ mode: "session", sessions: ["ses_a"], token: "tok", voiceModel: "anthropic/claude-haiku" })
     await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_other"))
+    await Bun.sleep(30)
     for (const req of [
       { op: "steer", sessionID: "ses_other", text: "x" },
       { op: "interrupt", sessionID: "ses_other" },
-      { op: "conversation", sessionID: "ses_other", on: true },
+      { op: "permission", sessionID: "ses_other", requestID: "per_1", decision: "once" },
+      { op: "context", sessionID: "ses_other" },
+      { op: "timeline", sessionID: "ses_other" },
     ]) {
       const res = await server.request(req)
-      expect(res.ok).toBe(false)
-      expect(res.error).toMatch(/not shared/i)
+      expect(res).toMatchObject({ ok: true })
     }
+    expect(calls.prompt).toEqual([{ sessionID: "ses_other", text: "x", delivery: "steer", metadata: { source: "opencode-hub", mode: "remote" } }])
+    expect(calls.interrupt).toEqual(["ses_other"])
+    expect(calls.permission).toHaveLength(1)
+    expect(calls.model).toHaveLength(0)
+    const convo = await server.request({ op: "conversation", sessionID: "ses_other", on: true })
+    expect(convo.ok).toBe(false)
+    expect(convo.error).toMatch(/not shared/i)
     await expect(spoke.setConversation("ses_other", true)).rejects.toMatchObject({ name: "invalid" })
-    expect(spoke.inConversation("ses_other")).toBe(false)
-    expect(calls.prompt).toHaveLength(0)
-    expect(calls.interrupt).toHaveLength(0)
     expect(calls.switch).toHaveLength(0)
+  })
+
+  test("stop interrupts running descendants deepest first, then the root, and is idempotent", async () => {
+    const { spoke, server, calls, host } = setup({ mode: "session", sessions: [], token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_r"))
+    host.push(created("ses_c", { parentID: "ses_r" }))
+    host.push(created("ses_g", { parentID: "ses_c" }))
+    host.push(created("ses_idle", { parentID: "ses_r" }))
+    for (const id of ["ses_r", "ses_c", "ses_g"]) host.push({ type: "session.execution.started", data: { sessionID: id } })
+    await Bun.sleep(30)
+    const res = await server.request({ op: "stop", sessionID: "ses_c" })
+    expect(res).toMatchObject({ ok: true, result: { stopped: ["ses_g", "ses_c", "ses_r"] } })
+    expect(calls.interrupt).toEqual(["ses_g", "ses_c", "ses_r"])
+    for (const id of ["ses_r", "ses_c", "ses_g"]) host.push({ type: "session.execution.interrupted", data: { sessionID: id } })
+    await Bun.sleep(30)
+    expect(await server.request({ op: "stop", sessionID: "ses_r" })).toMatchObject({ ok: true, result: { stopped: ["ses_r"] } })
+  })
+
+  test("summary and diff read the session's directory; missing host features leave parts out", async () => {
+    const { spoke, server, host, messages } = setup({ mode: "session", sessions: [], token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_r"))
+    await Bun.sleep(30)
+    messages.set("ses_r", [{ type: "assistant", model: { providerID: "anthropic", id: "claude-opus" }, tokens: { input: 900, output: 100, reasoning: 0, cache: { read: 0, write: 0 } } }])
+    const seen: string[] = []
+    const diffs = [{ file: "a.ts", status: "modified", additions: 3, deletions: 1, patch: "@@ -1 +1 @@" }]
+    Object.assign(host, {
+      mcpList: async (dir: string) => (seen.push(`mcp ${dir}`), [{ name: "github", status: { status: "connected" } }]),
+      vcsDiff: async (dir: string) => (seen.push(`diff ${dir}`), diffs),
+      vcsBranch: async (dir: string) => (seen.push(`branch ${dir}`), "main"),
+    })
+    const summary = await server.request({ op: "summary", sessionID: "ses_r" })
+    expect(summary).toMatchObject({
+      ok: true,
+      result: {
+        directory: "/work/project",
+        branch: "main",
+        context: { used: 1000, model: "Claude Opus" },
+        mcp: [{ name: "github", status: "connected" }],
+        changes: { files: [{ file: "a.ts", status: "modified", additions: 3, deletions: 1 }], additions: 3, deletions: 1 },
+      },
+    })
+    expect(seen.sort()).toEqual(["branch /work/project", "diff /work/project", "mcp /work/project"])
+    expect(await server.request({ op: "diff", sessionID: "ses_r", file: "a.ts" })).toMatchObject({ ok: true, result: { patch: { file: "a.ts", patch: "@@ -1 +1 @@", truncated: false } } })
+    expect(await server.request({ op: "diff", sessionID: "ses_r", file: "zzz" })).toMatchObject({ ok: true, result: {} })
+    // A failing part is left out instead of failing the whole summary.
+    Object.assign(host, { vcsDiff: async () => { throw new Error("not a git repo") } })
+    const partial = await server.request({ op: "summary", sessionID: "ses_r" })
+    expect(partial.ok).toBe(true)
+    expect((partial.result as any).changes).toBeUndefined()
+    expect((partial.result as any).mcp).toHaveLength(1)
+  })
+
+  test("stop keeps going when a descendant finished meanwhile", async () => {
+    const { spoke, server, calls, host } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_r"))
+    host.push(created("ses_c", { parentID: "ses_r" }))
+    host.push({ type: "session.execution.started", data: { sessionID: "ses_c" } })
+    await Bun.sleep(30)
+    const original = host.interrupt
+    host.interrupt = async (id) => {
+      await original(id)
+      if (id === "ses_c") throw new Error("not running")
+    }
+    expect(await server.request({ op: "stop", sessionID: "ses_r" })).toMatchObject({ ok: true, result: { stopped: ["ses_c", "ses_r"] } })
+    expect(calls.interrupt).toEqual(["ses_c", "ses_r"])
   })
 
   test("text.ended, inbox.delivered and agent.selected are forwarded for exposed sessions", async () => {
@@ -583,6 +660,7 @@ describe("Spoke", () => {
       { type: "session.tool.success", data: base },
       { type: "session.tool.failed", data: { ...base, id: "tool_2", error: "boom" } },
       { type: "session.reasoning.started", data: { sessionID: "ses_a", assistantMessageID: "msg_0" } },
+      { type: "session.tool.called", data: { sessionID: "ses_b", id: "tool_b", summary: "ls", background: false } },
     ])
     expect(JSON.stringify(server.frames)).not.toContain("SECRET")
   })

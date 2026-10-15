@@ -283,9 +283,9 @@ export const escapeHTML = (text: string) => text.replace(/[&<>"']/g, (c) => ESCA
 export function authPage(status: number, title: string, message: string, headers: HeadersInit = {}): Response {
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${escapeHTML(title)} · opencode-voice</title>
+<title>${escapeHTML(title)} · OpenCode Hub</title>
 <style>body{font:16px/1.5 system-ui,sans-serif;max-width:32rem;margin:15vh auto;padding:0 1rem;color:#222}a{color:#0a58ca}</style>
-</head><body><h1>${escapeHTML(title)}</h1><p>${escapeHTML(message)}</p><p><a href="/">Back to opencode-voice</a></p></body></html>
+</head><body><h1>${escapeHTML(title)}</h1><p>${escapeHTML(message)}</p><p><a href="/">Back to OpenCode Hub</a></p></body></html>
 `
   const h = new Headers(headers)
   h.set("content-type", "text/html; charset=utf-8")

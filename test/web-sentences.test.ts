@@ -1,6 +1,6 @@
 // Conversation mode: splitting agent replies into sentences for per-sentence TTS.
 import { describe, expect, test } from "bun:test"
-import { splitSentences } from "../web/conversation-core.js"
+import { splitSentences } from "../web/src/core/conversation-core"
 
 describe("splitSentences", () => {
   test("plain sentences", () => {

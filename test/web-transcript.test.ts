@@ -1,6 +1,6 @@
 // Conversation mode transcript helpers: deduping spoken "say" text against streamed deltas, and subagent notes.
 import { describe, expect, test } from "bun:test"
-import { reconcileSay, statusNotes } from "../web/conversation-core.js"
+import { reconcileSay, statusNotes } from "../web/src/core/conversation-core"
 
 describe("reconcileSay", () => {
   test("no agent bubble yet: a new bubble", () => {

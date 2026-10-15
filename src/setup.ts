@@ -1,5 +1,5 @@
-// First-run setup for /voice: whether to show it, which options in which order, the server URL the user
-// types, and whether that server answers like a voice hub. Pure decisions; src/tui.ts renders them.
+// First-run setup for /hub: whether to show it, which options in which order, the server URL the user
+// types, and whether that server answers like an OpenCode Hub. Pure decisions; src/tui.ts renders them.
 import { DEFAULT_SERVER, type Mode } from "./config"
 import { isLoopbackURL } from "./loopback"
 
@@ -45,26 +45,26 @@ export function setupOptions(status: SetupStatus): SetupOption[] {
       title: `Connect to ${hostOf(status.server)}`,
       description: revoked
         ? "This machine was revoked there; ask to be approved again"
-        : "Your voice server: approve this machine in its web page, then talk from any device",
+        : "Your hub: approve this machine in its web page, then open your sessions from any device",
     })
   }
   options.push(
     {
       value: "local",
       title: "On this computer (local — nothing to install)",
-      description: "Starts a voice hub here (nothing to install), shares every session, and opens the voice page in your browser",
+      description: "Starts a hub here (nothing to install), shares every session, and opens it in your browser",
     },
     {
       value: "local-session",
       title: "On this computer, only sessions I choose",
-      description: "Same local hub; share a session with /voice → This session",
+      description: "Same local hub; share a session with /hub → This session",
     },
     {
       value: "remote",
-      title: remote ? "Connect to a different voice server…" : "Connect to a voice server…",
-      description: "A hub you or your team host, e.g. https://voice.example.com (needed for phones away from this computer)",
+      title: remote ? "Connect to a different hub…" : "Connect to a hub…",
+      description: "A hub you or your team host, e.g. https://hub.example.com (needed for phones away from this computer)",
     },
-    { value: "later", title: "Not now", description: "Run /voice again any time" },
+    { value: "later", title: "Not now", description: "Run /hub again any time" },
   )
   return options
 }
@@ -82,7 +82,7 @@ export function modeFor(choice: SetupChoice): Mode {
 /** A server URL as typed: http(s) only, a bare host means https; no credentials, query or fragment. */
 export function parseServerInput(raw: string): Parsed {
   const text = raw.trim()
-  if (!text) return { ok: false, error: "Enter the voice server's address, e.g. https://voice.example.com" }
+  if (!text) return { ok: false, error: "Enter the hub's address, e.g. https://hub.example.com" }
   if (/\s/.test(text)) return { ok: false, error: "The address cannot contain spaces" }
   const withScheme = /^[a-z][a-z0-9+.-]*:/i.test(text) ? text : `https://${text}`
   let url: URL
@@ -100,7 +100,7 @@ export function parseServerInput(raw: string): Parsed {
   return { ok: true, url: `${url.origin}${url.pathname}`.replace(/\/+$/, "") }
 }
 
-/** GET <server>/healthz: reachable and answering like an opencode-voice hub ({ok: true}). */
+/** GET <server>/healthz: reachable and answering like an OpenCode Hub ({ok: true}). */
 export async function checkServer(
   server: string,
   options: { fetch?: typeof globalThis.fetch; timeoutMs?: number } = {},
@@ -119,6 +119,6 @@ export async function checkServer(
     }
   }
   const body = (await res.json().catch(() => undefined)) as { ok?: unknown; version?: unknown } | undefined
-  if (body?.ok !== true) return { ok: false, error: `${server} answered, but it is not an opencode-voice hub` }
+  if (body?.ok !== true) return { ok: false, error: `${server} answered, but it is not an OpenCode Hub` }
   return { ok: true, ...(typeof body.version === "string" ? { version: body.version } : {}) }
 }

@@ -1,6 +1,6 @@
 // Spoken progress cues in conversation mode: pure scheduler with injected time.
 import { describe, expect, test } from "bun:test"
-import { CUE_PHRASES, CueScheduler, isWorking, subagentChanges } from "../web/feedback-core.js"
+import { CUE_PHRASES, CueScheduler, isWorking, subagentChanges } from "../web/src/core/feedback-core"
 
 const speak = (cue: "working" | "subagent" | "still") => [{ type: "speak" as const, cue, text: CUE_PHRASES[cue] }]
 

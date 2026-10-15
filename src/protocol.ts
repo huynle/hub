@@ -144,7 +144,7 @@ export interface Event {
   readonly event: ForwardedEvent
 }
 
-/** Requests the spoke makes of the server on the user's behalf (from the /voice dialog). */
+/** Requests the spoke makes of the server on the user's behalf (from the /hub dialog). */
 export type SpokeRequest =
   | { readonly op: "pairCode" }
   | { readonly op: "handoff"; readonly sessionID: string }
@@ -167,6 +167,12 @@ export type ServerRequest =
   /** Conversation mode: deliver an utterance with delivery "steer" and return at once (replies arrive as events). */
   | { readonly op: "steer"; readonly sessionID: string; readonly text: string }
   | { readonly op: "interrupt"; readonly sessionID: string }
+  /** Interrupt the session's whole tree: running descendants deepest first, then the root. */
+  | { readonly op: "stop"; readonly sessionID: string }
+  /** Right-rail data: context usage, MCP servers, branch and working-tree change stats. */
+  | { readonly op: "summary"; readonly sessionID: string }
+  /** One changed file's patch in the session's directory. */
+  | { readonly op: "diff"; readonly sessionID: string; readonly file: string }
   /** Switch the session to the voice orchestrator agent (on) or back to its previous agent (off). */
   | { readonly op: "conversation"; readonly sessionID: string; readonly on: boolean }
   | { readonly op: "models"; readonly sessionID: string }
@@ -183,6 +189,53 @@ export type ServerRequest =
    */
   | { readonly op: "create"; readonly directory: string; readonly title?: string; readonly herdrWorkspace?: string }
 
+export interface ContextUsage {
+  /** Tokens of the latest assistant message (input + output + reasoning + cache). */
+  readonly used: number
+  readonly limit?: number
+  readonly percent?: number
+  readonly model?: string
+}
+
+export interface McpStatus {
+  readonly name: string
+  readonly status: "connected" | "pending" | "disabled" | "failed" | "needs_auth" | "unknown"
+  readonly error?: string
+}
+
+export interface ChangedFile {
+  readonly file: string
+  readonly status: "added" | "deleted" | "modified"
+  readonly additions: number
+  readonly deletions: number
+}
+
+export interface SessionChanges {
+  /** The listed files: all of them, or (when `truncated`) the most-changed ones that fit the limits. */
+  readonly files: readonly ChangedFile[]
+  /** Line totals over every changed file, listed or not. */
+  readonly additions: number
+  readonly deletions: number
+  /** Number of changed files, listed or not. */
+  readonly totalFiles: number
+  /** True when `files` lists fewer than `totalFiles`. */
+  readonly truncated: boolean
+}
+
+export interface FilePatch extends ChangedFile {
+  readonly patch: string
+  readonly truncated: boolean
+}
+
+/** Right-rail data for a session; each part is absent when OpenCode could not provide it. */
+export interface SessionSummary {
+  readonly directory: string
+  readonly branch?: string
+  readonly context?: ContextUsage
+  readonly mcp?: readonly McpStatus[]
+  readonly changes?: SessionChanges
+}
+
 export type TurnResult =
   | { readonly outcome: "succeeded"; readonly reply: string }
   | { readonly outcome: "failed" | "interrupted"; readonly message: string; readonly reply: string }
@@ -198,6 +251,9 @@ export interface ResultFor {
   openLink: { readonly url: string }
   steer: { readonly inboxID: string }
   interrupt: Record<string, never>
+  stop: { readonly stopped: readonly string[] }
+  summary: SessionSummary
+  diff: { readonly patch?: FilePatch }
   conversation: { readonly agent: string }
   models: { readonly models: readonly AvailableModel[] }
   modelPrefs: { readonly prefs: SessionModelPrefs; readonly defaults: SessionModelPrefs }
@@ -242,7 +298,8 @@ const ID = /^[A-Za-z0-9_.:@/+~-]{1,300}$/
 const isModelSelection = (v: unknown): v is ModelSelection =>
   isObj(v) && typeof v.providerID === "string" && ID.test(v.providerID) && typeof v.modelID === "string" && ID.test(v.modelID) && (v.variant === undefined || (typeof v.variant === "string" && ID.test(v.variant)))
 
-const MAX_FRAME = 1_000_000
+/** Largest frame (in characters) either side accepts; a larger one is a protocol error. */
+export const MAX_FRAME = 1_000_000
 
 function isSession(v: unknown): v is SessionInfo {
   return (
@@ -301,6 +358,8 @@ function isServerRequest(v: unknown): v is ServerRequest {
       return nonEmpty(v.sessionID) && nonEmpty(v.requestID) && ["once", "always", "reject"].includes(v.decision as string)
     case "context":
     case "interrupt":
+    case "stop":
+    case "summary":
     case "models":
     case "modelPrefs":
       return nonEmpty(v.sessionID)
@@ -321,6 +380,8 @@ function isServerRequest(v: unknown): v is ServerRequest {
       return nonEmpty(v.sessionID) && nonEmpty(v.messageID) && v.messageID.length <= 300 && nonEmpty(v.partID) && v.partID.length <= 300
     case "steer":
       return nonEmpty(v.sessionID) && nonEmpty(v.text)
+    case "diff":
+      return nonEmpty(v.sessionID) && nonEmpty(v.file) && v.file.length <= 4096
     case "conversation":
     case "expose":
       return nonEmpty(v.sessionID) && typeof v.on === "boolean"

@@ -17,6 +17,7 @@ jobs:
           node-version: 22
       - run: npm ci --no-audit --no-fund
       - run: npx tsc --noEmit
+      - run: npx tsc --noEmit -p web
       - run: scripts/test-ci.sh
 
   release-image:
@@ -28,6 +29,6 @@ jobs:
       packages: write
     uses: huynle/.github/.github/workflows/container-release.yml@v1
     with:
-      image: ghcr.io/huynle/opencode-voice-hub
+      image: ghcr.io/huynle/opencode-hub
       platforms: linux/amd64,linux/arm64
       runner: ubuntu-latest

@@ -111,13 +111,13 @@ export function fakeProvider(options: { clientId?: string; clientSecret?: string
 /** Hub env for oidc mode against the fake provider. */
 export function oidcEnv(provider: FakeProvider, extra: Record<string, string> = {}): Record<string, string> {
   return {
-    VOICE_AUTH: "oidc",
-    VOICE_OIDC_ISSUER: provider.issuer,
-    VOICE_OIDC_INSECURE_ISSUER: "1",
-    VOICE_OIDC_CLIENT_ID: provider.clientId,
-    VOICE_OIDC_CLIENT_SECRET: provider.clientSecret,
-    VOICE_OIDC_ALLOWED: "alice@example.com,bob@example.com,@example.org",
-    VOICE_ADMIN_EMAILS: "admin@example.com",
+    HUB_AUTH: "oidc",
+    HUB_OIDC_ISSUER: provider.issuer,
+    HUB_OIDC_INSECURE_ISSUER: "1",
+    HUB_OIDC_CLIENT_ID: provider.clientId,
+    HUB_OIDC_CLIENT_SECRET: provider.clientSecret,
+    HUB_OIDC_ALLOWED: "alice@example.com,bob@example.com,@example.org",
+    HUB_ADMIN_EMAILS: "admin@example.com",
     ...extra,
   }
 }

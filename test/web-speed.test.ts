@@ -1,6 +1,6 @@
 // Voice speed: playback rate chosen on the phone (0.75×–2.0×, 0.05 steps), stored as a string in localStorage.
 import { describe, expect, test } from "bun:test"
-import { SPEED_DEFAULT, SPEED_MAX, SPEED_MIN, SPEED_STEP, clampSpeed, formatSpeed } from "../web/feedback-core.js"
+import { SPEED_DEFAULT, SPEED_MAX, SPEED_MIN, SPEED_STEP, clampSpeed, formatSpeed } from "../web/src/core/feedback-core"
 
 describe("clampSpeed", () => {
   test("range constants", () => {

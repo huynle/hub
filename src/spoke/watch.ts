@@ -33,7 +33,7 @@ export function watchConfig(
       try {
         onChange(config)
       } catch (cause) {
-        console.error("[opencode-voice] config change handler failed", cause)
+        console.error("[opencode-hub] config change handler failed", cause)
       }
     }
     return config

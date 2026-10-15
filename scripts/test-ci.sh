@@ -7,6 +7,13 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 LIMIT="${TEST_FILE_TIMEOUT:-120}"
+# The hub serves the built console (web/dist); test/central-web.test.ts checks it.
+if ! build=$(npx --no-install vite build --config web/vite.config.ts --logLevel error 2>&1); then
+  echo "::group::FAILED web build"
+  echo "$build" | tail -40
+  echo "::endgroup::"
+  exit 1
+fi
 failed=()
 total=0
 for file in test/*.test.ts; do

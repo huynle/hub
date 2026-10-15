@@ -1,9 +1,19 @@
-# Central voice server for opencode-voice. Runtime: Bun, the sources, and the hub's npm dependencies
+# OpenCode Hub server. Runtime: Bun, the sources, and the hub's npm dependencies
 # (web-push for notifications) at the versions pinned in package-lock.json. Published as
-# ghcr.io/huynle/opencode-voice-hub (see .github/workflows/release.yml).
-#   docker build -t opencode-voice-hub .
-#   docker run -p 127.0.0.1:4097:4097 -v voice-data:/data -e VOICE_PUBLIC_URL=https://voice.example.com \
-#     -e OPENROUTER_API_KEY=... opencode-voice-hub
+# ghcr.io/huynle/opencode-hub (see .github/workflows/release.yml; formerly opencode-voice-hub).
+#   docker build -t opencode-hub .
+#   docker run -p 127.0.0.1:4097:4097 -v hub-data:/data -e HUB_PUBLIC_URL=https://hub.example.com \
+#     -e OPENROUTER_API_KEY=... opencode-hub
+# Legacy VOICE_* variables still work, except that the HUB_HOST/HUB_PORT/HUB_STATE_DIR defaults below
+# win over VOICE_HOST/VOICE_PORT/VOICE_STATE_DIR: rename those overrides to HUB_*.
+# The console (web/, Solid + Vite) is built in its own stage; the image ships only web/dist.
+FROM node:22-slim AS web
+WORKDIR /build
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund --ignore-scripts
+COPY web ./web
+RUN npx vite build --config web/vite.config.ts
+
 FROM oven/bun:1.3-slim AS deps
 WORKDIR /build
 COPY package.json package-lock.json ./
@@ -14,20 +24,20 @@ COPY docker/hub-deps.ts ./
 RUN bun hub-deps.ts /deps web-push
 
 FROM oven/bun:1.3-slim
-LABEL org.opencontainers.image.title="opencode-voice-hub" \
-      org.opencontainers.image.description="Voice server for opencode-voice: web app, pairing, speech and push for OpenCode sessions" \
+LABEL org.opencontainers.image.title="opencode-hub" \
+      org.opencontainers.image.description="OpenCode Hub: remote console, pairing, push and optional Voice for OpenCode sessions" \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.source="https://github.com/huynle/opencode-voice"
+      org.opencontainers.image.source="https://github.com/huynle/opencode-hub"
 WORKDIR /app
 COPY --from=deps /deps/node_modules ./node_modules
 COPY package.json ./
 COPY bin ./bin
 COPY src ./src
-COPY web ./web
+COPY --from=web /build/web/dist ./web/dist
 
-ENV VOICE_HOST=0.0.0.0 \
-    VOICE_PORT=4097 \
-    VOICE_STATE_DIR=/data \
+ENV HUB_HOST=0.0.0.0 \
+    HUB_PORT=4097 \
+    HUB_STATE_DIR=/data \
     NODE_ENV=production
 
 RUN mkdir -p /data && chown bun:bun /data
@@ -36,6 +46,6 @@ USER bun
 EXPOSE 4097
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD ["bun", "-e", "fetch('http://127.0.0.1:' + (process.env.VOICE_PORT || 4097) + '/healthz').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+  CMD ["bun", "-e", "fetch('http://127.0.0.1:' + (process.env.HUB_PORT || process.env.VOICE_PORT || 4097) + '/healthz').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
 
 CMD ["bun", "bin/hub.ts"]

@@ -18,7 +18,7 @@ import {
   relativeDir,
   sessionState,
   toggleIn,
-} from "../web/browser-core.js"
+} from "../web/src/core/browser-core"
 
 const NOW = new Date(2026, 9, 12, 15, 0, 0).getTime()
 const MIN = 60_000

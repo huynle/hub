@@ -1,6 +1,6 @@
 // Conversation mode: per-sentence TTS queue with one-ahead prefetch, sequential playback and barge-in clear.
 import { describe, expect, test } from "bun:test"
-import { SpeechQueue } from "../web/conversation-core.js"
+import { SpeechQueue } from "../web/src/core/conversation-core"
 
 function deferred<T>() {
   let resolve!: (value: T) => void

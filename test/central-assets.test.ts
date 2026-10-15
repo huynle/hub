@@ -4,7 +4,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { diskAssets, embeddedAssets, webAssetModule } from "../src/central/assets"
+import { diskAssets, embeddedAssets, webAssetModule, webFiles } from "../src/central/assets"
 import { harness, type Harness } from "./central-harness"
 
 const text = (bytes: Uint8Array | undefined) => (bytes ? new TextDecoder().decode(bytes) : undefined)
@@ -66,9 +66,25 @@ describe("webAssetModule", () => {
     expect(source).toContain("export default")
   })
 
-  test("skips type declarations and hidden files", () => {
-    const source = webAssetModule(["app.js", "browser-core.d.ts", ".DS_Store"], "../web")
+  test("skips type declarations, source maps and hidden files, nested ones too", () => {
+    const source = webAssetModule(["app.js", "browser-core.d.ts", ".DS_Store", "assets/.DS_Store", "assets/index-x.js.map", "assets/index-x.js"], "../web/dist")
     expect(source).not.toContain("browser-core.d.ts")
     expect(source).not.toContain(".DS_Store")
+    expect(source).not.toContain(".map")
+    expect(source).toContain('"assets/index-x.js": f1')
+  })
+})
+
+describe("webFiles", () => {
+  test("lists every file of the build, nested ones as relative / paths, sorted", () => {
+    expect(webFiles(webFolder())).toEqual(["app.js", "index.html", "sub/x.js"])
+  })
+
+  test("the hub serves a nested embedded asset (Vite's assets/ folder)", async () => {
+    const dir = webFolder()
+    h = harness({ web: embeddedAssets({ "index.html": path.join(dir, "index.html"), "sub/x.js": path.join(dir, "sub", "x.js") }) })
+    const res = await h.api("/sub/x.js", { cookie: null })
+    expect(res.status).toBe(200)
+    expect(await res.text()).toBe("nested")
   })
 })

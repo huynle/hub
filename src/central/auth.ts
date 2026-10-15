@@ -1,6 +1,6 @@
 // Credentials issued by the central server:
 // - machine enrollment (device-code flow): a spoke asks, the owner approves in the web UI, the spoke polls for its token
-// - device pairing: short single-use numeric codes, shown in the /voice dialog or logged at startup
+// - device pairing: short single-use numeric codes, shown in the /hub dialog or logged at startup
 // - login links: long single-use codes opened from the terminal to sign a browser in
 // Pending codes live in memory only; a restart invalidates them.
 import { randomBytes, randomInt } from "node:crypto"
