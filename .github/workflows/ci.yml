@@ -19,3 +19,16 @@ jobs:
       - run: npx tsc --noEmit
       - run: npx tsc --noEmit -p web
       - run: scripts/test-ci.sh
+
+  release-image:
+    name: Release production image
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    uses: huynle/.github/.github/workflows/container-release.yml@v1
+    with:
+      image: ghcr.io/huynle/opencode-voice-hub
+      platforms: linux/amd64,linux/arm64
+      runner: ubuntu-latest
