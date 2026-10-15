@@ -292,7 +292,8 @@ const ID = /^[A-Za-z0-9_.:@/+~-]{1,300}$/
 const isModelSelection = (v: unknown): v is ModelSelection =>
   isObj(v) && typeof v.providerID === "string" && ID.test(v.providerID) && typeof v.modelID === "string" && ID.test(v.modelID) && (v.variant === undefined || (typeof v.variant === "string" && ID.test(v.variant)))
 
-const MAX_FRAME = 1_000_000
+/** Largest frame (in characters) either side accepts; a larger one is a protocol error. */
+export const MAX_FRAME = 1_000_000
 
 function isSession(v: unknown): v is SessionInfo {
   return (

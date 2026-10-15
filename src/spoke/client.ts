@@ -2,6 +2,7 @@
 // response correlation in both directions, and reconnect with jittered exponential backoff.
 import {
   encode,
+  MAX_FRAME,
   parseServerMessage,
   PROTOCOL_VERSION,
   type Hello,
@@ -111,7 +112,13 @@ export class SpokeConnection {
   send(frame: SpokeMessage): boolean {
     if (!this.socket || !this.welcomed || this.socket.readyState !== 1) return false
     try {
-      this.socket.send(encode(frame))
+      let text = encode(frame)
+      if (text.length > MAX_FRAME) {
+        // The hub drops the connection on an oversize frame; answer a request with an error instead.
+        if (frame.t !== "res") return false
+        text = encode({ t: "res", id: frame.id, ok: false, error: `Result too large to send (${text.length} characters, limit ${MAX_FRAME})` })
+      }
+      this.socket.send(text)
       return true
     } catch {
       return false
