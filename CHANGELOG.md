@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.5.1 (unreleased)
+
+- **Image attachments**: the composer's **+** button attaches images (file picker, which offers the camera
+  on phones), as do paste and drag-and-drop; up to 4 per message, shown as removable thumbnails, and a
+  message may be images only. The browser re-encodes each image before sending (longest side at most
+  1600 px, JPEG with stepped-down quality, PNG kept for small transparent images; GIFs become their first
+  frame; camera metadata such as location is dropped) so each stays under ~180 KB and all under ~700 KB of
+  base64. `POST /api/sessions/:id/turn` takes `images: [{mime, data, name?}]` (validated by the hub and
+  the spoke: at most 4, PNG/JPEG/WebP/GIF whose bytes match, ≤ 512 KB each, ≤ 750,000 base64 characters
+  together) and the spoke passes them to OpenCode as inline (data URL) file attachments, for turns and
+  steers alike. Utterances (Voice mode) stay text-only; a message with images sent while Voice mode is on
+  goes as a typed turn.
+- **Images in the transcript**: user messages show their image attachments as thumbnails, loaded on
+  demand from the owner-scoped `GET /api/sessions/:id/timeline/messages/:message/files/:index`; other
+  attached files show as named chips.
+
 ## 0.5.0
 
 **opencode-voice is now OpenCode Hub** (`@huynle/opencode-hub`, `github:huynle/opencode-hub`): a remote
