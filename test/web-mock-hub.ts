@@ -635,7 +635,9 @@ async function consoleRoute(request: Request, url: URL, user: MockUser): Promise
         branch: id === SESSION ? "feature/remote-session-console" : "main",
         context: { used: 61_200, limit: 200_000, percent: 31, model: "Claude Sonnet 4.5" },
         mcp: [{ name: "brain", status: "connected" }, { name: "github", status: "needs_auth" }, { name: "chrome", status: "failed", error: "spawn ENOENT" }],
-        ...(id === SESSION ? { changes: { files: CHANGES, additions: 130, deletions: 127 } } : { changes: { files: [], additions: 0, deletions: 0 } }),
+        ...(id === SESSION
+          ? { changes: { files: CHANGES, additions: 141, deletions: 130, totalFiles: CHANGES.length + 2, truncated: true } }
+          : { changes: { files: [], additions: 0, deletions: 0, totalFiles: 0, truncated: false } }),
       })
     case "diff": {
       const file = url.searchParams.get("file")

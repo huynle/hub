@@ -11,8 +11,19 @@ export interface Summary {
   branch?: string
   context?: { used: number; limit?: number; percent?: number; model?: string }
   mcp?: Array<{ name: string; status: string; error?: string }>
-  changes?: { files: Array<{ file: string; status: string; additions: number; deletions: number }>; additions: number; deletions: number }
+  changes?: {
+    files: Array<{ file: string; status: string; additions: number; deletions: number }>
+    additions: number
+    deletions: number
+    /** All changed files, listed or not (absent from older spokes). */
+    totalFiles?: number
+    /** The spoke listed only the most-changed files. */
+    truncated?: boolean
+  }
 }
+
+/** How many changed files the spoke did not list (0 when it listed them all). */
+export const unlistedFiles = (c: NonNullable<Summary["changes"]>) => (c.truncated && c.totalFiles ? Math.max(0, c.totalFiles - c.files.length) : 0)
 
 const tokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 100_000 ? 0 : 1)}k` : String(n))
 
@@ -129,6 +140,9 @@ export function Rail(props: {
                   )}
                 </For>
               </ul>
+              <Show when={unlistedFiles(c())}>
+                {(n) => <p class="muted small more-files">+{n()} more {n() === 1 ? "file" : "files"} (only the most-changed files are listed)</p>}
+              </Show>
             </Show>
           )}
         </Show>

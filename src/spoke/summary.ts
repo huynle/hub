@@ -9,6 +9,12 @@ import type { ChangedFile, ContextUsage, FilePatch, McpStatus, SessionChanges } 
  * and marked truncated.
  */
 export const MAX_PATCH_CHARS = 400 * 1024
+/** At most this many changed files are listed (the most-changed first); the totals still cover every file. */
+export const MAX_CHANGED_FILES = 500
+/** The listed files also stop once their JSON reaches this size, so the summary always fits in one frame. */
+const MAX_CHANGES_ENCODED_CHARS = 400 * 1024
+const MAX_MCP_SERVERS = 100
+const MAX_NAME_CHARS = 200
 const MAX_ERROR_CHARS = 200
 const MCP_STATUSES = new Set(["connected", "pending", "disabled", "failed", "needs_auth"])
 const FILE_STATUSES = new Set(["added", "deleted", "modified"])
@@ -35,14 +41,16 @@ export function contextUsage(messages: ReadonlyArray<unknown>, models: ReadonlyA
 }
 
 export function mcpServers(raw: ReadonlyArray<unknown>): McpStatus[] {
-  return raw.flatMap((value) => {
-    const server = record(value)
-    if (typeof server.name !== "string" || !server.name) return []
-    const status = record(server.status)
-    const name = MCP_STATUSES.has(status.status) ? (status.status as McpStatus["status"]) : "unknown"
-    const error = typeof status.error === "string" && status.error ? status.error.slice(0, MAX_ERROR_CHARS) : undefined
-    return [{ name: server.name, status: name, ...(error ? { error } : {}) }]
-  })
+  return raw
+    .flatMap((value) => {
+      const server = record(value)
+      if (typeof server.name !== "string" || !server.name) return []
+      const status = record(server.status)
+      const name = MCP_STATUSES.has(status.status) ? (status.status as McpStatus["status"]) : "unknown"
+      const error = typeof status.error === "string" && status.error ? status.error.slice(0, MAX_ERROR_CHARS) : undefined
+      return [{ name: server.name.slice(0, MAX_NAME_CHARS), status: name, ...(error ? { error } : {}) }]
+    })
+    .slice(0, MAX_MCP_SERVERS)
 }
 
 function changedFile(value: unknown): (ChangedFile & { patch: string }) | undefined {
@@ -58,13 +66,26 @@ function changedFile(value: unknown): (ChangedFile & { patch: string }) | undefi
 }
 
 export function changeStats(raw: ReadonlyArray<unknown>): SessionChanges {
-  const files = raw.flatMap((value) => {
+  const all: ChangedFile[] = raw.flatMap((value) => {
     const file = changedFile(value)
     if (!file) return []
     const { patch: _patch, ...stats } = file
     return [stats]
   })
-  return { files, additions: files.reduce((n, f) => n + f.additions, 0), deletions: files.reduce((n, f) => n + f.deletions, 0) }
+  const ranked = all.length > MAX_CHANGED_FILES ? [...all].sort((a, b) => b.additions + b.deletions - (a.additions + a.deletions) || a.file.localeCompare(b.file)) : all
+  const files: ChangedFile[] = []
+  let size = 0
+  for (const file of ranked) {
+    if (files.length >= MAX_CHANGED_FILES || (size += JSON.stringify(file).length + 1) > MAX_CHANGES_ENCODED_CHARS) break
+    files.push(file)
+  }
+  return {
+    files,
+    additions: all.reduce((n, f) => n + f.additions, 0),
+    deletions: all.reduce((n, f) => n + f.deletions, 0),
+    totalFiles: all.length,
+    truncated: files.length < all.length,
+  }
 }
 
 const isHigh = (c: number) => c >= 0xd800 && c <= 0xdbff

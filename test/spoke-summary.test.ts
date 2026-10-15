@@ -1,6 +1,9 @@
 // Right-rail summary of a session: context usage, MCP servers, working-tree changes and per-file patches.
 import { describe, expect, test } from "bun:test"
+import * as summary from "../src/spoke/summary"
 import { changeStats, contextUsage, filePatch, mcpServers, MAX_PATCH_CHARS } from "../src/spoke/summary"
+
+const MAX_CHANGED_FILES = (summary as Record<string, unknown>).MAX_CHANGED_FILES as number
 
 /** Patches are capped by their JSON-encoded size so a reply always fits in one protocol frame. */
 const ENCODED_LIMIT = 400 * 1024
@@ -52,6 +55,12 @@ describe("mcpServers", () => {
       { name: "weird", status: "unknown" },
     ])
   })
+
+  test("lists at most 100 servers with names of at most 200 characters", () => {
+    const out = mcpServers(Array.from({ length: 1000 }, (_, i) => ({ name: `${"n".repeat(300)}${i}`, status: { status: "connected" } })))
+    expect(out.length).toBe(100)
+    expect(out.every((m) => m.name.length <= 200)).toBe(true)
+  })
 })
 
 describe("changes", () => {
@@ -69,7 +78,30 @@ describe("changes", () => {
       ],
       additions: 15,
       deletions: 2,
+      totalFiles: 2,
+      truncated: false,
     })
+  })
+
+  test("changeStats keeps at most 500 files (most-changed first) but totals every file", () => {
+    const many = Array.from({ length: 20_000 }, (_, i) => ({ file: `src/f${i}.ts`, status: "modified", additions: i % 7, deletions: 1, patch: "" }))
+    many[12_345] = { file: "src/big.ts", status: "modified", additions: 9_999, deletions: 0, patch: "" }
+    const out = changeStats(many)
+    expect(out.files.length).toBe(MAX_CHANGED_FILES)
+    expect(MAX_CHANGED_FILES).toBe(500)
+    expect(out.files[0]!.file).toBe("src/big.ts")
+    expect(out.totalFiles).toBe(20_000)
+    expect(out.truncated).toBe(true)
+    expect(out.additions).toBe(many.reduce((n, f) => n + f.additions, 0))
+    expect(out.deletions).toBe(20_000 - 1)
+  })
+
+  test("changeStats also stops before the file list outgrows a frame (very long paths)", () => {
+    const long = Array.from({ length: 400 }, (_, i) => ({ file: `${"d/".repeat(2000)}${i}`, status: "added", additions: 1, deletions: 0 }))
+    const out = changeStats(long)
+    expect(out.truncated).toBe(true)
+    expect(out.totalFiles).toBe(400)
+    expect(JSON.stringify(out).length).toBeLessThanOrEqual(ENCODED_LIMIT + 200)
   })
 
   test("filePatch returns one file's patch, truncated at the cap", () => {

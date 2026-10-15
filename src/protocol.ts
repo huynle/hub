@@ -211,9 +211,15 @@ export interface ChangedFile {
 }
 
 export interface SessionChanges {
+  /** The listed files: all of them, or (when `truncated`) the most-changed ones that fit the limits. */
   readonly files: readonly ChangedFile[]
+  /** Line totals over every changed file, listed or not. */
   readonly additions: number
   readonly deletions: number
+  /** Number of changed files, listed or not. */
+  readonly totalFiles: number
+  /** True when `files` lists fewer than `totalFiles`. */
+  readonly truncated: boolean
 }
 
 export interface FilePatch extends ChangedFile {

@@ -88,6 +88,8 @@ async function desktop(browser: Browser): Promise<void> {
     await page.locator(".rail").getByText("31%").waitFor()
     await page.locator(".rail").getByText("feature/remote-session-console").waitFor()
     assert(await page.locator(".rail .mcp-list li").count() === 3, "MCP list")
+    assert(await page.locator(".rail .file-list li").count() === 3, "changed files listed")
+    await page.locator(".rail").getByText("+2 more files").waitFor()
     await shot(page, "desktop-session")
   })
 
