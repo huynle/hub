@@ -9,6 +9,7 @@ import {
   type HerdrWorkspace,
   type PermissionDecision,
   type ProcessKind,
+  type PromptImage,
   type ResultFor,
   type ServerRequest,
   type SessionModelPrefs,
@@ -18,7 +19,7 @@ import {
 } from "../protocol"
 import { extractReply } from "../reply"
 import { TurnTracker } from "../turns"
-import { boundedTimelinePart, timelineItems } from "./timeline"
+import { boundedTimelinePart, timelineFile, timelineItems } from "./timeline"
 import { SpokeConnection, type Backoff, type ConnectionState } from "./client"
 import { PROMPT_SOURCE, VOICE_AGENT } from "./conversation"
 import { pollEnrollment, startEnrollment } from "./enroll"
@@ -57,12 +58,24 @@ export interface HostSession {
   readonly model?: ModelRef
 }
 
+/** A prompt attachment as OpenCode's prompt input takes it; a `data:` URI is stored inline. */
+export interface PromptFile {
+  readonly uri: string
+  readonly name?: string
+}
+
+/** Prompt images as OpenCode file attachments (base64 data URLs), or nothing without images. */
+export function promptFiles(images: readonly PromptImage[] | undefined): { files?: PromptFile[] } {
+  if (!images?.length) return {}
+  return { files: images.map((image) => ({ uri: `data:${image.mime};base64,${image.data}`, ...(image.name ? { name: image.name } : {}) })) }
+}
+
 /** What the spoke needs from the plugin context (a fake in tests). */
 export interface SpokeHost {
   readonly directory: string
   readonly opencodeVersion: string
   events(signal: AbortSignal): AsyncIterable<EventLike>
-  prompt(input: { sessionID: string; text: string; metadata: Record<string, unknown>; delivery?: "steer" }): Promise<{ id: string }>
+  prompt(input: { sessionID: string; text: string; files?: readonly PromptFile[]; metadata: Record<string, unknown>; delivery?: "steer" }): Promise<{ id: string }>
   context(sessionID: string): Promise<ReadonlyArray<unknown>>
   listModels?(): Promise<ReadonlyArray<unknown>>
   getSession(sessionID: string): Promise<HostSession>
@@ -718,7 +731,7 @@ export class Spoke {
     if (!isReported(this.config, this.tracker, req.sessionID)) throw new Error(UNKNOWN_SESSION)
     switch (req.op) {
       case "turn":
-        return this.turn(req.sessionID, req.text, req.voiceStyle)
+        return this.turn(req.sessionID, req.text, req.voiceStyle, req.images)
       case "permission":
         await this.host.replyPermission({ sessionID: req.sessionID, requestID: req.requestID, decision: req.decision })
         return {}
@@ -763,12 +776,15 @@ export class Spoke {
       }
       case "timelinePart":
         return { detail: boundedTimelinePart(await this.host.context(req.sessionID), req.messageID, req.partID) }
+      case "timelineFile":
+        return timelineFile(await this.host.context(req.sessionID), req.messageID, req.index) satisfies ResultFor["timelineFile"]
       case "steer": {
         const voice = isExposed(this.config, this.tracker, req.sessionID)
         if (voice) await this.applyVoiceModel(req.sessionID)
         const inbox = await this.host.prompt({
           sessionID: req.sessionID,
           text: req.text,
+          ...promptFiles(req.images),
           delivery: "steer",
           metadata: { source: PROMPT_SOURCE, mode: voice ? "conversation" : "remote" },
         })
@@ -923,13 +939,13 @@ export class Spoke {
     return out
   }
 
-  private async turn(sessionID: string, text: string, voiceStyle: boolean): Promise<TurnResult> {
+  private async turn(sessionID: string, text: string, voiceStyle: boolean, images?: readonly PromptImage[]): Promise<TurnResult> {
     if (this.running.has(sessionID)) throw new Error("A turn is already running for this session")
     if (isExposed(this.config, this.tracker, sessionID)) await this.applyVoiceModel(sessionID)
     this.running.add(sessionID)
     if (voiceStyle) this.voiceTurns.set(sessionID, (this.voiceTurns.get(sessionID) ?? 0) + 1)
     try {
-      const inbox = await this.host.prompt({ sessionID, text, metadata: { source: PROMPT_SOURCE } })
+      const inbox = await this.host.prompt({ sessionID, text, ...promptFiles(images), metadata: { source: PROMPT_SOURCE } })
       const result = await this.turns.wait(inbox.id, { timeoutMs: this.options.turnTimeoutMs ?? 10 * 60_000 })
       let reply = ""
       try {
