@@ -73,6 +73,40 @@ describe("markdown", () => {
     expect(safeHref("mailto:a@b.c")).toBe("mailto:a@b.c")
     expect(safeHref("data:text/html,x")).toBeUndefined()
   })
+
+  test("safeHref keeps http(s), mailto and same-site paths", () => {
+    expect(safeHref("https://x.dev/a?b=c#d")).toBe("https://x.dev/a?b=c#d")
+    expect(safeHref("HTTP://x.dev")).toBe("HTTP://x.dev")
+    expect(safeHref("  /s/ses_1  ")).toBe("/s/ses_1")
+    expect(safeHref("/settings?tab=speech")).toBe("/settings?tab=speech")
+  })
+
+  test("safeHref rejects links a browser would resolve off-site or run as script", () => {
+    for (const href of [
+      "//evil.com",
+      "/\\evil.com",
+      "/\\/evil.com",
+      "\\\\evil.com",
+      "/\t/evil.com",
+      "/\n/evil.com",
+      "/\r/evil.com",
+      "/ /evil.com",
+      "/\u0000/evil.com",
+      "/\u007f/evil.com",
+      "/\u00a0/evil.com",
+      "https://evil.com\\@good.com",
+      "javascript:alert(1)",
+      "JaVaScRiPt:alert(1)",
+      "java\tscript:alert(1)",
+      "vbscript:x",
+      "data:text/html,x",
+      "DATA:text/html,x",
+      "evil.com",
+      "",
+    ]) {
+      expect(safeHref(href)).toBeUndefined()
+    }
+  })
 })
 
 describe("parsePatch", () => {

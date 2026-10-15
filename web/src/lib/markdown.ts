@@ -93,9 +93,14 @@ export function parseMarkdown(source: string): MdBlock[] {
   return out
 }
 
-/** Links allowed in replies: http(s), mailto and same-site paths. */
+/**
+ * Links allowed in replies: http(s), mailto and same-site paths. Backslashes, whitespace and control characters
+ * are refused anywhere: browsers read `\` as `/` and drop tabs and newlines, so `/\evil.com` or `/<tab>/evil.com`
+ * would leave the site.
+ */
 export function safeHref(href: string): string | undefined {
   const value = href.trim()
+  if (/[\\\s\u0000-\u001f\u007f-\u009f]/.test(value)) return undefined
   if (/^(https?:|mailto:)/i.test(value)) return value
   if (value.startsWith("/") && !value.startsWith("//")) return value
   return undefined
