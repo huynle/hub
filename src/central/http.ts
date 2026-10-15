@@ -24,8 +24,7 @@ export interface Speech {
 
 export interface CentralOptions {
   readonly config: CentralConfig
-  /** Directory with index.html and other static PWA files. */
-  /** web/ on disk; or pass `web` (e.g. files embedded in a compiled binary). */
+  /** The built web app (web/dist, see web/vite.config.ts) on disk; or pass `web` (e.g. files embedded in a compiled binary). */
   readonly webDir?: string
   readonly web?: WebAssets
   readonly version?: string
@@ -121,7 +120,7 @@ export const MAX_UTTERANCE_CHARS = 4000
 /** Preview text for POST /api/settings/speech/test. */
 const SPEECH_TEST_TEXT = "Hi! This is how I will sound when I read replies to you."
 const SPEECH_TEST_MAX_CHARS = 300
-const APP_ROUTES = /^\/(?:|pair|approve|s\/[^/]+)$/
+const APP_ROUTES = /^\/(?:|pair|approve|new|settings|s\/[^/]+)$/
 const STATIC_PATH = /^(?:\/[A-Za-z0-9_-][A-Za-z0-9._-]*)+$/
 const LOGIN_NEXT = /^\/(?:s\/[A-Za-z0-9_-]+)?$/
 const CONTENT_TYPES: Record<string, string> = {
@@ -152,7 +151,7 @@ const error = (status: number, message: string, code?: string) =>
 
 export function startCentral(options: CentralOptions): Central {
   const { config } = options
-  const web: WebAssets = options.web ?? diskAssets(options.webDir ?? path.join(import.meta.dir, "..", "..", "web"))
+  const web: WebAssets = options.web ?? diskAssets(options.webDir ?? path.join(import.meta.dir, "..", "..", "web", "dist"))
   const now = options.now ?? Date.now
   const store = Store.open(config.stateDir, now, { mode: config.auth.mode })
   // A machine's tenant is its owner (read live: ownership moves on migration).
@@ -326,7 +325,7 @@ export function startCentral(options: CentralOptions): Central {
       headers.append("set-cookie", cookie(token))
     }
     store.audit({ actor: user.id, action: "signin", target: deviceID })
-    // Speech not usable yet (e.g. no key): land on the page's speech setup (web/app.js opens it for #speech).
+    // Speech not usable yet (e.g. no key): land on the page's speech setup (the console opens Settings → Speech for #speech).
     const setup = !next.includes("#") && speechSettings.view(speechScope(user.id)).ready.reason ? "#speech" : ""
     headers.set("location", `${next}${setup}`)
     return new Response(null, { status: 302, headers })
@@ -399,7 +398,7 @@ export function startCentral(options: CentralOptions): Central {
         headers: { "content-type": "text/plain; charset=utf-8" },
       })
     }
-    // Speech not usable yet (e.g. no key): land on the page's speech setup (web/app.js opens it for #speech).
+    // Speech not usable yet (e.g. no key): land on the page's speech setup (the console opens Settings → Speech for #speech).
     const setup = speechSettings.view(speechScope(ownerID)).ready.reason ? "#speech" : ""
     const headers = new Headers({ location: `${next}${setup}`, "cache-control": "no-store" })
     // A link signs in as the machine's owner: a browser signed in as someone else gets a new device.
@@ -922,6 +921,9 @@ export function startCentral(options: CentralOptions): Central {
     const name = APP_ROUTES.test(pathname) ? "index.html" : STATIC_PATH.test(pathname) ? pathname.slice(1) : undefined
     const type = name && CONTENT_TYPES[path.extname(name).toLowerCase()]
     const bytes = name && type ? web.read(name) : undefined
+    if (name === "index.html" && !bytes) {
+      return new Response("The web app is not built. Run `npm run build:web` (or use a release build).", { status: 503, headers: { "content-type": "text/plain; charset=utf-8" } })
+    }
     if (!type || !bytes) return error(404, "Not found")
     const headers = new Headers({ "content-type": type })
     if (pathname === "/sw.js") {

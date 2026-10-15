@@ -1,68 +1,115 @@
 // Hands-free conversation mode for one session: always-on mic → energy VAD → speculative per-segment
 // transcription → endpointing → POST utterance; SSE "say" text → sentence TTS queue with barge-in.
-// Progress cues (earcons, "Working on it." …) are scheduled by feedback-core.js and played by cues.js.
-// The pure parts live in conversation-core.js; this file owns the browser APIs (mic, Web Audio, wake lock,
-// media session).
-import { Endpointer, EnergyVad, SpeechQueue, encodeWav, parseCommand, splitSentences } from "./conversation-core.js"
-import { CueScheduler, isWorking, subagentChanges } from "./feedback-core.js"
-import { CuePlayer } from "./cues.js"
+// Progress cues (earcons, "Working on it." …) are scheduled by feedback-core and played by cues.
+// The pure parts live in core/conversation-core; this file owns the browser APIs (mic, Web Audio, wake lock,
+// media session). Ported from the 0.4 web/conversation.js; behavior unchanged except the mic device choice.
+import { Endpointer, EnergyVad, SpeechQueue, encodeWav, parseCommand, splitSentences } from "../core/conversation-core"
+import { CuePlayer } from "../core/cues"
+import { CueScheduler, isWorking, subagentChanges, type StatusEntry } from "../core/feedback-core"
+import type { ApiInit } from "../app/api"
 
-const MIC_CONSTRAINTS = { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }
 const SENT_LABEL_MS = 2500
 const CUE_TICK_MS = 1000
 const SILENCE_SECONDS = 2
 
-/**
- * @param {object} options
- * @param {string} options.sessionID
- * @param {(path: string, init?: object) => Promise<Response>} options.api  same-origin fetch that throws on !ok
- * @param {HTMLAudioElement} options.player
- * @param {object} options.ui  view callbacks: state, level, user, tick, agent, note, held, ended
- * @param {object} [options.options]
- * @param {boolean} [options.options.cues]  spoken progress cues (default on)
- * @param {boolean} [options.options.background]  keep listening with the screen off (no wake lock, media session)
- * @param {() => number} [options.options.speed]  playback rate for cue phrases
- * @param {() => string} [options.options.title]  session title for the lock screen
- * @param {object[]} [options.options.status]  current status tree (subagents already running don't cue)
- */
-export class Conversation {
-  constructor({ sessionID, api, player, ui, options = {} }) {
-    Object.assign(this, { sessionID, api, player, ui })
+export type ConversationState = "starting" | "listening" | "hearing" | "transcribing" | "sent" | "speaking" | "paused" | "off"
+export type Tick = "sent" | "heard" | "failed"
+
+export interface ConversationUI<B> {
+  state(name: ConversationState): void
+  level(x: number): void
+  held?(text: string): void
+  /** A user utterance bubble; returned handle is passed to `tick`. */
+  user(text: string): B
+  tick(bubble: B, kind: Tick): void
+  agent(message: { messageID?: string; text: string }): void
+  note(text: string, kind?: string): void
+  ended(): void
+}
+
+export interface ConversationOptions {
+  cues?: boolean
+  background?: boolean
+  speed?: () => number
+  title?: () => string
+  status?: readonly StatusEntry[]
+  /** Microphone deviceId ("" or undefined: the default). */
+  deviceId?: string
+}
+
+type Api = (path: string, init?: ApiInit) => Promise<Response>
+
+export function micConstraints(deviceId?: string): MediaStreamConstraints {
+  return { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, ...(deviceId ? { deviceId: { exact: deviceId } } : {}) } }
+}
+
+export class Conversation<B = unknown> {
+  readonly sessionID: string
+  private api: Api
+  private player: HTMLAudioElement
+  private ui: ConversationUI<B>
+  private opts: Required<Omit<ConversationOptions, "status" | "deviceId">> & Pick<ConversationOptions, "deviceId">
+  active = false
+  paused = false
+  agent: string | undefined
+  private inflight = 0
+  private sent = new Map<string, B | "heard">()
+  private heardAt = 0
+  private lastStatus: readonly StatusEntry[] | undefined
+  private scheduler = new CueScheduler()
+  private cuePlayer: CuePlayer
+  private onVisibility: () => void
+  private stream?: MediaStream
+  private ctx?: AudioContext
+  private source?: MediaStreamAudioSourceNode
+  private sink?: GainNode
+  private tap?: AudioWorkletNode | ScriptProcessorNode
+  private vad?: EnergyVad
+  private endpointer?: Endpointer
+  private queue?: SpeechQueue<string>
+  private ticker?: ReturnType<typeof setInterval>
+  private silence?: HTMLAudioElement
+  private silenceURL?: string
+  private wakeLock?: WakeLockSentinel
+  private warnedAutoplay = false
+  private state: ConversationState | undefined
+
+  constructor({ sessionID, api, player, ui, options = {} }: { sessionID: string; api: Api; player: HTMLAudioElement; ui: ConversationUI<B>; options?: ConversationOptions }) {
+    this.sessionID = sessionID
+    this.api = api
+    this.player = player
+    this.ui = ui
     this.opts = { cues: true, background: false, speed: () => 1, title: () => "OpenCode session", ...options }
-    this.active = false
-    this.paused = false
-    this.inflight = 0 // transcriptions running
-    this.sent = new Map() // inboxID → user bubble
-    this.heardAt = 0
     this.lastStatus = options.status
-    this.scheduler = new CueScheduler()
     this.scheduler.enabled = this.opts.cues !== false
     this.scheduler.working(isWorking(options.status), Date.now())
-    this.cuePlayer = new CuePlayer({ api, speed: this.opts.speed, onSpeaking: (on) => this.scheduler.cueSpeaking(on, Date.now()) })
+    this.cuePlayer = new CuePlayer({ api: this.api as never, speed: this.opts.speed, onSpeaking: (on) => this.scheduler.cueSpeaking(on, Date.now()) })
     this.onVisibility = () => {
-      if (document.visibilityState === "visible" && this.active && !this.opts.background) this.lockScreen()
+      if (document.visibilityState === "visible" && this.active && !this.opts.background) void this.lockScreen()
     }
   }
 
-  get path() {
+  private get path(): string {
     return `/api/sessions/${encodeURIComponent(this.sessionID)}`
   }
 
   /** Mic first (a refusal leaves the server untouched), then the server flag. Returns false on failure. */
-  async start() {
+  async start(): Promise<boolean> {
     if (this.active) return true
     this.ui.state("starting")
     this.cuePlayer.unlock() // still inside the tap
     if (this.opts.background) this.startSilence()
-    if (!navigator.mediaDevices?.getUserMedia || !(window.AudioContext || window.webkitAudioContext)) {
+    const w = window as unknown as { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext }
+    if (!navigator.mediaDevices?.getUserMedia || !(w.AudioContext || w.webkitAudioContext)) {
       this.ui.note("This browser cannot listen here (the microphone needs HTTPS).", "err")
       this.ui.state("off")
       return false
     }
     try {
-      this.stream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS)
+      this.stream = await navigator.mediaDevices.getUserMedia(micConstraints(this.opts.deviceId))
     } catch (e) {
-      this.ui.note(e.name === "NotAllowedError" ? "Microphone permission was denied. Allow it in the browser's site settings." : `Microphone: ${e.message}`, "err")
+      const err = e as Error
+      this.ui.note(err.name === "NotAllowedError" ? "Microphone permission was denied. Allow it in the browser's site settings." : `Microphone: ${err.message}`, "err")
       this.ui.state("off")
       this.stopSilence()
       return false
@@ -73,7 +120,7 @@ export class Conversation {
     } catch (e) {
       this.release()
       this.stopSilence()
-      this.ui.note(`Could not start conversation mode: ${e.message}`, "err")
+      this.ui.note(`Could not start Voice mode: ${(e as Error).message}`, "err")
       this.ui.state("off")
       return false
     }
@@ -81,43 +128,46 @@ export class Conversation {
     try {
       await this.listen()
     } catch (e) {
-      this.ui.note(`Could not start listening: ${e.message}`, "err")
+      this.ui.note(`Could not start listening: ${(e as Error).message}`, "err")
       await this.stop()
       return false
     }
     if (this.opts.background) this.mediaSession()
-    else this.lockScreen()
+    else void this.lockScreen()
     document.addEventListener("visibilitychange", this.onVisibility)
     this.ticker = setInterval(() => this.tickCues(), CUE_TICK_MS)
     this.refresh()
     return true
   }
 
-  async listen() {
-    const AudioCtx = window.AudioContext || window.webkitAudioContext
+  private async listen(): Promise<void> {
+    const w = window as unknown as { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext }
+    const AudioCtx = (w.AudioContext || w.webkitAudioContext)!
     const ctx = (this.ctx = new AudioCtx())
     await ctx.resume().catch(() => {})
-    this.source = ctx.createMediaStreamSource(this.stream)
+    this.source = ctx.createMediaStreamSource(this.stream!)
     this.sink = ctx.createGain()
     this.sink.gain.value = 0 // keeps the tap pulled by the graph without making a sound
     this.sink.connect(ctx.destination)
-    if (ctx.audioWorklet && window.AudioWorkletNode) {
+    if (ctx.audioWorklet && "AudioWorkletNode" in window) {
       await ctx.audioWorklet.addModule("/vad-worklet.js")
-      this.tap = new AudioWorkletNode(ctx, "vad-tap", { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1 })
-      this.tap.port.onmessage = (event) => this.frame(event.data)
+      const node = new AudioWorkletNode(ctx, "vad-tap", { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1 })
+      node.port.onmessage = (event) => this.frame(event.data as Float32Array)
+      this.tap = node
     } else {
-      this.tap = ctx.createScriptProcessor(1024, 1, 1)
-      this.tap.onaudioprocess = (event) => this.frame(Float32Array.from(event.inputBuffer.getChannelData(0)))
+      const node = ctx.createScriptProcessor(1024, 1, 1)
+      node.onaudioprocess = (event) => this.frame(Float32Array.from(event.inputBuffer.getChannelData(0)))
+      this.tap = node
     }
     this.source.connect(this.tap)
     this.tap.connect(this.sink)
 
     this.vad = new EnergyVad({ sampleRate: ctx.sampleRate })
     this.endpointer = new Endpointer({
-      send: (text) => this.deliver(text),
+      send: (text) => void this.deliver(text),
       onHeld: (text) => this.ui.held?.(text),
     })
-    this.queue = new SpeechQueue({
+    this.queue = new SpeechQueue<string>({
       synth: (text, signal) => this.synth(text, signal),
       play: (url) => this.play(url),
       stop: () => {
@@ -130,49 +180,49 @@ export class Conversation {
         this.refresh()
       },
       onError: (error) => {
-        if (error?.name !== "AbortError") this.ui.note(`Could not read the reply aloud: ${error.message}`, "err")
+        if (error?.name !== "AbortError") this.ui.note(`Could not read the reply aloud: ${error?.message}`, "err")
       },
     })
   }
 
   /** One ~20 ms frame from the mic. */
-  frame(samples) {
+  private frame(samples: Float32Array): void {
     if (!this.active || !this.vad || this.paused) return
     const { level, events } = this.vad.process(samples)
     this.ui.level(level)
     for (const event of events) {
       if (event.type === "start") {
-        this.endpointer.speechStarted()
+        this.endpointer!.speechStarted()
         this.scheduler.userTalking(true, Date.now())
         this.cuePlayer.stop()
-        if (this.queue.speaking) this.queue.clear() // barge-in: start fires only after 250 ms of voice
+        if (this.queue!.speaking) this.queue!.clear() // barge-in: start fires only after 250 ms of voice
       } else {
         this.scheduler.userTalking(false, Date.now())
-        const id = this.endpointer.segmentEnded(event.durationMs)
-        this.transcribe(id, encodeWav(event.samples, this.vad.sampleRate))
+        const id = this.endpointer!.segmentEnded(event.durationMs)
+        void this.transcribe(id, encodeWav(event.samples, this.vad.sampleRate))
       }
       this.refresh()
     }
   }
 
-  async transcribe(id, wav) {
+  private async transcribe(id: number, wav: Uint8Array<ArrayBuffer>): Promise<void> {
     this.inflight++
     this.refresh()
     let text = ""
     try {
       text = (await (await this.api("/api/transcribe", { method: "POST", body: wav, headers: { "content-type": "audio/wav" } })).json()).text ?? ""
     } catch (e) {
-      if (this.active) this.ui.note(`Transcription failed: ${e.message}`, "err")
+      if (this.active) this.ui.note(`Transcription failed: ${(e as Error).message}`, "err")
     } finally {
       this.inflight--
     }
     if (!this.active) return
-    this.endpointer.transcribed(id, text)
+    this.endpointer?.transcribed(id, text)
     this.refresh()
   }
 
   /** A finished utterance from the endpointer (or typed text): a voice command or a steer. */
-  async deliver(text) {
+  private async deliver(text: string): Promise<void> {
     const command = parseCommand(text)
     if (command === "pause") {
       this.ui.note("Paused listening.")
@@ -184,7 +234,7 @@ export class Conversation {
       try {
         await this.api(`${this.path}/interrupt`, { method: "POST", json: {} })
       } catch (e) {
-        this.ui.note(`Could not interrupt: ${e.message}`, "err")
+        this.ui.note(`Could not interrupt: ${(e as Error).message}`, "err")
       }
       return
     }
@@ -195,23 +245,24 @@ export class Conversation {
       else this.ui.tick(bubble, "sent")
       this.sent.set(inboxID, bubble)
     } catch (e) {
+      const err = e as Error & { status?: number }
       this.ui.tick(bubble, "failed")
-      this.ui.note(e.status === 409 ? e.message : `Could not send: ${e.message}`, "err")
+      this.ui.note(err.status === 409 ? err.message : `Could not send: ${err.message}`, "err")
     }
   }
 
-  /** Typed text while conversation mode is on goes the same way as speech. */
-  sendTyped(text) {
+  /** Typed text while Voice mode is on goes the same way as speech. */
+  sendTyped(text: string): Promise<void> {
     this.queue?.clear()
     return this.deliver(text)
   }
 
   /** Hub SSE messages for this session. */
-  onEvent(message) {
+  onEvent(message: Record<string, any>): void {
     if (message.sessionID !== this.sessionID) return
     if (message.type === "heard") {
       const bubble = this.sent.get(message.inboxID)
-      if (bubble && bubble !== "heard") this.ui.tick(bubble, "heard")
+      if (bubble !== undefined && bubble !== "heard") this.ui.tick(bubble, "heard")
       else this.sent.set(message.inboxID, "heard")
       this.heardAt = Date.now()
       if (this.active && !this.paused) this.cuePlayer.play(this.scheduler.heard(this.heardAt))
@@ -221,16 +272,16 @@ export class Conversation {
       if (!this.active) return
       this.scheduler.agentSaid(Date.now())
       this.cuePlayer.stop()
-      this.ui.agent(message)
-      this.queue.enqueue(splitSentences(message.text))
+      this.ui.agent(message as { messageID?: string; text: string })
+      this.queue?.enqueue(splitSentences(message.text))
     } else if (message.type === "conversation" && !message.on && this.active) {
-      this.ui.note("Conversation mode was turned off.")
-      this.stop({ post: false })
+      this.ui.note("Voice mode was turned off.")
+      void this.stop({ post: false })
     }
   }
 
   /** Status tree of this root session: drives "Started a subagent.", the subagent-done earcon and "Still working.". */
-  onStatus(sessions) {
+  onStatus(sessions: readonly StatusEntry[]): void {
     const now = Date.now()
     const { started, finished } = subagentChanges(this.lastStatus, sessions, this.sessionID)
     this.lastStatus = sessions
@@ -241,18 +292,18 @@ export class Conversation {
     this.tickCues()
   }
 
-  tickCues() {
+  private tickCues(): void {
     if (!this.active || this.paused) return
     this.cuePlayer.play(this.scheduler.tick(Date.now()))
   }
 
-  setCues(on) {
+  setCues(on: boolean): void {
     this.scheduler.enabled = on
     if (!on) this.cuePlayer.stop()
   }
 
   /** Switches screen-off listening while active: wake lock ↔ media session + silent loop. */
-  setBackground(on) {
+  setBackground(on: boolean): void {
     this.opts.background = on
     if (!this.active) return
     if (on) {
@@ -263,12 +314,12 @@ export class Conversation {
     } else {
       this.stopSilence()
       this.clearMediaSession()
-      this.lockScreen()
+      void this.lockScreen()
     }
   }
 
-  /** Lock-screen pause: stop listening (mic muted, speech cleared) but keep the mode on for a quick resume. */
-  pause() {
+  /** Mute: stop listening (mic muted, speech cleared) but keep the mode on for a quick resume. */
+  pause(): void {
     if (!this.active || this.paused) return
     this.paused = true
     this.queue?.clear()
@@ -282,7 +333,7 @@ export class Conversation {
     this.refresh()
   }
 
-  resume() {
+  resume(): void {
     if (!this.active || !this.paused) return
     this.paused = false
     this.stream?.getAudioTracks().forEach((t) => (t.enabled = true))
@@ -295,14 +346,14 @@ export class Conversation {
   }
 
   /** Lock screen / notification controls (Android Chrome shows them while media plays). */
-  mediaSession() {
+  private mediaSession(): void {
     const ms = navigator.mediaSession
     if (!ms) return
     try {
-      if (window.MediaMetadata) {
+      if ("MediaMetadata" in window) {
         ms.metadata = new MediaMetadata({
           title: this.opts.title(),
-          artist: "OpenCode Voice",
+          artist: "OpenCode Hub",
           artwork: [
             { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
             { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
@@ -317,7 +368,7 @@ export class Conversation {
     }
   }
 
-  clearMediaSession() {
+  private clearMediaSession(): void {
     const ms = navigator.mediaSession
     if (!ms) return
     try {
@@ -330,11 +381,8 @@ export class Conversation {
     }
   }
 
-  /**
-   * A silent looping <audio> while listening with the screen off: an audible-media page is less likely to be
-   * suspended, and it gives the media session its lock-screen controls. Best-effort; browsers may still suspend.
-   */
-  startSilence() {
+  /** A silent looping <audio> while listening with the screen off (keeps the page alive; lock-screen controls). */
+  private startSilence(): void {
     if (!this.silence) {
       const url = URL.createObjectURL(new Blob([encodeWav(new Float32Array(16_000 * SILENCE_SECONDS), 16_000)], { type: "audio/wav" }))
       const audio = new Audio(url)
@@ -346,38 +394,41 @@ export class Conversation {
     this.silence.play().catch(() => {})
   }
 
-  stopSilence() {
+  private stopSilence(): void {
     if (!this.silence) return
     this.silence.pause()
     this.silence.removeAttribute("src")
     this.silence.load()
-    URL.revokeObjectURL(this.silenceURL)
+    if (this.silenceURL) URL.revokeObjectURL(this.silenceURL)
     this.silence = this.silenceURL = undefined
   }
 
-  /** Stops reading aloud (mic tap while speaking); resumes listening when paused. */
-  hush() {
+  /** Stops reading aloud; resumes listening when muted. */
+  hush(): void {
     if (this.paused) return this.resume()
     this.queue?.clear()
     this.cuePlayer.stop()
   }
 
-  async synth(text, signal) {
+  private async synth(text: string, signal: AbortSignal): Promise<string> {
     const res = await this.api("/api/speak", { method: "POST", json: { text }, signal })
     return URL.createObjectURL(await res.blob())
   }
 
-  async play(url) {
+  private async play(url: string): Promise<void> {
     const player = this.player
     try {
       player.src = url
-      const played = await player.play().then(() => true, () => false)
+      const played = await player.play().then(
+        () => true,
+        () => false,
+      )
       if (!played) {
         if (!this.warnedAutoplay) this.ui.note("The browser blocked audio playback. Tap the mic to allow it.")
         this.warnedAutoplay = true
         return
       }
-      await new Promise((resolve) => {
+      await new Promise<void>((resolve) => {
         player.onended = player.onpause = player.onerror = () => resolve()
       })
     } finally {
@@ -386,26 +437,26 @@ export class Conversation {
     }
   }
 
-  refresh() {
+  private refresh(): void {
     if (!this.active) return
-    const state = this.paused
+    const state: ConversationState = this.paused
       ? "paused"
       : this.queue?.speaking
-      ? "speaking"
-      : this.vad?.active
-        ? "hearing"
-        : this.inflight > 0 || this.endpointer?.held
-          ? "transcribing"
-          : Date.now() - this.heardAt < SENT_LABEL_MS
-            ? "sent"
-            : "listening"
+        ? "speaking"
+        : this.vad?.active
+          ? "hearing"
+          : this.inflight > 0 || this.endpointer?.held
+            ? "transcribing"
+            : Date.now() - this.heardAt < SENT_LABEL_MS
+              ? "sent"
+              : "listening"
     if (state !== this.state) {
       this.state = state
       this.ui.state(state)
     }
   }
 
-  async lockScreen() {
+  private async lockScreen(): Promise<void> {
     if (!("wakeLock" in navigator) || document.visibilityState !== "visible") return
     if (this.wakeLock && !this.wakeLock.released) return
     try {
@@ -415,13 +466,13 @@ export class Conversation {
     }
   }
 
-  release() {
+  private release(): void {
     this.stream?.getTracks().forEach((t) => t.stop())
     this.stream = undefined
   }
 
   /** Turns everything off; `post: false` when the server already did (SSE) or the page is going away. */
-  async stop({ post = true, keepalive = false } = {}) {
+  async stop({ post = true, keepalive = false }: { post?: boolean; keepalive?: boolean } = {}): Promise<void> {
     const wasActive = this.active
     this.active = false
     this.paused = false
@@ -437,7 +488,7 @@ export class Conversation {
     try {
       this.source?.disconnect()
       this.tap?.disconnect()
-      if (this.tap?.port) this.tap.port.onmessage = null
+      if (this.tap && "port" in this.tap) this.tap.port.onmessage = null
       this.sink?.disconnect()
     } catch {
       // already disconnected

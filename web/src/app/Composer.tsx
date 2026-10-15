@@ -1,0 +1,246 @@
+// Composer (textarea, Send/Steer, Stop, Dictate, Voice mode split button with mic picker, model menus) and the
+// inline Voice bar shown above it in Voice mode.
+import { For, Show, createEffect, createSignal, onCleanup } from "solid-js"
+import { Portal } from "solid-js/web"
+import type { ComposerView } from "../lib/composer"
+import type { ConversationState } from "../voice/conversation"
+import { levelMeter, listMics, micDevice, setMicDevice } from "../voice/audio"
+import { Icon } from "./ui"
+
+export function Composer(props: {
+  draft: string
+  view: ComposerView
+  error?: string
+  voiceOn: boolean
+  voiceBlocked: string | undefined
+  dictating: false | number
+  transcribing: boolean
+  metaLeft: string
+  voiceModel: string
+  workerModel: string
+  onInput: (text: string) => void
+  onSubmit: () => void
+  onStop: () => void
+  onDictate: () => void
+  onVoice: () => void
+  onModel: (kind: "voice" | "worker") => void
+}) {
+  let area!: HTMLTextAreaElement
+  const fit = () => {
+    area.style.height = "auto"
+    area.style.height = `${Math.min(area.scrollHeight, 280)}px`
+  }
+  createEffect(() => {
+    props.draft
+    queueMicrotask(fit)
+  })
+  const label = () => (props.view.primary === "steer" ? "Steer" : "Send")
+  return (
+    <form
+      class="composer"
+      onSubmit={(e) => {
+        e.preventDefault()
+        if (props.view.canSubmit) props.onSubmit()
+      }}
+    >
+      <Show when={props.error}>
+        <p class="composer-error" role="alert">
+          {props.error}
+        </p>
+      </Show>
+      <Show when={props.view.hint}>
+        <p class="composer-hint muted small">{props.view.hint}</p>
+      </Show>
+      <div class="composer-box">
+        <textarea
+          ref={area}
+          rows={1}
+          value={props.draft}
+          aria-label="Message"
+          placeholder={props.voiceOn ? "Voice mode is on — talk, or type here" : props.view.primary === "steer" ? "Steer the running session…" : "Reply…"}
+          onInput={(e) => props.onInput(e.currentTarget.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey && !e.isComposing && !(matchMedia("(max-width: 760px)").matches && "ontouchstart" in window)) {
+              e.preventDefault()
+              if (props.view.canSubmit) props.onSubmit()
+            }
+          }}
+        />
+        <div class="composer-actions">
+          <button type="button" class="icon-btn" aria-label="Attach (coming later)" title="Attachments are not supported yet" disabled>
+            <Icon name="plus" />
+          </button>
+          <span class="grow" />
+          <button
+            type="button"
+            class={`icon-btn${props.dictating !== false ? " recording" : ""}`}
+            aria-label={props.dictating !== false ? "Stop dictation" : "Dictate"}
+            title={props.voiceBlocked ?? (props.dictating !== false ? `Stop dictation (${props.dictating}s left)` : "Dictate")}
+            disabled={!!props.voiceBlocked || props.transcribing || props.voiceOn}
+            onClick={props.onDictate}
+          >
+            <Show when={!props.transcribing} fallback={<span class="spinner small" />}>
+              <Icon name={props.dictating !== false ? "stop" : "mic"} />
+            </Show>
+          </button>
+          <div class={`split${props.voiceOn ? " on" : ""}`}>
+            <button
+              type="button"
+              class="split-main"
+              aria-pressed={props.voiceOn}
+              aria-label={props.voiceOn ? "End Voice mode" : "Start Voice mode"}
+              title={props.voiceBlocked ?? (props.voiceOn ? "End Voice mode" : "Voice mode: talk hands-free")}
+              disabled={!!props.voiceBlocked && !props.voiceOn}
+              onClick={props.onVoice}
+            >
+              <Icon name="wave" />
+            </button>
+            <MicPicker />
+          </div>
+          <Show when={props.view.showStop}>
+            <button type="button" class="btn stop" disabled={!props.view.canStop} onClick={props.onStop} aria-label="Stop the session and its subagents">
+              <Icon name="stop" /> Stop
+            </button>
+          </Show>
+          <button type="submit" class={`btn primary send ${props.view.primary}`} disabled={!props.view.canSubmit}>
+            <Show when={props.view.primary === "send"} fallback={label()}>
+              <Icon name="send" />
+              <span class="sr-only">{label()}</span>
+            </Show>
+          </button>
+        </div>
+      </div>
+      <div class="composer-meta">
+        <span class="muted small">{props.metaLeft}</span>
+        <span class="grow" />
+        <button type="button" class="model-chip" onClick={() => props.onModel("voice")} title="Voice model (the orchestrator you talk to)">
+          Voice: {props.voiceModel}
+        </button>
+        <button type="button" class="model-chip" onClick={() => props.onModel("worker")} title="Worker model (subagents that do the work)">
+          Worker: {props.workerModel}
+        </button>
+      </div>
+    </form>
+  )
+}
+
+/** Chevron of the Voice split button: microphone choice with a live level meter. */
+function MicPicker() {
+  const [open, setOpen] = createSignal(false)
+  const [mics, setMics] = createSignal<MediaDeviceInfo[]>([])
+  const [level, setLevel] = createSignal(0)
+  const [error, setError] = createSignal("")
+  let button!: HTMLButtonElement
+  let panel: HTMLDivElement | undefined
+  let stopMeter: (() => void) | undefined
+  const [pos, setPos] = createSignal({ right: 0, bottom: 0 })
+  const meter = async () => {
+    stopMeter?.()
+    stopMeter = undefined
+    try {
+      stopMeter = await levelMeter(micDevice(), setLevel)
+      setError("")
+    } catch (e) {
+      setError((e as Error).name === "NotAllowedError" ? "Microphone permission was denied." : `Microphone: ${(e as Error).message}`)
+    }
+  }
+  const show = async () => {
+    const r = button.getBoundingClientRect()
+    setPos({ right: window.innerWidth - r.right, bottom: window.innerHeight - r.top + 6 })
+    setOpen(true)
+    if (!navigator.mediaDevices) return setError("This browser cannot use the microphone here (it needs HTTPS).")
+    setMics(await listMics().catch(() => []))
+    void meter()
+  }
+  const hide = () => {
+    setOpen(false)
+    stopMeter?.()
+    stopMeter = undefined
+    setLevel(0)
+  }
+  const onDoc = (e: MouseEvent) => open() && !button.contains(e.target as Node) && !panel?.contains(e.target as Node) && hide()
+  const onKey = (e: KeyboardEvent) => open() && e.key === "Escape" && hide()
+  document.addEventListener("mousedown", onDoc)
+  document.addEventListener("keydown", onKey)
+  onCleanup(() => {
+    document.removeEventListener("mousedown", onDoc)
+    document.removeEventListener("keydown", onKey)
+    hide()
+  })
+  return (
+    <>
+      <button ref={button} type="button" class="split-chev" aria-label="Choose microphone" aria-haspopup="dialog" aria-expanded={open()} onClick={() => (open() ? hide() : void show())}>
+        <Icon name="down" />
+      </button>
+      <Show when={open()}>
+        <Portal>
+          <div ref={panel} class="menu mic-picker" role="dialog" aria-label="Microphone" style={{ right: `${pos().right}px`, bottom: `${pos().bottom}px` }}>
+            <div class="menu-section">Microphone</div>
+            <For each={[{ deviceId: "", label: "System default" } as Pick<MediaDeviceInfo, "deviceId" | "label">, ...mics().filter((m) => m.deviceId && m.deviceId !== "default")]}>
+              {(m, i) => (
+                <button
+                  type="button"
+                  class="menu-item"
+                  role="menuitemradio"
+                  aria-checked={micDevice() === m.deviceId}
+                  onClick={() => {
+                    setMicDevice(m.deviceId)
+                    void meter()
+                  }}
+                >
+                  <span class="menu-check">{micDevice() === m.deviceId ? "✓" : ""}</span>
+                  <span class="menu-label">{m.label || `Microphone ${i()}`}</span>
+                </button>
+              )}
+            </For>
+            <div class="level" aria-label="Input level" role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(level() * 100)}>
+              <span style={{ width: `${Math.round(level() * 100)}%` }} />
+            </div>
+            <Show when={error()}>
+              <p class="error small pad">{error()}</p>
+            </Show>
+          </div>
+        </Portal>
+      </Show>
+    </>
+  )
+}
+
+const VOICE_LABEL: Record<ConversationState, string> = {
+  starting: "Starting…",
+  listening: "Listening",
+  hearing: "Listening",
+  transcribing: "Thinking",
+  sent: "Thinking",
+  speaking: "Speaking",
+  paused: "Muted",
+  off: "Off",
+}
+
+export function VoiceBar(props: { state: ConversationState; level: number; held: string; working: boolean; model: string; onMute: () => void; onEnd: () => void; onModel: () => void }) {
+  const label = () => (props.state === "listening" && props.working ? "Thinking" : VOICE_LABEL[props.state])
+  const bars = [0.5, 0.8, 1, 0.7, 0.45]
+  return (
+    <div class={`voice-bar ${props.state}`} role="region" aria-label="Voice mode">
+      <div class="wave" aria-hidden="true">
+        <For each={bars}>{(k) => <span style={{ transform: `scaleY(${Math.max(0.15, Math.min(1, (props.state === "speaking" ? 0.6 : props.level) * k * 1.6))})` }} />}</For>
+      </div>
+      <span class="voice-state" role="status" aria-live="polite">
+        {label()}
+        <Show when={props.held}>
+          <span class="muted"> · “{props.held}…”</span>
+        </Show>
+      </span>
+      <span class="grow" />
+      <button type="button" class="model-chip" onClick={props.onModel} title="Voice model">
+        {props.model}
+      </button>
+      <button type="button" class={`icon-btn${props.state === "paused" ? " on" : ""}`} aria-pressed={props.state === "paused"} aria-label={props.state === "paused" ? "Unmute" : "Mute"} title={props.state === "paused" ? "Unmute" : "Mute"} onClick={props.onMute}>
+        <Icon name={props.state === "paused" ? "muted" : "mic"} />
+      </button>
+      <button type="button" class="btn small end" onClick={props.onEnd}>
+        End
+      </button>
+    </div>
+  )
+}

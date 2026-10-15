@@ -4,6 +4,14 @@
 #   docker build -t opencode-voice-hub .
 #   docker run -p 127.0.0.1:4097:4097 -v voice-data:/data -e VOICE_PUBLIC_URL=https://voice.example.com \
 #     -e OPENROUTER_API_KEY=... opencode-voice-hub
+# The console (web/, Solid + Vite) is built in its own stage; the image ships only web/dist.
+FROM node:22-slim AS web
+WORKDIR /build
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund --ignore-scripts
+COPY web ./web
+RUN npx vite build --config web/vite.config.ts
+
 FROM oven/bun:1.3-slim AS deps
 WORKDIR /build
 COPY package.json package-lock.json ./
@@ -23,7 +31,7 @@ COPY --from=deps /deps/node_modules ./node_modules
 COPY package.json ./
 COPY bin ./bin
 COPY src ./src
-COPY web ./web
+COPY --from=web /build/web/dist ./web/dist
 
 ENV VOICE_HOST=0.0.0.0 \
     VOICE_PORT=4097 \

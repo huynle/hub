@@ -148,6 +148,9 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+      # prepack builds the web app (web/dist), which needs the dev dependencies.
+      - if: env.NPM_TOKEN != ''
+        run: npm ci --no-audit --no-fund
       - if: env.NPM_TOKEN != ''
         run: npm publish --provenance --access public ${{ contains(github.ref_name, '-') && '--tag next' || '' }}
         env:

@@ -1,4 +1,4 @@
-// OpenCode Voice service worker: shows push notifications and opens the session they are about.
+// OpenCode Hub service worker: shows push notifications and opens the session they are about.
 // No offline caching: every request goes to the network (the API must never be served stale).
 self.addEventListener("install", () => self.skipWaiting())
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()))
@@ -8,13 +8,13 @@ self.addEventListener("push", (event) => {
   try {
     data = event.data ? event.data.json() : {}
   } catch {
-    data = { title: "OpenCode Voice", body: event.data ? event.data.text() : "" }
+    data = { title: "OpenCode Hub", body: event.data ? event.data.text() : "" }
   }
   const sessionID = typeof data.sessionID === "string" ? data.sessionID : ""
   const kind = typeof data.kind === "string" ? data.kind : "update"
   const url = sessionID ? `/s/${encodeURIComponent(sessionID)}` : "/"
   event.waitUntil(
-    self.registration.showNotification(data.title || "OpenCode Voice", {
+    self.registration.showNotification(data.title || "OpenCode Hub", {
       body: data.body || "",
       tag: `${sessionID}:${kind}`,
       renotify: kind !== "finished",

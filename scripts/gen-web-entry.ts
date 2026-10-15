@@ -1,19 +1,22 @@
 #!/usr/bin/env bun
-// Writes .build/hub.ts, the entry for `bun build --compile`: the hub with every web/ file embedded
-// (`with { type: "file" }` imports, see src/central/assets.ts). Run by scripts/build-binaries.sh.
-import { mkdirSync, readdirSync, writeFileSync } from "node:fs"
+// Writes .build/hub.ts, the entry for `bun build --compile`: the hub with every file of the built web app
+// (web/dist, nested assets/ included) embedded (`with { type: "file" }` imports, see src/central/assets.ts).
+// Run by scripts/build-binaries.sh after `npm run build:web`.
+import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import path from "node:path"
-import { webAssetModule } from "../src/central/assets"
+import { webAssetModule, webFiles } from "../src/central/assets"
 
 const root = path.join(import.meta.dir, "..")
 const out = path.join(root, ".build")
-const names = readdirSync(path.join(root, "web"), { withFileTypes: true })
-  .filter((entry) => entry.isFile())
-  .map((entry) => entry.name)
-  .sort()
+const dist = path.join(root, "web", "dist")
+if (!existsSync(path.join(dist, "index.html"))) {
+  console.error("web/dist is missing: run `npm run build:web` first")
+  process.exit(1)
+}
+const names = webFiles(dist)
 
 mkdirSync(out, { recursive: true })
-writeFileSync(path.join(out, "web-assets.ts"), webAssetModule(names, "../web"))
+writeFileSync(path.join(out, "web-assets.ts"), webAssetModule(names, "../web/dist"))
 writeFileSync(
   path.join(out, "hub.ts"),
   [

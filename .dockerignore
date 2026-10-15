@@ -10,3 +10,4 @@ Dockerfile
 .dockerignore
 dist
 .build
+web/dist
