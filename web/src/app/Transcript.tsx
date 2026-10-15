@@ -3,7 +3,7 @@
 import { For, Match, Show, Switch, createSignal } from "solid-js"
 import type { TimelineRow } from "../core/timeline-core"
 import { formatElapsed } from "../core/feedback-core"
-import type { Block, BlockImage } from "../lib/transcript"
+import { thoughtView, type Block, type BlockImage } from "../lib/transcript"
 import { errorText, getJSON, sessionPath, enc } from "./api"
 import { Markdown } from "./Markdown"
 import { sessionHref } from "./router"
@@ -98,18 +98,18 @@ export function Transcript(props: { sessionID: string; blocks: Block[]; ticks: R
 function Thought(props: { block: Extract<Block, { type: "thought" }> } & Expansion) {
   const open = () => !!props.expanded[props.block.key]
   const setOpen = (on: boolean) => props.onToggle(props.block.key, on)
-  const label = () => (props.block.running ? "Thinking…" : props.block.seconds !== undefined ? `Thought for ${props.block.seconds}s` : "Thought")
+  const view = () => thoughtView(props.block)
   return (
     <div class="fold thought">
-      <button type="button" class="fold-head" aria-expanded={open()} onClick={() => setOpen(!open())} disabled={!props.block.text && !props.block.running}>
+      <button type="button" class="fold-head" aria-expanded={open()} onClick={() => setOpen(!open())}>
         <Show when={props.block.running}>
           <span class="spinner small" />
         </Show>
-        <span>{label()}</span>
+        <span>{view().label}</span>
         <Icon name="chevron" class="chev" />
       </button>
-      <Show when={open() && props.block.text}>
-        <div class="fold-body reasoning">{props.block.text}</div>
+      <Show when={open()}>
+        <div class={`fold-body reasoning${view().muted ? " hidden-reasoning" : ""}`}>{view().body}</div>
       </Show>
     </div>
   )

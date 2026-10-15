@@ -252,6 +252,7 @@ pre.code { white-space: pre; font-size: 12px; }
 .fold.has-failed .fold-head { color: #c9a0a4; }
 .fold-body { margin: 6px 0 0 2px; border-left: 1px solid var(--line); padding-left: 12px; }
 .reasoning { color: var(--muted); white-space: pre-wrap; font-size: 13px; max-height: 320px; overflow: auto; }
+.reasoning.hidden-reasoning { font-style: italic; }
 .tool-list { list-style: none; }
 .tool-head { display: flex; align-items: center; gap: 8px; width: 100%; border: 0; background: transparent; padding: 3px 0; cursor: pointer; text-align: left; font-size: 13px; }
 .tool-mark { width: 14px; color: var(--ok); font-size: 11px; }

@@ -47,3 +47,43 @@ describe("Timeline", () => {
     expect(timeline.rows()[1]!.detail).toEqual({ input: { query: "x" }, output: "full" })
   })
 })
+
+describe("Timeline: live reasoning", () => {
+  test("streamed reasoning deltas accumulate into one thought with text", () => {
+    const timeline = new Timeline()
+    timeline.appendReasoning({ sessionID: "s", messageID: "m1", delta: "Look at ", at: 10 })
+    timeline.appendReasoning({ sessionID: "s", messageID: "m1", delta: "the tests.", at: 11 })
+    expect(timeline.rows().filter((r) => r.kind === "reasoning").map((r) => [r.text, r.state, r.at])).toEqual([["Look at the tests.", "running", 10]])
+  })
+
+  test("deltas go into the running history row of the same message instead of a second thought", () => {
+    const timeline = new Timeline()
+    timeline.load([{ key: "m1:0", messageID: "m1", sessionID: "s", kind: "reasoning", text: "", state: "running", at: 5 }])
+    timeline.appendReasoning({ sessionID: "s", messageID: "m1", delta: "Thinking hard", at: 10 })
+    const thoughts = timeline.rows().filter((r) => r.kind === "reasoning")
+    expect(thoughts.map((r) => [r.key, r.text, r.at])).toEqual([["m1:0", "Thinking hard", 5]])
+  })
+
+  test("history loaded after live deltas replaces the live row, keeping the streamed text when the stored text is empty", () => {
+    const timeline = new Timeline()
+    timeline.appendReasoning({ sessionID: "s", messageID: "m1", delta: "Streamed reasoning", at: 10 })
+    timeline.load([{ key: "m1:0", messageID: "m1", sessionID: "s", kind: "reasoning", text: "", state: "done", at: 9, completed: 20 }])
+    const thoughts = timeline.rows().filter((r) => r.kind === "reasoning")
+    expect(thoughts.map((r) => [r.key, r.text, r.state])).toEqual([["m1:0", "Streamed reasoning", "done"]])
+    // Stored text wins when the provider shared it.
+    const other = new Timeline()
+    other.appendReasoning({ sessionID: "s", messageID: "m2", delta: "partial", at: 10 })
+    other.load([{ key: "m2:0", messageID: "m2", sessionID: "s", kind: "reasoning", text: "full stored text", state: "done", at: 9, completed: 20 }])
+    expect(other.rows().filter((r) => r.kind === "reasoning").map((r) => r.text)).toEqual(["full stored text"])
+  })
+
+  test("ending reasoning marks running thoughts of that session done with a completion time", () => {
+    const timeline = new Timeline()
+    timeline.appendReasoning({ sessionID: "s", messageID: "m1", delta: "x", at: 10 })
+    timeline.appendReasoning({ sessionID: "kid", messageID: "k1", delta: "y", at: 10 })
+    timeline.endReasoning("s", 4010)
+    expect(timeline.rows().map((r) => [r.sessionID, r.state, r.completed])).toEqual([["s", "done", 4010], ["kid", "running", undefined]])
+    timeline.endReasoning(undefined, 5000)
+    expect(timeline.rows().map((r) => r.state)).toEqual(["done", "done"])
+  })
+})

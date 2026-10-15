@@ -66,6 +66,9 @@ export interface TimelineRow {
   [key: string]: unknown
 }
 
+/** Key of the thought built from live deltas of a message (before its stored row is known). */
+const reasoningKey = (messageID: string) => `${messageID}:reasoning`
+
 export type TimelineInput = Omit<TimelineRow, "depth"> & { depth?: number }
 
 interface Subagent {
@@ -82,7 +85,43 @@ export class Timeline {
   private details = new Map<string, unknown>()
 
   load(items: readonly TimelineInput[] | undefined): void {
-    for (const item of items ?? []) this.upsert(item)
+    for (const item of items ?? []) {
+      // A stored thought replaces the row its live deltas built; the streamed text stays when the provider
+      // stored none (many keep only an encrypted signature).
+      const liveKey = item?.kind === "reasoning" && typeof item.messageID === "string" ? reasoningKey(item.messageID) : undefined
+      const live = liveKey !== undefined && liveKey !== item.key ? this.items.get(liveKey) : undefined
+      if (live) {
+        this.items.delete(liveKey!)
+        this.upsert({ ...item, text: item.text || live.text || "" })
+      } else this.upsert(item)
+    }
+  }
+
+  /**
+   * A streamed reasoning delta: appended to the running thought of that message (a history row when the
+   * session was opened mid-run), else to the message's live thought.
+   */
+  appendReasoning({ sessionID, messageID, delta, at = Date.now() }: { sessionID?: string; messageID: string; delta: string; at?: number }): void {
+    let target: TimelineRow | undefined
+    for (const row of this.items.values()) if (row.kind === "reasoning" && row.messageID === messageID && row.state === "running") target = row
+    target ??= this.items.get(reasoningKey(messageID))
+    const key = target?.key ?? reasoningKey(messageID)
+    this.upsert({
+      key,
+      kind: "reasoning",
+      messageID,
+      ...(sessionID ? { sessionID } : {}),
+      text: `${target?.text ?? ""}${delta}`,
+      state: "running",
+      at: target?.at ?? at,
+    })
+  }
+
+  /** Thinking ended (text followed, or the tree went idle): running thoughts of `sessionID` (all when omitted) are done. */
+  endReasoning(sessionID: string | undefined, at = Date.now()): void {
+    for (const row of this.items.values()) {
+      if (row.kind === "reasoning" && row.state === "running" && (sessionID === undefined || row.sessionID === sessionID)) this.upsert({ key: row.key, kind: row.kind, state: "done", completed: at })
+    }
   }
 
   upsert(item: TimelineInput): void {

@@ -119,30 +119,29 @@ export function SessionView(props: { id: string }) {
         at: timeline.get(`activity:${m.sessionID}:${item.id}`)?.at ?? item.at,
       })
       bump()
-    } else if ((m.type === "delta" || m.type === "reasoning") && rootID === id && typeof m.messageID === "string") {
-      const reasoning = m.type === "reasoning"
-      const key = `${m.messageID}:${reasoning ? "reasoning" : "text"}`
-      const previous = timeline.get(key)?.text ?? ""
+    } else if (m.type === "reasoning" && rootID === id && typeof m.messageID === "string" && typeof m.delta === "string") {
+      timeline.appendReasoning({ sessionID: m.sessionID, messageID: m.messageID, delta: m.delta })
+      bump()
+    } else if (m.type === "delta" && rootID === id && typeof m.messageID === "string" && typeof m.text === "string") {
+      const key = `${m.messageID}:text`
       timeline.upsert({
         key,
         messageID: m.messageID,
         sessionID: m.sessionID,
-        kind: reasoning ? "reasoning" : "assistant",
-        text: `${previous}${reasoning ? m.delta : m.text}`,
-        ...(reasoning ? { state: "running" } : { live: true }),
+        kind: "assistant",
+        text: `${timeline.get(key)?.text ?? ""}${m.text}`,
+        live: true,
         at: timeline.get(key)?.at ?? Date.now(),
       })
       // Text after reasoning ends that reasoning.
-      if (!reasoning) for (const r of timeline.rows()) if (r.kind === "reasoning" && r.state === "running" && r.sessionID === m.sessionID) timeline.upsert({ key: r.key, state: "done", completed: Date.now() } as never)
+      timeline.endReasoning(m.sessionID)
       bump()
     } else if (m.type === "status" && m.sessionID === id) {
       for (const text of statusNotes(lastStatus, m.sessions, id)) note(text, "sys")
       lastStatus = m.sessions
       if (!treeRunning(m.sessions)) {
-        for (const r of timeline.rows()) {
-          if (r.live) timeline.upsert({ key: r.key, live: false } as never)
-          if (r.kind === "reasoning" && r.state === "running") timeline.upsert({ key: r.key, state: "done" } as never)
-        }
+        for (const r of timeline.rows()) if (r.live) timeline.upsert({ key: r.key, live: false } as never)
+        timeline.endReasoning(undefined)
       }
       convo()?.onStatus(m.sessions)
       bump()

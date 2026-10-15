@@ -1,7 +1,8 @@
 // Transcript layout (web/src/lib/transcript.ts), markdown (web/src/lib/markdown.ts) and patch parsing
 // (web/src/lib/diff.ts) for the session view.
 import { describe, expect, test } from "bun:test"
-import { transcriptBlocks } from "../web/src/lib/transcript"
+import { thoughtView, transcriptBlocks } from "../web/src/lib/transcript"
+import { Timeline } from "../web/src/core/timeline-core"
 import { parseInline, parseMarkdown, safeHref } from "../web/src/lib/markdown"
 import { parsePatch } from "../web/src/lib/diff"
 
@@ -149,5 +150,34 @@ describe("parsePatch", () => {
       ["context", 10, 10, "ctx"],
       ["add", undefined, 11, "added"],
     ])
+  })
+})
+
+describe("thoughtView", () => {
+  const thought = (extra: Partial<{ text: string; running: boolean; seconds: number }>) => ({ type: "thought" as const, key: "m:0", text: "", running: false, ...extra })
+
+  test("a finished thought with text expands to that text", () => {
+    expect(thoughtView(thought({ text: "Read the test first.", seconds: 12 }))).toEqual({ label: "Thought for 12s", body: "Read the test first.", muted: false })
+  })
+
+  test("no readable text (encrypted reasoning only): still expandable, with an explanation", () => {
+    const view = thoughtView(thought({ seconds: 3 }))
+    expect(view.label).toBe("Thought for 3s")
+    expect(view.body).toBe("The model didn't share its reasoning text (only an encrypted summary).")
+    expect(view.muted).toBe(true)
+  })
+
+  test("running: streamed text so far, or a waiting note", () => {
+    expect(thoughtView(thought({ running: true, text: "Look at " }))).toEqual({ label: "Thinking…", body: "Look at ", muted: false })
+    expect(thoughtView(thought({ running: true }))).toMatchObject({ label: "Thinking…", muted: true })
+  })
+
+  test("live deltas end up as an expandable thought block", () => {
+    const timeline = new Timeline()
+    timeline.appendReasoning({ sessionID: "s", messageID: "m1", delta: "Check the picker.", at: 1000 })
+    timeline.endReasoning("s", 5000)
+    const [block] = transcriptBlocks(timeline.rows())
+    expect(block).toMatchObject({ type: "thought", text: "Check the picker.", running: false, seconds: 4 })
+    expect(thoughtView(block as never).body).toBe("Check the picker.")
   })
 })

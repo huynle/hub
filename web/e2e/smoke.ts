@@ -93,6 +93,24 @@ async function desktop(browser: Browser): Promise<void> {
     await shot(page, "desktop-session")
   })
 
+  await check("desktop: thoughts expand — stored text, encrypted-only reasoning, live streamed reasoning", async () => {
+    await page.getByRole("button", { name: /Thought for 12s/ }).click()
+    await page.locator(".fold-body.reasoning").getByText(/The failing test is in the picker/).waitFor()
+    const hidden = page.getByRole("button", { name: /Thought for 2s/ })
+    assert(await hidden.isEnabled(), "a thought without text is still clickable")
+    await hidden.click()
+    await page.locator(".fold-body.reasoning.hidden-reasoning").getByText(/didn't share its reasoning text/).waitFor()
+    await mock("/mock/stream", { kind: "reasoning", messageID: "msg_live_r", text: "Streaming my live reasoning now.", every: 30, size: 8 })
+    const live = page.getByRole("button", { name: /Thinking…/ })
+    await live.waitFor()
+    await live.click()
+    await page.locator(".fold-body.reasoning").getByText("Streaming my live reasoning now.").waitFor()
+    await mock("/mock/status", { sessions: [{ id: "ses_mock", title: "Mock session", state: "idle", blockers: [] }] })
+    await page.getByRole("button", { name: /^Thought for \ds$/ }).last().waitFor()
+    assert((await page.locator(".fold-body.reasoning").last().textContent())?.includes("Streaming my live reasoning now."), "finished live thought keeps its text")
+    await shot(page, "desktop-thoughts")
+  })
+
   await check("desktop: composer Send → Steer + Stop while running → Send", async () => {
     const send = page.locator("button.send")
     assert(await send.isDisabled(), "Send disabled while empty")

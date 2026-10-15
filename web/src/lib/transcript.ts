@@ -82,3 +82,13 @@ export function transcriptBlocks(rows: readonly TimelineRow[]): Block[] {
   }
   return out
 }
+
+/** Shown when a thought has no readable text: the provider kept only an encrypted signature. */
+export const HIDDEN_REASONING = "The model didn't share its reasoning text (only an encrypted summary)."
+
+/** The "Thought for Ns" row: its label and what it shows when expanded (always expandable). */
+export function thoughtView(block: Extract<Block, { type: "thought" }>): { label: string; body: string; muted: boolean } {
+  const label = block.running ? "Thinking…" : block.seconds !== undefined ? `Thought for ${block.seconds}s` : "Thought"
+  if (block.text) return { label, body: block.text, muted: false }
+  return { label, body: block.running ? "Waiting for the model's reasoning…" : HIDDEN_REASONING, muted: true }
+}
