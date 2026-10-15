@@ -1,7 +1,7 @@
 // Speech onboarding on the page: when the "Set up speech" banner shows, whether the mic is usable, and the
 // local-hub note about where keys are stored.
 import { describe, expect, test } from "bun:test"
-import { speechSetup } from "../web/feedback-core.js"
+import { speechSetup } from "../web/src/core/feedback-core"
 
 const REASON = "Speech-to-text needs an OpenRouter API key. Set it in Settings → Speech."
 

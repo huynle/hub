@@ -16,7 +16,7 @@ import {
   usersView,
   type AdminUser,
   type Me,
-} from "../web/account-core.js"
+} from "../web/src/core/account-core"
 
 const alice: Me = { device: { id: "dev_a", name: "Pixel" }, user: { id: "u_alice", email: "alice@example.com", name: "Alice Example", role: "admin" }, auth: "oidc" }
 const bob: Me = { device: { id: "dev_b", name: "iPhone" }, user: { id: "u_bob", email: "bob@example.com", role: "user" }, auth: "oidc" }

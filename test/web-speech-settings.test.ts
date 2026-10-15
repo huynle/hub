@@ -1,6 +1,6 @@
 // Settings → Speech: partial PUT built from changed fields only, inline validation, voice hints by model prefix.
 import { describe, expect, test } from "bun:test"
-import { speechForm, speechPatch, validateSpeech, voicesFor, type SpeechSettings } from "../web/feedback-core.js"
+import { speechForm, speechPatch, validateSpeech, voicesFor, type SpeechSettings } from "../web/src/core/feedback-core"
 
 const current: SpeechSettings & { voiceHints: Record<string, string[]> } = {
   stt: { provider: "openrouter", model: "openai/whisper-1", language: "en", apiKey: { set: true, last4: "abcd", source: "env" } },

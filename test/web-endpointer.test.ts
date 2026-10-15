@@ -1,6 +1,6 @@
 // Conversation mode: joining speculative per-segment transcripts into utterances.
 import { describe, expect, test } from "bun:test"
-import { Endpointer } from "../web/conversation-core.js"
+import { Endpointer } from "../web/src/core/conversation-core"
 
 /** Manual clock for the endpointer's hold timer. */
 function clock() {

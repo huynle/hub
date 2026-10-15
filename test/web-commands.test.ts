@@ -1,6 +1,6 @@
 // Conversation mode: voice commands, filler detection and "looks complete" endpointing heuristics.
 import { describe, expect, test } from "bun:test"
-import { isFiller, looksComplete, parseCommand } from "../web/conversation-core.js"
+import { isFiller, looksComplete, parseCommand } from "../web/src/core/conversation-core"
 
 describe("parseCommand", () => {
   test("interrupt commands, case and punctuation insensitive", () => {

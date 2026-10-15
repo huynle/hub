@@ -1,6 +1,6 @@
 // Live activity feed: SSE activity items + status trees → compact rows (subagent tool calls nested under the subagent).
 import { describe, expect, test } from "bun:test"
-import { ActivityFeed } from "../web/feedback-core.js"
+import { ActivityFeed } from "../web/src/core/feedback-core"
 
 const ROOT = "ses_root"
 const tool = (id: string, at: number, extra: Record<string, unknown> = {}) => ({ id, kind: "tool", tool: "shell", summary: `cmd ${id}`, state: "running", at, ...extra })

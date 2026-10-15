@@ -1,7 +1,7 @@
 // What the session is doing right now: streamed reasoning and text in the activity feed, and the "now" header
 // summary (pulse) with elapsed time since the run started.
 import { describe, expect, test } from "bun:test"
-import * as core from "../web/feedback-core.js"
+import * as core from "../web/src/core/feedback-core"
 
 const { ActivityFeed } = core
 const tailText = (...args: Parameters<typeof core.tailText>) => core.tailText(...args)

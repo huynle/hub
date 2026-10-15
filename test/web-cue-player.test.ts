@@ -1,6 +1,6 @@
 // Progress cue output: fixed phrases are synthesized once and cached; playback uses the chosen speed.
 import { describe, expect, test } from "bun:test"
-import { CuePlayer } from "../web/cues.js"
+import { CuePlayer } from "../web/src/core/cues"
 
 class FakeAudio {
   src = ""

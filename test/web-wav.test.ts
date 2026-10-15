@@ -1,6 +1,6 @@
 // Conversation mode: 16 kHz mono 16-bit WAV encoding of VAD segments for /api/transcribe.
 import { describe, expect, test } from "bun:test"
-import { encodeWav, resample } from "../web/conversation-core.js"
+import { encodeWav, resample } from "../web/src/core/conversation-core"
 
 const ascii = (bytes: Uint8Array, at: number, n: number) => String.fromCharCode(...bytes.slice(at, at + n))
 

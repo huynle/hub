@@ -1,7 +1,7 @@
 // Session view (0.4.0, docs/session-view.md): open sessions first. Synced view prefs (hide/pin), migration of
 // 0.3 local pins, Open / Recent / Hidden split, Herdr-like grouping and ordering, status dots, new-session targets.
 import { describe, expect, test } from "bun:test"
-import { createBody, dotState, groupKey, newSessionTargets, hiddenView, homeView as typedHomeView, migratePins, normalizePrefs, recentMachine, setPref } from "../web/view-core.js"
+import { createBody, dotState, groupKey, newSessionTargets, hiddenView, homeView as typedHomeView, migratePins, normalizePrefs, recentMachine, setPref } from "../web/src/core/view-core"
 
 type S = any
 const homeView = (...args: Parameters<typeof typedHomeView>): S => typedHomeView(...args)
