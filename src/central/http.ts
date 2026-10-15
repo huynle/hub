@@ -119,6 +119,14 @@ const DECISIONS = new Set<PermissionDecision>(["once", "always", "reject"])
 export const MAX_UTTERANCE_CHARS = 4000
 /** Longest typed prompt or steer accepted (characters, after trimming); a bigger one would not fit in a frame. */
 export const MAX_PROMPT_CHARS = 100_000
+/** The shell's answer when the hub has no built web app (e.g. the plugin installed from GitHub). */
+const WEB_NOT_BUILT = [
+  "This hub has no built web app (web/dist).",
+  "",
+  "To run a hub, install it from npm (`opencode plugin add @huynle/opencode-hub`, or `bunx --package @huynle/opencode-hub opencode-hub`)",
+  "or use a release binary (https://github.com/huynle/opencode-hub/releases), which ship the web app.",
+  "In a source checkout, run `npm install && npm run build:web` first.",
+].join("\n")
 /** Preview text for POST /api/settings/speech/test. */
 const SPEECH_TEST_TEXT = "Hi! This is how I will sound when I read replies to you."
 const SPEECH_TEST_MAX_CHARS = 300
@@ -934,7 +942,7 @@ export function startCentral(options: CentralOptions): Central {
     const type = name && CONTENT_TYPES[path.extname(name).toLowerCase()]
     const bytes = name && type ? web.read(name) : undefined
     if (name === "index.html" && !bytes) {
-      return new Response("The web app is not built. Run `npm run build:web` (or use a release build).", { status: 503, headers: { "content-type": "text/plain; charset=utf-8" } })
+      return new Response(WEB_NOT_BUILT, { status: 503, headers: { "content-type": "text/plain; charset=utf-8" } })
     }
     if (!type || !bytes) return error(404, "Not found")
     const headers = new Headers({ "content-type": type })

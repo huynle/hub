@@ -25,6 +25,12 @@ Existing installs keep working; see [Migrating from opencode-voice](README.md#mi
   session is busy (`{mode: "turn" | "steer"}`), `POST /api/sessions/:id/stop` stops the whole tree
   (descendants first), `GET …/summary` (context usage, todos, MCP, branch, change stats) and
   `GET …/diff?file=` (per-file patch, on demand), and per-user read marks (`POST …/read`, `GET /api/reads`).
+- **Limits**: typed prompts/steers are capped at 100,000 characters (400); diffs at 400 KB of JSON and the
+  summary at 500 changed files (`totalFiles`, `truncated`) and 100 MCP servers, so no reply outgrows a
+  protocol frame; a spoke answers an oversize result with an error instead of dropping the connection.
+  Stop and interrupt release the hub's turn lock (a waiting turn answers `interrupted`). The busy message
+  is now "A turn is already running for this session". Reply links refuse backslashes and control
+  characters.
 - **Releases** publish to npm through trusted publishing (OIDC) instead of an `NPM_TOKEN`.
 - **Legacy package**: `packages/opencode-voice-shim/` is a final `@huynle/opencode-voice` 0.5.0 that
   depends on and re-exports `@huynle/opencode-hub` and prints a one-line rename notice. It is published by

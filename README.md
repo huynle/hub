@@ -27,9 +27,15 @@ Install the plugin (adds it to your global OpenCode config), then restart the ba
 loads:
 
 ```sh
-opencode plugin add @huynle/opencode-hub     # or: opencode plugin add github:huynle/opencode-hub
+opencode plugin add @huynle/opencode-hub
 opencode service restart
 ```
+
+Install from npm: the npm package ships the built web app, so the plugin can run a local hub. A GitHub
+install (`opencode plugin add github:huynle/opencode-hub`) has no built web app (`web/dist` is not in the
+repository): it works for connecting to a hub that runs elsewhere, but a local hub it starts answers 503
+until you build the app. To run a hub yourself, use the npm package, a [release binary](#running-the-hub)
+or Docker, or run `npm install && npm run build:web` in a source checkout.
 
 Then run **`/hub`** in OpenCode (`/voice` still works as an alias). The first time, it offers **Set up
 OpenCode Hub** with two paths.
@@ -74,7 +80,7 @@ The hub serves the web app, pairs devices, enrolls machines, and does push and (
 
 | Way | For | How |
 |---|---|---|
-| **`/hub` → On this computer** | Local use; nothing to install | started by the plugin with OpenCode's own runtime (`BUN_BE_BUN=1 opencode bin/hub.ts`), or `bun` when installed |
+| **`/hub` → On this computer** | Local use; nothing to install (plugin from npm) | started by the plugin with OpenCode's own runtime (`BUN_BE_BUN=1 opencode bin/hub.ts`), or `bun` when installed |
 | **Standalone binary** | Any server or laptop, no runtime needed | `opencode-hub-<os>-<arch>` from the [releases](https://github.com/huynle/opencode-hub/releases) |
 | **Docker** | Servers | `ghcr.io/huynle/opencode-hub` (linux/amd64, linux/arm64) |
 | **bunx / from source** | Bun users, development | `bunx --package @huynle/opencode-hub opencode-hub` · `bun bin/hub.ts` |
@@ -158,10 +164,10 @@ conversation mode and utterances (403 `not_exposed` for sessions not shared with
 
 | Route | Result |
 |---|---|
-| `POST /api/sessions/:id/turn {text}` | sends a turn; while the session tree is running it steers instead. Answers `{mode: "turn" \| "steer"}` |
-| `POST /api/sessions/:id/stop` | interrupts running descendants deepest first, then the root; idempotent |
-| `GET /api/sessions/:id/summary` | context usage, todos, MCP status, branch and working-tree change stats (each part optional) |
-| `GET /api/sessions/:id/diff?file=` | one file's patch, on demand (512 KB cap); never stored in the hub |
+| `POST /api/sessions/:id/turn {text}` | sends a turn; while the session tree is running it steers instead. Answers `{mode: "turn" \| "steer"}`. 400 empty or over 100,000 characters; 409 "A turn is already running for this session" |
+| `POST /api/sessions/:id/stop` | interrupts running descendants deepest first, then the root; idempotent. Also releases the hub's turn lock for the tree: a turn request still waiting answers `{outcome: "interrupted"}` and the next turn can start (`/interrupt` does the same) |
+| `GET /api/sessions/:id/summary` | context usage, todos, MCP status (at most 100 servers), branch and working-tree change stats (each part optional). `changes` lists at most 500 files, most-changed first, with `totalFiles` and `truncated`; its `additions`/`deletions` cover every file |
+| `GET /api/sessions/:id/diff?file=` | one file's patch, on demand (capped at 400 KB as JSON, then `truncated: true`); never stored in the hub |
 | `POST /api/sessions/:id/read` · `GET /api/reads` | per-user read marks, synced to your other devices |
 
 ## Spoke (OpenCode plugin)
@@ -384,10 +390,10 @@ Pure logic lives in `web/src/core` and `web/src/lib` (bun tests in `test/web-*.t
   once, reverted with a message if the hub refuses, with Undo after a hide. Other devices update live
   (SSE `prefs`). Pins from 0.3 (stored on the device) are moved into them once. With an older hub
   without `/api/prefs/view`, they stay on the device. Open/closed groups and the filter stay per device.
-- **Voice off** sessions (`exposed: false`, mode `session`) are greyed with an "Enable voice" button
-  (`POST /api/sessions/:id/expose {on:true}`; shown at once, reverted on error); tapping one explains
-  and offers "Enable voice and open". A session page answered with 403 `not_exposed` shows "Enable
-  voice for this session" instead of the conversation.
+- **Voice off** sessions (`exposed: false`, mode `session`) open, show their status and live activity, and
+  take Send, Steer, Stop and permission replies like any other session. Only Voice is off: the row's ⋯
+  menu has **Turn Voice on** (`POST /api/sessions/:id/expose {on:true}`; shown at once, reverted on
+  error), and Voice mode on such a session turns Voice on first.
 - **New session** (+ in the header, + on any group, or a group's ⋯ menu): machine (when several are
   online), workspace (Herdr workspaces first, then known folders), folder (a Herdr workspace's pane
   folders, most used first), optional title, and **Open in Herdr** (shown when the machine runs Herdr; on
@@ -508,8 +514,9 @@ tool?, summary?}`, the latest running activity item), and `open?` / `terminal?` 
 (`GET /api/sessions/:id`: open from any reporting process, Herdr first). Machines carry `terminals?:
 {herdr?: {workspaces: [{id, label, directories}]}}`, the latest `terminals` frame of the machine, while
 the process that sent it is connected. `now` and `state` are snapshots: the phone follows
-SSE `activity` and `status` for live changes. Unexposed sessions have no status board (`status: []`,
-`state: "idle"`). An unchanged sessions frame does not re-broadcast the catalog.
+SSE `activity` and `status` for live changes. Every reported session has a status board, Voice on or
+off: unexposed sessions report `status`, `state`, `blockers`, `now` and activity like exposed ones. An
+unchanged sessions frame does not re-broadcast the catalog.
 
 | Route | Spoke op | Result |
 |---|---|---|
@@ -814,7 +821,8 @@ machines (a reverse proxy on the same host makes every request look local).
 opencode-voice 0.5.0 is **OpenCode Hub**: same features, Voice optional. Nothing needs to change on
 day one; everything below keeps working with a one-time warning where noted.
 
-1. Replace the plugin: `opencode plugin add @huynle/opencode-hub` (or `github:huynle/opencode-hub`),
+1. Replace the plugin: `opencode plugin add @huynle/opencode-hub` (a `github:huynle/opencode-hub` install
+   has no built web app, so it only suits connecting to a hub that runs elsewhere),
    remove `@huynle/opencode-voice` from your OpenCode plugins, and `opencode service restart`. The final
    `@huynle/opencode-voice` 0.5.0 only re-exports `@huynle/opencode-hub` and prints a rename notice.
 2. Start OpenCode or the hub once: on first start, the legacy files are **copied** (file modes such as
