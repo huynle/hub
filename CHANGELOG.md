@@ -15,6 +15,13 @@
 - **Images in the transcript**: user messages show their image attachments as thumbnails, loaded on
   demand from the owner-scoped `GET /api/sessions/:id/timeline/messages/:message/files/:index`; other
   attached files show as named chips.
+- **Fix: thoughts always expand.** "Thought for Ns" opens even when the provider stored no readable
+  reasoning (Claude usually keeps only an encrypted signature) and then says so; live reasoning deltas go
+  into the thought of the same message instead of a second, empty row when a session is opened mid-run.
+- **Fix: speech model lists of OpenAI-compatible gateways.** `GET /api/settings/speech/models` answers
+  `{models, note?}`: a gateway's full `/models` list is narrowed to speech-to-text or text-to-speech models
+  (never chat, image, embedding, rerank or music models), the configured model is always offered first, and
+  when nothing is labeled every model shows with a note. The pickers group models by provider.
 
 ## 0.5.0
 

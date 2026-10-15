@@ -4,7 +4,7 @@ import { For, Show, createSignal, onMount, type JSX } from "solid-js"
 import { createStore, reconcile, unwrap } from "solid-js/store"
 import { resetPatch, speechInheritance, speechTabs, type SpeechInheritance } from "../core/account-core"
 import { speechForm, speechPatch, speechSetup, validateSpeech, voicesFor, type SpeechForm, type SpeechSettings } from "../core/feedback-core"
-import { pickerOptions, type PickerOption } from "../core/picker-core"
+import { pickerNote, pickerOptions, type PickerOption } from "../core/picker-core"
 import { applyRate } from "../core/cues"
 import { api, errorText, getJSON, HttpError } from "./api"
 import { me, setSpeechReady, loadSpeechReady } from "./hub"
@@ -82,9 +82,9 @@ function SpeechEditor(props: { settings: SpeechSettings; scope: Scope; onSaved: 
   const inherit = (): SpeechInheritance | undefined => (props.scope === "user" ? speechInheritance(props.settings) : undefined)
   const setup = () => (props.scope === "user" ? speechSetup(props.settings.ready, me()?.publicURL) : undefined)
   const dirty = () => Object.keys(speechPatch(props.settings, unwrap(form))).length > 0
-  const modelLists: Partial<Record<Kind, Promise<PickerOption[]>>> = {}
+  const modelLists: Partial<Record<Kind, Promise<{ options: PickerOption[]; note?: string }>>> = {}
   const models = (kind: Kind) => {
-    modelLists[kind] ??= getJSON(`/api/settings/speech/models?kind=${kind}`).then(pickerOptions)
+    modelLists[kind] ??= getJSON(`/api/settings/speech/models?kind=${kind}`).then((raw) => ({ options: pickerOptions(raw), note: pickerNote(raw) }))
     modelLists[kind]!.catch(() => delete modelLists[kind])
     return modelLists[kind]!
   }
@@ -120,13 +120,13 @@ function SpeechEditor(props: { settings: SpeechSettings; scope: Scope; onSaved: 
       onInput={(e) => setForm(kind, name as never, e.currentTarget.value as never)}
     />
   )
-  const choose = (kind: Kind, name: "model" | "voice", title: string, noun: string, load: () => Promise<PickerOption[]>) => (
+  const choose = (kind: Kind, name: "model" | "voice", title: string, noun: string, load: OptionPickerRequest["load"]) => (
     <div class="row">
       {text(kind, name, { placeholder: `Choose or type a ${noun}` })}
       <button
         type="button"
         class="btn small"
-        onClick={() => setPicker({ title, noun, current: (form[kind] as unknown as Record<string, string>)[name] ?? "", load, onPick: (v) => setForm(kind, name as never, v as never) })}
+        onClick={() => setPicker({ title, noun, current: (form[kind] as unknown as Record<string, string>)[name] ?? "", load, grouped: name === "model", onPick: (v) => setForm(kind, name as never, v as never) })}
       >
         Browse…
       </button>

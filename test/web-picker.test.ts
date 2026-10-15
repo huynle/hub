@@ -1,6 +1,8 @@
 // Option picker for Settings → Speech (model and voice): option normalization, search, ranking, custom values.
 import { describe, expect, test } from "bun:test"
-import { filterPicker, pickerOptions, stepActive } from "../web/src/core/picker-core"
+import { filterPicker, pickerGroup, pickerNote, pickerOptions, stepActive } from "../web/src/core/picker-core"
+import fixture from "./fixtures/openai-compatible-gateway-models.json"
+import { speechModelList } from "../src/central/speech/models"
 
 const MODELS = pickerOptions([
   { id: "openai/gpt-4o-mini-tts", name: "OpenAI: GPT-4o mini TTS" },
@@ -79,5 +81,42 @@ describe("stepActive", () => {
     expect(stepActive(1, "home", 3)).toBe(0)
     expect(stepActive(1, "end", 3)).toBe(2)
     expect(stepActive(0, 1, 0)).toBe(-1)
+  })
+})
+
+describe("speech model picker over a big gateway list", () => {
+  const stt = speechModelList("stt", fixture, "openrouter/openai/gpt-4o-mini-transcribe")
+  const all = pickerOptions({ models: fixture.data.map((m) => ({ id: m.id, name: (m as { name?: string }).name })) })
+
+  test("the hub's {models, note} answer: options and the note", () => {
+    expect(pickerOptions(stt).length).toBe(stt.models.length)
+    expect(pickerNote(stt)).toBeUndefined()
+    expect(pickerNote({ models: [], note: "This provider doesn't label speech models; showing all" })).toBe("This provider doesn't label speech models; showing all")
+    expect(pickerNote([{ id: "a" }])).toBeUndefined()
+  })
+
+  test("a provider prefix or part of a name narrows the list, case-insensitively", () => {
+    const options = pickerOptions(stt)
+    const openai = ids(filterPicker(options, "OpenAI", { current: "openrouter/openai/gpt-4o-mini-transcribe" }))
+    expect(openai.length).toBeGreaterThanOrEqual(5)
+    expect(openai.every((id) => id.includes("/openai/"))).toBe(true)
+    expect(ids(filterPicker(options, "whisper")).sort()).toEqual(["openrouter/openai/whisper-1", "openrouter/openai/whisper-large-v3", "openrouter/openai/whisper-large-v3-turbo"])
+    expect(ids(filterPicker(options, "mai"))).toEqual(["openrouter/microsoft/mai-transcribe-1.5"])
+    expect(ids(filterPicker(all, "mai-transcribe"))).toEqual(["openrouter/microsoft/mai-transcribe-1.5"])
+  })
+
+  test("results are grouped by provider (the id up to its last slash), the best match's group first", () => {
+    expect(pickerGroup("openrouter/openai/whisper-1")).toBe("openrouter/openai")
+    expect(pickerGroup("kokoro")).toBe("")
+    const r = filterPicker(pickerOptions(stt), "", { current: "openrouter/openai/gpt-4o-mini-transcribe", grouped: true })
+    const groups = r.items.map((x) => pickerGroup(x.id))
+    expect(groups[0]).toBe("openrouter/openai")
+    // Each group's items are contiguous.
+    const seen: string[] = []
+    for (const g of groups) if (seen.at(-1) !== g) {
+      expect(seen).not.toContain(g)
+      seen.push(g)
+    }
+    expect(r.items[0]).toMatchObject({ id: "openrouter/openai/gpt-4o-mini-transcribe", current: true })
   })
 })

@@ -207,13 +207,16 @@ describe("providers follow the settings", () => {
 })
 
 describe("models", () => {
-  test("openrouter: proxies the models list filtered by output modality, cached for 10 minutes", async () => {
+  test("openrouter: proxies the models list filtered by output modality, cached for 10 minutes; the configured model first", async () => {
     expect(MODELS_CACHE_MS).toBe(600_000)
     reply = () => Response.json({ data: [{ id: "openai/whisper-1", name: "Whisper", pricing: {} }, { id: "x/no-name" }] })
-    expect(await service.models("stt")).toEqual([
-      { id: "openai/whisper-1", name: "Whisper" },
-      { id: "x/no-name", name: "x/no-name" },
-    ])
+    expect(await service.models("stt")).toEqual({
+      models: [
+        { id: defaults.sttModel, name: defaults.sttModel, current: true },
+        { id: "openai/whisper-1", name: "Whisper" },
+        { id: "x/no-name", name: "x/no-name" },
+      ],
+    })
     expect(calls[0]!.url).toBe("https://openrouter.ai/api/v1/models?output_modalities=transcription")
     expect(auth(calls[0]!)).toBeNull()
     await service.models("stt")
@@ -228,25 +231,31 @@ describe("models", () => {
   test("openrouter failures are SpeechErrors (502), not cached", async () => {
     reply = () => new Response("down", { status: 503 })
     expect(await service.models("tts").catch((e) => e.name)).toBe("SpeechError")
-    reply = () => Response.json({ data: [{ id: "a", name: "A" }] })
-    expect(await service.models("tts")).toEqual([{ id: "a", name: "A" }])
+    reply = () => Response.json({ data: [{ id: "a", name: "A" }, { id: defaults.ttsModel, name: "MAI Voice" }] })
+    expect(await service.models("tts")).toEqual({ models: [{ id: defaults.ttsModel, name: "MAI Voice", current: true }, { id: "a", name: "A" }] })
   })
 
-  test("openai-compatible: GET {baseURL}/models with its key; anything wrong gives []", async () => {
-    service.update({ tts: { provider: "openai-compatible", baseURL: "https://speech.example/v1", apiKey: LOCAL_KEY } })
-    reply = () => Response.json({ data: [{ id: "kokoro", object: "model" }] })
-    expect(await service.models("tts")).toEqual([{ id: "kokoro", name: "kokoro" }])
+  test("openai-compatible: GET {baseURL}/models with its key, classified by kind; anything wrong gives just the configured model", async () => {
+    service.update({ tts: { provider: "openai-compatible", baseURL: "https://speech.example/v1", apiKey: LOCAL_KEY, model: "kokoro" } })
+    reply = () => Response.json({ data: [{ id: "kokoro", object: "model" }, { id: "acme/tts-1" }, { id: "acme/whisper" }, { id: "acme/chat", type: "chat" }] })
+    expect(await service.models("tts")).toEqual({ models: [{ id: "kokoro", name: "kokoro", current: true }, { id: "acme/tts-1", name: "acme/tts-1" }] })
     expect(calls[0]!.url).toBe("https://speech.example/v1/models")
     expect(auth(calls[0]!)).toBe(`Bearer ${LOCAL_KEY}`)
 
-    service.update({ stt: { provider: "openai-compatible", baseURL: "https://other.example/v1" } })
+    service.update({ stt: { provider: "openai-compatible", baseURL: "https://other.example/v1", model: "local-whisper" } })
     reply = () => new Response("nope", { status: 404 })
-    expect(await service.models("stt")).toEqual([])
+    expect(await service.models("stt")).toEqual({ models: [{ id: "local-whisper", name: "local-whisper", current: true }] })
     reply = () => {
       throw new Error("connection refused")
     }
     service.update({ stt: { baseURL: "https://third.example/v1" } })
-    expect(await service.models("stt")).toEqual([])
+    expect(await service.models("stt")).toEqual({ models: [{ id: "local-whisper", name: "local-whisper", current: true }] })
+  })
+
+  test("openai-compatible without speech labels: the full list with a note", async () => {
+    service.update({ stt: { provider: "openai-compatible", baseURL: "https://speech.example/v1", model: "m1" } })
+    reply = () => Response.json({ data: [{ id: "m1" }, { id: "m2" }] })
+    expect(await service.models("stt")).toEqual({ models: [{ id: "m1", name: "m1", current: true }, { id: "m2", name: "m2" }], note: "This provider doesn't label speech models; showing all" })
   })
 
   test("a settings change clears the cache", async () => {

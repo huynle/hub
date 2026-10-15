@@ -247,6 +247,35 @@ async function desktop(browser: Browser): Promise<void> {
     await page.getByRole("button", { name: "Create session" }).waitFor()
   })
 
+  await check("desktop: speech model pickers filter a big gateway list by provider and name; the pick is saved", async () => {
+    await page.goto(`${BASE}/settings`)
+    await page.locator("#sp-stt-model").first().waitFor()
+    await page.locator("#sp-stt-model").first().locator("..").getByRole("button", { name: "Browse…" }).click()
+    const dialog = page.locator("dialog.picker[open]")
+    await dialog.locator(".picker-opt").nth(3).waitFor()
+    const all = await dialog.locator(".picker-opt").count()
+    assert(all > 3 && all < 20, `speech-to-text models only, got ${all}`)
+    await dialog.getByRole("searchbox").fill("WHISPER")
+    await dialog.locator(".picker-group").getByText("openrouter/openai", { exact: true }).waitFor()
+    const names = await dialog.locator(".picker-opt .po-name").allTextContents()
+    assert(names.filter((n) => n.startsWith("openrouter/openai/whisper")).length === 3, `three gateway whisper models: ${names.join(", ")}`)
+    assert(names.every((n) => /whisper/i.test(n)), `only whisper matches: ${names.join(", ")}`)
+    await dialog.getByRole("searchbox").fill("mai")
+    await dialog.locator(".picker-opt .po-name").getByText("openrouter/microsoft/mai-transcribe-1.5", { exact: true }).click()
+    await dialog.waitFor({ state: "hidden" })
+    assert((await page.locator("#sp-stt-model").first().inputValue()) === "openrouter/microsoft/mai-transcribe-1.5", "picked model in the field")
+    // Text-to-speech: nothing in the gateway list is labeled TTS, so all models show with a note.
+    await page.locator("#sp-tts-model").first().locator("..").getByRole("button", { name: "Browse…" }).click()
+    await dialog.locator(".picker-note").getByText(/doesn't label speech models/).waitFor()
+    await page.keyboard.press("Escape")
+    await page.getByRole("button", { name: "Save", exact: true }).first().click()
+    await page.waitForFunction(async () => {
+      const log = await (await fetch("/mock/log")).json()
+      return JSON.stringify([log.speech, log.userSpeech]).includes("openrouter/microsoft/mai-transcribe-1.5")
+    })
+    await shot(page, "desktop-speech-picker")
+  })
+
   await check("desktop: ⌘B collapses the sidebar", async () => {
     await page.goto(`${BASE}/`)
     await page.locator(".sidebar").waitFor()

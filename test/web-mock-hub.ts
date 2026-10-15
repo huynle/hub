@@ -40,6 +40,8 @@
 // else runs the turn (ses_mock: working → streamed reply → idle; text containing "fail" → 409).
 import { existsSync, readFileSync, statSync } from "node:fs"
 import path from "node:path"
+import { speechModelList } from "../src/central/speech/models"
+import gatewayModels from "./fixtures/openai-compatible-gateway-models.json"
 
 const WEB = path.join(import.meta.dir, "..", "web", "dist")
 const PORT = Number(process.argv[2] ?? 4311)
@@ -1048,12 +1050,9 @@ const server = Bun.serve({
     if (p === "/api/settings/speech/models" && m === "GET") {
       await Bun.sleep(300)
       if (fail.models) return Response.json({ error: "OpenRouter is unreachable" }, { status: 502 })
-      const kind = url.searchParams.get("kind")
-      return Response.json(
-        kind === "stt"
-          ? [{ id: "openai/whisper-1", name: "Whisper" }, { id: "openai/gpt-4o-transcribe", name: "GPT-4o Transcribe" }]
-          : [{ id: "tts-1", name: "TTS 1" }, { id: "tts-1-hd", name: "TTS 1 HD" }, { id: "gpt-4o-mini-tts", name: "GPT-4o mini TTS" }],
-      )
+      const kind = url.searchParams.get("kind") === "stt" ? "stt" : "tts"
+      // A big OpenAI-compatible gateway list (trimmed real fixture), classified like the hub does.
+      return Response.json(speechModelList(kind, gatewayModels, speech[kind].model))
     }
     if (p === "/api/settings/speech/test" && m === "POST") {
       last().body = await json()

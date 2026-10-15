@@ -158,7 +158,7 @@ describe("GET /api/settings/speech/models", () => {
   test("proxies OpenRouter by kind, cached; bad kind is 400", async () => {
     reply = () => Response.json({ data: [{ id: "openai/whisper-1", name: "Whisper" }] })
     const first = await get("/api/settings/speech/models?kind=stt")
-    expect(first).toMatchObject({ status: 200, body: [{ id: "openai/whisper-1", name: "Whisper" }] })
+    expect(first).toMatchObject({ status: 200, body: { models: [{ current: true }, { id: "openai/whisper-1", name: "Whisper" }] } })
     expect(calls[0]!.url).toBe("https://openrouter.ai/api/v1/models?output_modalities=transcription")
     await get("/api/settings/speech/models?kind=stt")
     expect(calls).toHaveLength(1)
@@ -168,11 +168,14 @@ describe("GET /api/settings/speech/models", () => {
     expect((await get("/api/settings/speech/models")).status).toBe(400)
   })
 
-  test("OpenRouter being down is 502; an openai-compatible server without a list gives []", async () => {
+  test("OpenRouter being down is 502; an openai-compatible server without a list offers only the configured model", async () => {
     reply = () => new Response("down", { status: 503 })
     expect((await get("/api/settings/speech/models?kind=tts")).status).toBe(502)
     await put({ tts: { provider: "openai-compatible", baseURL: "https://speech.example/v1" } })
-    expect(await get("/api/settings/speech/models?kind=tts")).toMatchObject({ status: 200, body: [] })
+    const offline = await get("/api/settings/speech/models?kind=tts")
+    expect(offline).toMatchObject({ status: 200 })
+    expect(offline.body.models).toHaveLength(1)
+    expect(offline.body.models[0]).toMatchObject({ current: true })
     expect(calls.at(-1)!.url).toBe("https://speech.example/v1/models")
   })
 })

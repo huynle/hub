@@ -152,6 +152,8 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
 .dialog-body { padding: 4px 14px 14px; overflow: auto; max-height: calc(84vh - 56px); }
 .picker-search { width: 100%; margin-bottom: 8px; }
 .picker-list { list-style: none; margin: 0; padding: 0; max-height: 55vh; overflow: auto; }
+.picker-group { padding: 8px 8px 2px; font-weight: 600; text-transform: none; }
+.picker-note { margin: 0 0 6px; }
 .picker-opt { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 8px; border: 0; border-radius: 6px; background: transparent; cursor: pointer; text-align: left; }
 .picker-opt:hover, .picker-opt.active { background: var(--raise-2); }
 .picker-opt[aria-selected="true"] .po-name { color: var(--accent); }

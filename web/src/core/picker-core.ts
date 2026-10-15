@@ -41,6 +41,15 @@ export function pickerOptions(raw: unknown): PickerOption[] {
   return out
 }
 
+/** The note of a hub model list (`{models, note}`), e.g. that the provider does not label speech models. */
+export function pickerNote(raw: unknown): string | undefined {
+  const note = (raw as { note?: unknown } | null | undefined)?.note
+  return !Array.isArray(raw) && typeof note === "string" && note.trim() ? note.trim() : undefined
+}
+
+/** Provider group of an option id: everything before its last "/" ("" when there is none). */
+export const pickerGroup = (id: string) => (id.includes("/") ? id.slice(0, id.lastIndexOf("/")) : "")
+
 /**
  * The rows to show for a search: `items` ({id, name?, current?, custom?}) ranked exact id → id prefix → other
  * matches (each in list order), with the current value first when there is no query (or listed as a custom
@@ -50,7 +59,7 @@ export function pickerOptions(raw: unknown): PickerOption[] {
 export function filterPicker(
   options: readonly PickerOption[] | undefined,
   query: string,
-  { current = "", limit = 200 }: { current?: string; limit?: number } = {},
+  { current = "", limit = 200, grouped = false }: { current?: string; limit?: number; grouped?: boolean } = {},
 ): PickerResult {
   const q = String(query ?? "").trim()
   const fq = fold(q)
@@ -67,6 +76,12 @@ export function filterPicker(
     ranked.push({ option, rank, index })
   })
   ranked.sort((a, b) => a.rank - b.rank || a.index - b.index)
+  if (grouped) {
+    // Stable: each provider's rows together, providers in the order of their best match.
+    const order = new Map<string, number>()
+    for (const r of ranked) if (!order.has(pickerGroup(r.option.id))) order.set(pickerGroup(r.option.id), order.size)
+    ranked.sort((a, b) => order.get(pickerGroup(a.option.id))! - order.get(pickerGroup(b.option.id))!)
+  }
   const items: PickerItem[] = ranked.slice(0, limit).map(({ option }) => ({
     id: option.id,
     ...(option.name ? { name: option.name } : {}),
