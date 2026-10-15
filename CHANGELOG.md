@@ -2,6 +2,20 @@
 
 ## 0.5.1 (unreleased)
 
+- **Notifications that arrive.** Settings → Notifications shows the real state of this device (permission,
+  service worker, and whether this hub holds its subscription) and warns when nothing would arrive; **Enable
+  notifications on this device** registers the worker and subscribes; the app re-subscribes by itself when
+  permission is granted but the hub lost the subscription (e.g. after the hub moved to a new address), and
+  the service worker follows `pushsubscriptionchange`. **Send test notification** (`POST /api/push/test`,
+  only the caller's device, at most one per 10 s) reports where it went or the push service's status.
+  Preferences can't be mistaken for working notifications any more: they say they apply once subscribed.
+- **Personal notifications.** Separate toggles for questions, permissions, failed runs (split from
+  finished), finished runs, hand-offs and Voice replies (0.5.0 prefs are migrated: blocked → question +
+  permission, finished → finished + failed); quiet hours per device in its time zone; **Mute
+  notifications** per session (⋯ menu, per user, `PUT /api/push/mute`). Questions, permissions and failures
+  go out with high urgency and a one-hour TTL, stay on screen, vibrate and re-alert per session and kind; a
+  permission shows what it is (fetched by the service worker, never in the payload) with **Allow once** /
+  **Reject**.
 - **Image attachments**: the composer's **+** button attaches images (file picker, which offers the camera
   on phones), as do paste and drag-and-drop; up to 4 per message, shown as removable thumbnails, and a
   message may be images only. The browser re-encodes each image before sending (longest side at most

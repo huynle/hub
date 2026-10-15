@@ -170,6 +170,11 @@ conversation mode and utterances (403 `not_exposed` for sessions not shared with
 | `GET /api/sessions/:id/summary` | context usage, todos, MCP status (at most 100 servers), branch and working-tree change stats (each part optional). `changes` lists at most 500 files, most-changed first, with `totalFiles` and `truncated`; its `additions`/`deletions` cover every file |
 | `GET /api/sessions/:id/diff?file=` | one file's patch, on demand (capped at 400 KB as JSON, then `truncated: true`); never stored in the hub |
 | `POST /api/sessions/:id/read` · `GET /api/reads` | per-user read marks, synced to your other devices |
+| `GET /api/push/prefs?endpoint=` | `{prefs, quietHours, muted, subscriptions, subscribed?}`: this device's toggles (`handoff, question, permission, finished, failed, say`) and quiet hours, the user's muted sessions, how many subscriptions the hub holds for this device, and whether it holds `endpoint` |
+| `PUT /api/push/prefs {toggles…, quietHours?}` | boolean toggles (a 0.5.0 `blocked` sets question and permission); `quietHours` `{start: "HH:MM", end: "HH:MM", timeZone}` or `null` (400 when invalid) |
+| `POST /api/push/subscribe {subscription, prefs?, oldEndpoint?}` · `POST /api/push/unsubscribe {endpoint}` | this device's subscriptions; `oldEndpoint` is dropped (rotated subscription) |
+| `POST /api/push/test` | a test notification to the caller's device only: `{sent, failed: [{host, status?}], subscriptions}`; 429 with `retry-after` within 10 s of the last one |
+| `PUT /api/push/mute {sessionID, muted}` | mutes or unmutes a session's notifications for the user: `{muted}` |
 
 ## Spoke (OpenCode plugin)
 
@@ -406,15 +411,35 @@ Pure logic lives in `web/src/core` and `web/src/lib` (bun tests in `test/web-*.t
   <workspace>" confirms the new tab; if Herdr failed, the session still exists and the hub's `warning`
   is shown. 409 (background service not connected) is shown in the sheet.
 
-**Notifications** (web push, VAPID keys generated once and stored in the state file): hand-offs from the
-terminal and blocked sessions are on by default, "finished" (a root session's run succeeded or failed,
-except voice turns started from the page) is opt-in per device. Payloads are `{kind, sessionID, title,
-body}` with a short title only (e.g. "api-server needs permission"); at most one per session and kind
-every 30 s; expired subscriptions (404/410) are pruned. "Read agent replies as notifications when the phone is locked"
-(push pref `say`) is opt-in per device: the hub pushes spoken replies while no phone shows the session.
+**Notifications** (web push, VAPID keys generated once and stored in the state file). Each device picks what
+it wants (Settings → Notifications): **a session asks a question**, **needs permission**, **failed**,
+**finished** (a root session's run succeeded, except voice turns started from the page), **hand-offs from the
+terminal**, and **Voice replies when you're not watching** (pref `say`: spoken replies while no device shows
+the session). Questions, permissions, hand-offs and Voice replies are on by default; finished and failed are
+opt-in (0.5.0's single "blocked" toggle became question + permission, and its "finished" became finished +
+failed, migrated on start). Optional **quiet hours** per device (local start/end time in the browser's time
+zone) hold everything except hand-offs; **Mute notifications** in a session's ⋯ menu silences one session
+for you on every device (hand-offs still come through). At most one per session and kind every 30 s
+(Voice replies: 10 s); expired subscriptions (404/410) are pruned.
 
-- **Android (Chrome)**: open the public URL, pair, tap the bell (Enable notifications). Use Chrome's
-  "Add to Home screen"/"Install app" for a standalone window.
+- **Status per device**: Settings → Notifications shows the browser permission, whether the service worker
+  is registered and whether this hub holds this browser's subscription. "Allowed, but this device is not
+  subscribed on this hub" means nothing will arrive (typical after the hub moved to a new address): **Enable
+  notifications on this device** fixes it. When permission is granted, the app re-subscribes by itself on
+  load if the hub lost the subscription, and the service worker re-subscribes when the browser rotates it
+  (`pushsubscriptionchange`). **Send test notification** sends one to this device only and shows the result
+  (sent, or the push service's status).
+- **Delivery**: questions, permissions and failures are sent with `urgency: high` and a TTL of one hour so a
+  phone in doze gets them; they stay on screen until handled (`requireInteraction`), vibrate, and replace the
+  previous one of the same session and kind. A permission notification asks the hub (with the device's
+  cookie, from the service worker) what the request is, shows it, and offers **Allow once** / **Reject**;
+  the payload itself never carries it. Payloads are `{kind, sessionID, title, body, requestID?}`.
+- **Android (Chrome)**, for notifications that arrive with the screen off: open the public URL, sign in or
+  pair, then Chrome's menu → **Install app** (or Add to Home screen) and use the installed app; Settings →
+  Notifications → **Enable notifications on this device** and **Send test notification**. In Android
+  settings → Apps → Chrome (and the installed app, if listed): Notifications allowed (all categories), and
+  **Battery → Unrestricted** (not "Optimized"), so Chrome may receive pushes while dozing. Notifications of
+  an app you have not opened for a long time can be delayed by Android's adaptive battery.
 - **iPhone/iPad**: web push needs iOS/iPadOS 16.4+ and the app added to the Home Screen
   (Share → Add to Home Screen); open it from the icon, then enable notifications. Audio replies need a
   tap first (the mic or Send button unlocks playback).

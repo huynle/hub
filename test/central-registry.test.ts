@@ -255,7 +255,7 @@ describe("alerts (push triggers)", () => {
     const asked = ev("permission.asked", { sessionID: "ses_child", id: "per_1", action: "bash", resources: ["rm -rf"] })
     registry.observe("c1", asked)
     registry.observe("c2", asked)
-    expect(alerts).toEqual([{ kind: "blocked", sessionID: "ses_1", title: "api-server", detail: "permission" }])
+    expect(alerts).toEqual([{ kind: "blocked", sessionID: "ses_1", title: "api-server", detail: "permission", requestID: "per_1" }])
     expect(messages.some((m) => (m as any).type === "alert")).toBe(false)
   })
 

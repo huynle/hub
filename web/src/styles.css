@@ -419,3 +419,14 @@ details.card summary { cursor: pointer; color: var(--muted); }
   .composer-meta .model-chip { max-width: 40vw; }
   .msg.user { max-width: 92%; }
 }
+/* Settings → Notifications */
+.notify-status { padding: 8px 12px; border-radius: var(--r); border: 1px solid var(--line); margin: 8px 0; }
+.notify-status.warn { border-color: #5a4a2a; color: var(--warn); }
+.notify-status.ok { color: var(--ok, inherit); }
+.notify-facts { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0 0 8px; }
+.notify-facts dd { margin: 0; }
+.row-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.quiet-hours { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 6px; }
+p.small.warn { color: var(--warn); }
+p.small.err { color: var(--err, #e5484d); }
+p.small.ok { color: var(--ok, inherit); }

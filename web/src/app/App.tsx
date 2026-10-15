@@ -5,6 +5,7 @@ import { Home } from "./Home"
 import { ensureMe, hub, loadSpeechReady, me, startEvents } from "./hub"
 import { drawerOpen, isPhone, setDrawerOpen, sidebarCollapsed, toggleSidebar } from "./layout"
 import { NewSession } from "./NewSession"
+import { syncPush } from "./push"
 import { navigate, route } from "./router"
 import { SessionView } from "./Session"
 import { Settings } from "./Settings"
@@ -23,6 +24,7 @@ export function App() {
       if (!(await ensureMe())) return
       startEvents()
       void loadSpeechReady()
+      void syncPush()
       setReady(true)
     } catch (e) {
       setError(`Cannot reach the hub: ${(e as Error).message}`)

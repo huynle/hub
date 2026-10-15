@@ -5,7 +5,7 @@
 // Control: POST /mock/transcripts {texts: string[]} (queued /api/transcribe answers; POST /mock/reset-transcripts empties the queue), POST /mock/emit {…SSE message},
 // POST /mock/status {sessions} (status tree of ses_mock, root first; emitted as SSE status),
 // POST /mock/activity {sessionID?, item} (stored for GET /api/sessions/ses_mock and emitted as SSE activity),
-// GET /mock/log (recorded API calls), POST /mock/reset.
+// GET /mock/log (recorded API calls), POST /mock/reset, POST /mock/push {endpoints} (the push subscriptions the hub holds).
 // Also fakes presence, push prefs (incl. `say`), devices and the speech settings API (keys masked as last4).
 // Session browser (VF6): ~40 sessions on "laptop" (6 workspaces incl. worktrees, blocked/working/unexposed ones,
 // a standalone process) plus an offline machine. Sessions carry exposed/project/projectName/now/state/blockers;
@@ -208,7 +208,12 @@ const mockSession = () => ({
   open: true,
   terminal: { source: "herdr", workspaceID: "w_gen", workspace: "general", title: "Mock session", status: herdrStatus(status[0]?.state ?? "idle") },
 })
-let pushPrefs: Record<string, boolean> = { handoff: true, blocked: true, finished: false, say: false }
+let pushPrefs: Record<string, boolean> = { handoff: true, question: true, permission: true, finished: false, failed: false, say: false }
+let quietHours: { start: string; end: string; timeZone: string } | null = null
+/** Push subscription endpoints the fake hub holds for this device; tests fake PushManager in the page. */
+let pushEndpoints: string[] = []
+let mutedSessions: string[] = []
+let pushTests = 0
 let keys: Record<string, string | undefined> = { stt: "sk-or-v1-mock-stt-1234", tts: undefined }
 const seedSpeech = () => ({
   stt: { provider: "openrouter", model: "openai/whisper-1", language: "en" as string | undefined, baseURL: undefined as string | undefined },
@@ -827,7 +832,7 @@ const server = Bun.serve({
       emitCatalog()
       return Response.json({ mode: authMode, as: loginAs })
     }
-    if (p === "/mock/log") return Response.json({ log, transcripts, conversation, pushPrefs, speech, keys, users, audit, enrollments, userSpeech: Object.fromEntries(userSpeech), viewPrefs: Object.fromEntries(viewPrefs), herdr })
+    if (p === "/mock/log") return Response.json({ log, transcripts, conversation, pushPrefs, quietHours, pushEndpoints, mutedSessions, pushTests, speech, keys, users, audit, enrollments, userSpeech: Object.fromEntries(userSpeech), viewPrefs: Object.fromEntries(viewPrefs), herdr })
     if (p === "/mock/reset" && m === "POST") {
       scenarioRun++
       log = []
@@ -850,7 +855,17 @@ const server = Bun.serve({
       userSpeech = new Map()
       speech = seedSpeech()
       keys = { stt: "sk-or-v1-mock-stt-1234", tts: undefined }
+      pushPrefs = { handoff: true, question: true, permission: true, finished: false, failed: false, say: false }
+      quietHours = null
+      pushEndpoints = []
+      mutedSessions = []
+      pushTests = 0
       emitCatalog()
+      return Response.json({ ok: true })
+    }
+    if (p === "/mock/push" && m === "POST") {
+      // Acts as the hub losing (or holding) this device's subscriptions, e.g. after a move to a new origin.
+      pushEndpoints = (await json()).endpoints ?? []
       return Response.json({ ok: true })
     }
 
@@ -1046,12 +1061,45 @@ const server = Bun.serve({
       emit({ type: "prefs", userID: user.id })
       return Response.json({ prefs: prefsOf(user.id) })
     }
-    if (p === "/api/push/prefs" && m === "GET") return Response.json({ prefs: pushPrefs })
+    const pushView = (endpoint?: string | null) => ({
+      prefs: pushPrefs,
+      quietHours,
+      muted: mutedSessions,
+      subscriptions: pushEndpoints.length,
+      ...(endpoint ? { subscribed: pushEndpoints.includes(endpoint) } : {}),
+    })
+    if (p === "/api/push/prefs" && m === "GET") return Response.json(pushView(url.searchParams.get("endpoint")))
     if (p === "/api/push/prefs" && m === "PUT") {
       const body = await json()
       last().body = body
       for (const [k, v] of Object.entries(body)) if (k in pushPrefs && typeof v === "boolean") pushPrefs[k] = v
+      if ("quietHours" in body) quietHours = body.quietHours
+      return Response.json(pushView())
+    }
+    if (p === "/api/push/key" && m === "GET") return Response.json({ publicKey: "BNbxGYNMhEIi9zrneh7mqV4oUanjLUK3m-mYZBc62frMKrEoMk88r3Lk596T0ck9xlT-hA0ITRxIFxeuybYCcQ8" })
+    if (p === "/api/push/subscribe" && m === "POST") {
+      const body = await json()
+      last().body = body
+      const endpoint = body.subscription?.endpoint
+      if (typeof endpoint !== "string") return Response.json({ error: "Invalid push subscription" }, { status: 400 })
+      if (!pushEndpoints.includes(endpoint)) pushEndpoints.push(endpoint)
       return Response.json({ prefs: pushPrefs })
+    }
+    if (p === "/api/push/unsubscribe" && m === "POST") {
+      const body = await json()
+      pushEndpoints = pushEndpoints.filter((e) => e !== body.endpoint)
+      return new Response(null, { status: 204 })
+    }
+    if (p === "/api/push/test" && m === "POST") {
+      pushTests++
+      return Response.json({ sent: pushEndpoints.length, failed: [], subscriptions: pushEndpoints.length })
+    }
+    if (p === "/api/push/mute" && m === "PUT") {
+      const body = await json()
+      last().body = body
+      mutedSessions = mutedSessions.filter((id) => id !== body.sessionID)
+      if (body.muted) mutedSessions.push(body.sessionID)
+      return Response.json({ muted: mutedSessions })
     }
     if (p === "/api/devices") {
       const current = { id: user.id === "u_bob" ? "dev_bob_chrome" : "dev_1", name: "Chrome", lastSeen: Date.now(), current: true }

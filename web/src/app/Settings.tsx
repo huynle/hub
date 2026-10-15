@@ -19,7 +19,8 @@ import { SPEED_MAX, SPEED_MIN, SPEED_STEP, formatSpeed } from "../core/feedback-
 import { api, enc, errorText, getJSON } from "./api"
 import { enrollments, ensureMe, hub, loadEnrollments, me, setMe, stopEvents } from "./hub"
 import { isPhone, toggleSidebar } from "./layout"
-import { currentSubscription, disableNotifications, enableNotifications, pushSupported } from "./push"
+import { describeTestResult, localTimeZone, NOTIFY_TOGGLES, notifyStatus, type QuietHours } from "../core/notify-core"
+import { currentSubscription, disableNotifications, enableNotifications, mutedSessions, notifyEnv, pushRevision, sendTestNotification, type PushPrefsView } from "./push"
 import { location$, navigate } from "./router"
 import { SpeechSettingsPanel } from "./SpeechSettings"
 import { toast } from "./toast"
@@ -128,55 +129,128 @@ function AccountSection() {
 }
 
 function NotificationsSection() {
-  const [sub, { refetch }] = createResource(() => currentSubscription().catch(() => undefined))
+  const [info, { refetch }] = createResource(pushRevision, () => notifyEnv())
+  const [busy, setBusy] = createSignal(false)
+  const [testResult, setTestResult] = createSignal<{ ok: boolean; text: string } | undefined>()
   const [prefs, setPrefs] = createSignal<Record<string, boolean> | undefined>()
-  onMount(async () => setPrefs((await getJSON("/api/push/prefs").catch(() => undefined))?.prefs))
-  const state = () =>
-    !pushSupported() ? "Not supported in this browser. On iPhone, add the app to the Home Screen (iOS 16.4+)." : Notification.permission === "denied" ? "Blocked in the browser's site settings." : sub() ? "On for this device." : "Off for this device."
-  const toggle = async (key: string, on: boolean) => {
+  const [quiet, setQuiet] = createSignal<QuietHours | null>(null)
+  const status = () => (info() ? notifyStatus(info()!.env) : undefined)
+  // The hub's prefs come with the status; later edits replace them.
+  const view = () => info()?.view
+  const currentPrefs = () => prefs() ?? view()?.prefs
+  const currentQuiet = () => (prefs() ? quiet() : (view()?.quietHours ?? null))
+  const run = async (work: () => Promise<unknown>, ok?: string) => {
+    setBusy(true)
     try {
-      setPrefs((await (await api("/api/push/prefs", { method: "PUT", json: { [key]: on } })).json()).prefs)
+      await work()
+      if (ok) toast(ok)
+    } catch (e) {
+      toast(errorText(e), "err")
+    } finally {
+      setBusy(false)
+      setPrefs(undefined)
+      void refetch()
+    }
+  }
+  const save = async (change: Record<string, unknown>) => {
+    try {
+      const res = (await (await api("/api/push/prefs", { method: "PUT", json: change })).json()) as PushPrefsView
+      setPrefs(res.prefs)
+      setQuiet(res.quietHours ?? null)
     } catch (e) {
       toast(errorText(e), "err")
     }
   }
+  const test = async () => {
+    setTestResult(undefined)
+    try {
+      setTestResult(describeTestResult(await sendTestNotification()))
+    } catch (e) {
+      setTestResult({ ok: false, text: errorText(e) })
+    }
+  }
   return (
     <Section id="notifications" title="Notifications">
-      <p class="small muted">{state()}</p>
-      <Show when={pushSupported() && Notification.permission !== "denied"}>
-        <Show
-          when={sub()}
-          fallback={
-            <button type="button" class="btn small primary" onClick={() => enableNotifications().then(() => (toast("Notifications are on"), refetch()), (e) => toast(errorText(e), "err"))}>
-              Enable notifications
-            </button>
-          }
-        >
-          <button type="button" class="btn small" onClick={() => disableNotifications().then(() => (toast("Notifications are off for this device"), refetch()))}>
-            Turn off on this device
-          </button>
-        </Show>
+      <Show when={status()} fallback={<p class="small muted">Checking this device…</p>}>
+        {(s) => (
+          <>
+            <p class={s().warn ? "notify-status warn" : "notify-status ok"} data-state={s().state} role="status">
+              {s().message}
+            </p>
+            <dl class="notify-facts small muted">
+              <dt>Permission</dt>
+              <dd>{info()!.env.supported ? info()!.env.permission : "unsupported"}</dd>
+              <dt>Service worker</dt>
+              <dd>{info()!.env.worker ? "registered" : "not registered"}</dd>
+              <dt>Subscribed on this hub</dt>
+              <dd>{info()!.env.hubSubscribed ? "yes" : "no"}</dd>
+            </dl>
+            <div class="row-actions">
+              <Show when={s().action === "enable"}>
+                <button type="button" class="btn small primary" disabled={busy()} onClick={() => void run(enableNotifications, "Notifications are on for this device")}>
+                  Enable notifications on this device
+                </button>
+              </Show>
+              <Show when={s().action === "disable"}>
+                <button type="button" class="btn small" disabled={busy()} onClick={() => void run(disableNotifications, "Notifications are off for this device")}>
+                  Turn off on this device
+                </button>
+              </Show>
+              <Show when={info()!.env.hubSubscriptions > 0}>
+                <button type="button" class="btn small" onClick={() => void test()}>
+                  Send test notification
+                </button>
+              </Show>
+            </div>
+            <Show when={testResult()}>{(r) => <p class={r().ok ? "small ok" : "small err"} data-test-result>{r().text}</p>}</Show>
+          </>
+        )}
       </Show>
-      <Show when={prefs()}>
+      <Show when={currentPrefs()}>
+        <h3>Notify me when</h3>
+        <Show when={status() && status()!.state !== "on"}>
+          <p class="small warn">These apply once this device is subscribed.</p>
+        </Show>
         <ul class="switches">
-          <For
-            each={[
-              ["handoff", "Hand-offs from the terminal"],
-              ["blocked", "Session needs permission or an answer"],
-              ["finished", "Session finished (not voice turns)"],
-              ["say", "Read agent replies as notifications when the phone is locked"],
-            ]}
-          >
+          <For each={NOTIFY_TOGGLES}>
             {([key, label]) => (
               <li>
                 <label class="switch">
                   <span>{label}</span>
-                  <input type="checkbox" checked={!!prefs()![key!]} onChange={(e) => void toggle(key!, e.currentTarget.checked)} />
+                  <input type="checkbox" data-pref={key} checked={!!currentPrefs()![key]} onChange={(e) => void save({ [key]: e.currentTarget.checked })} />
                 </label>
               </li>
             )}
           </For>
+          <li>
+            <label class="switch">
+              <span>Quiet hours</span>
+              <input
+                type="checkbox"
+                checked={!!currentQuiet()}
+                onChange={(e) => void save({ quietHours: e.currentTarget.checked ? { start: "22:00", end: "07:00", timeZone: localTimeZone() } : null })}
+              />
+            </label>
+            <Show when={currentQuiet()}>
+              {(q) => (
+                <div class="quiet-hours">
+                  <label>
+                    From <input type="time" value={q().start} onChange={(e) => void save({ quietHours: { ...q(), start: e.currentTarget.value, timeZone: localTimeZone() } })} />
+                  </label>
+                  <label>
+                    to <input type="time" value={q().end} onChange={(e) => void save({ quietHours: { ...q(), end: e.currentTarget.value, timeZone: localTimeZone() } })} />
+                  </label>
+                  <span class="small muted">{q().timeZone}. Hand-offs still come through.</span>
+                </div>
+              )}
+            </Show>
+          </li>
         </ul>
+        <Show when={mutedSessions().size}>
+          <p class="small muted">
+            {plural(mutedSessions().size, "session")} muted (⋯ menu of a session → Unmute notifications).
+          </p>
+        </Show>
       </Show>
     </Section>
   )

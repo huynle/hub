@@ -15,7 +15,7 @@ import { BusyError, Registry } from "./registry"
 import { audioFormat, SpeechError } from "./speech/provider"
 import { SpeechService } from "./speech/service"
 import { RequestTimeoutError, RequestTooLargeError, SpokeError, SpokeHub, type Notifier, type SpokeSocketData } from "./spoke-ws"
-import { DEFAULT_PUSH_PREFS, LOCAL_USER, Store, VIEW_PREF_KEYS, type DeviceRecord, type PushPrefs, type UserRecord, type ViewPrefs } from "./store"
+import { LOCAL_USER, PUSH_PREF_KEYS, quietHoursInput, Store, VIEW_PREF_KEYS, type DeviceRecord, type LegacyPushPrefs, type PushPrefs, type UserRecord, type ViewPrefs } from "./store"
 
 export interface Speech {
   transcribe(audio: Uint8Array, format: string): Promise<string>
@@ -265,10 +265,26 @@ export function startCentral(options: CentralOptions): Central {
   registry.subscribeAlerts((alert) => {
     // Push goes to the session owner's devices only; an alert without an owner goes nowhere.
     if (!alert.owner) return
-    notifier.notify(alert.kind, alert.sessionID, alert.title, alert.detail, alert.text, alert.owner).catch((cause) => {
+    const extra = alert.requestID ? { requestID: alert.requestID } : undefined
+    notifier.notify(alert.kind, alert.sessionID, alert.title, alert.detail, alert.text, alert.owner, extra).catch((cause) => {
       console.error("[opencode-hub] push notification failed:", cause instanceof Error ? cause.message : cause)
     })
   })
+
+  /** GET /api/push/prefs: the device's toggles and quiet hours, the user's muted sessions, and the subscriptions held. */
+  const pushPrefsView = (deviceID: string, userID: string, endpoint?: string | null) => {
+    const mine = store.pushSubscriptions().filter((s) => s.deviceID === deviceID)
+    return Response.json(
+      {
+        prefs: store.pushPrefs(deviceID),
+        quietHours: store.quietHours(deviceID) ?? null,
+        muted: store.mutedSessions(userID),
+        subscriptions: mine.length,
+        ...(endpoint ? { subscribed: mine.some((s) => s.endpoint === endpoint) } : {}),
+      },
+      { headers: NO_STORE },
+    )
+  }
 
   const cookie = (token: string, maxAge = COOKIE_MAX_AGE) =>
     `${COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secure ? "; Secure" : ""}`
@@ -501,6 +517,8 @@ export function startCentral(options: CentralOptions): Central {
       const input = await body(request)
       const target = pushTarget(input.subscription)
       if (!target) return error(400, "Invalid push subscription")
+      // pushsubscriptionchange: the service worker sends the endpoint it replaces.
+      if (typeof input.oldEndpoint === "string" && input.oldEndpoint !== target.endpoint) store.removePushSubscription(device.id, input.oldEndpoint)
       store.addPushSubscription(device.id, target)
       const prefs = prefsInput(input.prefs)
       return Response.json({ prefs: prefs ? store.setPushPrefs(device.id, prefs) : store.pushPrefs(device.id) })
@@ -512,15 +530,35 @@ export function startCentral(options: CentralOptions): Central {
       }
       return new Response(null, { status: 204 })
     }),
-    route("GET", "/api/push/prefs", "user", ({ device }) =>
-      Response.json({
-        prefs: store.pushPrefs(device.id),
-        subscriptions: store.pushSubscriptions().filter((s) => s.deviceID === device.id).length,
-      }),
-    ),
-    route("PUT", "/api/push/prefs", "user", async ({ request, device }) =>
-      Response.json({ prefs: store.setPushPrefs(device.id, prefsInput(await body(request)) ?? {}) }),
-    ),
+    route("GET", "/api/push/prefs", "user", ({ device, user, url }) => pushPrefsView(device.id, user.id, url.searchParams.get("endpoint"))),
+    route("PUT", "/api/push/prefs", "user", async ({ request, device, user }) => {
+      const input = await body(request)
+      if ("quietHours" in input) {
+        const quiet = input.quietHours === null ? null : quietHoursInput(input.quietHours)
+        if (quiet === undefined) return error(400, "quietHours must be {start: \"HH:MM\", end: \"HH:MM\", timeZone} or null")
+        store.setQuietHours(device.id, quiet)
+      }
+      const prefs = prefsInput(input)
+      if (prefs) store.setPushPrefs(device.id, prefs)
+      return pushPrefsView(device.id, user.id)
+    }),
+    route("PUT", "/api/push/mute", "user", async ({ request, user }) => {
+      const input = await body(request)
+      const sessionID = input.sessionID
+      if (typeof sessionID !== "string" || !sessionID || sessionID.length > 200 || typeof input.muted !== "boolean") {
+        return error(400, "Expected {sessionID, muted}")
+      }
+      return Response.json({ muted: store.setSessionMuted(user.id, sessionID, input.muted) })
+    }),
+    route("POST", "/api/push/test", "user", async ({ device }) => {
+      const subscriptions = store.pushSubscriptions().filter((s) => s.deviceID === device.id).length
+      if (subscriptions === 0) return Response.json({ sent: 0, failed: [], subscriptions })
+      const result = await push.test(device.id)
+      if ("limited" in result) {
+        return Response.json({ error: "Wait a few seconds before sending another test" }, { status: 429, headers: { "retry-after": String(result.retryAfter) } })
+      }
+      return Response.json({ ...result, subscriptions: store.pushSubscriptions().filter((s) => s.deviceID === device.id).length })
+    }),
     // The caller's own settings (pairing mode: the single owner's are the server default).
     route("GET", "/api/settings/speech", "user", ({ user }) => Response.json(speechSettings.view(speechScope(user.id)), { headers: NO_STORE })),
     // Raw JSON: anything but an object is refused by the validator.
@@ -1028,11 +1066,11 @@ function pushTarget(value: unknown): { endpoint: string; keys: { p256dh: string;
   return { endpoint, keys: { p256dh, auth } }
 }
 
-/** Boolean pref fields from untrusted input; undefined when nothing applies. */
-function prefsInput(value: unknown): Partial<PushPrefs> | undefined {
+/** Boolean pref fields (and 0.5.0's `blocked`) from untrusted input; undefined when nothing applies. */
+function prefsInput(value: unknown): (Partial<PushPrefs> & LegacyPushPrefs) | undefined {
   if (typeof value !== "object" || value === null) return undefined
-  const prefs: Partial<PushPrefs> = {}
-  for (const key of Object.keys(DEFAULT_PUSH_PREFS) as Array<keyof PushPrefs>) {
+  const prefs: Partial<PushPrefs> & LegacyPushPrefs = {}
+  for (const key of [...PUSH_PREF_KEYS, "blocked"] as const) {
     const v = (value as Record<string, unknown>)[key]
     if (typeof v === "boolean") prefs[key] = v
   }

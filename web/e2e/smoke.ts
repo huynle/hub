@@ -452,6 +452,80 @@ async function desktop(browser: Browser): Promise<void> {
   await context.close()
 }
 
+/** Fakes Notification permission and PushManager (headless Chromium has no push service); state survives reloads. */
+const FAKE_PUSH = `(() => {
+  const read = (k) => localStorage.getItem("fake-push:" + k)
+  const write = (k, v) => (v === null ? localStorage.removeItem("fake-push:" + k) : localStorage.setItem("fake-push:" + k, v))
+  Object.defineProperty(Notification, "permission", { get: () => read("permission") || "default", configurable: true })
+  Notification.requestPermission = async () => (write("permission", "granted"), "granted")
+  const make = (endpoint) => ({
+    endpoint,
+    options: { applicationServerKey: null },
+    toJSON: () => ({ endpoint, keys: { p256dh: "BFakeP256dhKey", auth: "FakeAuth" } }),
+    unsubscribe: async () => (write("endpoint", null), true),
+  })
+  const manager = {
+    getSubscription: async () => (read("endpoint") ? make(read("endpoint")) : null),
+    subscribe: async () => (write("endpoint", "https://push.example/fake-" + Date.now()), make(read("endpoint"))),
+  }
+  Object.defineProperty(ServiceWorkerRegistration.prototype, "pushManager", { get: () => manager, configurable: true })
+})()`
+
+async function notifications(browser: Browser): Promise<void> {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } })
+  await context.addInitScript(FAKE_PUSH)
+  const page = await context.newPage()
+  const errors: string[] = []
+  page.on("pageerror", (e) => errors.push(e.message))
+  const hubLog = async () => (await (await fetch(`${BASE}/mock/log`)).json()) as { pushEndpoints: string[]; pushTests: number; mutedSessions: string[]; quietHours: unknown; pushPrefs: Record<string, boolean> }
+  const state = page.locator("#notifications .notify-status")
+
+  await check("notifications: not subscribed → enable → subscribed; test button calls the route", async () => {
+    await page.goto(`${BASE}/settings#notifications`)
+    await state.waitFor()
+    assert((await state.getAttribute("data-state")) === "off", `starts off: ${await state.getAttribute("data-state")}`)
+    assert((await page.locator("#notifications").getByText("These apply once this device is subscribed.").count()) === 1, "warns before subscribing")
+    await page.getByRole("button", { name: "Enable notifications on this device" }).click()
+    await page.locator('#notifications .notify-status[data-state="on"]').waitFor()
+    const log = await hubLog()
+    assert(log.pushEndpoints.length === 1 && log.pushEndpoints[0]!.startsWith("https://push.example/fake-"), `hub got the subscription: ${JSON.stringify(log.pushEndpoints)}`)
+    await page.getByRole("button", { name: "Send test notification" }).click()
+    await page.locator("[data-test-result]").getByText("Test notification sent to this device").waitFor()
+    assert((await hubLog()).pushTests === 1, "POST /api/push/test called once")
+    await shot(page, "notifications-on")
+  })
+
+  await check("notifications: toggles and quiet hours save; failed is its own toggle", async () => {
+    await page.locator('#notifications input[data-pref="failed"]').check()
+    await page.waitForFunction(async () => (await (await fetch("/mock/log")).json()).pushPrefs.failed === true)
+    await page.locator("#notifications .switch").filter({ hasText: "Quiet hours" }).locator("input").check()
+    await page.locator("#notifications .quiet-hours").waitFor()
+    const quiet = (await hubLog()).quietHours as { start: string; end: string; timeZone: string } | null
+    assert(quiet?.start === "22:00" && quiet.end === "07:00" && !!quiet.timeZone, `quiet hours saved with a time zone: ${JSON.stringify(quiet)}`)
+  })
+
+  await check("notifications: the hub lost the subscription (new origin) → re-subscribed on load", async () => {
+    await mock("/mock/push", { endpoints: [] })
+    await page.reload()
+    await page.waitForFunction(async () => (await (await fetch("/mock/log")).json()).pushEndpoints.length === 1)
+    await page.locator('#notifications .notify-status[data-state="on"]').waitFor()
+  })
+
+  await check("notifications: a session's ⋯ menu mutes and unmutes it", async () => {
+    await page.goto(`${BASE}/s/ses_mock`)
+    await page.locator(".msg.assistant").first().waitFor()
+    await page.getByRole("button", { name: "Session actions" }).click()
+    await page.getByRole("menuitem", { name: "Mute notifications" }).click()
+    await page.waitForFunction(async () => (await (await fetch("/mock/log")).json()).mutedSessions.includes("ses_mock"))
+    await page.getByRole("button", { name: "Session actions" }).click()
+    await page.getByRole("menuitem", { name: "Unmute notifications" }).click()
+    await page.waitForFunction(async () => (await (await fetch("/mock/log")).json()).mutedSessions.length === 0)
+  })
+
+  await check("notifications: no page errors", async () => assert(!errors.length, errors.join("; ")))
+  await context.close()
+}
+
 async function phone(browser: Browser): Promise<void> {
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 })
   const page = await context.newPage()
@@ -509,6 +583,8 @@ try {
   await desktop(browser)
   await mock("/mock/reset")
   await phone(browser)
+  await mock("/mock/reset")
+  await notifications(browser)
 } catch (e) {
   failures++
   results.push(`✗ setup: ${(e as Error).message}`)
