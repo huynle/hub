@@ -2,6 +2,9 @@
 import { describe, expect, test } from "bun:test"
 import { changeStats, contextUsage, filePatch, mcpServers, MAX_PATCH_CHARS } from "../src/spoke/summary"
 
+/** Patches are capped by their JSON-encoded size so a reply always fits in one protocol frame. */
+const ENCODED_LIMIT = 400 * 1024
+
 const tokens = (input: number, output = 0, reasoning = 0, read = 0, write = 0) => ({ input, output, reasoning, cache: { read, write } })
 const assistant = (model: { providerID: string; id: string }, t?: unknown) => ({ type: "assistant", model, ...(t ? { tokens: t } : {}) })
 const models = [
@@ -73,7 +76,34 @@ describe("changes", () => {
     expect(filePatch(diffs, "src/b.ts")).toEqual({ file: "src/b.ts", status: "added", additions: 5, deletions: 0, patch: "@@ b", truncated: false })
     expect(filePatch(diffs, "nope.ts")).toBeUndefined()
     const big = filePatch([{ file: "big", status: "modified", additions: 1, deletions: 1, patch: "y".repeat(MAX_PATCH_CHARS + 10) }], "big")
-    expect(big?.patch.length).toBe(MAX_PATCH_CHARS)
+    expect(big?.patch.length).toBe(MAX_PATCH_CHARS - 2)
+    expect(MAX_PATCH_CHARS).toBe(ENCODED_LIMIT)
     expect(big?.truncated).toBe(true)
+  })
+
+  test("filePatch caps the JSON-encoded size, so quotes and backslashes cannot blow the frame limit", () => {
+    const patch = '"\\'.repeat(300_000)
+    const out = filePatch([{ file: "q", status: "modified", additions: 1, deletions: 0, patch }], "q")
+    expect(out?.truncated).toBe(true)
+    expect(JSON.stringify(out?.patch).length).toBeLessThanOrEqual(ENCODED_LIMIT)
+    expect(patch.startsWith(out!.patch)).toBe(true)
+    expect(out!.patch.length).toBeGreaterThan(ENCODED_LIMIT / 2 - 10)
+    expect(JSON.stringify(out).length).toBeLessThan(1_000_000)
+  })
+
+  test("filePatch counts control characters at their escaped size", () => {
+    const patch = "\u0001".repeat(200_000)
+    const out = filePatch([{ file: "c", status: "modified", additions: 1, deletions: 0, patch }], "c")
+    expect(out?.truncated).toBe(true)
+    expect(JSON.stringify(out?.patch).length).toBeLessThanOrEqual(ENCODED_LIMIT)
+  })
+
+  test("filePatch never splits a surrogate pair when truncating", () => {
+    const patch = "a" + "😀".repeat(MAX_PATCH_CHARS)
+    const out = filePatch([{ file: "e", status: "modified", additions: 1, deletions: 0, patch }], "e")
+    expect(out?.truncated).toBe(true)
+    const last = out!.patch.charCodeAt(out!.patch.length - 1)
+    expect(last >= 0xd800 && last <= 0xdbff).toBe(false)
+    expect(out!.patch.length % 2).toBe(1)
   })
 })

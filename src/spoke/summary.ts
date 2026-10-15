@@ -3,8 +3,12 @@
 // Pure: the spoke passes in what it read from OpenCode.
 import type { ChangedFile, ContextUsage, FilePatch, McpStatus, SessionChanges } from "../protocol"
 
-/** Longest patch text sent for one file (the rest is cut and marked truncated). */
-export const MAX_PATCH_CHARS = 512 * 1024
+/**
+ * Longest patch sent for one file, measured as JSON-encoded characters (quotes, backslashes and control
+ * characters count at their escaped size), so the reply always fits in one protocol frame. The rest is cut
+ * and marked truncated.
+ */
+export const MAX_PATCH_CHARS = 400 * 1024
 const MAX_ERROR_CHARS = 200
 const MCP_STATUSES = new Set(["connected", "pending", "disabled", "failed", "needs_auth"])
 const FILE_STATUSES = new Set(["added", "deleted", "modified"])
@@ -63,12 +67,30 @@ export function changeStats(raw: ReadonlyArray<unknown>): SessionChanges {
   return { files, additions: files.reduce((n, f) => n + f.additions, 0), deletions: files.reduce((n, f) => n + f.deletions, 0) }
 }
 
+const isHigh = (c: number) => c >= 0xd800 && c <= 0xdbff
+const isLow = (c: number) => c >= 0xdc00 && c <= 0xdfff
+const SHORT_ESCAPES = new Set([0x08, 0x09, 0x0a, 0x0c, 0x0d, 0x22, 0x5c])
+
+/** The longest prefix of `text` whose JSON encoding (with quotes) fits in `max` characters, never splitting a surrogate pair. */
+export function clipEncoded(text: string, max: number): { text: string; truncated: boolean } {
+  let size = 2
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i)
+    // A well-formed surrogate pair is written as-is (two units); lone surrogates and other control characters as \uXXXX.
+    const pair = isHigh(c) && isLow(text.charCodeAt(i + 1))
+    const width = pair ? 2 : SHORT_ESCAPES.has(c) ? 2 : c < 0x20 || isHigh(c) || isLow(c) ? 6 : 1
+    if ((size += width) > max) return { text: text.slice(0, i), truncated: true }
+    if (pair) i++
+  }
+  return { text, truncated: false }
+}
+
 export function filePatch(raw: ReadonlyArray<unknown>, file: string): FilePatch | undefined {
   for (const value of raw) {
     const found = changedFile(value)
     if (found?.file !== file) continue
-    const truncated = found.patch.length > MAX_PATCH_CHARS
-    return { ...found, patch: truncated ? found.patch.slice(0, MAX_PATCH_CHARS) : found.patch, truncated }
+    const { text, truncated } = clipEncoded(found.patch, MAX_PATCH_CHARS)
+    return { ...found, patch: text, truncated }
   }
   return undefined
 }
