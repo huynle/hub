@@ -8,6 +8,7 @@ export const ICONS = {
   sidebar: ["M4 5h16v14H4z", "M9 5v14"],
   rail: ["M4 5h16v14H4z", "M15 5v14"],
   plus: ["M12 5v14", "M5 12h14"],
+  file: ["M6 3h8l4 4v14H6z", "M14 3v4h4"],
   more: ["M5 12h.01", "M12 12h.01", "M19 12h.01"],
   search: ["M11 4a7 7 0 1 0 0 14a7 7 0 0 0 0-14z", "M20 20l-4-4"],
   mic: ["M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3z", "M5 11a7 7 0 0 0 14 0", "M12 18v3"],

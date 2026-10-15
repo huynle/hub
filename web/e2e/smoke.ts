@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // Headless smoke test of the built console against the mock hub (test/web-mock-hub.ts), at desktop (1440×900) and
-// phone (390×844) sizes: home loads, a session opens with its timeline, Send → Steer/Stop → Send, the right rail and
-// diff viewer render, and a Voice-off session is inspectable. Screenshots go to $SMOKE_SHOTS (default: the OS temp
+// phone (390×844) sizes: home loads, a session opens with its timeline, Send → Steer/Stop → Send, image attachments
+// (attach, remove, attach again, send), the right rail and diff viewer render, and a Voice-off session is inspectable. Screenshots go to $SMOKE_SHOTS (default: the OS temp
 // dir). Run `npm run build:web && npm run test:e2e`. Chromium: $CHROMIUM_PATH, else Playwright's cache, else PATH.
 import { existsSync, mkdirSync, readdirSync } from "node:fs"
 import { homedir, tmpdir } from "node:os"
@@ -119,6 +119,57 @@ async function desktop(browser: Browser): Promise<void> {
     await page.locator(".composer-error").waitFor()
     assert((await page.getByLabel("Message").inputValue()) === "this will fail", "draft restored")
     await page.getByLabel("Message").fill("")
+  })
+
+  await check("desktop: attach an image, remove it, attach again and send it", async () => {
+    // History: the first user message's image loads lazily from the hub.
+    const history = page.locator(".msg.user .msg-image img").first()
+    await history.waitFor()
+    await page.waitForFunction(() => (document.querySelector(".msg.user .msg-image img") as HTMLImageElement | null)?.naturalWidth === 1)
+    assert((await history.getAttribute("src"))?.includes("/timeline/messages/") && (await history.getAttribute("src"))?.endsWith("/files/0"), "history image URL")
+    // A 1200×900 PNG drawn in the page (opaque, so it is re-encoded as JPEG).
+    const dataURL = await page.evaluate(() => {
+      const c = document.createElement("canvas")
+      c.width = 1200
+      c.height = 900
+      const ctx = c.getContext("2d")!
+      const g = ctx.createLinearGradient(0, 0, 1200, 900)
+      g.addColorStop(0, "#fab283")
+      g.addColorStop(1, "#3a6ea5")
+      ctx.fillStyle = g
+      ctx.fillRect(0, 0, 1200, 900)
+      ctx.fillStyle = "#fff"
+      ctx.font = "120px sans-serif"
+      ctx.fillText("smoke", 200, 500)
+      return c.toDataURL("image/png")
+    })
+    const file = { name: "smoke.png", mimeType: "image/png", buffer: Buffer.from(dataURL.slice(dataURL.indexOf(",") + 1), "base64") }
+    const input = page.getByTestId("attach-input")
+    const send = page.locator("button.send")
+    assert(await page.getByRole("button", { name: "Attach images" }).isEnabled(), "+ is enabled")
+    await input.setInputFiles(file)
+    await page.locator(".attachments .attachment img").waitFor()
+    assert(await send.isEnabled(), "Send enabled with only an image")
+    await shot(page, "desktop-attachment")
+    await page.getByRole("button", { name: "Remove smoke.jpg" }).click()
+    await page.locator(".attachments").waitFor({ state: "detached" })
+    assert(await send.isDisabled(), "Send disabled again after removing the image")
+    await input.setInputFiles(file)
+    await page.locator(".attachments .attachment img").waitFor()
+    await page.getByLabel("Message").fill("what is in this image?")
+    await send.click()
+    await page.locator(".attachments").waitFor({ state: "detached" })
+    await page.locator(".msg.user .msg-image img[src^='blob:']").waitFor()
+    const { log } = (await (await fetch(`${BASE}/mock/log`)).json()) as { log: Array<{ method: string; path: string; body?: any }> }
+    const turn = log.filter((e) => e.method === "POST" && e.path.endsWith("/turn")).at(-1)
+    assert(turn?.body?.text === "what is in this image?", `turn text: ${JSON.stringify(turn?.body?.text)}`)
+    const images = turn?.body?.images as Array<{ mime: string; name: string; length: number }> | undefined
+    assert(images?.length === 1, `one image sent, got ${images?.length}`)
+    assert(images[0]!.mime === "image/jpeg" && images[0]!.name === "smoke.jpg", `re-encoded as JPEG: ${JSON.stringify(images[0])}`)
+    assert(images[0]!.length > 0 && images[0]!.length <= 180_000, `within the per-image budget: ${images[0]!.length}`)
+    await shot(page, "desktop-image-sent")
+    await page.locator("button.send.send").waitFor({ timeout: 10_000 })
+    await page.getByText("Done: what is in this image?").first().waitFor({ timeout: 10_000 })
   })
 
   await check("desktop: diff viewer opens over the transcript", async () => {

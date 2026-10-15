@@ -219,6 +219,12 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
 .column.narrow { max-width: 560px; padding-top: 40px; }
 .transcript { padding: 24px 0 8px; display: flex; flex-direction: column; gap: 14px; }
 .msg.user { align-self: flex-end; max-width: 85%; display: flex; align-items: flex-end; gap: 6px; }
+.user-body { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; min-width: 0; }
+.msg-images { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.msg-image { display: block; border-radius: 10px; overflow: hidden; border: 1px solid var(--line-2); background: var(--raise-2); }
+.msg-image img { display: block; max-width: min(220px, 60vw); max-height: 220px; object-fit: contain; }
+.file-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; background: var(--raise-2); color: var(--muted); font-size: 12.5px; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-chip .icon { width: 14px; height: 14px; flex: none; }
 .pill { background: var(--raise-2); border-radius: 14px; padding: 8px 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .tick { font-size: 11px; color: var(--faint); }
 .tick.heard { color: var(--ok); }
@@ -271,6 +277,12 @@ pre.code { white-space: pre; font-size: 12px; }
 .composer-box { border: 1px solid var(--line-2); background: var(--raise); border-radius: 14px; padding: 10px 10px 6px 14px; }
 .composer-box:focus-within { border-color: #4a4a45; }
 .composer textarea { width: 100%; border: 0; background: transparent; resize: none; padding: 0; min-height: 24px; max-height: 280px; line-height: 1.5; box-shadow: none; }
+.composer.dragging .composer-box { border-color: var(--accent); border-style: dashed; }
+.attachments { list-style: none; margin: 0 0 8px; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.attachment { position: relative; width: 64px; height: 64px; border-radius: 10px; overflow: hidden; border: 1px solid var(--line-2); background: var(--raise-2); display: flex; align-items: center; justify-content: center; }
+.attachment img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.attachment-remove { position: absolute; top: 3px; right: 3px; width: 22px; height: 22px; border-radius: 50%; border: 0; padding: 0; display: flex; align-items: center; justify-content: center; background: rgba(0, 0, 0, 0.65); color: #fff; cursor: pointer; }
+.attachment-remove .icon { width: 13px; height: 13px; }
 .composer-actions { display: flex; align-items: center; gap: 4px; margin-top: 4px; }
 .composer-meta { display: flex; align-items: center; gap: 6px; padding: 6px 4px 0; }
 .composer-meta > .muted { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

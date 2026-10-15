@@ -13,6 +13,7 @@ import { Conversation, type ConversationState } from "../voice/conversation"
 import { micDevice, player, startDictation, unlockAudio, voicePrefs, type Dictation } from "../voice/audio"
 import { sessionMenu } from "./actions"
 import { api, errorText, getJSON, HttpError, sessionPath } from "./api"
+import { prepareImage } from "./attach"
 import { Composer, VoiceBar } from "./Composer"
 import { hub, live, liveTick, lookup, markRead, me, onMessage, rows, setVoice, speechReady } from "./hub"
 import { isPhone, railOpen, setRailOpen, toggleSidebar } from "./layout"
@@ -210,11 +211,33 @@ export function SessionView(props: { id: string }) {
   const view = () => composerView(composer(), { running: running(), offline: offline() })
   let submitSeq = 0
 
+  // Images are prepared one at a time, in the order they were added.
+  const [attaching, setAttaching] = createSignal(false)
+  let attachQueue = Promise.resolve()
+  function attach(files: File[]) {
+    attachQueue = attachQueue.then(async () => {
+      setAttaching(true)
+      try {
+        for (const file of files) {
+          try {
+            act({ type: "attach", image: await prepareImage(file, composer().images) })
+          } catch (e) {
+            act({ type: "attachError", message: errorText(e) })
+          }
+        }
+      } finally {
+        setAttaching(false)
+      }
+    })
+  }
+
   async function submit() {
     const text = composer().draft.trim()
-    if (!text) return
+    const images = composer().images
+    if (!text && !images.length) return
     const c = convo()
-    if (c) {
+    // Voice mode speaks replies to utterances; a message with images goes as a typed turn instead.
+    if (c && !images.length) {
       act({ type: "input", text: "" })
       void c.sendTyped(text)
       return
@@ -224,14 +247,15 @@ export function SessionView(props: { id: string }) {
     const sentAt = Date.now()
     batch(() => {
       act({ type: "submit", id: sub })
-      timeline.upsert({ key, kind: "user", text, at: sentAt })
+      timeline.upsert({ key, kind: "user", text, at: sentAt, ...(images.length ? { images: images.map(({ name, mime, preview }) => ({ name, mime, preview })) } : {}) })
       setTicks((t) => ({ ...t, [key]: "pending" }))
       bump()
     })
     stick = true
     toEnd()
     try {
-      const res = await api(`${sessionPath(id)}/turn`, { method: "POST", json: { text } })
+      const json = { text, ...(images.length ? { images: images.map(({ mime, data, name }) => ({ mime, data, name })) } : {}) }
+      const res = await api(`${sessionPath(id)}/turn`, { method: "POST", json })
       const result = await res.json().catch(() => ({}))
       act({ type: "accepted", id: sub })
       setTicks((t) => ({ ...t, [key]: res.status === 202 ? "sent" : "heard" }))
@@ -247,7 +271,7 @@ export function SessionView(props: { id: string }) {
       const message = e instanceof HttpError && e.status === 504 ? "OpenCode did not answer in time. The session may still be working." : errorText(e)
       batch(() => {
         act({ type: "rejected", id: sub, message })
-        timeline.upsert({ key, kind: "user", text: "" })
+        timeline.upsert({ key, kind: "user", text: "", images: [] })
         bump()
       })
     }
@@ -516,6 +540,8 @@ export function SessionView(props: { id: string }) {
             </Show>
             <Composer
               draft={composer().draft}
+              images={composer().images}
+              attaching={attaching()}
               view={view()}
               error={composer().error}
               voiceOn={!!convo()}
@@ -526,6 +552,12 @@ export function SessionView(props: { id: string }) {
               voiceModel={models.error() ? "unavailable" : modelLabel(models.prefs(), "voice")}
               workerModel={models.error() ? "unavailable" : modelLabel(models.prefs(), "worker")}
               onInput={(text) => act({ type: "input", text })}
+              onAttach={attach}
+              onDetach={(imageID) => {
+                const image = composer().images.find((i) => i.id === imageID)
+                if (image?.preview.startsWith("blob:")) URL.revokeObjectURL(image.preview)
+                act({ type: "detach", id: imageID })
+              }}
               onSubmit={() => void submit()}
               onStop={() => void stop()}
               onDictate={() => void dictate()}

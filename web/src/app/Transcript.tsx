@@ -3,7 +3,7 @@
 import { For, Match, Show, Switch, createSignal } from "solid-js"
 import type { TimelineRow } from "../core/timeline-core"
 import { formatElapsed } from "../core/feedback-core"
-import type { Block } from "../lib/transcript"
+import type { Block, BlockImage } from "../lib/transcript"
 import { errorText, getJSON, sessionPath, enc } from "./api"
 import { Markdown } from "./Markdown"
 import { sessionHref } from "./router"
@@ -17,6 +17,25 @@ interface Expansion {
   onToggle: (key: string, open: boolean) => void
 }
 
+/** A thumbnail that opens the full image; a named chip for other files or when the image cannot load. */
+function MessageImage(props: { image: BlockImage }) {
+  const [failed, setFailed] = createSignal(false)
+  return (
+    <Show
+      when={props.image.src && !failed()}
+      fallback={
+        <span class="file-chip" title={props.image.mime}>
+          <Icon name="file" /> {props.image.name}
+        </span>
+      }
+    >
+      <a class="msg-image" href={props.image.src} target="_blank" rel="noopener" title={props.image.name}>
+        <img src={props.image.src} alt={props.image.name} loading="lazy" onError={() => setFailed(true)} />
+      </a>
+    </Show>
+  )
+}
+
 export function Transcript(props: { sessionID: string; blocks: Block[]; ticks: Record<string, TickState>; onDetail: (key: string, detail: unknown) => void } & Expansion) {
   return (
     <div class="transcript" aria-label="Conversation">
@@ -26,7 +45,16 @@ export function Transcript(props: { sessionID: string; blocks: Block[]; ticks: R
             <Match when={b.type === "user" && b}>
               {(u) => (
                 <div class="msg user" data-key={u().key}>
-                  <div class="pill">{u().text}</div>
+                  <div class="user-body">
+                    <Show when={u().images?.length}>
+                      <div class="msg-images">
+                        <For each={u().images}>{(image) => <MessageImage image={image} />}</For>
+                      </div>
+                    </Show>
+                    <Show when={u().text}>
+                      <div class="pill">{u().text}</div>
+                    </Show>
+                  </div>
                   <Show when={props.ticks[u().key]}>
                     {(t) => (
                       <span class={`tick ${t()}`} aria-label={TICK[t()][1]} title={TICK[t()][1]}>

@@ -34,7 +34,9 @@
 // POST /mock/fail {prefs?} (PUT /api/prefs/view answers 502).
 // Console (0.5): every session is inspectable and controllable with Voice off (only conversation and utterance
 // answer 403 not_exposed); GET …/timeline (+ parts), …/model-prefs (GET/PUT), …/models, …/summary, …/diff?file=,
-// POST …/read (GET /api/reads), …/stop, …/permission; POST …/turn answers 202 {mode:"steer"} while the tree runs,
+// GET …/timeline/messages/:message/files/:index (a 1×1 PNG; ses_mock's first user message lists one image),
+// POST …/read (GET /api/reads), …/stop, …/permission; POST …/turn {text, images?} (up to 4 PNG/JPEG/WebP/GIF images;
+// text may be empty with images; the log keeps each image's mime, name and base64 length) answers 202 {mode:"steer"} while the tree runs,
 // else runs the turn (ses_mock: working → streamed reply → idle; text containing "fail" → 409).
 import { existsSync, readFileSync, statSync } from "node:fs"
 import path from "node:path"
@@ -576,7 +578,7 @@ function timelineOf(id: string, title: string) {
   const t0 = Date.now() - 20 * 60_000
   const m = (n: number) => `msg_${id}_${n}`
   return [
-    { key: `${m(1)}:text`, messageID: m(1), sessionID: id, kind: "user", text: `Please look at “${title || "this"}” and fix what's broken.`, at: t0 },
+    { key: `${m(1)}:text`, messageID: m(1), sessionID: id, kind: "user", text: `Please look at “${title || "this"}” and fix what's broken.`, at: t0, ...(id === SESSION ? { files: [{ index: 0, mime: "image/png", name: "screenshot.png" }] } : {}) },
     { key: `${m(2)}:0`, messageID: m(2), partID: "0", sessionID: id, kind: "reasoning", text: "The failing test is in the picker. Read it first, then run the suite.", state: "done", at: t0 + 1000, completed: t0 + 13_400 },
     { key: `${m(2)}:1`, messageID: m(2), partID: "1", sessionID: id, kind: "tool", name: "read", state: "done", at: t0 + 14_000, completed: t0 + 14_200 },
     { key: `${m(2)}:2`, messageID: m(2), partID: "2", sessionID: id, kind: "tool", name: "bash", state: "failed", at: t0 + 15_000, completed: t0 + 21_000 },
@@ -606,11 +608,26 @@ async function mockTurn(text: string): Promise<Record<string, unknown>> {
   return { outcome: "succeeded", reply }
 }
 
+/** A 1×1 PNG served for message images. */
+const PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+
+/** The hub's image checks, roughly: at most 4, known types, base64 data. */
+function imagesProblem(images: unknown): string | undefined {
+  if (images === undefined) return undefined
+  if (!Array.isArray(images)) return "images must be an array"
+  if (images.length > 4) return "Attach at most 4 images"
+  for (const image of images) {
+    if (!["image/png", "image/jpeg", "image/webp", "image/gif"].includes(image?.mime)) return "Unsupported image type"
+    if (typeof image.data !== "string" || !/^[A-Za-z0-9+/]+={0,2}$/.test(image.data)) return "Image data must be base64"
+  }
+  return images.reduce((sum: number, i: any) => sum + i.data.length, 0) > 750_000 ? "Images together are too large" : undefined
+}
+
 async function consoleRoute(request: Request, url: URL, user: MockUser): Promise<Response | undefined> {
   const p = url.pathname
   const m = request.method
   if (p === "/api/reads" && m === "GET") return Response.json({ reads: reads[user.id] ?? {} })
-  const match = /^\/api\/sessions\/([^/]+)\/(timeline|model-prefs|models|summary|diff|read|stop|turn|permission)(?:\/messages\/([^/]+)\/parts\/([^/]+))?$/.exec(p)
+  const match = /^\/api\/sessions\/([^/]+)\/(timeline|model-prefs|models|summary|diff|read|stop|turn|permission)(?:\/messages\/([^/]+)\/(?:parts\/([^/]+)|files\/(\d+)))?$/.exec(p)
   if (!match) return undefined
   const id = decodeURIComponent(match[1]!)
   const fixture = id === SESSION ? { title: "Mock session", directory: `${HOME}/opencode-voice` } : id === BOB_SESSION ? bobSession() : sessions.find((x) => x.id === id) ?? (id === "ses_scratch" ? { title: "Scratch experiment", directory: "/tmp/scratch" } : undefined)
@@ -618,6 +635,10 @@ async function consoleRoute(request: Request, url: URL, user: MockUser): Promise
   const body = async () => (await request.json().catch(() => ({}))) as Record<string, any>
   switch (match[2]) {
     case "timeline":
+      if (match[5] !== undefined) {
+        if (match[5] !== "0") return Response.json({ error: "No such image" }, { status: 404 })
+        return new Response(Buffer.from(PIXEL_PNG, "base64"), { headers: { "content-type": "image/png", "cache-control": "private, no-store" } })
+      }
       if (match[3]) return Response.json({ detail: { name: "bash", state: { status: "error", input: { command: "bun test" }, error: "1 test failed" }, time: { start: Date.now() - 60_000, end: Date.now() - 54_000 } } })
       return Response.json({ items: timelineOf(id, fixture.title) })
     case "model-prefs":
@@ -668,9 +689,11 @@ async function consoleRoute(request: Request, url: URL, user: MockUser): Promise
       return new Response(null, { status: 204 })
     }
     case "turn": {
-      const { text } = await body()
-      if (typeof text !== "string" || !text.trim()) return Response.json({ error: "Empty prompt" }, { status: 400 })
-      log[log.length - 1]!.body = { text }
+      const { text, images } = await body()
+      const problem = imagesProblem(images)
+      if (problem) return Response.json({ error: problem }, { status: 400 })
+      if (typeof text !== "string" || (!text.trim() && !images?.length)) return Response.json({ error: "Empty prompt" }, { status: 400 })
+      log[log.length - 1]!.body = { text, ...(images?.length ? { images: images.map((i: any) => ({ mime: i.mime, name: i.name, length: i.data.length })) } : {}) }
       if (text.includes("fail")) return Response.json({ error: "No OpenCode process for this session is connected" }, { status: 409 })
       if (treeState(id) !== "idle") return Response.json({ mode: "steer", inboxID: `inb_${++inbox}` }, { status: 202 })
       if (id === SESSION) return Response.json(await mockTurn(text))
