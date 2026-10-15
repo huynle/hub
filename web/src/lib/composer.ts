@@ -103,3 +103,33 @@ export function composerView(state: ComposerState, { running, offline }: { runni
     ...(offline ? { hint: "The machine running this session is disconnected; it is read-only until it reconnects." } : {}),
   }
 }
+
+/** Unsent drafts per session, kept while the console is open (switching sessions keeps each one's text). */
+export class Drafts {
+  private readonly drafts = new Map<string, string>()
+  private readonly listeners = new Set<(sessionID: string) => void>()
+
+  get(sessionID: string): string {
+    return this.drafts.get(sessionID) ?? ""
+  }
+
+  set(sessionID: string, text: string): void {
+    if (this.get(sessionID) === text) return
+    if (text) this.drafts.set(sessionID, text)
+    else this.drafts.delete(sessionID)
+    for (const listener of [...this.listeners]) listener(sessionID)
+  }
+
+  /** Adds dictated text after the draft (one space between). Returns the new draft. */
+  append(sessionID: string, text: string): string {
+    const current = this.get(sessionID).replace(/\s+$/, "")
+    const next = current ? `${current} ${text}` : text
+    this.set(sessionID, next)
+    return next
+  }
+
+  subscribe(listener: (sessionID: string) => void): () => void {
+    this.listeners.add(listener)
+    return () => this.listeners.delete(listener)
+  }
+}

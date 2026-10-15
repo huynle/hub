@@ -8,6 +8,7 @@ import { NewSession } from "./NewSession"
 import { navigate, route } from "./router"
 import { SessionView } from "./Session"
 import { Settings } from "./Settings"
+import { dictation } from "./voice"
 import { Sidebar } from "./Sidebar"
 import { currentToast, dismissToast } from "./toast"
 import { IconButton } from "./ui"
@@ -37,6 +38,11 @@ export function App() {
   )
   createEffect(() => {
     if (!me() && ready() && route().name !== "pair") setReady(false)
+  })
+  // A dictation belongs to the session it was started in: leaving that session cancels it.
+  createEffect(() => {
+    const r = route()
+    dictation.viewing(r.name === "session" ? r.id : undefined)
   })
   onMount(() => {
     const onKey = (e: KeyboardEvent) => {

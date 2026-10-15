@@ -277,6 +277,56 @@ async function desktop(browser: Browser): Promise<void> {
     await page.locator(".voice-bar").waitFor({ state: "detached" })
   })
 
+  await check("desktop: Dictate fills the draft of the session on screen; each session keeps its own draft; leaving mid-recording cancels", async () => {
+    const go = (href: string) =>
+      page.evaluate((h) => {
+        const a = document.createElement("a")
+        a.href = h
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+      }, href)
+    const transcribes = async () => ((await (await fetch(`${BASE}/mock/log`)).json()) as { log: Array<{ method: string; path: string }> }).log.filter((e) => e.path === "/api/transcribe").length
+    await page.goto(`${BASE}/s/ses_mock`)
+    await page.locator(".msg.assistant").first().waitFor()
+    await page.getByLabel("Message").fill("")
+    await mock("/mock/transcripts", { texts: ["dictated into A"] })
+    await page.getByRole("button", { name: "Dictate" }).click()
+    await page.getByRole("button", { name: "Stop dictation" }).waitFor()
+    await page.waitForTimeout(800)
+    await page.getByRole("button", { name: "Stop dictation" }).click()
+    await page.waitForFunction(() => (document.querySelector('textarea[aria-label="Message"]') as HTMLTextAreaElement | null)?.value === "dictated into A")
+    const { log } = (await (await fetch(`${BASE}/mock/log`)).json()) as { log: Array<{ method: string; path: string }> }
+    assert(!log.slice(-5).some((e) => e.path.endsWith("/turn") || e.path.endsWith("/utterance")), "dictation never sends")
+    // Session B: its own (empty) draft.
+    await go("/s/ses_10")
+    await page.waitForURL(/\/s\/ses_10$/)
+    await page.locator(".msg.assistant").first().waitFor()
+    assert((await page.getByLabel("Message").inputValue()) === "", "B's draft is untouched")
+    await page.getByLabel("Message").fill("draft of B")
+    // Back to A: A's dictated draft is still there.
+    await go("/s/ses_mock")
+    await page.waitForURL(/\/s\/ses_mock$/)
+    await page.waitForFunction(() => (document.querySelector('textarea[aria-label="Message"]') as HTMLTextAreaElement | null)?.value === "dictated into A")
+    // Start in A, leave for B mid-recording: cancelled, nothing transcribed, B's draft unchanged.
+    const before = await transcribes()
+    await mock("/mock/transcripts", { texts: ["must not land anywhere"] })
+    await page.getByRole("button", { name: "Dictate" }).click()
+    await page.getByRole("button", { name: "Stop dictation" }).waitFor()
+    await go("/s/ses_10")
+    await page.getByText(/Dictation cancelled/).waitFor()
+    await page.waitForTimeout(600)
+    assert((await page.getByLabel("Message").inputValue()) === "draft of B", "B's draft unchanged after the cancelled dictation")
+    assert(await page.getByRole("button", { name: "Dictate" }).isVisible(), "B's mic button is idle")
+    assert((await transcribes()) === before, "the cancelled recording was not transcribed")
+    await go("/s/ses_mock")
+    await page.waitForFunction(() => (document.querySelector('textarea[aria-label="Message"]') as HTMLTextAreaElement | null)?.value === "dictated into A")
+    await mock("/mock/reset-transcripts")
+    await page.getByLabel("Message").fill("")
+    await go("/s/ses_10")
+    await page.getByLabel("Message").fill("")
+  })
+
   await check("desktop: mic picker lists microphones with a level meter", async () => {
     await page.getByRole("button", { name: "Choose microphone" }).click()
     await page.locator(".mic-picker .level").waitFor()

@@ -10,7 +10,7 @@ import { treeRunning } from "../lib/store"
 import { transcriptBlocks, type Block } from "../lib/transcript"
 import { createStore } from "solid-js/store"
 import { Conversation, type ConversationState } from "../voice/conversation"
-import { micDevice, player, startDictation, unlockAudio, voicePrefs, type Dictation } from "../voice/audio"
+import { micDevice, player, unlockAudio, voicePrefs } from "../voice/audio"
 import { sessionMenu } from "./actions"
 import { api, errorText, getJSON, HttpError, sessionPath } from "./api"
 import { prepareImage } from "./attach"
@@ -21,6 +21,7 @@ import { ModelPicker, createModels, modelLabel, type ModelKind } from "./ModelMe
 import { DiffPanel, Rail, type Summary } from "./Rail"
 import { navigate } from "./router"
 import { toast } from "./toast"
+import { dictation, dictationFor, drafts } from "./voice"
 import { Transcript, type TickState } from "./Transcript"
 import { Icon, IconButton, Menu, STATE_LABEL, StatusIcon, ago, now } from "./ui"
 import { formatElapsed } from "../core/feedback-core"
@@ -205,8 +206,17 @@ export function SessionView(props: { id: string }) {
   const [picker, setPicker] = createSignal<ModelKind | undefined>()
 
   // ---------- composer ----------
-  const [composer, setComposer] = createSignal(initialComposer())
-  const act = (a: ComposerAction) => setComposer((s) => composerReducer(s, a))
+  // The draft lives in the app-level draft store, so it survives switching sessions and dictation can fill it.
+  const [composer, setComposer] = createSignal({ ...initialComposer(), draft: drafts.get(id) })
+  const act = (a: ComposerAction) => {
+    setComposer((s) => composerReducer(s, a))
+    drafts.set(id, composer().draft)
+  }
+  onCleanup(
+    drafts.subscribe((changed) => {
+      if (changed === id && drafts.get(id) !== composer().draft) setComposer((s) => composerReducer(s, { type: "input", text: drafts.get(id) }))
+    }),
+  )
   const view = () => composerView(composer(), { running: running(), offline: offline() })
   let submitSeq = 0
 
@@ -290,33 +300,9 @@ export function SessionView(props: { id: string }) {
   }
 
   // ---------- dictation ----------
-  const [dictating, setDictating] = createSignal<false | number>(false)
-  const [transcribing, setTranscribing] = createSignal(false)
-  let dictation: Dictation | undefined
-  async function dictate() {
-    if (dictation) {
-      const d = dictation
-      dictation = undefined
-      setDictating(false)
-      setTranscribing(true)
-      try {
-        const text = await d.finish()
-        if (!text) toast("Didn't catch that. Try again.")
-        else act({ type: "input", text: composer().draft ? `${composer().draft.replace(/\s+$/, "")} ${text}` : text })
-      } catch (e) {
-        toast(errorText(e), "err")
-      } finally {
-        setTranscribing(false)
-      }
-      return
-    }
-    try {
-      dictation = await startDictation((left) => setDictating(left))
-      setDictating(60)
-    } catch (e) {
-      toast(errorText(e), "err")
-    }
-  }
+  // App-level: the text goes into this session's draft; leaving the session while recording cancels it.
+  const dictated = () => dictationFor(id)
+  const dictate = () => dictation.toggle(id)
 
   // ---------- Voice mode ----------
   const [convo, setConvo] = createSignal<Conversation<string> | undefined>()
@@ -335,8 +321,10 @@ export function SessionView(props: { id: string }) {
     if (!exposed()) {
       if (!(await setVoice(id, true))) return
       // Wait (briefly) for the catalog to report Voice on before starting.
-      for (let i = 0; i < 25 && !exposed(); i++) await new Promise((r) => setTimeout(r, 200))
+      for (let i = 0; i < 25 && !exposed() && !disposed; i++) await new Promise((r) => setTimeout(r, 200))
     }
+    // The user left this session meanwhile: never start a conversation nobody can see or stop.
+    if (disposed) return
     const c = new Conversation<string>({
       sessionID: id,
       api,
@@ -398,9 +386,10 @@ export function SessionView(props: { id: string }) {
     void presence(false, true)
   }
   window.addEventListener("pagehide", leave)
+  let disposed = false
   onCleanup(() => {
+    disposed = true
     unsubscribe()
-    dictation?.cancel()
     clearInterval(presenceTimer)
     clearTimeout(summaryTimer)
     clearTimeout(readTimer)
@@ -545,8 +534,8 @@ export function SessionView(props: { id: string }) {
               error={composer().error}
               voiceOn={!!convo()}
               voiceBlocked={voiceBlocked()}
-              dictating={dictating()}
-              transcribing={transcribing()}
+              dictating={dictated().recording}
+              transcribing={dictated().transcribing}
               metaLeft={metaLeft()}
               voiceModel={models.error() ? "unavailable" : modelLabel(models.prefs(), "voice")}
               workerModel={models.error() ? "unavailable" : modelLabel(models.prefs(), "worker")}

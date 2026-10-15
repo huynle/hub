@@ -73,6 +73,8 @@ export class Conversation<B = unknown> {
   private wakeLock?: WakeLockSentinel
   private warnedAutoplay = false
   private state: ConversationState | undefined
+  /** Bumped by start() and stop(); a start that sees another value was cancelled. */
+  private attempt = 0
 
   constructor({ sessionID, api, player, ui, options = {} }: { sessionID: string; api: Api; player: HTMLAudioElement; ui: ConversationUI<B>; options?: ConversationOptions }) {
     this.sessionID = sessionID
@@ -96,6 +98,9 @@ export class Conversation<B = unknown> {
   /** Mic first (a refusal leaves the server untouched), then the server flag. Returns false on failure. */
   async start(): Promise<boolean> {
     if (this.active) return true
+    // stop() while starting cancels this start: nothing may keep listening afterwards.
+    const attempt = ++this.attempt
+    const cancelled = () => attempt !== this.attempt
     this.ui.state("starting")
     this.cuePlayer.unlock() // still inside the tap
     if (this.opts.background) this.startSilence()
@@ -105,33 +110,49 @@ export class Conversation<B = unknown> {
       this.ui.state("off")
       return false
     }
+    let stream: MediaStream
     try {
-      this.stream = await navigator.mediaDevices.getUserMedia(micConstraints(this.opts.deviceId))
+      stream = await navigator.mediaDevices.getUserMedia(micConstraints(this.opts.deviceId))
     } catch (e) {
+      if (cancelled()) return false
       const err = e as Error
       this.ui.note(err.name === "NotAllowedError" ? "Microphone permission was denied. Allow it in the browser's site settings." : `Microphone: ${err.message}`, "err")
       this.ui.state("off")
       this.stopSilence()
       return false
     }
+    if (cancelled()) {
+      stream.getTracks().forEach((t) => t.stop())
+      return false
+    }
+    this.stream = stream
     try {
       const { agent } = await (await this.api(`${this.path}/conversation`, { method: "POST", json: { on: true } })).json()
       this.agent = agent
     } catch (e) {
       this.release()
       this.stopSilence()
+      if (cancelled()) return false
       this.ui.note(`Could not start Voice mode: ${(e as Error).message}`, "err")
       this.ui.state("off")
+      return false
+    }
+    if (cancelled()) {
+      // Stopped while the hub was turning conversation mode on: turn it off again.
+      this.release()
+      await this.api(`${this.path}/conversation`, { method: "POST", json: { on: false } }).catch(() => {})
       return false
     }
     this.active = true
     try {
       await this.listen()
     } catch (e) {
+      if (cancelled()) return false
       this.ui.note(`Could not start listening: ${(e as Error).message}`, "err")
       await this.stop()
       return false
     }
+    if (cancelled()) return false
     if (this.opts.background) this.mediaSession()
     else void this.lockScreen()
     document.addEventListener("visibilitychange", this.onVisibility)
@@ -473,6 +494,7 @@ export class Conversation<B = unknown> {
 
   /** Turns everything off; `post: false` when the server already did (SSE) or the page is going away. */
   async stop({ post = true, keepalive = false }: { post?: boolean; keepalive?: boolean } = {}): Promise<void> {
+    this.attempt++
     const wasActive = this.active
     this.active = false
     this.paused = false

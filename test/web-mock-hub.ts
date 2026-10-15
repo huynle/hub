@@ -2,7 +2,7 @@
 // Mock hub for manual/browser checks of the console (not a test file): serves the built web/dist (run
 // `npm run build:web` first) and fakes
 // the hub API + SSE per the conversation contract. Usage: `bun test/web-mock-hub.ts [port]` (default 4311).
-// Control: POST /mock/transcripts {texts: string[]} (queued /api/transcribe answers), POST /mock/emit {…SSE message},
+// Control: POST /mock/transcripts {texts: string[]} (queued /api/transcribe answers; POST /mock/reset-transcripts empties the queue), POST /mock/emit {…SSE message},
 // POST /mock/status {sessions} (status tree of ses_mock, root first; emitted as SSE status),
 // POST /mock/activity {sessionID?, item} (stored for GET /api/sessions/ses_mock and emitted as SSE activity),
 // GET /mock/log (recorded API calls), POST /mock/reset.
@@ -751,6 +751,10 @@ const server = Bun.serve({
     if (p.startsWith("/api/") && p !== "/api/events") log.push({ at: Date.now(), method: m, path: p, contentType: request.headers.get("content-type") ?? undefined })
     const last = () => log[log.length - 1]!
 
+    if (p === "/mock/reset-transcripts" && m === "POST") {
+      transcripts = []
+      return Response.json({ queued: 0 })
+    }
     if (p === "/mock/transcripts" && m === "POST") {
       transcripts.push(...((await json()).texts ?? []))
       return Response.json({ queued: transcripts.length })

@@ -28,6 +28,12 @@
   of models (at most 100 rows rendered with a count, arrows + Enter, number keys only outside the search box so
   digits can be typed), have a Back button in the variant step, never hide every model when a catalog
   reports them all disabled, and report a failed save.
+- **Fix: dictation and Voice mode stay with their session.** Stopping Voice mode while it was still starting
+  (waiting for the microphone or the hub), or leaving the session meanwhile, left a hidden conversation
+  listening that sent what the user said, including dictation in another session, to the first session. A
+  start that is stopped now releases the microphone and turns conversation mode off again. Dictation is
+  app-level: the text goes into the draft of the session where recording started (never sent), leaving that
+  session while recording cancels it (a notice says so), and each session keeps its own unsent draft.
 
 ## 0.5.0
 
