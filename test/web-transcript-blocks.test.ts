@@ -43,6 +43,33 @@ describe("transcriptBlocks", () => {
   })
 })
 
+describe("transcriptBlocks: attachments", () => {
+  test("history images get lazy URLs; other files become named chips; image-only messages still show", () => {
+    const blocks = transcriptBlocks([
+      { key: "u1:text", kind: "user", text: "what is this?", sessionID: "ses 1", messageID: "msg/1", files: [
+        { index: 0, mime: "image/png", name: "shot.png" },
+        { index: 1, mime: "text/plain", name: "notes.txt" },
+        { index: 2, mime: "image/svg+xml", name: "logo.svg" },
+      ] },
+      { key: "u2:text", kind: "user", text: "", sessionID: "s", messageID: "m2", files: [{ index: 0, mime: "image/jpeg" }] },
+      { key: "u3:text", kind: "user", text: "", sessionID: "s", messageID: "m3" },
+    ])
+    expect(blocks).toEqual([
+      { type: "user", key: "u1:text", text: "what is this?", images: [
+        { key: "u1:text:0", name: "shot.png", mime: "image/png", src: "/api/sessions/ses%201/timeline/messages/msg%2F1/files/0" },
+        { key: "u1:text:1", name: "notes.txt", mime: "text/plain" },
+        { key: "u1:text:2", name: "logo.svg", mime: "image/svg+xml" },
+      ] },
+      { type: "user", key: "u2:text", text: "", images: [{ key: "u2:text:0", name: "image", mime: "image/jpeg", src: "/api/sessions/s/timeline/messages/m2/files/0" }] },
+    ])
+  })
+
+  test("a message just sent shows its local previews", () => {
+    const blocks = transcriptBlocks([{ key: "local:1", kind: "user", text: "", images: [{ name: "a.jpg", mime: "image/jpeg", preview: "blob:x" }] }])
+    expect(blocks).toEqual([{ type: "user", key: "local:1", text: "", images: [{ key: "local:1:0", name: "a.jpg", mime: "image/jpeg", src: "blob:x" }] }])
+  })
+})
+
 describe("markdown", () => {
   test("paragraphs, headings, lists, fenced code, quotes and rules", () => {
     const blocks = parseMarkdown("# Title\n\nSome *text* here.\nsame para\n\n- one\n- two\n\n1. first\n2. second\n\n```ts\nconst x = 1\n```\n> quoted\n\n---")
