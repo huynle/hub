@@ -1,7 +1,7 @@
 name: Release
 # Push a tag vX.Y.Z (matching package.json) to publish: standalone hub binaries + SHA256SUMS on the
-# GitHub Release, the hub image on GHCR (linux/amd64 + linux/arm64), and the npm package when the
-# NPM_TOKEN secret is set.
+# GitHub Release, the hub image ghcr.io/<owner>/opencode-hub (linux/amd64 + linux/arm64), and the npm
+# package @huynle/opencode-hub through npm trusted publishing (OIDC; no token).
 on:
   push:
     tags: ["v*"]
@@ -56,11 +56,11 @@ jobs:
       - run: scripts/build-binaries.sh ${{ matrix.target }}
       - name: Smoke test
         if: matrix.target == 'linux-x64'
-        run: ./dist/opencode-voice-hub-linux-x64 --version
+        run: ./dist/opencode-hub-linux-x64 --version
       - uses: actions/upload-artifact@v4
         with:
           name: hub-${{ matrix.target }}
-          path: dist/opencode-voice-hub-*
+          path: dist/opencode-hub-*
           if-no-files-found: error
 
   release:
@@ -78,13 +78,13 @@ jobs:
       - name: SHA256SUMS
         working-directory: dist
         run: |
-          chmod +x opencode-voice-hub-*
-          sha256sum opencode-voice-hub-* > SHA256SUMS
+          chmod +x opencode-hub-*
+          sha256sum opencode-hub-* > SHA256SUMS
           cat SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/opencode-voice-hub-*
+            dist/opencode-hub-*
             dist/SHA256SUMS
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
@@ -108,14 +108,14 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/opencode-voice-hub
+          images: ghcr.io/${{ github.repository_owner }}/opencode-hub
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
           labels: |
-            org.opencontainers.image.title=opencode-voice-hub
-            org.opencontainers.image.description=Voice server for opencode-voice: web app, pairing, speech and push for OpenCode sessions
+            org.opencontainers.image.title=opencode-hub
+            org.opencontainers.image.description=OpenCode Hub: remote console, pairing, push and optional Voice for OpenCode sessions
             org.opencontainers.image.licenses=MIT
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
       - uses: docker/build-push-action@v6
@@ -129,26 +129,30 @@ jobs:
           cache-to: type=gha,mode=max
 
   npm:
+    # Trusted publishing (OIDC): npm trusts this workflow (huynle/opencode-hub, release.yml), so there is no
+    # token to store or leak, and npm adds provenance automatically. Needs npm >= 11.5.1 and Node >= 22.14.
+    # The trusted publisher is configured per package on npmjs.com (package settings), so a new package
+    # name needs one manual first publish before this job can publish it.
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
       id-token: write
-    env:
-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
-      - name: Skip without NPM_TOKEN
-        if: env.NPM_TOKEN == ''
-        run: echo "NPM_TOKEN is not set; skipping npm publish."
       - uses: actions/checkout@v4
-        if: env.NPM_TOKEN != ''
       - uses: actions/setup-node@v4
-        if: env.NPM_TOKEN != ''
         with:
-          node-version: 22
+          node-version: 24
           registry-url: https://registry.npmjs.org
-      - if: env.NPM_TOKEN != ''
-        run: npm publish --provenance --access public ${{ contains(github.ref_name, '-') && '--tag next' || '' }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - run: npm install -g npm@^11.5.1
+      - name: Skip versions already on npm
+        id: check
+        run: |
+          spec="$(node -p "const p = require('./package.json'); p.name + '@' + p.version")"
+          if npm view "$spec" version >/dev/null 2>&1; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "$spec is already on npm; skipping."
+          fi
+      - if: steps.check.outputs.already != 'true'
+        run: npm publish --access public ${{ contains(github.ref_name, '-') && '--tag next' || '' }}
