@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { defineVoiceAgent, delegateNote, ORCHESTRATOR_PROMPT, orchestratorParts, VOICE_AGENT } from "../src/spoke/conversation"
+import { defineVoiceAgent, delegateNote, isHubPrompt, ORCHESTRATOR_PROMPT, orchestratorParts, PROMPT_SOURCE, VOICE_AGENT } from "../src/spoke/conversation"
 
 type Agent = { id: string; name: string; mode: string; hidden: boolean; system?: string; description?: string; permissions: unknown[] }
 
@@ -92,5 +92,16 @@ describe("work model note", () => {
     expect(parts.join("\n")).toContain("complex")
     expect(parts.join("\n")).toContain("omit model")
     expect(orchestratorParts({ agent: "voice", conversation: true, subagent: "general" }).join("\n")).not.toContain("model:")
+  })
+})
+
+describe("prompt source", () => {
+  test("the hub tags its prompts opencode-hub and recognizes the legacy opencode-voice tag", () => {
+    expect(PROMPT_SOURCE).toBe("opencode-hub")
+    expect(isHubPrompt({ source: "opencode-hub", mode: "remote" })).toBe(true)
+    expect(isHubPrompt({ source: "opencode-voice" })).toBe(true)
+    expect(isHubPrompt({ source: "tui" })).toBe(false)
+    expect(isHubPrompt(undefined)).toBe(false)
+    expect(isHubPrompt("opencode-hub")).toBe(false)
   })
 })

@@ -29,6 +29,7 @@ export interface Membership<S> {
   leave(): void
 }
 
+// Kept from opencode-voice so a process that loads both the old and the renamed package runs one spoke.
 export const SPOKE_KEY = Symbol.for("opencode-voice.spoke")
 
 function registry(key: symbol): Registry {
@@ -50,7 +51,7 @@ function promote(reg: Registry): void {
       reg.owner = instance.id
       return
     } catch (cause) {
-      console.error("[opencode-voice] could not start the voice spoke", cause)
+      console.error("[opencode-hub] could not start the hub spoke", cause)
     }
   }
   reg.spoke = undefined
@@ -60,7 +61,7 @@ function promote(reg: Registry): void {
 /** `create` receives the stable per-process ID. */
 export function joinProcess<S extends Startable>(create: (processID: string) => S, key: symbol = SPOKE_KEY): Membership<S> {
   const reg = registry(key)
-  const id = Symbol("opencode-voice.instance")
+  const id = Symbol("opencode-hub.instance")
   reg.instances.push({ id, create })
   if (!reg.spoke) {
     try {
@@ -69,7 +70,7 @@ export function joinProcess<S extends Startable>(create: (processID: string) => 
       reg.spoke = spoke
       reg.owner = id
     } catch (cause) {
-      console.error("[opencode-voice] could not start the voice spoke", cause)
+      console.error("[opencode-hub] could not start the hub spoke", cause)
     }
   }
   return {
@@ -85,7 +86,7 @@ export function joinProcess<S extends Startable>(create: (processID: string) => 
       try {
         current.spoke?.stop()
       } catch (cause) {
-        console.error("[opencode-voice] spoke stop failed", cause)
+        console.error("[opencode-hub] spoke stop failed", cause)
       }
       promote(current)
     },

@@ -18,6 +18,7 @@ function fakeContext(overrides: { hookThrows?: boolean; registerThrows?: boolean
   const switches: unknown[] = []
   const sessionAgents = new Map<string, string>()
   let handlers: Record<string, (input: unknown, rpc: unknown) => Promise<unknown>> | undefined
+  const registered: string[] = []
   const ctx = {
     location: { directory: "/work/project" },
     app: { name: "opencode", version: "2.0.25", channel: "latest" },
@@ -54,15 +55,16 @@ function fakeContext(overrides: { hookThrows?: boolean; registerThrows?: boolean
     },
     permission: { reply: async () => {} },
     rpc: {
-      register: async (_def: unknown, impl: typeof handlers) => {
+      register: async (def: { id: string }, impl: typeof handlers) => {
         if (overrides.registerThrows) throw new Error("register failed")
+        registered.push(def.id)
         handlers = impl
         return { dispose: async () => {} }
       },
     },
   }
   const rpc = { signal: new AbortController().signal, error: (type: string, message: string, data: unknown) => ({ type, message, data }) }
-  return { ctx, hooks, transforms, switches, rpc, call: (name: string, input: unknown = {}) => handlers![name]!(input, rpc) }
+  return { ctx, hooks, transforms, switches, rpc, registered, call: (name: string, input: unknown = {}) => handlers![name]!(input, rpc) }
 }
 
 function tempConfig(config: Partial<ReturnType<typeof defaults>>) {
@@ -95,6 +97,15 @@ describe("plugin setup", () => {
     })
     expect(status).toMatchObject({ server: "http://127.0.0.1:1", mode: "always", enrolled: true, kind: "standalone" })
     expect(status.lastError).toBeTruthy()
+  })
+
+  test("is the opencode-hub plugin and serves its RPC as \"hub\" and the legacy \"voice\" id", async () => {
+    tempConfig({ mode: "off" })
+    const fake = fakeContext()
+    expect(plugin.id).toBe("opencode-hub")
+    const cleanup = (await plugin.setup(fake.ctx as any)) as () => void
+    cleanups.push(cleanup)
+    expect(fake.registered).toEqual(["hub", "voice"])
   })
 
   test("survives hook and RPC registration failures", async () => {

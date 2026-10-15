@@ -33,7 +33,7 @@ describe("setupOptions", () => {
     const status = { ...fresh, server: "https://voice.example.com" }
     expect(values(status)).toEqual(["configured", "local", "local-session", "remote", "later"])
     expect(setupOptions(status)[0]!.title).toBe("Connect to voice.example.com")
-    expect(setupOptions(status).find((o) => o.value === "remote")!.title).toBe("Connect to a different voice server…")
+    expect(setupOptions(status).find((o) => o.value === "remote")!.title).toBe("Connect to a different hub…")
   })
 
   test("a revoked machine is told why", () => {

@@ -260,7 +260,7 @@ export class SpokeHub {
   private resendConversations(connID: string): void {
     for (const sessionID of this.options.registry.conversationResends(connID)) {
       this.request(connID, { op: "conversation", sessionID, on: true }).catch((cause) => {
-        console.error("[voice] re-sending conversation mode failed:", cause instanceof Error ? cause.message : cause)
+        console.error("[opencode-hub] re-sending conversation mode failed:", cause instanceof Error ? cause.message : cause)
       })
     }
   }

@@ -144,7 +144,7 @@ export interface Event {
   readonly event: ForwardedEvent
 }
 
-/** Requests the spoke makes of the server on the user's behalf (from the /voice dialog). */
+/** Requests the spoke makes of the server on the user's behalf (from the /hub dialog). */
 export type SpokeRequest =
   | { readonly op: "pairCode" }
   | { readonly op: "handoff"; readonly sessionID: string }

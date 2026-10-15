@@ -298,7 +298,7 @@ export class HerdrWatcher {
     try {
       this.options.onChange()
     } catch (cause) {
-      console.error("[opencode-voice] herdr change handler failed", cause)
+      console.error("[opencode-hub] herdr change handler failed", cause)
     }
   }
 

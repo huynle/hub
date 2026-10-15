@@ -1,4 +1,4 @@
-// Auto-start of a local hub for a loopback voice server. When nothing answers on the configured
+// Auto-start of a local hub for a loopback hub URL. When nothing answers on the configured
 // http://127.0.0.1:<port> (or localhost / [::1]), start `bun <this repo>/bin/hub.ts` as a detached
 // background process bound to that address, with output appended to hub.log. Without a bun install it
 // runs the hub with the current executable (OpenCode is a compiled Bun binary) and BUN_BE_BUN=1. A lockfile (hub.pid)
