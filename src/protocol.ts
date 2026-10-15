@@ -160,12 +160,20 @@ export interface Welcome {
   readonly publicURL: string
 }
 
+/** An image attached to a typed prompt: base64 bytes of a PNG, JPEG, WebP or GIF (see promptImagesProblem). */
+export interface PromptImage {
+  readonly mime: string
+  readonly data: string
+  readonly name?: string
+}
+
 export type ServerRequest =
-  | { readonly op: "turn"; readonly sessionID: string; readonly text: string; readonly voiceStyle: boolean }
+  /** `text` may be empty when `images` are attached. */
+  | { readonly op: "turn"; readonly sessionID: string; readonly text: string; readonly voiceStyle: boolean; readonly images?: readonly PromptImage[] }
   | { readonly op: "permission"; readonly sessionID: string; readonly requestID: string; readonly decision: PermissionDecision }
   | { readonly op: "context"; readonly sessionID: string }
   /** Conversation mode: deliver an utterance with delivery "steer" and return at once (replies arrive as events). */
-  | { readonly op: "steer"; readonly sessionID: string; readonly text: string }
+  | { readonly op: "steer"; readonly sessionID: string; readonly text: string; readonly images?: readonly PromptImage[] }
   | { readonly op: "interrupt"; readonly sessionID: string }
   /** Interrupt the session's whole tree: running descendants deepest first, then the root. */
   | { readonly op: "stop"; readonly sessionID: string }
@@ -180,6 +188,8 @@ export type ServerRequest =
   | { readonly op: "setModelPrefs"; readonly sessionID: string; readonly voice?: ModelSelection | null; readonly worker?: ModelSelection | null }
   | { readonly op: "timeline"; readonly sessionID: string; readonly limit?: number; readonly cursor?: string }
   | { readonly op: "timelinePart"; readonly sessionID: string; readonly messageID: string; readonly partID: string }
+  /** One image attached to a user message (its position in the message's files). */
+  | { readonly op: "timelineFile"; readonly sessionID: string; readonly messageID: string; readonly index: number }
   /** Enable or disable voice for one session (adds/removes it from the machine config's session list). */
   | { readonly op: "expose"; readonly sessionID: string; readonly on: boolean }
   /** Create a session in a workspace directory the spoke already reported. */
@@ -260,6 +270,8 @@ export interface ResultFor {
   setModelPrefs: { readonly prefs: SessionModelPrefs; readonly defaults: SessionModelPrefs }
   timeline: TimelinePage
   timelinePart: { readonly detail: unknown }
+  /** No `file` when the message has no image at that index; `tooLarge` when its bytes would not fit in a frame. */
+  timelineFile: { readonly file?: PromptImage; readonly tooLarge?: boolean }
   expose: { readonly exposed: boolean }
   create: { readonly sessionID: string; readonly openedIn?: "herdr" }
 }
@@ -349,11 +361,70 @@ function isSpokeRequest(v: unknown): v is SpokeRequest {
   return false
 }
 
+// ---------- prompt images ----------
+
+/** Image types a prompt may carry. */
+export const PROMPT_IMAGE_MIMES: readonly string[] = ["image/png", "image/jpeg", "image/webp", "image/gif"]
+export const MAX_PROMPT_IMAGES = 4
+/** Largest decoded image accepted. */
+export const MAX_PROMPT_IMAGE_BYTES = 512 * 1024
+/** Largest total base64 length of a prompt's images, so they fit in one frame with the text. */
+export const MAX_PROMPT_IMAGES_BASE64 = 750_000
+export const MAX_PROMPT_IMAGE_NAME_CHARS = 200
+
+const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/
+
+/** Leading bytes of each accepted type (WebP: "RIFF" ... "WEBP"). */
+function sniffImage(bytes: Uint8Array): string | undefined {
+  const at = (offset: number, ...values: number[]) => values.every((value, i) => bytes[offset + i] === value)
+  if (at(0, 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) return "image/png"
+  if (at(0, 0xff, 0xd8, 0xff)) return "image/jpeg"
+  if (at(0, 0x47, 0x49, 0x46, 0x38)) return "image/gif"
+  if (at(0, 0x52, 0x49, 0x46, 0x46) && at(8, 0x57, 0x45, 0x42, 0x50)) return "image/webp"
+  return undefined
+}
+
+/**
+ * Why `value` is not an acceptable list of prompt images, or undefined when it is: at most
+ * MAX_PROMPT_IMAGES, each a known image type whose bytes match it, canonical base64 (OpenCode refuses
+ * anything else) of at most MAX_PROMPT_IMAGE_BYTES, together at most MAX_PROMPT_IMAGES_BASE64 characters.
+ */
+export function promptImagesProblem(value: unknown): string | undefined {
+  if (!Array.isArray(value)) return "images must be an array"
+  if (value.length > MAX_PROMPT_IMAGES) return `Attach at most ${MAX_PROMPT_IMAGES} images`
+  let total = 0
+  for (const [i, image] of value.entries()) {
+    const label = `Image ${i + 1}`
+    if (!isObj(image)) return `${label} must be {mime, data, name?}`
+    if (typeof image.mime !== "string" || !PROMPT_IMAGE_MIMES.includes(image.mime)) return `${label}: type must be one of ${PROMPT_IMAGE_MIMES.join(", ")}`
+    if (image.name !== undefined && (typeof image.name !== "string" || image.name.length > MAX_PROMPT_IMAGE_NAME_CHARS)) {
+      return `${label}: name must be a string of at most ${MAX_PROMPT_IMAGE_NAME_CHARS} characters`
+    }
+    const data = image.data
+    if (typeof data !== "string" || !data || data.length % 4 !== 0 || !BASE64.test(data)) return `${label}: data must be non-empty base64`
+    total += data.length
+    if (total > MAX_PROMPT_IMAGES_BASE64) return `Images together are larger than ${MAX_PROMPT_IMAGES_BASE64} base64 characters`
+    if ((data.length / 4) * 3 > MAX_PROMPT_IMAGE_BYTES + 2) return `${label} is larger than ${MAX_PROMPT_IMAGE_BYTES / 1024} KB`
+    const bytes = Buffer.from(data, "base64")
+    if (bytes.toString("base64") !== data) return `${label}: data must be canonical base64`
+    if (bytes.length > MAX_PROMPT_IMAGE_BYTES) return `${label} is larger than ${MAX_PROMPT_IMAGE_BYTES / 1024} KB`
+    if (sniffImage(bytes) !== image.mime) return `${label}: content does not match ${image.mime}`
+  }
+  return undefined
+}
+
+/** Text, plus optional images; the text may be empty only when images are attached. */
+function promptBody(v: Record<string, unknown>): boolean {
+  if (!str(v.text)) return false
+  if (v.images === undefined) return v.text.length > 0
+  return Array.isArray(v.images) && v.images.length > 0 && promptImagesProblem(v.images) === undefined
+}
+
 function isServerRequest(v: unknown): v is ServerRequest {
   if (!isObj(v)) return false
   switch (v.op) {
     case "turn":
-      return nonEmpty(v.sessionID) && nonEmpty(v.text) && typeof v.voiceStyle === "boolean"
+      return nonEmpty(v.sessionID) && promptBody(v) && typeof v.voiceStyle === "boolean"
     case "permission":
       return nonEmpty(v.sessionID) && nonEmpty(v.requestID) && ["once", "always", "reject"].includes(v.decision as string)
     case "context":
@@ -379,7 +450,9 @@ function isServerRequest(v: unknown): v is ServerRequest {
     case "timelinePart":
       return nonEmpty(v.sessionID) && nonEmpty(v.messageID) && v.messageID.length <= 300 && nonEmpty(v.partID) && v.partID.length <= 300
     case "steer":
-      return nonEmpty(v.sessionID) && nonEmpty(v.text)
+      return nonEmpty(v.sessionID) && promptBody(v)
+    case "timelineFile":
+      return nonEmpty(v.sessionID) && nonEmpty(v.messageID) && v.messageID.length <= 300 && Number.isInteger(v.index) && Number(v.index) >= 0 && Number(v.index) < 1000
     case "diff":
       return nonEmpty(v.sessionID) && nonEmpty(v.file) && v.file.length <= 4096
     case "conversation":
