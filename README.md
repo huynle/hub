@@ -358,8 +358,11 @@ the Docker image, npm package and binaries ship the build). One store fed by the
   recording cancels it; each session keeps its own unsent draft), Voice mode (hands-free, see below; a toggle that
   turns Voice on first when needed; one session at a time, so turning it on elsewhere turns the first one off; it
   keeps running while you look at other sessions, which show a "Voice: <session>" pill with End) with a
-  microphone picker, and the Voice/Worker model menus. The right rail (a bottom sheet on phones) shows
-  the server, branch, context use, MCP servers and changed files with a diff viewer. Every session works with Voice
+  microphone picker, and the Voice/Worker model menus. The right rail (a bottom sheet on phones) has
+  cards that collapse from their header (remembered per device): **Environment** (machine with
+  online/offline/Connecting, project folder with the full path as tooltip, branch, and where it is open:
+  TUI, Herdr or background), Context, **Connectors · N connected** (MCP servers) and Changes with a diff
+  viewer. Every session works with Voice
   off; Voice only adds speech.
 - **`/new`**, **`/settings`** (account, notifications, Voice, Speech, machines and approvals, devices, admin),
   **`/pair`**, **`/approve`**.
@@ -419,13 +422,18 @@ Pure logic lives in `web/src/core` and `web/src/lib` (bun tests in `test/web-*.t
   take Send, Steer, Stop and permission replies like any other session. Only Voice is off: the row's ⋯
   menu has **Turn Voice on** (`POST /api/sessions/:id/expose {on:true}`; shown at once, reverted on
   error), and Voice mode on such a session turns Voice on first.
-- **New session** (+ in the header, + on any group, or a group's ⋯ menu): machine (when several are
-  online), workspace (Herdr workspaces first, then known folders), folder (a Herdr workspace's pane
-  folders, most used first), optional title, and **Open in Herdr** (shown when the machine runs Herdr; on
-  by default for a Herdr workspace). Sends `POST /api/machines/:id/sessions {directory, title?,
-  herdrWorkspace?}`; the new session opens with an offer to start conversation mode. "Opened in Herdr ·
-  <workspace>" confirms the new tab; if Herdr failed, the session still exists and the hub's `warning`
-  is shown. 409 (background service not connected) is shown in the sheet.
+- **New session** (`/new`; + in the header, + on any group, or a group's ⋯ menu), composer first: "Describe
+  a task or ask a question" (images can be attached), and under it where it runs: **Environment** (your
+  machines on this hub: online first with their process and OpenCode version, offline ones listed but not
+  selectable; ✓ on the chosen one), **Project** (a popover with search: Herdr workspaces with their pane
+  folders, then known folders), the folder's **branch** (from the summary of the latest session in that
+  folder, when there is one) and **Open in Herdr tab** (a Herdr workspace on a machine that runs Herdr; on
+  by default). Submitting sends `POST /api/machines/:id/sessions {directory, herdrWorkspace?}`, opens the
+  new session and sends the prompt (and images) as its first turn (`POST /api/sessions/:id/turn`). The last
+  environment and folder are remembered on the device (`localStorage` `hub.newSession`); the group "+"
+  preselects with `?machine=&key=&dir=`. "Opened in Herdr · <workspace>" confirms the new tab; if Herdr
+  failed, the session still exists and the hub's `warning` is shown. 409 (background service not
+  connected) is shown under the composer.
 
 **Notifications** (web push, VAPID keys generated once and stored in the state file). Each device picks what
 it wants (Settings → Notifications): **a session asks a question**, **needs permission**, **failed**,

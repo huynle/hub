@@ -5,7 +5,7 @@
 // Control: POST /mock/transcripts {texts: string[]} (queued /api/transcribe answers; POST /mock/reset-transcripts empties the queue), POST /mock/emit {…SSE message},
 // POST /mock/status {sessions} (status tree of ses_mock, root first; emitted as SSE status),
 // POST /mock/activity {sessionID?, item} (stored for GET /api/sessions/ses_mock and emitted as SSE activity),
-// GET /mock/log (recorded API calls), POST /mock/reset, POST /mock/push {endpoints} (the push subscriptions the hub holds).
+// GET /mock/log (recorded API calls), POST /mock/reset, POST /mock/workstation {on} (a second online machine), POST /mock/push {endpoints} (the push subscriptions the hub holds).
 // Also fakes presence, push prefs (incl. `say`), devices and the speech settings API (keys masked as last4).
 // Session browser (VF6): ~40 sessions on "laptop" (6 workspaces incl. worktrees, blocked/working/unexposed ones,
 // a standalone process) plus an offline machine. Sessions carry exposed/project/projectName/now/state/blockers;
@@ -65,6 +65,8 @@ type Status = { id: string; title: string; state: string; blockers: unknown[]; p
 let status: Status[] = [{ id: SESSION, title: "Mock session", state: "idle", blockers: [] }]
 let activity: Array<Record<string, unknown>> = []
 type Fixture = {
+  /** The machine reporting it (default mac_1). */
+  machine?: string
   id: string
   title: string
   directory: string
@@ -168,6 +170,9 @@ let sessions = fixtures()
 let created = 0
 let fail = { expose: false, create: false, models: false, prefs: false, modelPrefs: false }
 let serviceConnected = true
+/** A second online machine ("workstation", mac_5) with its own service and one session; POST /mock/workstation {on}. */
+let workstation = false
+const WORKSTATION_DIR = "/home/user/work/ml-lab"
 let herdr = { on: true, fail: false }
 type ViewPrefs = { hiddenSessions: string[]; hiddenWorkspaces: string[]; pinnedSessions: string[]; pinnedWorkspaces: string[] }
 const PREF_LISTS = ["hiddenSessions", "hiddenWorkspaces", "pinnedSessions", "pinnedWorkspaces"] as const
@@ -410,7 +415,7 @@ const mainMachines = () => [
       terminals: herdr.on ? { herdr: { workspaces: HERDR } } : {},
       processes: [
         ...(serviceConnected
-          ? [{ id: "proc_1", kind: "service", directory: "/home/user", pid: 4242, sessions: [mockSession(), ...sessions.map(catalogSession)] }]
+          ? [{ id: "proc_1", kind: "service", directory: "/home/user", pid: 4242, opencodeVersion: "2.0.26", sessions: [mockSession(), ...sessions.filter((s) => !s.machine).map(catalogSession)] }]
           : []),
         {
           id: "proc_2",
@@ -425,6 +430,30 @@ const mainMachines = () => [
       ],
     },
     { id: "mac_2", name: "desktop", created: Date.now() - 86_400_000, lastSeen: Date.now() - 3 * 3_600_000, online: false, processes: [] },
+    ...(workstation
+      ? [
+          {
+            id: "mac_5",
+            name: "workstation",
+            created: Date.now() - 5 * 86_400_000,
+            lastSeen: Date.now(),
+            online: true,
+            processes: [
+              {
+                id: "proc_ws",
+                kind: "service",
+                directory: "/home/user",
+                pid: 5050,
+                opencodeVersion: "2.0.25",
+                sessions: [
+                  catalogSession({ id: "ses_ws_1", title: "Train the ranking model", directory: WORKSTATION_DIR, projectName: "ml-lab", project: WORKSTATION_DIR, updated: Date.now() - 3_600_000, exposed: true, state: "idle", blockers: [] }),
+                  ...sessions.filter((s) => s.machine === "mac_5").map(catalogSession),
+                ],
+              },
+            ],
+          },
+        ]
+      : []),
 ]
 
 /** A WAV tone (~55 ms per character, 0.4–4 s) standing in for TTS audio. */
@@ -860,6 +889,12 @@ const server = Bun.serve({
       pushEndpoints = []
       mutedSessions = []
       pushTests = 0
+      workstation = false
+      emitCatalog()
+      return Response.json({ ok: true })
+    }
+    if (p === "/mock/workstation" && m === "POST") {
+      workstation = (await json()).on !== false
       emitCatalog()
       return Response.json({ ok: true })
     }
@@ -996,14 +1031,15 @@ const server = Bun.serve({
       last().body = body
       await Bun.sleep(250)
       if (fail.create) return Response.json({ error: "OpenCode could not create the session" }, { status: 502 })
-      if (decodeURIComponent(match[1]!) !== "mac_1" || !serviceConnected) {
+      const onMachine = decodeURIComponent(match[1]!)
+      if (!(onMachine === "mac_1" || (onMachine === "mac_5" && workstation)) || !serviceConnected) {
         return Response.json({ error: "The background service of this machine is not connected" }, { status: 409 })
       }
       if (typeof body.directory !== "string" || !body.directory.startsWith("/")) return Response.json({ error: "directory must be absolute" }, { status: 400 })
       const ws = projectOf(body.directory)
       const id = `ses_new_${++created}`
       const title = typeof body.title === "string" && body.title.trim() ? body.title.trim() : ""
-      const fixture: Fixture = { id, title, directory: body.directory, project: ws?.[0], projectName: ws?.[1], updated: Date.now(), exposed: true, state: "idle", blockers: [] }
+      const fixture: Fixture = { ...(onMachine === "mac_5" ? { machine: "mac_5" } : {}), id, title, directory: body.directory, project: ws?.[0], projectName: ws?.[1], updated: Date.now(), exposed: true, state: "idle", blockers: [] }
       let result: Record<string, unknown> = { sessionID: id }
       if (typeof body.herdrWorkspace === "string") {
         const target = HERDR.find((w) => w.id === body.herdrWorkspace)

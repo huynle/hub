@@ -13,6 +13,7 @@ import { unlockAudio } from "../voice/audio"
 import { sessionMenu } from "./actions"
 import { api, errorText, getJSON, HttpError, sessionPath } from "./api"
 import { prepareImage } from "./attach"
+import { takeFirstTurn } from "./first-turn"
 import { Composer, VoiceBar } from "./Composer"
 import { hub, live, liveTick, lookup, markRead, me, onMessage, rows, speechReady } from "./hub"
 import { isPhone, railOpen, setRailOpen, toggleSidebar } from "./layout"
@@ -364,6 +365,15 @@ export function SessionView(props: { id: string }) {
 
   // ---------- lifecycle ----------
   onMount(() => {
+    // Started from /new: its prompt is this session's first turn.
+    const first = takeFirstTurn(id)
+    if (first) {
+      batch(() => {
+        act({ type: "input", text: first.text })
+        for (const image of first.images) act({ type: "attach", image })
+      })
+      void submit()
+    }
     void loadTimeline()
     void loadBacklog()
     void loadSummary()

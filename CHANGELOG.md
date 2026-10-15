@@ -2,6 +2,14 @@
 
 ## 0.5.1 (unreleased)
 
+- **New sessions, composer first.** `/new` is a big "Describe a task or ask a question" composer (with
+  images) and a row under it: **Environment** (your machines; online first with process and OpenCode
+  version, offline ones disabled; ✓ on the choice), **Project** (searchable Herdr workspaces and known
+  folders), the folder's **branch**, and **Open in Herdr tab**. Submitting creates the session on that
+  machine and sends the prompt as its first turn; the last environment and folder are remembered per
+  device. The session rail's **Server** card is now a collapsible **Environment** card (machine and
+  status, project, branch, where it is open), and every rail card collapses from its header (remembered),
+  with MCP shown as **Connectors · N connected**.
 - **`/hub` and `/voice` are separate commands.** `/hub` configures the hub connection: server URL and
   connection state, change the server (reachability checked) or use a hub on this computer, start the
   local hub, approval status, mode, this session on/off, pair a phone, open the hub in the browser.
