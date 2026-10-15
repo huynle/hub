@@ -159,6 +159,7 @@ describe("turns", () => {
     await waitFor(() => finish !== undefined)
     const second = await h.api("/api/sessions/ses_1/turn", { method: "POST", json: { text: "two" } })
     expect(second.status).toBe(409)
+    expect(((await second.json()) as any).error).toBe("A turn is already running for this session")
     finish!()
     expect((await first).status).toBe(200)
 
@@ -168,6 +169,52 @@ describe("turns", () => {
     expect(((await none.json()) as any).error).toBe("Not found")
     expect((await h.api("/api/sessions/ses_1/turn", { method: "POST", json: { text: "  " } })).status).toBe(400)
   })
+
+  test("a prompt over 100,000 characters is 400 and never reaches the spoke", async () => {
+    h = harness()
+    const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
+    const seen = answer(client, () => ({ outcome: "succeeded", reply: "ok" }))
+    const res = await h.api("/api/sessions/ses_1/turn", { method: "POST", json: { text: "x".repeat(100_001) } })
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as any).error).toBe("Prompt longer than 100000 characters")
+    expect(seen).toEqual([])
+    expect(h.registry.catalog()[0]!.processes[0]!.sessions[0]!.busy).toBe(false)
+    expect((await h.api("/api/sessions/ses_1/turn", { method: "POST", json: { text: "x".repeat(100_000) } })).status).toBe(200)
+  })
+
+  test("a request too large for one frame is refused at once instead of hanging", async () => {
+    h = harness()
+    const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
+    const seen = answer(client, () => ({}))
+    const connID = h.registry.owner("ses_1")!
+    const started = Date.now()
+    await expect(h.spokes.request(connID, { op: "steer", sessionID: "ses_1", text: '"'.repeat(600_000) })).rejects.toThrow(/too large/i)
+    expect(Date.now() - started).toBeLessThan(1000)
+    expect(seen).toEqual([])
+  })
+
+  for (const action of ["stop", "interrupt"] as const) {
+    test(`${action} releases the hub's turn lock and ends the in-flight turn request`, async () => {
+      h = harness()
+      const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
+      let turns = 0
+      answer(client, (req) => {
+        if (req.op === "stop") return { stopped: [req.sessionID] }
+        if (req.op === "interrupt") return {}
+        if (req.op === "turn" && ++turns > 1) return { outcome: "succeeded", reply: "again" }
+        return undefined // the first turn never gets an answer (e.g. the spoke lost it)
+      })
+      const first = h.api("/api/sessions/ses_1/turn", { method: "POST", json: { text: "one" } })
+      await waitFor(() => turns === 1)
+      expect((await h.api(`/api/sessions/ses_1/${action}`, { method: "POST" })).status).toBeLessThan(300)
+      const ended = await first
+      expect(ended.status).toBe(200)
+      expect(await ended.json()).toMatchObject({ outcome: "interrupted" })
+      const next = await h.api("/api/sessions/ses_1/turn", { method: "POST", json: { text: "two" } })
+      expect(next.status).toBe(200)
+      expect(await next.json()).toEqual({ outcome: "succeeded", reply: "again" })
+    })
+  }
 
   test("the hub waits a grace period past the turn timeout so the spoke's own timeout result wins", async () => {
     expect(TURN_GRACE_MS).toBe(15_000)

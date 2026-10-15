@@ -181,6 +181,19 @@ describe("turns", () => {
     other()
   })
 
+  test("cancelTurns releases the tree's locks once; the old release cannot free a newer turn", () => {
+    let cancelled = 0
+    const release = registry.beginTurn("ses_1", () => cancelled++)
+    registry.cancelTurns("ses_1")
+    registry.cancelTurns("ses_1")
+    expect(cancelled).toBe(1)
+    const next = registry.beginTurn("ses_1")
+    release()
+    expect(() => registry.beginTurn("ses_1")).toThrow(BusyError)
+    next()
+    registry.beginTurn("ses_1")()
+  })
+
   test("busy flag shows in the catalog", () => {
     registry.connect("a", laptop, hello("pa"))
     registry.setSessions("a", [session("ses_1")])

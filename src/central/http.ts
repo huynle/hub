@@ -4,7 +4,7 @@
 import type { Server } from "bun"
 import { diskAssets, type WebAssets } from "./assets"
 import path from "node:path"
-import type { EnrollStart, ModelSelection, PermissionDecision } from "../protocol"
+import type { EnrollStart, ModelSelection, PermissionDecision, TurnResult } from "../protocol"
 import { isLoopbackAddress, isLoopbackHost, isLoopbackURL, loopbackOrigins } from "../loopback"
 import { speakable } from "../speakable"
 import { Auth, RateLimitError, ValidationError } from "./auth"
@@ -14,7 +14,7 @@ import { Push, type PushSender } from "./push"
 import { BusyError, Registry } from "./registry"
 import { audioFormat, SpeechError } from "./speech/provider"
 import { SpeechService } from "./speech/service"
-import { RequestTimeoutError, SpokeError, SpokeHub, type Notifier, type SpokeSocketData } from "./spoke-ws"
+import { RequestTimeoutError, RequestTooLargeError, SpokeError, SpokeHub, type Notifier, type SpokeSocketData } from "./spoke-ws"
 import { DEFAULT_PUSH_PREFS, LOCAL_USER, Store, VIEW_PREF_KEYS, type DeviceRecord, type PushPrefs, type UserRecord, type ViewPrefs } from "./store"
 
 export interface Speech {
@@ -117,6 +117,8 @@ const VIEW_PREF_MAX_CHARS = 4096
 const DECISIONS = new Set<PermissionDecision>(["once", "always", "reject"])
 /** Longest utterance accepted for conversation mode (characters, after trimming). */
 export const MAX_UTTERANCE_CHARS = 4000
+/** Longest typed prompt or steer accepted (characters, after trimming); a bigger one would not fit in a frame. */
+export const MAX_PROMPT_CHARS = 100_000
 /** Preview text for POST /api/settings/speech/test. */
 const SPEECH_TEST_TEXT = "Hi! This is how I will sound when I read replies to you."
 const SPEECH_TEST_MAX_CHARS = 300
@@ -550,11 +552,15 @@ export function startCentral(options: CentralOptions): Central {
       "session",
       async ({ params }) => {
         await spokes.request(ownerOf(params.session!), { op: "interrupt", sessionID: params.session! })
+        registry.cancelTurns(params.session!)
         return new Response(null, { status: 204 })
       },
     ),
-    route("POST", "/api/sessions/:session/stop", "session", async ({ params }) =>
-      Response.json(await spokes.request(ownerOf(params.session!), { op: "stop", sessionID: params.session! }), { headers: NO_STORE })),
+    route("POST", "/api/sessions/:session/stop", "session", async ({ params }) => {
+      const result = await spokes.request(ownerOf(params.session!), { op: "stop", sessionID: params.session! })
+      registry.cancelTurns(params.session!)
+      return Response.json(result, { headers: NO_STORE })
+    }),
     route("POST", "/api/sessions/:session/conversation", "session", ({ request, params }) => conversation(request, params.session!), true),
     route("GET", "/api/sessions/:session/models", "session", async ({ params }) =>
       Response.json(await spokes.request(ownerOf(params.session!), { op: "models", sessionID: params.session! }), { headers: NO_STORE })),
@@ -756,17 +762,23 @@ export function startCentral(options: CentralOptions): Central {
     const raw = (await body(request)).text
     const text = typeof raw === "string" ? raw.trim() : ""
     if (!text) return error(400, "Empty prompt")
+    if (text.length > MAX_PROMPT_CHARS) return error(400, `Prompt longer than ${MAX_PROMPT_CHARS} characters`)
     const connID = ownerOf(sessionID)
     // While anything in the tree runs, typed input redirects the current work instead of queueing.
     if (registry.running(sessionID)) {
       const { inboxID } = await spokes.request(connID, { op: "steer", sessionID, text })
       return Response.json({ mode: "steer", inboxID }, { status: 202 })
     }
-    const release = registry.beginTurn(sessionID)
+    // A stop or interrupt releases the lock and answers this request at once, even if the spoke never does.
+    let cancel = () => {}
+    const stopped = new Promise<TurnResult>((resolve) => {
+      cancel = () => resolve({ outcome: "interrupted", message: "Stopped", reply: "" })
+    })
+    const release = registry.beginTurn(sessionID, () => cancel())
     server.timeout(request, 0)
     try {
       const voiceStyle = registry.exposed(sessionID) === true
-      return Response.json(await spokes.request(connID, { op: "turn", sessionID, text, voiceStyle }))
+      return Response.json(await Promise.race([spokes.request(connID, { op: "turn", sessionID, text, voiceStyle }), stopped]))
     } finally {
       release()
     }
@@ -1054,6 +1066,7 @@ function failure(cause: unknown): Response {
   if (cause instanceof SyntaxError) return error(400, "Invalid JSON")
   if (cause instanceof SpeechError) return error(502, cause.message)
   if (cause instanceof SpokeError) return error(502, cause.message)
+  if (cause instanceof RequestTooLargeError) return error(413, cause.message)
   if (cause instanceof OidcError) return authPage(cause.status, "Sign-in failed", cause.message)
   if (cause instanceof RequestTimeoutError) return error(504, cause.message)
   console.error("[opencode-hub] request failed:", cause)

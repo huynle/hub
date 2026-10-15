@@ -8,7 +8,7 @@ import { StatusBoard, type Blocker, type SessionStatus } from "../status"
 
 export class BusyError extends Error {
   constructor() {
-    super("A voice turn is already running for this session")
+    super("A turn is already running for this session")
     this.name = "BusyError"
   }
 }
@@ -236,7 +236,8 @@ export class Registry {
   private readonly boards = new Map<string, StatusBoard>()
   /** permission requestID → where it was asked. */
   private readonly permissions = new Map<string, { connID: string; sessionID: string }>()
-  private readonly active = new Set<string>()
+  /** Sessions with a hub turn in flight, with how to end the waiting request early (stop/interrupt). */
+  private readonly active = new Map<string, { readonly cancel?: () => void }>()
   private readonly listeners = new Set<(message: RegistryMessage, tenant?: string) => void>()
   private readonly alertListeners = new Set<(alert: Alert) => void>()
   /** Form IDs already alerted (forms may be forwarded by several processes). */
@@ -945,17 +946,35 @@ export class Registry {
     return { ...origin }
   }
 
-  /** Takes the session's turn lock; call the returned function to release it. */
-  beginTurn(sessionID: string): () => void {
+  /**
+   * Takes the session's turn lock; call the returned function to release it. `onCancel` runs when a stop or
+   * interrupt releases the lock first (see cancelTurns), so the waiting request can end.
+   */
+  beginTurn(sessionID: string, onCancel?: () => void): () => void {
     if (this.active.has(sessionID)) throw new BusyError()
-    this.active.add(sessionID)
+    const turn = { cancel: onCancel }
+    this.active.set(sessionID, turn)
     this.emit({ type: "catalog" })
-    let released = false
     return () => {
-      if (released) return
-      released = true
+      if (this.active.get(sessionID) !== turn) return // already released, or cancelled and taken by a newer turn
       this.active.delete(sessionID)
       this.emit({ type: "catalog" })
+    }
+  }
+
+  /** After a stop or interrupt: releases the turn locks in the session's tree and ends their waiting requests. */
+  cancelTurns(sessionID: string): void {
+    const rootID = this.rootOf(sessionID) ?? sessionID
+    const ended = [...this.active].filter(([id]) => id === sessionID || (this.rootOf(id) ?? id) === rootID)
+    if (!ended.length) return
+    for (const [id] of ended) this.active.delete(id)
+    this.emit({ type: "catalog" })
+    for (const [, turn] of ended) {
+      try {
+        turn.cancel?.()
+      } catch {
+        // a waiting request that cannot be told still lost its lock
+      }
     }
   }
 

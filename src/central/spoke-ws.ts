@@ -3,6 +3,7 @@
 import type { Server, ServerWebSocket, WebSocketHandler } from "bun"
 import {
   encode,
+  MAX_FRAME,
   parseSpokeMessage,
   PROTOCOL_VERSION,
   type Req,
@@ -26,6 +27,14 @@ export class SpokeError extends Error {
   constructor(message: string) {
     super(message)
     this.name = "SpokeError"
+  }
+}
+
+/** A request that would not fit in one protocol frame (the spoke would drop it and never answer). */
+export class RequestTooLargeError extends Error {
+  constructor(op: string) {
+    super(`The ${op} request is too large to send to OpenCode`)
+    this.name = "RequestTooLargeError"
   }
 }
 
@@ -130,6 +139,8 @@ export class SpokeHub {
     const ws = this.sockets.get(connID)
     if (!ws?.data.ready) return Promise.reject(new SpokeError("OpenCode process disconnected"))
     const id = `r${++this.seq}`
+    const frame = encode({ t: "req", id, req })
+    if (frame.length > MAX_FRAME) return Promise.reject(new RequestTooLargeError(req.op))
     const base = this.options.requestTimeoutMs ?? 15_000
     const timeoutMs =
       req.op === "turn"
@@ -143,7 +154,7 @@ export class SpokeHub {
         reject(new RequestTimeoutError(req.op))
       }, timeoutMs)
       this.pending.set(id, { connID, op: req.op, resolve: resolve as (v: unknown) => void, reject, timer })
-      this.send(ws, { t: "req", id, req })
+      ws.send(frame)
     })
   }
 

@@ -924,7 +924,7 @@ export class Spoke {
   }
 
   private async turn(sessionID: string, text: string, voiceStyle: boolean): Promise<TurnResult> {
-    if (this.running.has(sessionID)) throw new Error("A voice turn is already running for this session")
+    if (this.running.has(sessionID)) throw new Error("A turn is already running for this session")
     if (isExposed(this.config, this.tracker, sessionID)) await this.applyVoiceModel(sessionID)
     this.running.add(sessionID)
     if (voiceStyle) this.voiceTurns.set(sessionID, (this.voiceTurns.get(sessionID) ?? 0) + 1)
