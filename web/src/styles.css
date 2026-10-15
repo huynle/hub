@@ -430,3 +430,6 @@ details.card summary { cursor: pointer; color: var(--muted); }
 p.small.warn { color: var(--warn); }
 p.small.err { color: var(--err, #e5484d); }
 p.small.ok { color: var(--ok, inherit); }
+.voice-bar { flex-wrap: wrap; }
+.voice-hint { flex-basis: 100%; margin: 2px 0 0; color: var(--muted, inherit); }
+button.link { background: none; border: 0; padding: 0; color: var(--accent, #fab283); text-decoration: underline; cursor: pointer; font: inherit; }

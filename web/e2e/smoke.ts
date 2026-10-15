@@ -270,6 +270,8 @@ async function desktop(browser: Browser): Promise<void> {
     await page.locator(".voice-bar").waitFor({ timeout: 10_000 })
     await page.locator(".voice-bar .voice-state").getByText(/Listening|Thinking/).waitFor()
     await page.locator(".composer-meta").getByText(/Voice on/).waitFor()
+    // Notifications are not allowed in this browser: the Voice bar offers them for the ongoing notification.
+    await page.locator(".voice-bar .voice-hint").getByRole("button", { name: "Allow notifications" }).waitFor()
     await shot(page, "desktop-voice-bar")
     await page.getByRole("button", { name: "Mute" }).click()
     await page.locator(".voice-bar .voice-state").getByText("Muted").waitFor()

@@ -366,40 +366,17 @@ export class Conversation<B = unknown> {
     this.refresh()
   }
 
-  /** Lock screen / notification controls (Android Chrome shows them while media plays). */
+  /**
+   * Lock screen / notification controls (Android Chrome shows them while media plays). The metadata ("Voice
+   * mode on", the session title) and the pause/stop → End handlers are app-level (web/src/app/voice.ts); the
+   * conversation only reports whether it plays.
+   */
   private mediaSession(): void {
-    const ms = navigator.mediaSession
-    if (!ms) return
-    try {
-      if ("MediaMetadata" in window) {
-        ms.metadata = new MediaMetadata({
-          title: this.opts.title(),
-          artist: "OpenCode Hub",
-          artwork: [
-            { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
-            { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
-          ],
-        })
-      }
-      ms.setActionHandler("pause", () => this.pause())
-      ms.setActionHandler("play", () => this.resume())
-      ms.playbackState = this.paused ? "paused" : "playing"
-    } catch {
-      // unsupported action or metadata: controls are best-effort
-    }
+    if (navigator.mediaSession) navigator.mediaSession.playbackState = this.paused ? "paused" : "playing"
   }
 
   private clearMediaSession(): void {
-    const ms = navigator.mediaSession
-    if (!ms) return
-    try {
-      ms.metadata = null
-      ms.setActionHandler("pause", null)
-      ms.setActionHandler("play", null)
-      ms.playbackState = "none"
-    } catch {
-      // ignore
-    }
+    if (navigator.mediaSession) navigator.mediaSession.playbackState = "none"
   }
 
   /** A silent looping <audio> while listening with the screen off (keeps the page alive; lock-screen controls). */

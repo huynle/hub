@@ -1,5 +1,5 @@
 // OpenCode Hub service worker: shows push notifications, answers permissions from them, keeps the push
-// subscription known to the hub.
+// subscription known to the hub, and handles the actions of the page's "Voice mode on" notification.
 // No offline caching: every request goes to the network (the API must never be served stale).
 // Requests from here are same-origin with the device cookie (credentials: "same-origin"); POSTs carry the
 // Origin header browsers add to non-GET requests, which the hub's CSRF check accepts.
@@ -87,6 +87,19 @@ async function focusOrOpen(url) {
   await self.clients.openWindow(url)
 }
 
+/** Ends Voice mode: tells an open page, or (no page) turns conversation mode off at the hub itself. */
+async function endVoice(sessionID) {
+  const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true })
+  const pages = windows.filter((c) => new URL(c.url).origin === self.location.origin)
+  if (pages.length) {
+    for (const page of pages) page.postMessage({ type: "voice-end", sessionID })
+    return
+  }
+  if (!sessionID) return
+  const res = await postJSON(`/api/sessions/${encodeURIComponent(sessionID)}/conversation`, { on: false }).catch(() => undefined)
+  if (!res || !res.ok) await self.clients.openWindow(sessionURL(sessionID))
+}
+
 self.addEventListener("notificationclick", (event) => {
   const note = event.notification
   const data = note.data || {}
@@ -94,6 +107,11 @@ self.addEventListener("notificationclick", (event) => {
   note.close()
   event.waitUntil(
     (async () => {
+      // The ongoing "Voice mode on" notification (shown by the page): End or Open.
+      if (data.kind === "voice") {
+        if (event.action === "end") return endVoice(data.sessionID)
+        return focusOrOpen(url)
+      }
       if ((event.action === "allow-once" || event.action === "reject") && data.sessionID && data.requestID) {
         const decision = event.action === "allow-once" ? "once" : "reject"
         const res = await postJSON(`/api/sessions/${encodeURIComponent(data.sessionID)}/permission`, { requestID: data.requestID, decision }).catch(() => undefined)

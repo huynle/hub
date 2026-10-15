@@ -20,7 +20,7 @@ import { ModelPicker, createModels, modelLabel, type ModelKind } from "./ModelMe
 import { DiffPanel, Rail, type Summary } from "./Rail"
 import { navigate } from "./router"
 import { toast } from "./toast"
-import { dictation, dictationFor, drafts, voice, voiceState } from "./voice"
+import { allowVoiceNotifications, dictation, dictationFor, drafts, voice, voiceNotifyHint, voiceState } from "./voice"
 import { VoicePill } from "./VoicePill"
 import { Transcript, type TickState } from "./Transcript"
 import { Icon, IconButton, Menu, STATE_LABEL, StatusIcon, ago, now } from "./ui"
@@ -494,6 +494,8 @@ export function SessionView(props: { id: string }) {
                 onMute={() => voice.mute()}
                 onEnd={() => void voice.end()}
                 onModel={() => setPicker("voice")}
+                notifyHint={voiceNotifyHint()}
+                onAllowNotifications={() => void allowVoiceNotifications()}
               />
             </Show>
             <Show when={voiceError()}>

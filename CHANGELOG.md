@@ -2,6 +2,12 @@
 
 ## 0.5.1 (unreleased)
 
+- **"Voice mode on" notification.** While Voice mode is on, a silent persistent notification says which
+  session and what Voice is doing ("API server · listening", updated at most every 3 s) with **End** (ends
+  Voice mode through the page, or with no page open turns conversation mode off at the hub) and **Open**;
+  it closes when Voice mode ends or the page unloads. The lock screen's media controls show "Voice mode on"
+  and the session title, and pause/stop end Voice mode (before, pause muted listening). Without
+  notification permission the Voice bar offers **Allow notifications**.
 - **Notifications that arrive.** Settings → Notifications shows the real state of this device (permission,
   service worker, and whether this hub holds its subscription) and warns when nothing would arrive; **Enable
   notifications on this device** registers the worker and subscribes; the app re-subscribes by itself when

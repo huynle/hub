@@ -289,7 +289,19 @@ const VOICE_LABEL: Record<ConversationState, string> = {
   off: "Off",
 }
 
-export function VoiceBar(props: { state: ConversationState; level: number; held: string; working: boolean; model: string; onMute: () => void; onEnd: () => void; onModel: () => void }) {
+export function VoiceBar(props: {
+  state: ConversationState
+  level: number
+  held: string
+  working: boolean
+  model: string
+  onMute: () => void
+  onEnd: () => void
+  onModel: () => void
+  /** Notifications are not allowed: offer them so Voice mode shows in the notification shade. */
+  notifyHint?: boolean
+  onAllowNotifications?: () => void
+}) {
   const label = () => (props.state === "listening" && props.working ? "Thinking" : VOICE_LABEL[props.state])
   const bars = [0.5, 0.8, 1, 0.7, 0.45]
   return (
@@ -313,6 +325,14 @@ export function VoiceBar(props: { state: ConversationState; level: number; held:
       <button type="button" class="btn small end" onClick={props.onEnd}>
         End
       </button>
+      <Show when={props.notifyHint}>
+        <p class="voice-hint small">
+          Allow notifications to keep a “Voice mode on” notification with an End button while the screen is off.{" "}
+          <button type="button" class="link" onClick={() => props.onAllowNotifications?.()}>
+            Allow notifications
+          </button>
+        </p>
+      </Show>
     </div>
   )
 }

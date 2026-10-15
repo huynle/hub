@@ -721,12 +721,18 @@ Pure logic is in `web/src/core/feedback-core.ts` (tested with bun); `web/src/cor
   when leaving the view. The hub uses this to decide when to push.
 - **Screen off** (Settings → Voice → "Keep listening when screen is off", off by default). Off: the
   Screen Wake Lock keeps the screen on while listening. On: no wake lock. The mic and VAD keep running
-  when the page is hidden. The lock screen shows media controls (`navigator.mediaSession`: session
-  title, "OpenCode Voice"); pause stops listening (mic muted, speech cleared) and play resumes. A
-  silent looping audio element plays to make suspension less likely. **This is best-effort:** whether
+  when the page is hidden. A silent looping audio element plays to make suspension less likely. **This is best-effort:** whether
   listening survives a locked screen depends on Android Chrome (battery saver, OS version), and iOS
   suspends it. The OpenCode session keeps running on the laptop either way. When the phone is not
   listening, turn on the `say` notification to get replies as push notifications.
+- **"Voice mode on" notification**: while Voice mode is on, the page shows a silent, persistent system
+  notification through the service worker (tag `voice-mode`): "<session title> · listening" (thinking,
+  speaking, muted; updated at most every 3 s) with **End** and **Open**. End reaches the page (which ends
+  Voice mode); with no page open, the service worker turns conversation mode off at the hub itself with the
+  device cookie. It closes when Voice mode ends or the page goes away. It needs notification permission:
+  without it the Voice bar shows **Allow notifications**. The Media Session shows "Voice mode on" with the
+  session title on the lock screen while Voice audio plays; its pause and stop end Voice mode (logic in
+  `web/src/core/voice-notifier.ts`).
 - **Settings → Speech** (your own settings; admins also edit the server default): cards for Speech-to-text and Text-to-speech, with provider
   (OpenRouter / OpenAI-compatible), base URL (OpenAI-compatible only), model, voice (TTS), language (STT,
   optional), server-side speed (TTS, optional, 0.25–4) and API key. Model and voice are buttons that open a
