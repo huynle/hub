@@ -1,6 +1,42 @@
 # Changelog
 
-## 0.5.1 (unreleased)
+## 0.6.0
+
+**OpenCode Hub is now Hub** (`@huynle/hub`): a harness-agnostic central hub that AI agent harnesses
+connect to. OpenCode is the first supported harness; Voice is one feature (`/voice`), and `/hub`
+configures the harness's hub connection. Everything from opencode-hub and opencode-voice keeps working;
+see [Migrating from opencode-voice or opencode-hub](README.md#migrating-from-opencode-voice-or-opencode-hub).
+
+- **Package and repository**: npm `@huynle/hub` 0.6.0, repository `github.com/huynle/hub`. Install with
+  `opencode plugin add @huynle/hub`. The interim name `@huynle/opencode-hub` was never published to npm, so
+  there is **no `@huynle/opencode-hub` shim**; `@huynle/opencode-voice` 0.6.0 re-exports `@huynle/hub`
+  with a rename notice.
+- **Commands**: the hub server command is `hub-server` (a bare `hub` would collide with GitHub's `hub`
+  CLI); `opencode-hub` and `opencode-voice-hub` stay as aliases. Release binaries are
+  `hub-<os>-<arch>[.exe]`; the image is `ghcr.io/huynle/hub`.
+- **Plugin ids** `hub` and `hub.tui` (were `opencode-hub` / `opencode-hub.tui`); TUI command ids
+  `hub.open` (`/hub`) and `hub.voice` (`/voice`) in the palette group "Hub". The RPC id stays `hub`, and the
+  server still registers the legacy `voice` id. The TUI's commands come from a small registry
+  (`src/tui-commands.ts`) so further `/<feature>` commands are one entry each.
+- **Config and state**: `~/.config/hub/{config,hub}.json` and `~/.local/state/hub`. On first start, when
+  the new location is missing, the `opencode-hub` copy is copied there, else the `opencode-voice` one
+  (copy only, modes kept, the old copies never deleted, the `hub.pid` lock skipped; explicit paths skip
+  it).
+- **Env**: `HUB_SPOKE_CONFIG` is the new name of the plugin config path; `OPENCODE_HUB_CONFIG` and
+  `OPENCODE_VOICE_CONFIG` still work with a one-time deprecation warning (newest legacy name wins). The
+  other `HUB_*` names are unchanged, with the `VOICE_*` fallbacks as before.
+- **Branding**: "Hub" in the console (title, sidebar, sign-in page), the installed app (manifest name and
+  short name "Hub"), notifications, TUI toasts and dialogs, and the hub's logs (`[hub]` prefix). Prompts the
+  hub sends carry `metadata.source: "hub"`; `"opencode-hub"` and `"opencode-voice"` are still recognized.
+  The default VAPID subject is `mailto:hub@localhost`. Device cookies (`voice_device`, `voice_oidc`) and
+  the `voice` agent are unchanged, so nobody is signed out.
+- **New icon**: an original Hub mark (a central node in the console's accent joined by three spokes to
+  satellite nodes) on the dark tile, as `icon.svg`, 192/512 px PNGs, a maskable icon, an Apple touch icon
+  and a `favicon.ico` (16/32/48 px), also drawn inline next to the "Hub" wordmark in the sidebar and on the
+  sign-in page. `scripts/gen-icons.ts` generates them all with headless Chromium.
+- **launchd template** renamed to `scripts/io.github.huynle.hub.plist` (label `io.github.huynle.hub`).
+
+Also in this release (listed as 0.5.1, unreleased, before):
 
 - **New sessions, composer first.** `/new` is a big "Describe a task or ask a question" composer (with
   images) and a row under it: **Environment** (your machines; online first with process and OpenCode
