@@ -1,4 +1,4 @@
-// OpenCode Hub console entry.
+// Hub console entry.
 import { render } from "solid-js/web"
 import { App } from "./app/App"
 import { registerServiceWorker } from "./app/push"

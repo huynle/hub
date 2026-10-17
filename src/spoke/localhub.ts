@@ -10,7 +10,7 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { hubEnv } from "../env"
 import { isLoopbackURL } from "../loopback"
-import { APP_DIR, LEGACY_APP_DIR, migrateLegacy, stateBase } from "../migrate"
+import { APP_DIR, legacyPaths, migrateFirst, stateBase } from "../migrate"
 
 export interface ChildLike {
   readonly pid?: number
@@ -23,8 +23,8 @@ export type SpawnLike = (command: string, args: readonly string[], options: obje
 
 export interface LocalHubOptions {
   /**
-   * Where hub.pid and hub.log live (default $HUB_STATE_DIR or ~/.local/state/opencode-hub, migrated from
-   * ~/.local/state/opencode-voice first so the hub does not find a fresh, empty state directory).
+   * Where hub.pid and hub.log live (default $HUB_STATE_DIR or ~/.local/state/hub, migrated from
+   * ~/.local/state/opencode-hub or opencode-voice first so the hub does not find a fresh, empty state directory).
    */
   readonly stateDir?: string
   /** Home directory for the default state directory (default os.homedir()). */
@@ -140,7 +140,7 @@ export async function ensureLocalHub(server: string, options: LocalHubOptions = 
   if (await answers(url.origin)) return { status: "running" }
 
   if (options.stateDir === undefined && !hubEnv(env).HUB_STATE_DIR) {
-    migrateLegacy(path.join(stateBase(home), LEGACY_APP_DIR), stateDir, { skip: ["hub.pid"], ...(options.log ? { log: options.log } : {}) })
+    migrateFirst(legacyPaths(stateBase(home)), stateDir, { skip: ["hub.pid"], ...(options.log ? { log: options.log } : {}) })
   }
   mkdirSync(stateDir, { recursive: true, mode: 0o700 })
 

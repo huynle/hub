@@ -14,7 +14,7 @@ describe("centralConfig", () => {
       host: "127.0.0.1",
       port: 4097,
       publicURL: "http://127.0.0.1:4097",
-      stateDir: "/home/u/.local/state/opencode-hub",
+      stateDir: "/home/u/.local/state/hub",
       apiKey: undefined,
       sttModel: "openai/gpt-4o-mini-transcribe",
       ttsModel: "microsoft/mai-voice-2.1-flash",
@@ -22,7 +22,7 @@ describe("centralConfig", () => {
       maxAudioBytes: 10 * 1024 * 1024,
       maxSpeechChars: 800,
       turnTimeoutMs: 600_000,
-      vapidSubject: "mailto:opencode-hub@localhost",
+      vapidSubject: "mailto:hub@localhost",
       auth: { mode: "pairing" },
     })
   })

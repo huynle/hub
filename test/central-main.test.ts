@@ -26,7 +26,7 @@ describe("parseHubArgs", () => {
 describe("hubHelp", () => {
   test("names the version, the config file and the main env vars", () => {
     const help = hubHelp("1.2.3")
-    expect(help).toContain("opencode-hub 1.2.3")
+    expect(help).toContain("hub-server 1.2.3")
     for (const word of ["HUB_PORT", "HUB_HOST", "HUB_PUBLIC_URL", "HUB_STATE_DIR", "OPENROUTER_API_KEY", "hub.json", "--version"]) {
       expect(help).toContain(word)
     }

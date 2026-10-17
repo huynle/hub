@@ -2,8 +2,8 @@
 const KEY = Symbol.for("opencode-voice.rename-notice")
 
 export const RENAME_NOTICE =
-  "[opencode-voice] @huynle/opencode-voice is now @huynle/opencode-hub; switch your OpenCode plugin to " +
-  "@huynle/opencode-hub (or github:huynle/opencode-hub). This package only re-exports it."
+  "[opencode-voice] @huynle/opencode-voice is now @huynle/hub; switch your OpenCode plugin to " +
+  "@huynle/hub (or github:huynle/hub). This package only re-exports it."
 
 export function renameNotice(log: (message: string) => void = console.warn): void {
   const store = globalThis as unknown as Record<symbol, unknown>

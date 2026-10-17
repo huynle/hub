@@ -18,8 +18,8 @@ describe("public repository release workflow", () => {
     expect(job).not.toMatch(/runner:\s*self-hosted/);
   });
 
-  test("publishes the renamed OpenCode Hub image", () => {
-    expect(releaseImageJob()).toContain("image: ghcr.io/huynle/opencode-hub\n");
+  test("publishes the renamed Hub image", () => {
+    expect(releaseImageJob()).toContain("image: ghcr.io/huynle/hub\n");
   });
 
   test("retains the supported multi-architecture platforms", () => {

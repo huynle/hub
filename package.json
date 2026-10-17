@@ -1,16 +1,16 @@
 {
-  "name": "@huynle/opencode-hub",
-  "version": "0.5.0",
-  "description": "A remote console for your OpenCode sessions: follow, steer and stop sessions from your phone or browser, with optional hands-free Voice and a self-hostable hub.",
+  "name": "@huynle/hub",
+  "version": "0.6.0",
+  "description": "Hub: a harness-agnostic central hub your AI agent harnesses connect to (OpenCode first). Follow, steer and stop sessions from your phone or browser, with notifications, optional hands-free Voice and a self-hostable server.",
   "license": "MIT",
   "author": "Huy Le",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/huynle/opencode-hub.git"
+    "url": "git+https://github.com/huynle/hub.git"
   },
-  "homepage": "https://github.com/huynle/opencode-hub#readme",
+  "homepage": "https://github.com/huynle/hub#readme",
   "bugs": {
-    "url": "https://github.com/huynle/opencode-hub/issues"
+    "url": "https://github.com/huynle/hub/issues"
   },
   "keywords": [
     "opencode",
@@ -23,7 +23,8 @@
     "tts",
     "stt",
     "pwa",
-    "agent"
+    "agent",
+    "harness"
   ],
   "type": "module",
   "main": "./server.ts",
@@ -35,6 +36,7 @@
     "./package.json": "./package.json"
   },
   "bin": {
+    "hub-server": "bin/hub.ts",
     "opencode-hub": "bin/hub.ts",
     "opencode-voice-hub": "bin/hub.ts"
   },
@@ -48,7 +50,7 @@
     "docker",
     "Dockerfile",
     "scripts/hub-local.sh",
-    "scripts/com.opencode-hub.hub.plist",
+    "scripts/io.github.huynle.hub.plist",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"

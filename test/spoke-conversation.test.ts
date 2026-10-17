@@ -96,8 +96,9 @@ describe("work model note", () => {
 })
 
 describe("prompt source", () => {
-  test("the hub tags its prompts opencode-hub and recognizes the legacy opencode-voice tag", () => {
-    expect(PROMPT_SOURCE).toBe("opencode-hub")
+  test("the hub tags its prompts hub and recognizes the legacy opencode-hub and opencode-voice tags", () => {
+    expect(PROMPT_SOURCE).toBe("hub")
+    expect(isHubPrompt({ source: "hub", mode: "remote" })).toBe(true)
     expect(isHubPrompt({ source: "opencode-hub", mode: "remote" })).toBe(true)
     expect(isHubPrompt({ source: "opencode-voice" })).toBe(true)
     expect(isHubPrompt({ source: "tui" })).toBe(false)

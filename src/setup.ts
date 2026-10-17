@@ -1,5 +1,5 @@
 // First-run setup for /hub: whether to show it, which options in which order, the server URL the user
-// types, and whether that server answers like an OpenCode Hub. Pure decisions; src/tui.ts renders them.
+// types, and whether that server answers like a Hub. Pure decisions; src/tui.ts renders them.
 import { DEFAULT_SERVER, type Mode } from "./config"
 import { isLoopbackURL } from "./loopback"
 
@@ -100,7 +100,7 @@ export function parseServerInput(raw: string): Parsed {
   return { ok: true, url: `${url.origin}${url.pathname}`.replace(/\/+$/, "") }
 }
 
-/** GET <server>/healthz: reachable and answering like an OpenCode Hub ({ok: true}). */
+/** GET <server>/healthz: reachable and answering like a Hub ({ok: true}). */
 export async function checkServer(
   server: string,
   options: { fetch?: typeof globalThis.fetch; timeoutMs?: number } = {},
@@ -119,6 +119,6 @@ export async function checkServer(
     }
   }
   const body = (await res.json().catch(() => undefined)) as { ok?: unknown; version?: unknown } | undefined
-  if (body?.ok !== true) return { ok: false, error: `${server} answered, but it is not an OpenCode Hub` }
+  if (body?.ok !== true) return { ok: false, error: `${server} answered, but it is not a Hub` }
   return { ok: true, ...(typeof body.version === "string" ? { version: body.version } : {}) }
 }

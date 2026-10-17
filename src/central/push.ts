@@ -233,7 +233,7 @@ export class Push {
     }
     this.cool(key, TEST_COOLDOWN_MS)
     const targets = this.store.pushSubscriptions().filter((s) => s.deviceID === deviceID)
-    const payload: PushPayload = { kind: "test", sessionID: "", title: "OpenCode Hub", body: "Test notification: notifications work on this device." }
+    const payload: PushPayload = { kind: "test", sessionID: "", title: "Hub", body: "Test notification: notifications work on this device." }
     const { delivered, failed } = await this.send(targets, payload)
     return { sent: delivered, failed }
   }
@@ -260,7 +260,7 @@ export class Push {
       const endpoint = targets[index]!.endpoint
       failed.push({ host: hostOf(endpoint), ...(status !== undefined ? { status } : {}) })
       if (status === 404 || status === 410) this.store.dropPushSubscription(endpoint)
-      else console.error(`[opencode-hub] push to ${hostOf(endpoint)} failed: ${status ?? (result.reason as Error)?.message}`)
+      else console.error(`[hub] push to ${hostOf(endpoint)} failed: ${status ?? (result.reason as Error)?.message}`)
     })
     return { delivered, failed }
   }

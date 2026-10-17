@@ -193,7 +193,7 @@ export class SpokeConnection {
         try {
           this.options.onWelcome?.(frame)
         } catch (cause) {
-          console.error("[opencode-hub] welcome handler failed", cause)
+          console.error("[hub] welcome handler failed", cause)
         }
         return
       case "bye":

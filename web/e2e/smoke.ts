@@ -3,39 +3,16 @@
 // phone (390×844) sizes: home loads, a session opens with its timeline, Send → Steer/Stop → Send, image attachments
 // (attach, remove, attach again, send), the right rail and diff viewer render, and a Voice-off session is inspectable. Screenshots go to $SMOKE_SHOTS (default: the OS temp
 // dir). Run `npm run build:web && npm run test:e2e`. Chromium: $CHROMIUM_PATH, else Playwright's cache, else PATH.
-import { existsSync, mkdirSync, readdirSync } from "node:fs"
-import { homedir, tmpdir } from "node:os"
+import { existsSync, mkdirSync } from "node:fs"
+import { tmpdir } from "node:os"
 import path from "node:path"
 import { chromium, type Browser, type Page } from "playwright-core"
+import { chromiumPath } from "./chromium"
 
 const ROOT = path.join(import.meta.dir, "..", "..")
-const SHOTS = process.env.SMOKE_SHOTS ?? path.join(tmpdir(), "opencode-hub-smoke")
+const SHOTS = process.env.SMOKE_SHOTS ?? path.join(tmpdir(), "hub-smoke")
 const PORT = Number(process.env.SMOKE_PORT ?? 4399)
 const BASE = `http://127.0.0.1:${PORT}`
-
-function chromiumPath(): string | undefined {
-  if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH
-  try {
-    const p = chromium.executablePath()
-    if (p && existsSync(p)) return p
-  } catch {}
-  const cache = path.join(homedir(), process.platform === "darwin" ? "Library/Caches/ms-playwright" : ".cache/ms-playwright")
-  if (existsSync(cache)) {
-    for (const dir of readdirSync(cache).filter((d) => /^chromium-\d+$/.test(d)).sort().reverse()) {
-      for (const rel of [
-        "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-        "chrome-mac/Chromium.app/Contents/MacOS/Chromium",
-        "chrome-linux64/chrome",
-        "chrome-linux/chrome",
-      ]) {
-        const file = path.join(cache, dir, rel)
-        if (existsSync(file)) return file
-      }
-    }
-  }
-  for (const file of ["/opt/homebrew/bin/chromium", "/usr/bin/chromium", "/usr/bin/chromium-browser"]) if (existsSync(file)) return file
-  return undefined
-}
 
 let failures = 0
 const results: string[] = []

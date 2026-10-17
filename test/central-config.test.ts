@@ -1,4 +1,4 @@
-// Hub configuration: ~/.config/opencode-hub/hub.json (or $HUB_CONFIG) under env vars, with
+// Hub configuration: ~/.config/hub/hub.json (or $HUB_CONFIG) under env vars, with
 // validated speech settings and API keys refused from a file other users can read.
 import { describe, expect, test } from "bun:test"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs"
@@ -19,8 +19,8 @@ function file(content: unknown, mode = 0o600): string {
 
 describe("hub.json path", () => {
   test("defaults under ~/.config, honors XDG_CONFIG_HOME and HUB_CONFIG", () => {
-    expect(hubConfigPath({}, HOME)).toBe("/home/me/.config/opencode-hub/hub.json")
-    expect(hubConfigPath({ XDG_CONFIG_HOME: "/xdg" }, HOME)).toBe("/xdg/opencode-hub/hub.json")
+    expect(hubConfigPath({}, HOME)).toBe("/home/me/.config/hub/hub.json")
+    expect(hubConfigPath({ XDG_CONFIG_HOME: "/xdg" }, HOME)).toBe("/xdg/hub/hub.json")
     expect(hubConfigPath({ HUB_CONFIG: "/etc/hub.json", XDG_CONFIG_HOME: "/xdg" }, HOME)).toBe("/etc/hub.json")
   })
 })
@@ -98,7 +98,7 @@ describe("centralConfig precedence", () => {
       stateDir: "/s/env",
     })
     expect(centralConfig({}, HOME, { port: 4330 })).toMatchObject({ host: "127.0.0.1", port: 4330, publicURL: "http://127.0.0.1:4330" })
-    expect(centralConfig({}, HOME)).toMatchObject({ port: 4097, stateDir: "/home/me/.local/state/opencode-hub" })
+    expect(centralConfig({}, HOME)).toMatchObject({ port: 4097, stateDir: "/home/me/.local/state/hub" })
   })
 
   test("speech from the file is passed through for the settings layer", () => {
@@ -149,14 +149,14 @@ describe("legacy VOICE_* names", () => {
   })
 })
 
-describe("migration from opencode-voice", () => {
-  function legacyHome(hub: unknown = { port: 4555 }) {
+describe("migration from opencode-hub and opencode-voice", () => {
+  function legacyHome(hub: unknown = { port: 4555 }, dir = "opencode-voice") {
     const home = mkdtempSync(path.join(tmpdir(), "hub-home-"))
-    const legacyConfig = path.join(home, ".config", "opencode-voice", "hub.json")
+    const legacyConfig = path.join(home, ".config", dir, "hub.json")
     mkdirSync(path.dirname(legacyConfig), { recursive: true })
     writeFileSync(legacyConfig, JSON.stringify(hub))
     chmodSync(legacyConfig, 0o600)
-    const legacyState = path.join(home, ".local", "state", "opencode-voice")
+    const legacyState = path.join(home, ".local", "state", dir)
     mkdirSync(legacyState, { recursive: true, mode: 0o700 })
     writeFileSync(path.join(legacyState, "machines.json"), "[]", { mode: 0o600 })
     writeFileSync(path.join(legacyState, "hub.pid"), "{}", { mode: 0o600 })
@@ -167,8 +167,8 @@ describe("migration from opencode-voice", () => {
     const { home, legacyConfig, legacyState } = legacyHome()
     const lines: string[] = []
     const loaded = loadCentralConfig({}, home, { log: (m) => lines.push(m) })
-    const config = path.join(home, ".config", "opencode-hub", "hub.json")
-    const state = path.join(home, ".local", "state", "opencode-hub")
+    const config = path.join(home, ".config", "hub", "hub.json")
+    const state = path.join(home, ".local", "state", "hub")
     expect(loaded.path).toBe(config)
     expect(loaded.loaded).toBe(true)
     expect(loaded.config.port).toBe(4555)
@@ -184,20 +184,40 @@ describe("migration from opencode-voice", () => {
     expect(lines).toHaveLength(2)
   })
 
+  test("prefers the opencode-hub copies over the opencode-voice ones", () => {
+    const { home, legacyConfig, legacyState } = legacyHome({ port: 4666 }, "opencode-hub")
+    const voiceConfig = path.join(home, ".config", "opencode-voice", "hub.json")
+    mkdirSync(path.dirname(voiceConfig), { recursive: true })
+    writeFileSync(voiceConfig, JSON.stringify({ port: 4555 }))
+    const voiceState = path.join(home, ".local", "state", "opencode-voice")
+    mkdirSync(voiceState, { recursive: true })
+    writeFileSync(path.join(voiceState, "old.json"), "{}")
+    const loaded = loadCentralConfig({}, home, { log: () => {} })
+    const state = path.join(home, ".local", "state", "hub")
+    expect(loaded.config.port).toBe(4666)
+    expect(statSync(loaded.path).mode & 0o777).toBe(0o600)
+    expect(readFileSync(path.join(state, "machines.json"), "utf8")).toBe("[]")
+    expect(existsSync(path.join(state, "old.json"))).toBe(false)
+    expect(existsSync(path.join(state, "hub.pid"))).toBe(false)
+    expect(existsSync(legacyConfig)).toBe(true)
+    expect(existsSync(path.join(legacyState, "hub.pid"))).toBe(true)
+    expect(existsSync(voiceConfig)).toBe(true)
+  })
+
   test("explicit HUB_CONFIG and HUB_STATE_DIR bypass migration", () => {
     const { home } = legacyHome()
     const explicit = path.join(home, "my-hub.json")
     const lines: string[] = []
     const loaded = loadCentralConfig({ HUB_CONFIG: explicit, HUB_STATE_DIR: path.join(home, "my-state") }, home, { log: (m) => lines.push(m) })
     expect(loaded.loaded).toBe(false)
-    expect(existsSync(path.join(home, ".config", "opencode-hub"))).toBe(false)
-    expect(existsSync(path.join(home, ".local", "state", "opencode-hub"))).toBe(false)
+    expect(existsSync(path.join(home, ".config", "hub"))).toBe(false)
+    expect(existsSync(path.join(home, ".local", "state", "hub"))).toBe(false)
     expect(lines).toEqual([])
   })
 
   test("a stateDir in hub.json bypasses the state migration", () => {
     const { home } = legacyHome({ stateDir: "~/custom-state" })
     loadCentralConfig({}, home, { log: () => {} })
-    expect(existsSync(path.join(home, ".local", "state", "opencode-hub"))).toBe(false)
+    expect(existsSync(path.join(home, ".local", "state", "hub"))).toBe(false)
   })
 })

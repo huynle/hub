@@ -1,7 +1,7 @@
 name: Release
 # Push a tag vX.Y.Z (matching package.json) to publish: standalone hub binaries + SHA256SUMS on the
-# GitHub Release, the hub image ghcr.io/<owner>/opencode-hub (linux/amd64 + linux/arm64), and the npm
-# package @huynle/opencode-hub through npm trusted publishing (OIDC; no token).
+# GitHub Release, the hub image ghcr.io/<owner>/hub (linux/amd64 + linux/arm64), and the npm
+# package @huynle/hub through npm trusted publishing (OIDC; no token).
 on:
   push:
     tags: ["v*"]
@@ -56,11 +56,11 @@ jobs:
       - run: scripts/build-binaries.sh ${{ matrix.target }}
       - name: Smoke test
         if: matrix.target == 'linux-x64'
-        run: ./dist/opencode-hub-linux-x64 --version
+        run: ./dist/hub-linux-x64 --version
       - uses: actions/upload-artifact@v4
         with:
           name: hub-${{ matrix.target }}
-          path: dist/opencode-hub-*
+          path: dist/hub-*
           if-no-files-found: error
 
   release:
@@ -78,13 +78,13 @@ jobs:
       - name: SHA256SUMS
         working-directory: dist
         run: |
-          chmod +x opencode-hub-*
-          sha256sum opencode-hub-* > SHA256SUMS
+          chmod +x hub-*
+          sha256sum hub-* > SHA256SUMS
           cat SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/opencode-hub-*
+            dist/hub-*
             dist/SHA256SUMS
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
@@ -108,14 +108,14 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/opencode-hub
+          images: ghcr.io/${{ github.repository_owner }}/hub
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
           labels: |
-            org.opencontainers.image.title=opencode-hub
-            org.opencontainers.image.description=OpenCode Hub: remote console, pairing, push and optional Voice for OpenCode sessions
+            org.opencontainers.image.title=hub
+            org.opencontainers.image.description=Hub: a central hub for AI agent harnesses (OpenCode first): remote console, pairing, push and optional Voice
             org.opencontainers.image.licenses=MIT
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
       - uses: docker/build-push-action@v6
@@ -129,7 +129,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   npm:
-    # Trusted publishing (OIDC): npm trusts this workflow (huynle/opencode-hub, release.yml), so there is no
+    # Trusted publishing (OIDC): npm trusts this workflow (huynle/hub, release.yml), so there is no
     # token to store or leak, and npm adds provenance automatically. Needs npm >= 11.5.1 and Node >= 22.14.
     # The trusted publisher is configured per package on npmjs.com (package settings), so a new package
     # name needs one manual first publish before this job can publish it.

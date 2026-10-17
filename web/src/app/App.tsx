@@ -148,7 +148,7 @@ function HomeShell() {
       <Show when={isPhone()}>
         <header class="topbar">
           <IconButton icon="menu" label="Open sidebar" onClick={toggleSidebar} />
-          <span class="title display">OpenCode Hub</span>
+          <span class="title display">Hub</span>
         </header>
       </Show>
       <div class="home-scroll">

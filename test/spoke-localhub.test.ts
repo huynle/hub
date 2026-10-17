@@ -131,7 +131,7 @@ describe("ensureLocalHub", () => {
     expect(env.VOICE_PUBLIC_URL).toBeUndefined()
   })
 
-  test("without a state dir: ~/.local/state/opencode-hub, migrated from opencode-voice first (without its lock)", async () => {
+  test("without a state dir: ~/.local/state/hub, migrated from opencode-voice first (without its lock)", async () => {
     const home = mkdtempSync(path.join(tmpdir(), "hub-home-"))
     const legacy = path.join(home, ".local", "state", "opencode-voice")
     mkdirSync(legacy, { recursive: true, mode: 0o700 })
@@ -140,17 +140,27 @@ describe("ensureLocalHub", () => {
     const lines: string[] = []
     const result = await ensureLocalHub("http://127.0.0.1:4321", options({ stateDir: undefined, home, env: { PATH: "/usr/bin" }, log: (m) => lines.push(m) }))
     expect(result).toEqual({ status: "started", pid: 5000 })
-    const state = path.join(home, ".local", "state", "opencode-hub")
+    const state = path.join(home, ".local", "state", "hub")
     expect(readFileSync(path.join(state, "machines.json"), "utf8")).toBe("[]")
     expect(existsSync(path.join(state, "hub.log"))).toBe(true)
     expect(existsSync(path.join(legacy, "machines.json"))).toBe(true)
     expect(lines).toHaveLength(1)
   })
 
-  test("defaultStateDir: HUB_STATE_DIR, then the legacy VOICE_STATE_DIR, then ~/.local/state/opencode-hub", () => {
+  test("without a state dir: the opencode-hub state is preferred over the opencode-voice one", async () => {
+    const home = mkdtempSync(path.join(tmpdir(), "hub-home-"))
+    for (const [dir, body] of [["opencode-hub", "hub"], ["opencode-voice", "voice"]] as const) {
+      mkdirSync(path.join(home, ".local", "state", dir), { recursive: true, mode: 0o700 })
+      writeFileSync(path.join(home, ".local", "state", dir, "machines.json"), body, { mode: 0o600 })
+    }
+    await ensureLocalHub("http://127.0.0.1:4321", options({ stateDir: undefined, home, env: { PATH: "/usr/bin" }, log: () => {} }))
+    expect(readFileSync(path.join(home, ".local", "state", "hub", "machines.json"), "utf8")).toBe("hub")
+  })
+
+  test("defaultStateDir: HUB_STATE_DIR, then the legacy VOICE_STATE_DIR, then ~/.local/state/hub", () => {
     expect(defaultStateDir({ HUB_STATE_DIR: "/new", VOICE_STATE_DIR: "/old" }, "/home/me")).toBe("/new")
     expect(defaultStateDir({ VOICE_STATE_DIR: "/old" }, "/home/me")).toBe("/old")
-    expect(defaultStateDir({}, "/home/me")).toBe("/home/me/.local/state/opencode-hub")
+    expect(defaultStateDir({}, "/home/me")).toBe("/home/me/.local/state/hub")
   })
 
   test("only one starter: a fresh lock held by a live process means busy", async () => {

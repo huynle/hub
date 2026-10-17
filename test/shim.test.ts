@@ -1,4 +1,5 @@
-// The legacy @huynle/opencode-voice package: a thin re-export of @huynle/opencode-hub, kept in step with it.
+// The legacy @huynle/opencode-voice package: a thin re-export of @huynle/hub, kept in step with it. There is no
+// @huynle/opencode-hub shim: that name was never published.
 import { describe, expect, test } from "bun:test"
 import { existsSync, readFileSync } from "node:fs"
 import path from "node:path"
@@ -10,11 +11,13 @@ const main = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"))
 const shim = JSON.parse(readFileSync(path.join(shimDir, "package.json"), "utf8"))
 
 describe("main package", () => {
-  test("is @huynle/opencode-hub with the opencode-hub bin and the legacy alias", () => {
-    expect(main.name).toBe("@huynle/opencode-hub")
-    expect(main.bin).toEqual({ "opencode-hub": "bin/hub.ts", "opencode-voice-hub": "bin/hub.ts" })
-    expect(main.repository.url).toContain("github.com/huynle/opencode-hub")
-    expect(main.keywords).toContain("hub")
+  test("is @huynle/hub with the hub-server bin and the legacy aliases", () => {
+    expect(main.name).toBe("@huynle/hub")
+    expect(main.bin).toEqual({ "hub-server": "bin/hub.ts", "opencode-hub": "bin/hub.ts", "opencode-voice-hub": "bin/hub.ts" })
+    expect(main.repository.url).toContain("github.com/huynle/hub.git")
+    expect(main.homepage).toContain("github.com/huynle/hub")
+    expect(main.bugs.url).toContain("github.com/huynle/hub/issues")
+    for (const k of ["hub", "agent", "harness", "opencode-plugin"]) expect(main.keywords).toContain(k)
   })
 
   test("does not ship the shim", () => {
@@ -27,7 +30,7 @@ describe("legacy shim package", () => {
   test("is @huynle/opencode-voice at the hub's version, depending on it", () => {
     expect(shim.name).toBe("@huynle/opencode-voice")
     expect(shim.version).toBe(main.version)
-    expect(shim.dependencies).toEqual({ "@huynle/opencode-hub": `^${main.version}` })
+    expect(shim.dependencies).toEqual({ "@huynle/hub": `^${main.version}` })
     expect(shim.bin).toBeUndefined() // the hub package already provides opencode-voice-hub
   })
 
@@ -37,7 +40,7 @@ describe("legacy shim package", () => {
       if (entry === "./package.json") continue
       const source = readFileSync(path.join(shimDir, file), "utf8")
       const target = entry === "." ? "./server" : entry
-      expect(source).toContain(`from "@huynle/opencode-hub/${target.slice(2)}"`)
+      expect(source).toContain(`from "@huynle/hub/${target.slice(2)}"`)
       expect(shim.files).toContain(file.slice(2))
     }
     expect(shim.files).toContain("notice.ts")
@@ -48,6 +51,7 @@ describe("legacy shim package", () => {
     renameNotice((m) => lines.push(m))
     renameNotice((m) => lines.push(m))
     expect(lines).toEqual([RENAME_NOTICE])
-    expect(RENAME_NOTICE).toContain("@huynle/opencode-hub")
+    expect(RENAME_NOTICE).toContain("@huynle/hub")
+    expect(RENAME_NOTICE).not.toContain("opencode-hub")
   })
 })
