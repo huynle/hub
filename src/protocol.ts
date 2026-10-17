@@ -256,7 +256,8 @@ export type TurnResult =
 /** Result payloads, keyed by op. */
 export interface ResultFor {
   turn: TurnResult
-  permission: Record<string, never>
+  /** `gone`: the request is not pending in this process any more (answered elsewhere, expired). */
+  permission: { readonly gone?: true }
   context: { readonly messages: ReadonlyArray<{ readonly role: "user" | "assistant"; readonly text: string }> }
   pairCode: { readonly code: string; readonly url: string; readonly expiresAt: number }
   handoff: { readonly notified: number }

@@ -12,6 +12,8 @@ export interface Startable {
 interface Instance {
   readonly id: symbol
   readonly create: (processID: string) => Startable
+  /** Per-instance value (e.g. the instance's location-scoped API), see Membership.locals. */
+  readonly local?: unknown
 }
 
 interface Registry {
@@ -26,6 +28,8 @@ export interface Membership<S> {
   readonly processID: string
   active(): S | undefined
   isActive(): boolean
+  /** The local values of every instance in the process (the active one first). */
+  locals<L = unknown>(): L[]
   leave(): void
 }
 
@@ -58,11 +62,11 @@ function promote(reg: Registry): void {
   reg.owner = undefined
 }
 
-/** `create` receives the stable per-process ID. */
-export function joinProcess<S extends Startable>(create: (processID: string) => S, key: symbol = SPOKE_KEY): Membership<S> {
+/** `create` receives the stable per-process ID; `local` is this instance's value for Membership.locals. */
+export function joinProcess<S extends Startable>(create: (processID: string) => S, key: symbol = SPOKE_KEY, local?: unknown): Membership<S> {
   const reg = registry(key)
   const id = Symbol("hub.instance")
-  reg.instances.push({ id, create })
+  reg.instances.push({ id, create, ...(local !== undefined ? { local } : {}) })
   if (!reg.spoke) {
     try {
       const spoke = create(reg.processID)
@@ -77,6 +81,11 @@ export function joinProcess<S extends Startable>(create: (processID: string) => 
     processID: reg.processID,
     active: () => registry(key).spoke as S | undefined,
     isActive: () => registry(key).owner === id,
+    locals: <L>() => {
+      const current = registry(key)
+      const ordered = [...current.instances].sort((a, b) => Number(b.id === current.owner) - Number(a.id === current.owner))
+      return ordered.flatMap((i) => (i.local === undefined ? [] : [i.local as L]))
+    },
     leave: () => {
       const current = registry(key)
       const index = current.instances.findIndex((i) => i.id === id)

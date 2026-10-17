@@ -79,7 +79,11 @@ export interface SpokeHost {
   context(sessionID: string): Promise<ReadonlyArray<unknown>>
   listModels?(): Promise<ReadonlyArray<unknown>>
   getSession(sessionID: string): Promise<HostSession>
-  replyPermission(input: { sessionID: string; requestID: string; decision: PermissionDecision }): Promise<unknown>
+  /**
+   * Replies to a pending permission; "gone" when it is not pending here any more (answered, expired).
+   * `directory` is the session's directory when known (permissions are pending per location).
+   */
+  replyPermission(input: { sessionID: string; requestID: string; decision: PermissionDecision; directory?: string }): Promise<unknown>
   interrupt(sessionID: string): Promise<unknown>
   switchAgent(sessionID: string, agent: string): Promise<unknown>
   switchModel(sessionID: string, model: ModelRef): Promise<unknown>
@@ -732,9 +736,11 @@ export class Spoke {
     switch (req.op) {
       case "turn":
         return this.turn(req.sessionID, req.text, req.voiceStyle, req.images)
-      case "permission":
-        await this.host.replyPermission({ sessionID: req.sessionID, requestID: req.requestID, decision: req.decision })
-        return {}
+      case "permission": {
+        const directory = this.tracker.directoryOf(req.sessionID)
+        const outcome = await this.host.replyPermission({ sessionID: req.sessionID, requestID: req.requestID, decision: req.decision, ...(directory ? { directory } : {}) })
+        return outcome === "gone" ? { gone: true } : {}
+      }
       case "context":
         return { messages: contextMessages(await this.host.context(req.sessionID)) }
       case "models": {

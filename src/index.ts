@@ -11,6 +11,7 @@ import { defineVoiceAgent, orchestratorParts } from "./spoke/conversation"
 import { herdrRunner } from "./spoke/herdr"
 import { listServiceSessions } from "./spoke/listing"
 import { ensureLocalHub } from "./spoke/localhub"
+import { replyPermission, type PermissionLocation } from "./spoke/locations"
 import { joinProcess, type Membership } from "./spoke/singleton"
 import { detectKind, Spoke, SpokeError, type SpokeHost } from "./spoke/spoke"
 
@@ -48,7 +49,18 @@ function unwrap<T>(value: unknown, isBare: (v: any) => boolean): T {
   return (v && !isBare(v) && v.data !== undefined ? v.data : v) as T
 }
 
-function hostFrom(ctx: Context): SpokeHost {
+/** This instance's location-scoped permission API (OpenCode keeps pending permissions per location). */
+function permissionLocation(ctx: Context): PermissionLocation {
+  const permission = ctx.permission as any
+  return {
+    directory: ctx.location.directory,
+    get: (input) => permission.get(input),
+    reply: (input) => permission.reply(input),
+  }
+}
+
+/** `locations`: the permission APIs of every plugin instance in this process (one per location). */
+function hostFrom(ctx: Context, locations: () => PermissionLocation[]): SpokeHost {
   const session = ctx.session as any
   const agent = ctx.agent as any
   const mcp = (ctx as any).mcp
@@ -61,7 +73,7 @@ function hostFrom(ctx: Context): SpokeHost {
     context: (sessionID) => session.context({ sessionID }),
     listModels: async () => unwrap<ReadonlyArray<unknown>>(await (ctx.model as any).list({}), Array.isArray),
     getSession: async (sessionID) => unwrap(await session.get({ sessionID }), (v) => typeof v.id === "string"),
-    replyPermission: (input) => (ctx.permission as any).reply(input),
+    replyPermission: ({ directory, ...input }) => replyPermission(locations(), input, directory),
     interrupt: (sessionID) => session.interrupt({ sessionID }),
     switchAgent: (sessionID, id) => session.switchAgent({ sessionID, agent: id }),
     switchModel: (sessionID, model) => session.switchModel({ sessionID, model }),
@@ -99,7 +111,7 @@ export default Plugin.define({
     const kind = detectKind(process.argv)
     const membership: Membership<Spoke> = joinProcess(
       (processID) =>
-        new Spoke(hostFrom(ctx), {
+        new Spoke(hostFrom(ctx, () => membership.locals<PermissionLocation>()), {
           configFile: prepareConfigPath(),
           machineName: hostname(),
           kind,
@@ -111,6 +123,8 @@ export default Plugin.define({
           // One Herdr reader per machine: the background service's spoke (see src/spoke/herdr.ts).
           ...(kind === "service" ? { herdr: herdrRunner() } : {}),
         }),
+      undefined,
+      permissionLocation(ctx),
     )
 
     try {

@@ -236,8 +236,11 @@ const isOn = (s: SessionInfo) => s.exposed !== false
 export class Registry {
   private readonly conns = new Map<string, Conn>()
   private readonly boards = new Map<string, StatusBoard>()
-  /** permission requestID → where it was asked. */
-  private readonly permissions = new Map<string, { connID: string; sessionID: string }>()
+  /**
+   * permission requestID → its session and every connection that forwarded it, first first. Usually one
+   * process holds it, but several may report the session; a reply tries them in order.
+   */
+  private readonly permissions = new Map<string, { connIDs: string[]; sessionID: string }>()
   /** Sessions with a hub turn in flight, with how to end the waiting request early (stop/interrupt). */
   private readonly active = new Map<string, { readonly cancel?: () => void }>()
   private readonly listeners = new Set<(message: RegistryMessage, tenant?: string) => void>()
@@ -357,7 +360,9 @@ export class Registry {
     if (this.machineTerminals.get(conn.machine.id)?.connID === connID) this.machineTerminals.delete(conn.machine.id)
     // Nobody can answer permissions asked by a process that is gone.
     for (const [requestID, origin] of this.permissions) {
-      if (origin.connID !== connID) continue
+      if (!origin.connIDs.includes(connID)) continue
+      origin.connIDs = origin.connIDs.filter((id) => id !== connID)
+      if (origin.connIDs.length) continue
       this.permissions.delete(requestID)
       this.observeBoards({ type: "permission.replied", data: { sessionID: origin.sessionID, requestID } })
     }
@@ -419,8 +424,13 @@ export class Registry {
     if (sessionID && !streamed) this.flushStream(this.streams.get(sessionID), sessionID)
 
     if (event.type === "permission.asked" && typeof data.id === "string" && sessionID) {
-      if (this.permissions.has(data.id)) return // the same request forwarded by another process
-      this.permissions.set(data.id, { connID, sessionID })
+      const known = this.permissions.get(data.id)
+      if (known) {
+        // The same request forwarded by another process: one more place to answer it.
+        if (!known.connIDs.includes(connID)) known.connIDs.push(connID)
+        return
+      }
+      this.permissions.set(data.id, { connIDs: [connID], sessionID })
       this.alert("blocked", sessionID, "permission", undefined, data.id)
     }
     if (event.type === "form.created" && sessionID) {
@@ -937,15 +947,30 @@ export class Registry {
     return [...list].sort((a, b) => (b.activity.get(sessionID) ?? 0) - (a.activity.get(sessionID) ?? 0) || b.seq - a.seq)[0]?.id
   }
 
-  /** Where to send a reply for a permission that is pending in the session's status tree. */
+  /** Where to send a reply for a permission that is pending in the session's status tree (the first place). */
   permissionTarget(rootID: string, requestID: string): { connID: string; sessionID: string } | undefined {
+    return this.permissionTargets(rootID, requestID)[0]
+  }
+
+  /** Every connected process of the session's tenant that forwarded the pending permission, first first. */
+  permissionTargets(rootID: string, requestID: string): Array<{ connID: string; sessionID: string }> {
     const pending = this.status(rootID)?.some((s) =>
       s.blockers.some((b) => b.kind === "permission" && b.id === requestID),
     )
     const origin = this.permissions.get(requestID)
-    if (!pending || !origin || !this.conns.has(origin.connID)) return undefined
-    if (this.connTenant(origin.connID) !== this.sessionTenant(rootID)) return undefined
-    return { ...origin }
+    if (!pending || !origin) return []
+    const tenant = this.sessionTenant(rootID)
+    return origin.connIDs
+      .filter((connID) => this.conns.has(connID) && this.connTenant(connID) === tenant)
+      .map((connID) => ({ connID, sessionID: origin.sessionID }))
+  }
+
+  /** A permission no process holds any more (answered elsewhere, expired): drop it and its blocker. */
+  dropPermission(requestID: string): void {
+    const origin = this.permissions.get(requestID)
+    if (!origin) return
+    this.permissions.delete(requestID)
+    this.observeBoards({ type: "permission.replied", data: { sessionID: origin.sessionID, requestID } })
   }
 
   /**

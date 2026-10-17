@@ -4,14 +4,14 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import { defaults, writeConfig } from "../src/config"
 import plugin from "../src/index"
-import { EventQueue, stopServer, until } from "./spoke-fake"
+import { EventQueue, fakeCentral, stopServer, until } from "./spoke-fake"
 
 const cleanups: Array<() => unknown> = []
 afterEach(async () => {
   for (const c of cleanups.splice(0).reverse()) await c()
 })
 
-function fakeContext(overrides: { hookThrows?: boolean; registerThrows?: boolean } = {}) {
+function fakeContext(overrides: { hookThrows?: boolean; registerThrows?: boolean; directory?: string; pending?: Record<string, string> } = {}) {
   const queue = new EventQueue<{ type: string; data: Record<string, unknown> }>()
   const hooks: Array<(event: any) => void> = []
   const transforms: Array<(editor: any) => void> = []
@@ -19,8 +19,9 @@ function fakeContext(overrides: { hookThrows?: boolean; registerThrows?: boolean
   const sessionAgents = new Map<string, string>()
   let handlers: Record<string, (input: unknown, rpc: unknown) => Promise<unknown>> | undefined
   const registered: string[] = []
+  const replies: unknown[] = []
   const ctx = {
-    location: { directory: "/work/project" },
+    location: { directory: overrides.directory ?? "/work/project" },
     app: { name: "opencode", version: "2.0.25", channel: "latest" },
     options: {},
     event: { subscribe: ({ signal }: { signal: AbortSignal }) => queue.iterate(signal) },
@@ -53,7 +54,18 @@ function fakeContext(overrides: { hookThrows?: boolean; registerThrows?: boolean
       },
       interrupt: async () => ({ interrupted: true }),
     },
-    permission: { reply: async () => {} },
+    // Location-scoped like OpenCode's: only requests pending in this instance's location are found.
+    permission: {
+      get: async (input: { sessionID: string; requestID: string }) => {
+        if (overrides.pending?.[input.requestID] !== input.sessionID) throw new Error(`Permission request not found: ${input.requestID}`)
+        return { id: input.requestID }
+      },
+      reply: async (input: { sessionID: string; requestID: string; decision: string }) => {
+        if (overrides.pending?.[input.requestID] !== input.sessionID) throw new Error(`Permission request not found: ${input.requestID}`)
+        replies.push(input)
+        delete overrides.pending[input.requestID]
+      },
+    },
     rpc: {
       register: async (def: { id: string }, impl: typeof handlers) => {
         if (overrides.registerThrows) throw new Error("register failed")
@@ -64,7 +76,7 @@ function fakeContext(overrides: { hookThrows?: boolean; registerThrows?: boolean
     },
   }
   const rpc = { signal: new AbortController().signal, error: (type: string, message: string, data: unknown) => ({ type, message, data }) }
-  return { ctx, hooks, transforms, switches, rpc, registered, call: (name: string, input: unknown = {}) => handlers![name]!(input, rpc) }
+  return { ctx, hooks, transforms, switches, rpc, registered, replies, queue, call: (name: string, input: unknown = {}) => handlers![name]!(input, rpc) }
 }
 
 function tempConfig(config: Partial<ReturnType<typeof defaults>>) {
@@ -129,6 +141,23 @@ describe("plugin setup", () => {
     expect(await b.call("status")).toMatchObject({ mode: "off" })
     cleanB()
     expect(await b.call("status")).toMatchObject({ type: "unavailable" })
+  })
+
+  test("a permission is answered through the plugin instance of the location that holds it", async () => {
+    const server = fakeCentral()
+    cleanups.push(() => stopServer(server))
+    tempConfig({ server: server.url, mode: "always", token: "tok" })
+    const a = fakeContext({ directory: "/a" })
+    const b = fakeContext({ directory: "/b", pending: { per_1: "ses_child" } })
+    cleanups.push((await plugin.setup(a.ctx as any)) as () => void)
+    cleanups.push((await plugin.setup(b.ctx as any)) as () => void)
+    await until(() => server.sockets.length > 0)
+    const res = await server.request({ op: "permission", sessionID: "ses_child", requestID: "per_1", decision: "once" })
+    expect(res).toMatchObject({ ok: true, result: {} })
+    expect(b.replies).toEqual([{ sessionID: "ses_child", requestID: "per_1", decision: "once" }])
+    expect(a.replies).toEqual([])
+    const again = await server.request({ op: "permission", sessionID: "ses_child", requestID: "per_1", decision: "once" })
+    expect(again).toMatchObject({ ok: true, result: { gone: true } })
   })
 
   test("presence RPC takes the TUI's sessions; anything but a list is refused", async () => {

@@ -48,6 +48,7 @@ function fakeHost() {
     },
     replyPermission: async (input) => {
       calls.permission.push(input)
+      return input.requestID.startsWith("per_gone") ? "gone" : "replied"
     },
     interrupt: async (sessionID) => {
       calls.interrupt.push(sessionID)
@@ -222,6 +223,13 @@ describe("Spoke", () => {
     expect(res.ok).toBe(false)
     expect(res.error).toMatch(/unknown session/i)
     expect(calls.prompt).toHaveLength(0)
+  })
+
+  test("a permission request no location holds any more is reported as gone, not as an error", async () => {
+    const { spoke, server } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    const res = await server.request({ op: "permission", sessionID: "ses_a", requestID: "per_gone1", decision: "once" })
+    expect(res).toMatchObject({ ok: true, result: { gone: true } })
   })
 
   test("permission and context requests", async () => {

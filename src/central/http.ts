@@ -106,6 +106,8 @@ const COOKIE_MAX_AGE = 400 * 24 * 60 * 60
 const SSE_HEARTBEAT_MS = 20_000
 const NO_OWNER = "No OpenCode process for this session is connected"
 const NOT_EXPOSED = "Voice is not enabled for this session"
+/** A permission or question that is not pending any more: someone answered it elsewhere, or it expired. */
+const PERMISSION_GONE = "This request was already answered or expired"
 /** Longest directory and title accepted for a new session (as in the spoke protocol). */
 const MAX_DIRECTORY_CHARS = 4096
 const MAX_TITLE_CHARS = 200
@@ -937,15 +939,22 @@ export function startCentral(options: CentralOptions): Central {
     const input = await body(request)
     const decision = input.decision as PermissionDecision
     if (typeof input.requestID !== "string" || !DECISIONS.has(decision)) return error(400, "Invalid decision")
-    const target = registry.permissionTarget(rootID, input.requestID)
-    if (!target) return error(409, `Permission request ${input.requestID} is not pending in this session`)
-    await spokes.request(target.connID, {
-      op: "permission",
-      sessionID: target.sessionID,
-      requestID: input.requestID,
-      decision,
-    })
-    return new Response(null, { status: 204 })
+    const targets = registry.permissionTargets(rootID, input.requestID)
+    if (!targets.length) return error(409, PERMISSION_GONE, "gone")
+    // Try every process that saw the request: only the one (and the location) running the session holds it.
+    let failure: unknown
+    for (const target of targets) {
+      try {
+        const result = await spokes.request(target.connID, { op: "permission", sessionID: target.sessionID, requestID: input.requestID, decision })
+        if (!result?.gone) return new Response(null, { status: 204 })
+      } catch (cause) {
+        // Older spokes pass OpenCode's "Permission request not found" through as an error.
+        if (!/not found/i.test(cause instanceof Error ? cause.message : String(cause))) failure ??= cause
+      }
+    }
+    if (failure) throw failure
+    registry.dropPermission(input.requestID)
+    return error(409, PERMISSION_GONE, "gone")
   }
 
   async function transcribe(request: Request, speech: Speech): Promise<Response> {
