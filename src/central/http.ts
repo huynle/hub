@@ -1,4 +1,4 @@
-// OpenCode Hub: HTTP routes (web UI, JSON API, SSE, enrollment) and the spoke WebSocket.
+// Hub: HTTP routes (web UI, JSON API, SSE, enrollment) and the spoke WebSocket.
 // Phones authenticate with the `voice_device` cookie; spokes with machine bearer tokens. Source IPs
 // (including loopback) are never trusted.
 import type { Server } from "bun"
@@ -123,8 +123,8 @@ export const MAX_PROMPT_CHARS = 100_000
 const WEB_NOT_BUILT = [
   "This hub has no built web app (web/dist).",
   "",
-  "To run a hub, install it from npm (`opencode plugin add @huynle/opencode-hub`, or `bunx --package @huynle/opencode-hub opencode-hub`)",
-  "or use a release binary (https://github.com/huynle/opencode-hub/releases), which ship the web app.",
+  "To run a hub, install it from npm (`opencode plugin add @huynle/hub`, or `bunx --package @huynle/hub hub-server`)",
+  "or use a release binary (https://github.com/huynle/hub/releases), which ship the web app.",
   "In a source checkout, run `npm install && npm run build:web` first.",
 ].join("\n")
 /** Preview text for POST /api/settings/speech/test. */
@@ -268,7 +268,7 @@ export function startCentral(options: CentralOptions): Central {
     if (!alert.owner) return
     const extra = alert.requestID ? { requestID: alert.requestID } : undefined
     notifier.notify(alert.kind, alert.sessionID, alert.title, alert.detail, alert.text, alert.owner, extra).catch((cause) => {
-      console.error("[opencode-hub] push notification failed:", cause instanceof Error ? cause.message : cause)
+      console.error("[hub] push notification failed:", cause instanceof Error ? cause.message : cause)
     })
   })
 
@@ -325,7 +325,7 @@ export function startCentral(options: CentralOptions): Central {
     } catch (cause) {
       if (!(cause instanceof OidcError)) throw cause
       if (cause.audited) store.audit({ actor: "system", action: "signin.denied", detail: cause.reason })
-      else console.warn(`[opencode-hub] sign-in refused: ${cause.reason}`)
+      else console.warn(`[hub] sign-in refused: ${cause.reason}`)
       return deny(cause.status, "Sign-in failed", cause.message)
     }
     const { identity, next } = result
@@ -393,7 +393,7 @@ export function startCentral(options: CentralOptions): Central {
         })
         if (auto && auth.approveEnrollment(start.userCode)) {
           autoApproved = true
-          console.log(`[opencode-hub] local hub: approved the first machine (code ${start.userCode}) without confirmation; later machines need approval`)
+          console.log(`[hub] local hub: approved the first machine (code ${start.userCode}) without confirmation; later machines need approval`)
           return Response.json({ ...start, autoApproved: true } satisfies EnrollStart)
         }
         broadcast({ type: "enrollment" }, { admins: true })
@@ -1141,7 +1141,7 @@ function failure(cause: unknown): Response {
   if (cause instanceof RequestTooLargeError) return error(413, cause.message)
   if (cause instanceof OidcError) return authPage(cause.status, "Sign-in failed", cause.message)
   if (cause instanceof RequestTimeoutError) return error(504, cause.message)
-  console.error("[opencode-hub] request failed:", cause)
+  console.error("[hub] request failed:", cause)
   return error(500, cause instanceof Error ? cause.message : String(cause))
 }
 

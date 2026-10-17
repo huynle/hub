@@ -76,7 +76,7 @@ describe("console assets", () => {
     expect(res.status).toBe(503)
     const text = await res.text()
     expect(text).toContain("npm install && npm run build:web")
-    expect(text).toContain("@huynle/opencode-hub")
+    expect(text).toContain("@huynle/hub")
     expect(text).toContain("release binary")
   })
 })

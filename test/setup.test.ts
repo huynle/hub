@@ -92,6 +92,6 @@ describe("checkServer", () => {
     const auth = await checkServer("https://voice.example.com", { fetch: fetchWith(() => new Response("login", { status: 302 })) })
     expect(auth).toEqual({ ok: false, error: expect.stringContaining("HTTP 302") })
     const other = await checkServer("https://voice.example.com", { fetch: fetchWith(() => new Response("<html>")) })
-    expect(other).toEqual({ ok: false, error: expect.stringContaining("not an OpenCode Hub") })
+    expect(other).toEqual({ ok: false, error: expect.stringContaining("not a Hub") })
   })
 })

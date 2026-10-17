@@ -51,7 +51,7 @@ function promote(reg: Registry): void {
       reg.owner = instance.id
       return
     } catch (cause) {
-      console.error("[opencode-hub] could not start the hub spoke", cause)
+      console.error("[hub] could not start the hub spoke", cause)
     }
   }
   reg.spoke = undefined
@@ -61,7 +61,7 @@ function promote(reg: Registry): void {
 /** `create` receives the stable per-process ID. */
 export function joinProcess<S extends Startable>(create: (processID: string) => S, key: symbol = SPOKE_KEY): Membership<S> {
   const reg = registry(key)
-  const id = Symbol("opencode-hub.instance")
+  const id = Symbol("hub.instance")
   reg.instances.push({ id, create })
   if (!reg.spoke) {
     try {
@@ -70,7 +70,7 @@ export function joinProcess<S extends Startable>(create: (processID: string) => 
       reg.spoke = spoke
       reg.owner = id
     } catch (cause) {
-      console.error("[opencode-hub] could not start the hub spoke", cause)
+      console.error("[hub] could not start the hub spoke", cause)
     }
   }
   return {
@@ -86,7 +86,7 @@ export function joinProcess<S extends Startable>(create: (processID: string) => 
       try {
         current.spoke?.stop()
       } catch (cause) {
-        console.error("[opencode-hub] spoke stop failed", cause)
+        console.error("[hub] spoke stop failed", cause)
       }
       promote(current)
     },

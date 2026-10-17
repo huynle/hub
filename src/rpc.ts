@@ -50,7 +50,7 @@ const methods = {
     errors,
   },
   setServer: { input: obj({ server: str }, ["server"]), output: empty, errors },
-  /** GET <server>/healthz from this machine: reachable and an OpenCode Hub? */
+  /** GET <server>/healthz from this machine: reachable and a Hub? */
   checkServer: { input: obj({ server: str }, ["server"]), output: obj({ ok: bool, version: str, error: str }, ["ok"]), errors },
   /** Start the local hub for the configured loopback server now (Open hub). */
   startLocalHub: { input: empty, output: obj({ status: { type: "string", enum: ["started", "running", "busy"] } }, ["status"]), errors },

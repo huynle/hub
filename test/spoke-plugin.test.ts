@@ -71,11 +71,11 @@ function tempConfig(config: Partial<ReturnType<typeof defaults>>) {
   const dir = mkdtempSync(path.join(tmpdir(), "voice-plugin-"))
   const file = path.join(dir, "config.json")
   writeConfig(file, { ...defaults("box"), ...config })
-  const previous = process.env.OPENCODE_HUB_CONFIG
-  process.env.OPENCODE_HUB_CONFIG = file
+  const previous = process.env.HUB_SPOKE_CONFIG
+  process.env.HUB_SPOKE_CONFIG = file
   cleanups.push(() => {
-    if (previous === undefined) delete process.env.OPENCODE_HUB_CONFIG
-    else process.env.OPENCODE_HUB_CONFIG = previous
+    if (previous === undefined) delete process.env.HUB_SPOKE_CONFIG
+    else process.env.HUB_SPOKE_CONFIG = previous
     rmSync(dir, { recursive: true, force: true })
   })
   return file
@@ -99,10 +99,10 @@ describe("plugin setup", () => {
     expect(status.lastError).toBeTruthy()
   })
 
-  test("is the opencode-hub plugin and serves its RPC as \"hub\" and the legacy \"voice\" id", async () => {
+  test("is the hub plugin and serves its RPC as \"hub\" and the legacy \"voice\" id", async () => {
     tempConfig({ mode: "off" })
     const fake = fakeContext()
-    expect(plugin.id).toBe("opencode-hub")
+    expect(plugin.id).toBe("hub")
     const cleanup = (await plugin.setup(fake.ctx as any)) as () => void
     cleanups.push(cleanup)
     expect(fake.registered).toEqual(["hub", "voice"])

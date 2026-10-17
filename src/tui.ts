@@ -3,9 +3,12 @@ import { Plugin } from "@opencode/plugin/tui"
 import { isLoopbackURL } from "./loopback"
 import { HubRpc } from "./rpc"
 import { localServerFor, modeFor, needsSetup, parseServerInput, setupOptions, type SetupChoice } from "./setup"
+import { hubCommands } from "./tui-commands"
 import { PresenceReporter, shownSessions } from "./tui-presence"
 import { startVoice } from "./voice-command"
 
+// Hub's TUI plugin. /hub configures this harness's hub connection; the other commands are features (see
+// src/tui-commands.ts to add one).
 // /hub: the hub connection — first-run setup (a hub on this computer, or your own hub), then one dialog for
 // the server, its connection and approval, what this machine shares, pairing phones and opening the hub.
 // /voice: no menu — connect (setting up first when needed), share this session, and open it in the browser
@@ -38,7 +41,7 @@ type Choice = "ui" | "start" | "approval" | "send" | "conversation" | "toggle" |
 
 const MODE_LABEL: Record<Mode, string> = { always: "Always", session: "This session only", off: "Off" }
 
-const HUB_LOG = "~/.local/state/opencode-hub/hub.log"
+const HUB_LOG = "~/.local/state/hub/hub.log"
 const host = (server: string) => server.replace(/^https?:\/\//, "")
 
 function describeStatus(status: Status): string {
@@ -54,17 +57,17 @@ function describeStatus(status: Status): string {
           : status.connection === "error"
             ? `cannot reach ${where}`
             : `${where}`
-  return `OpenCode Hub · ${state} · mode: ${MODE_LABEL[status.mode]}`
+  return `Hub · ${state} · mode: ${MODE_LABEL[status.mode]}`
 }
 
 export default Plugin.define({
-  id: "opencode-hub.tui",
+  id: "hub.tui",
   setup(context) {
     const hub = context.client.rpc(HubRpc) as unknown as Record<string, (input: unknown, options: unknown) => Promise<unknown>>
     const call = async <T>(method: string, input: Record<string, unknown> = {}) =>
       (await hub[method]!(input, { location: context.location ?? context.data.location.default() })) as T
     const toast = (message: string, variant: "info" | "success" | "warning" | "error" = "info") =>
-      context.ui.toast.show({ title: "OpenCode Hub", message, variant })
+      context.ui.toast.show({ title: "Hub", message, variant })
     const currentSession = () => {
       const route = context.ui.router.current() as { type: string; sessionID?: string }
       return route.type === "session" ? route.sessionID : undefined
@@ -87,7 +90,7 @@ export default Plugin.define({
       const opened = openURL(url)
       const copied = copyToClipboard(url)
       if (opened) return toast(`Opened ${what} in your browser${copied ? " (link copied)" : ""}`, "success")
-      await context.ui.dialog.alert({ title: "OpenCode Hub", message: `Open this link${copied ? " (copied)" : ""}:\n\n${url}\n\nKeep it private.` })
+      await context.ui.dialog.alert({ title: "Hub", message: `Open this link${copied ? " (copied)" : ""}:\n\n${url}\n\nKeep it private.` })
     }
 
     /** Connects to the configured hub (starting a local one when nothing answers) and waits for it. */
@@ -256,7 +259,7 @@ export default Plugin.define({
     /** First-run setup; `open: false` leaves opening the browser to the caller (/voice). */
     const runSetup = async (s: Status, { open = true }: { open?: boolean } = {}) => {
       const choice = await context.ui.dialog.select<SetupChoice>({
-        title: s.enrolled && s.connection === "revoked" ? `Set up OpenCode Hub · revoked by ${host(s.server)}` : "Set up OpenCode Hub",
+        title: s.enrolled && s.connection === "revoked" ? `Set up Hub · revoked by ${host(s.server)}` : "Set up Hub",
         options: setupOptions(s).map((o) => ({ title: o.title, value: o.value, description: o.description })),
       })
       switch (choice) {
@@ -417,33 +420,15 @@ export default Plugin.define({
     })
     presence.start()
 
-    context.keymap.layer(() => ({
-      mode: "global",
-      commands: [
-        {
-          id: "opencode-hub.open",
-          title: "OpenCode Hub: server, connection, sharing and phones",
-          group: "OpenCode Hub",
-          palette: true,
-          slash: { name: "hub" },
-          run: () =>
-            void open().catch((cause) => {
-              toast(errorMessage(cause), "error")
-            }),
-        },
-        {
-          id: "opencode-hub.voice",
-          title: "OpenCode Hub: talk to this session (Voice mode in the browser)",
-          group: "OpenCode Hub",
-          palette: true,
-          slash: { name: "voice" },
-          run: () =>
-            void voice().catch((cause) => {
-              toast(errorMessage(cause), "error")
-            }),
-        },
+    // One entry per command; a new /<feature> is one more entry (src/tui-commands.ts).
+    const commands = hubCommands(
+      [
+        { id: "open", slash: "hub", title: "server, connection, sharing and phones", run: open },
+        { id: "voice", slash: "voice", title: "talk to this session (Voice mode in the browser)", run: voice },
       ],
-    }))
+      (cause) => toast(errorMessage(cause), "error"),
+    )
+    context.keymap.layer(() => ({ mode: "global", commands }))
     return () => presence.stop()
   },
 })

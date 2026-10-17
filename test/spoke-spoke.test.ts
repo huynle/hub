@@ -191,7 +191,7 @@ describe("Spoke", () => {
     host.push(created("ses_a"))
     const response = server.request({ op: "turn", sessionID: "ses_a", text: "what's up", voiceStyle: true })
     await until(() => calls.prompt.length === 1)
-    expect(calls.prompt[0]).toEqual({ sessionID: "ses_a", text: "what's up", metadata: { source: "opencode-hub" } })
+    expect(calls.prompt[0]).toEqual({ sessionID: "ses_a", text: "what's up", metadata: { source: "hub" } })
     expect(spoke.isVoiceTurn("ses_a")).toBe(true)
     messages.set("ses_a", [
       { id: "msg_1", type: "user", text: "what's up" },
@@ -446,7 +446,7 @@ describe("Spoke", () => {
       sessionID: "ses_a",
       text: "make it blue",
       delivery: "steer",
-      metadata: { source: "opencode-hub", mode: "conversation" },
+      metadata: { source: "hub", mode: "conversation" },
     })
   })
 
@@ -546,7 +546,7 @@ describe("Spoke", () => {
       const res = await server.request(req)
       expect(res).toMatchObject({ ok: true })
     }
-    expect(calls.prompt).toEqual([{ sessionID: "ses_other", text: "x", delivery: "steer", metadata: { source: "opencode-hub", mode: "remote" } }])
+    expect(calls.prompt).toEqual([{ sessionID: "ses_other", text: "x", delivery: "steer", metadata: { source: "hub", mode: "remote" } }])
     expect(calls.interrupt).toEqual(["ses_other"])
     expect(calls.permission).toHaveLength(1)
     expect(calls.model).toHaveLength(0)
@@ -779,7 +779,7 @@ describe("prompt images", () => {
     host.push(created("ses_a"))
     const response = server.request({ op: "turn", sessionID: "ses_a", text: "", voiceStyle: false, images })
     await until(() => calls.prompt.length === 1)
-    expect(calls.prompt[0]).toEqual({ sessionID: "ses_a", text: "", files, metadata: { source: "opencode-hub" } })
+    expect(calls.prompt[0]).toEqual({ sessionID: "ses_a", text: "", files, metadata: { source: "hub" } })
     messages.set("ses_a", [{ id: "msg_1", type: "user", text: "" }, { id: "a1", type: "assistant", content: [{ type: "text", text: "A screenshot." }] }])
     host.push({ type: "session.inbox.delivered", data: { sessionID: "ses_a", inboxID: "msg_1" } })
     host.push({ type: "session.execution.succeeded", data: { sessionID: "ses_a" } })

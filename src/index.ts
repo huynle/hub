@@ -1,4 +1,4 @@
-// OpenCode Hub server plugin: a thin "spoke" that connects this OpenCode process to the hub. The web
+// Hub server plugin: a thin "spoke" that connects this OpenCode process to the hub. The web
 // console, phones and (optional) Voice speech live on the hub; this side only exposes sessions, forwards
 // their events, and runs remote / voice turns and permission replies on request.
 import { readFileSync } from "node:fs"
@@ -94,7 +94,7 @@ function hostFrom(ctx: Context): SpokeHost {
 }
 
 export default Plugin.define({
-  id: "opencode-hub",
+  id: "hub",
   async setup(ctx) {
     const kind = detectKind(process.argv)
     const membership: Membership<Spoke> = joinProcess(
@@ -116,7 +116,7 @@ export default Plugin.define({
     try {
       await ctx.agent.transform((editor) => defineVoiceAgent(editor as any))
     } catch (cause) {
-      console.error("[opencode-hub] could not register the voice agent", cause)
+      console.error("[hub] could not register the voice agent", cause)
     }
 
     try {
@@ -132,7 +132,7 @@ export default Plugin.define({
         for (const text of parts) event.system.push({ type: "text", text })
       })
     } catch (cause) {
-      console.error("[opencode-hub] could not register the context hook", cause)
+      console.error("[hub] could not register the context hook", cause)
     }
 
     const run = async <T>(rpc: { error: (...args: any[]) => any }, action: (spoke: Spoke) => T | Promise<T>) => {
@@ -179,7 +179,7 @@ export default Plugin.define({
       try {
         await ctx.rpc.register(definition, handlers)
       } catch (cause) {
-        console.error(`[opencode-hub] could not register RPC methods (${definition.id})`, cause)
+        console.error(`[hub] could not register RPC methods (${definition.id})`, cause)
       }
     }
 

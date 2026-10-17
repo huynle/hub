@@ -38,6 +38,12 @@ describe("TUI commands", () => {
     expect(new Set(names).size).toBe(names.length)
     expect(hub.slash.aliases ?? []).not.toContain("voice")
     expect(typeof voice.run).toBe("function")
+    expect(hub).toMatchObject({ id: "hub.open", group: "Hub" })
+    expect(voice).toMatchObject({ id: "hub.voice", group: "Hub" })
+  })
+
+  test("is the hub.tui plugin", () => {
+    expect((plugin as any).id).toBe("hub.tui")
   })
 })
 

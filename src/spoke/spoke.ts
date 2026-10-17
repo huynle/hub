@@ -254,7 +254,7 @@ export class Spoke {
       this.watcher = watchConfig(this.options.configFile, this.options.machineName, (c) => this.apply(c), { pollMs: this.options.pollMs })
       this.config = this.watcher.current()
     } catch (cause) {
-      console.error("[opencode-hub] config watch failed", cause)
+      console.error("[hub] config watch failed", cause)
     }
     void this.listen()
     this.apply(this.config)
@@ -475,7 +475,7 @@ export class Spoke {
       })
       .catch((cause) => {
         enrollment.state = "error"
-        console.error("[opencode-hub] enrollment failed", cause)
+        console.error("[hub] enrollment failed", cause)
       })
     return {
       userCode: start.userCode,
@@ -600,8 +600,8 @@ export class Spoke {
         this.sendTerminals(true)
       },
       onState: (state, error) => {
-        if (state === "revoked") console.error("[opencode-hub] this machine was revoked by the hub")
-        else if (state === "error" && error) console.error(`[opencode-hub] ${error}; retrying`)
+        if (state === "revoked") console.error("[hub] this machine was revoked by the hub")
+        else if (state === "error" && error) console.error(`[hub] ${error}; retrying`)
         if (state === "error" && this.hub.retryOnError) {
           this.hub.retryOnError = false
           setTimeout(() => this.connection?.retryNow(), 0)
@@ -653,11 +653,11 @@ export class Spoke {
       if (result.status === "failed") {
         this.hub.message = result.error
         this.hub.cooldown = Math.min(this.hub.cooldown * 2, LOCAL_HUB_MAX_RETRY_MS)
-        console.error(`[opencode-hub] could not start a local hub for ${server}: ${result.error}`)
+        console.error(`[hub] could not start a local hub for ${server}: ${result.error}`)
         return
       }
       this.hub.message = undefined
-      if (result.status === "started") console.log(`[opencode-hub] started a local hub for ${server} (pid ${result.pid})`)
+      if (result.status === "started") console.log(`[hub] started a local hub for ${server} (pid ${result.pid})`)
       if (result.status === "started" || result.status === "running") this.connection?.retryNow()
     } finally {
       this.hub.pending = false
@@ -924,7 +924,7 @@ export class Spoke {
       void herdr.refresh()
       return undefined
     } catch (cause) {
-      console.error(`[opencode-hub] could not open ${sessionID} in Herdr`, errorText(cause))
+      console.error(`[hub] could not open ${sessionID} in Herdr`, errorText(cause))
       return `Could not open the session in Herdr: ${errorText(cause)}`
     }
   }
@@ -974,7 +974,7 @@ export class Spoke {
         for await (const event of this.host.events(this.abort.signal)) this.observe(event)
       } catch (cause) {
         if (this.abort.signal.aborted) return
-        console.error("[opencode-hub] event stream failed, retrying", cause)
+        console.error("[hub] event stream failed, retrying", cause)
       }
       if (this.abort.signal.aborted) return
       await new Promise((resolve) => setTimeout(resolve, 1000))
@@ -995,7 +995,7 @@ export class Spoke {
         if (compact) this.connection.send({ t: "event", event: compact })
       }
     } catch (cause) {
-      console.error("[opencode-hub] event handling failed", cause)
+      console.error("[hub] event handling failed", cause)
     }
   }
 
@@ -1028,7 +1028,7 @@ export class Spoke {
       const sessions = (await this.host.listRecent?.({ days, max, include: [...keep] })) ?? []
       if (this.tracker.applyListing(sessions, Date.now(), keep)) this.scheduleSnapshot()
     } catch (cause) {
-      console.error("[opencode-hub] could not list recent sessions", errorText(cause))
+      console.error("[hub] could not list recent sessions", errorText(cause))
     }
   }
 

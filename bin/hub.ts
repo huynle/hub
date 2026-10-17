@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
-// OpenCode Hub entry point (`opencode-hub`, alias `opencode-voice-hub`): `bun bin/hub.ts [--help | --version]`,
-// configured by HUB_* env vars over ~/.config/opencode-hub/hub.json ($HUB_CONFIG); see src/central/config.ts. Serves the
+// Hub server entry point (`hub-server`, aliases `opencode-hub` and `opencode-voice-hub`): `bun bin/hub.ts [--help | --version]`,
+// configured by HUB_* env vars over ~/.config/hub/hub.json ($HUB_CONFIG); see src/central/config.ts. Serves the
 // built web app (web/dist, `npm run build:web`) from disk. The standalone binaries embed it instead
 // (scripts/build-binaries.sh).
 import { readFileSync } from "node:fs"
