@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Console**: the All sessions table has no Voice column and no Voice on/off filter chips (saved Voice
+  filters and sort are ignored). The session live in Voice (Voice mode in this browser, or a conversation)
+  shows a small pulsing green dot left of its title in the table, the phone list and the sidebar
+  (no animation with reduced motion); sessions that merely allow Voice get no badge. The row `⋯` menu
+  says **Allow Voice** / **Disallow Voice**. The old session browser's "Voice on" filter is gone.
+
 ## 0.6.0
 
 **OpenCode Hub is now Hub** (`@huynle/hub`): a harness-agnostic central hub that AI agent harnesses
