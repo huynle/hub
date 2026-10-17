@@ -151,7 +151,8 @@ describe("plugin setup", () => {
     const b = fakeContext({ directory: "/b", pending: { per_1: "ses_child" } })
     cleanups.push((await plugin.setup(a.ctx as any)) as () => void)
     cleanups.push((await plugin.setup(b.ctx as any)) as () => void)
-    await until(() => server.sockets.length > 0)
+    // Connected once the spoke got the welcome (it answers with its sessions frame).
+    await until(() => server.frames.some((f) => f.t === "sessions"))
     const res = await server.request({ op: "permission", sessionID: "ses_child", requestID: "per_1", decision: "once" })
     expect(res).toMatchObject({ ok: true, result: {} })
     expect(b.replies).toEqual([{ sessionID: "ses_child", requestID: "per_1", decision: "once" }])
