@@ -83,12 +83,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
 .unread-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); display: inline-block; margin-left: 6px; flex: none; }
 .online-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); display: inline-block; margin-right: 6px; vertical-align: middle; }
 .online-dot.on { background: var(--ok); }
-.voice-badge { color: var(--faint); display: inline-grid; }
-.voice-badge .icon { width: 13px; height: 13px; }
-.voice-badge.live { color: var(--accent); }
-.voice-pill { font-size: 12px; color: var(--faint); }
-.voice-pill.on { color: var(--muted); }
-.voice-pill.live { color: var(--accent); }
+/* Live Voice: the session in Voice mode (or in a conversation), left of its title. */
+.voice-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); display: inline-block; flex: none; margin-right: 6px; vertical-align: middle; animation: voice-dot-pulse 1.8s ease-in-out infinite; }
+@keyframes voice-dot-pulse { 0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 55%, transparent); } 50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 0%, transparent); } }
+@media (prefers-reduced-motion: reduce) { .voice-dot { animation: none; } }
 
 /* ---------- shell ---------- */
 .shell { display: flex; height: 100%; overflow: hidden; }
@@ -198,11 +196,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
 .sessions-table .col-title a { color: var(--text); }
 .sessions-table tr.unread .col-title a { font-weight: 600; }
 .col-status { width: 64px; }
-.col-title { width: 26%; }
+.col-title { width: 30%; }
 .col-project { width: 16%; }
 .col-server { width: 9%; }
 .col-source { width: 9%; }
-.col-voice { width: 7%; }
 .col-activity { width: 10%; }
 .col-actions { width: 40px; text-align: right; }
 .empty-cell { text-align: center; padding: 24px !important; }

@@ -43,6 +43,11 @@ export function Icon(props: { name: IconName; class?: string; title?: string }) 
 
 export const STATE_LABEL: Record<SessionState, string> = { idle: "Idle", working: "Running", blocked: "Needs you", error: "Error" }
 
+/** Live Voice marker (the session in Voice mode or in a conversation), shown left of a session title. */
+export function VoiceDot() {
+  return <span class="voice-dot" role="img" aria-label="Voice mode on" title="Voice mode on" />
+}
+
 export function StatusIcon(props: { state: SessionState; class?: string }) {
   return (
     <span class={`status ${props.state} ${props.class ?? ""}`} role="img" aria-label={STATE_LABEL[props.state]} title={STATE_LABEL[props.state]}>
