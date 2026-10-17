@@ -1,4 +1,4 @@
-/* OpenCode Hub console. Dark, compact, restrained; modeled on Claude Code web's structure. */
+/* Hub console. Dark, compact, restrained; modeled on Claude Code web's structure. */
 :root {
   --bg: #141413;
   --side: #1a1a18;
@@ -100,7 +100,11 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
 
 .side-top { display: flex; align-items: center; justify-content: space-between; padding: 10px 8px 6px 14px; }
 .brand { display: flex; align-items: center; gap: 8px; }
-.brand-mark { color: var(--accent); font-size: 13px; }
+.brand-mark { flex: none; }
+.hub-mark { color: var(--text); --mark-gap: var(--bg); }
+.hub-mark-gap { fill: var(--mark-gap); }
+.hub-mark-hub { fill: var(--accent); }
+.sidebar .hub-mark { --mark-gap: var(--side); }
 .brand-name { font-family: var(--serif); font-size: 17px; }
 .side-search { margin: 4px 10px; display: flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: var(--r); padding: 0 8px; color: var(--faint); background: var(--bg); }
 .side-search input { border: 0; background: transparent; min-height: 30px; padding: 0; width: 100%; box-shadow: none; }
@@ -398,7 +402,7 @@ table.diff .sign { color: var(--faint); margin-right: 8px; }
 .speech-card legend { padding: 0 6px; color: var(--muted); }
 .key-summary { margin: 0; font-size: 13px; }
 .entry { max-width: 440px; margin: 0 auto; padding: 12vh 20px 40px; display: flex; flex-direction: column; gap: 14px; }
-.brand-big { font-size: 30px; margin: 0; }
+.brand-big { font-size: 30px; margin: 0; display: flex; align-items: center; gap: 12px; }
 .pair-code { font-family: var(--mono); font-size: 20px; letter-spacing: 0.3em; }
 .greeting { font-size: 26px; margin: 0 0 18px; }
 details.card summary { cursor: pointer; color: var(--muted); }

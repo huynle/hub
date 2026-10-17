@@ -1,4 +1,4 @@
-// OpenCode Hub service worker: shows push notifications, answers permissions from them, keeps the push
+// Hub service worker: shows push notifications, answers permissions from them, keeps the push
 // subscription known to the hub, and handles the actions of the page's "Voice mode on" notification.
 // No offline caching: every request goes to the network (the API must never be served stale).
 // Requests from here are same-origin with the device cookie (credentials: "same-origin"); POSTs carry the
@@ -39,7 +39,7 @@ self.addEventListener("push", (event) => {
   try {
     data = event.data ? event.data.json() : {}
   } catch {
-    data = { title: "OpenCode Hub", body: event.data ? event.data.text() : "" }
+    data = { title: "Hub", body: event.data ? event.data.text() : "" }
   }
   const sessionID = typeof data.sessionID === "string" ? data.sessionID : ""
   const kind = typeof data.kind === "string" ? data.kind : "update"
@@ -59,7 +59,7 @@ self.addEventListener("push", (event) => {
           ]
         }
       }
-      await self.registration.showNotification(data.title || "OpenCode Hub", {
+      await self.registration.showNotification(data.title || "Hub", {
         body,
         tag: `${sessionID}:${kind}`,
         renotify: kind !== "finished",

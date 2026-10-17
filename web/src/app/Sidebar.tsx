@@ -5,6 +5,7 @@ import { account } from "../core/account-core"
 import { sidebarSections, type GroupBy, type SessionRow, type SidebarSort } from "../lib/sessions"
 import { sessionMenu } from "./actions"
 import { enrollments, me, rows } from "./hub"
+import { HubMark } from "./HubMark"
 import { route, sessionHref } from "./router"
 import { Icon, IconButton, Menu, StatusIcon } from "./ui"
 import { voiceState } from "./voice"
@@ -36,8 +37,8 @@ export function Sidebar(props: { onClose: () => void; onCollapse: () => void; ph
     <nav class="sidebar" aria-label="Sessions">
       <div class="side-top">
         <a class="brand" href="/" onClick={() => props.phone && props.onClose()}>
-          <span class="brand-mark" aria-hidden="true">◆</span>
-          <span class="brand-name">OpenCode Hub</span>
+          <HubMark class="brand-mark" />
+          <span class="brand-name">Hub</span>
         </a>
         <Show when={props.phone} fallback={<IconButton icon="sidebar" label="Collapse sidebar (⌘B)" onClick={props.onCollapse} />}>
           <IconButton icon="close" label="Close sidebar" onClick={props.onClose} />

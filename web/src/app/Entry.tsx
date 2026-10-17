@@ -3,6 +3,7 @@ import { Show, createSignal, onMount } from "solid-js"
 import { approveOwner, isAdmin, signInURL } from "../core/account-core"
 import { api, enc, errorText, HttpError } from "./api"
 import { enrollments, loadAuth, loadEnrollments, me, setMe } from "./hub"
+import { HubMark } from "./HubMark"
 import { navigate } from "./router"
 import { ago } from "./ui"
 
@@ -68,7 +69,7 @@ export function Pair(props: { next: string; error: string }) {
   return (
     <main class="entry">
       <h1 class="display brand-big">
-        <span class="brand-mark">◆</span> OpenCode Hub
+        <HubMark class="brand-mark" size={30} /> Hub
       </h1>
       <Show when={ready()} fallback={<p class="muted">Loading…</p>}>
         <Show

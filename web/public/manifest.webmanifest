@@ -1,7 +1,7 @@
 {
-  "name": "OpenCode Hub",
+  "name": "Hub",
   "short_name": "Hub",
-  "description": "Talk to your OpenCode sessions, answer permission requests, and get notified when they need you.",
+  "description": "The hub for your AI agent sessions: follow and steer them, answer permission requests, talk to them with Voice, and get notified when they need you.",
   "id": "/",
   "start_url": "/",
   "scope": "/",
