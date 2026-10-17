@@ -1,12 +1,12 @@
 // Hub configuration: HUB_* environment variables (legacy VOICE_* still read, see ../env.ts) over the
-// optional hub config file (~/.config/opencode-hub/hub.json or $HUB_CONFIG) over built-in defaults. The file's speech
+// optional hub config file (~/.config/hub/hub.json or $HUB_CONFIG) over built-in defaults. The file's speech
 // settings sit between the phone's saved settings and the env (see speech/settings.ts).
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
 import { hubEnv } from "../env"
 import { isLoopbackHost } from "../loopback"
-import { APP_DIR, configBase, LEGACY_APP_DIR, migrateLegacy, stateBase } from "../migrate"
+import { APP_DIR, configBase, legacyPaths, migrateFirst, stateBase } from "../migrate"
 import { updateSpeech, type StoredSpeech } from "./speech/settings"
 
 export const GOOGLE_ISSUER = "https://accounts.google.com"
@@ -275,7 +275,7 @@ export function centralConfig(rawEnv: Env = process.env, home: string = homedir(
     maxSpeechChars: int(env.HUB_MAX_SPEECH_CHARS, 800),
     turnTimeoutMs: int(env.HUB_TURN_TIMEOUT_MS, 600_000),
     // Push services want a contact: an https URL or mailto. The public URL works for hosted hubs.
-    vapidSubject: env.HUB_VAPID_SUBJECT || (publicURL.startsWith("https://") ? publicURL : "mailto:opencode-hub@localhost"),
+    vapidSubject: env.HUB_VAPID_SUBJECT || (publicURL.startsWith("https://") ? publicURL : "mailto:hub@localhost"),
     ...(file.speech ? { speech: file.speech } : {}),
     auth: authConfig(env, file.auth),
   }
@@ -288,8 +288,8 @@ export interface LoadOptions {
 
 /**
  * Reads hub.json (if any) and the environment. Throws on an invalid file or public URL. On first start,
- * copies the legacy opencode-voice hub.json and state directory to their default opencode-hub locations
- * (never for paths set by env or hub.json; the old copies are kept).
+ * copies the legacy hub.json and state directory (opencode-hub first, else opencode-voice) to their default
+ * Hub locations (never for paths set by env or hub.json; the old copies are kept).
  */
 export function loadCentralConfig(
   env: Env = process.env,
@@ -299,12 +299,12 @@ export function loadCentralConfig(
   const resolved = hubEnv(env)
   const migrate = options.log ? { log: options.log } : {}
   const file = hubConfigPath(env, home)
-  if (!resolved.HUB_CONFIG) migrateLegacy(path.join(configBase(env, home), LEGACY_APP_DIR, "hub.json"), file, migrate)
+  if (!resolved.HUB_CONFIG) migrateFirst(legacyPaths(configBase(env, home), "hub.json"), file, migrate)
   const { file: hub, warnings } = readHubFile(file, home)
   const config = centralConfig(env, home, hub)
   if (!resolved.HUB_STATE_DIR && !hub?.stateDir) {
     // hub.pid is the spoke's auto-start lock for the legacy location, not state.
-    migrateLegacy(path.join(stateBase(home), LEGACY_APP_DIR), config.stateDir, { ...migrate, skip: ["hub.pid"] })
+    migrateFirst(legacyPaths(stateBase(home)), config.stateDir, { ...migrate, skip: ["hub.pid"] })
   }
   return { config, warnings, path: file, loaded: hub !== undefined }
 }

@@ -1,5 +1,6 @@
-// One-time migration from the opencode-voice locations to the opencode-hub ones. When the new file or
-// directory is missing and the legacy one exists, it is copied (file modes kept, e.g. 0600 for tokens)
+// One-time migration from the legacy locations to the Hub ones. The project was opencode-voice (<= 0.4),
+// then opencode-hub (0.5), and is now Hub. When the new file or directory is missing, the most recent
+// legacy one that exists (opencode-hub first, then opencode-voice) is copied (file modes kept, e.g. 0600 for tokens)
 // through a temporary sibling that is renamed into place, so a partial copy never looks migrated. The
 // legacy copy is never touched or deleted. Callers skip migration for paths set explicitly by env.
 import {
@@ -17,8 +18,9 @@ import {
 import path from "node:path"
 import type { Env } from "./env"
 
-export const APP_DIR = "opencode-hub"
-export const LEGACY_APP_DIR = "opencode-voice"
+export const APP_DIR = "hub"
+/** Legacy directory names under ~/.config and ~/.local/state, most recent first. */
+export const LEGACY_APP_DIRS: readonly string[] = Object.freeze(["opencode-hub", "opencode-voice"])
 
 /** $XDG_CONFIG_HOME or ~/.config. */
 export const configBase = (env: Env, home: string): string => env.XDG_CONFIG_HOME || path.join(home, ".config")
@@ -80,11 +82,24 @@ export function migrateLegacy(legacy: string, target: string, options: MigrateOp
   } catch (cause) {
     rmSync(tmp, { recursive: true, force: true })
     const message = `could not migrate ${legacy} to ${target}: ${cause instanceof Error ? cause.message : cause}`
-    ;(options.log ?? ((m: string) => console.warn(`[opencode-hub] warning: ${m}`)))(message)
+    ;(options.log ?? ((m: string) => console.warn(`[hub] warning: ${m}`)))(message)
     return "failed"
   }
-  ;(options.log ?? ((m: string) => console.log(`[opencode-hub] ${m}`)))(
-    `migrated ${legacy} to ${target} (opencode-voice was renamed to opencode-hub; the old copy is kept)`,
+  ;(options.log ?? ((m: string) => console.log(`[hub] ${m}`)))(
+    `migrated ${legacy} to ${target} (the project is now Hub; the old copy is kept)`,
   )
   return "migrated"
 }
+
+/**
+ * Copies the first existing of `legacies` (most recent first) to `target` when the target is missing.
+ * Never throws; the legacy copies are never touched.
+ */
+export function migrateFirst(legacies: readonly string[], target: string, options: MigrateOptions = {}): MigrationResult {
+  if (exists(target)) return "none"
+  const legacy = legacies.find(exists)
+  return legacy === undefined ? "none" : migrateLegacy(legacy, target, options)
+}
+
+/** The legacy copies of `<base>/<APP_DIR>/<...rest>`, most recent first. */
+export const legacyPaths = (base: string, ...rest: string[]): string[] => LEGACY_APP_DIRS.map((dir) => path.join(base, dir, ...rest))

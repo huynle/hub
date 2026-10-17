@@ -1,9 +1,9 @@
-// One-time copy of the legacy opencode-voice config/state into the opencode-hub locations. Temp dirs only.
+// One-time copy of the legacy opencode-hub / opencode-voice config and state into the Hub locations. Temp dirs only.
 import { describe, expect, test } from "bun:test"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { APP_DIR, configBase, LEGACY_APP_DIR, migrateLegacy, stateBase } from "../src/migrate"
+import { APP_DIR, configBase, LEGACY_APP_DIRS, migrateFirst, migrateLegacy, stateBase } from "../src/migrate"
 
 const temp = () => mkdtempSync(path.join(tmpdir(), "hub-migrate-"))
 const mode = (p: string) => statSync(p).mode & 0o777
@@ -15,8 +15,9 @@ function logger() {
 
 describe("locations", () => {
   test("names and bases", () => {
-    expect(APP_DIR).toBe("opencode-hub")
-    expect(LEGACY_APP_DIR).toBe("opencode-voice")
+    expect(APP_DIR).toBe("hub")
+    // most recent first: opencode-hub (0.5), then opencode-voice (<= 0.4)
+    expect(LEGACY_APP_DIRS).toEqual(["opencode-hub", "opencode-voice"])
     expect(configBase({}, "/home/me")).toBe("/home/me/.config")
     expect(configBase({ XDG_CONFIG_HOME: "/xdg" }, "/home/me")).toBe("/xdg")
     expect(stateBase("/home/me")).toBe("/home/me/.local/state")
@@ -27,7 +28,7 @@ describe("migrateLegacy", () => {
   test("copies a legacy file, keeping its mode and the original", () => {
     const dir = temp()
     const legacy = path.join(dir, "opencode-voice", "config.json")
-    const target = path.join(dir, "opencode-hub", "config.json")
+    const target = path.join(dir, "hub", "config.json")
     mkdirSync(path.dirname(legacy), { recursive: true })
     writeFileSync(legacy, '{"token":"t"}')
     chmodSync(legacy, 0o600)
@@ -45,7 +46,7 @@ describe("migrateLegacy", () => {
   test("copies a legacy directory recursively with modes, skipping listed top-level names", () => {
     const dir = temp()
     const legacy = path.join(dir, "state", "opencode-voice")
-    const target = path.join(dir, "state", "opencode-hub")
+    const target = path.join(dir, "state", "hub")
     mkdirSync(path.join(legacy, "sub"), { recursive: true })
     chmodSync(legacy, 0o700)
     writeFileSync(path.join(legacy, "keys.json"), "k")
@@ -63,7 +64,7 @@ describe("migrateLegacy", () => {
     expect(existsSync(path.join(legacy, "hub.pid"))).toBe(true)
     expect(existsSync(path.join(legacy, "keys.json"))).toBe(true)
     // no temporary leftovers next to the target
-    expect(require("node:fs").readdirSync(path.dirname(target)).sort()).toEqual(["opencode-hub", "opencode-voice"])
+    expect(require("node:fs").readdirSync(path.dirname(target)).sort()).toEqual(["hub", "opencode-voice"])
   })
 
   test("does nothing when the target exists", () => {
@@ -100,5 +101,61 @@ describe("migrateLegacy", () => {
     expect(result).toBe("failed")
     expect(existsSync(target)).toBe(false)
     expect(lines[0]).toMatch(/could not/i)
+  })
+})
+
+describe("migrateFirst", () => {
+  function homeWith(...names: string[]) {
+    const dir = temp()
+    for (const name of names) {
+      mkdirSync(path.join(dir, name), { recursive: true, mode: 0o700 })
+      writeFileSync(path.join(dir, name, "config.json"), name)
+      chmodSync(path.join(dir, name, "config.json"), 0o600)
+    }
+    const at = (name: string) => path.join(dir, name, "config.json")
+    return { dir, at, legacies: LEGACY_APP_DIRS.map(at) }
+  }
+
+  test("prefers the opencode-hub copy over the opencode-voice one, keeping both", () => {
+    const { at, legacies } = homeWith("opencode-hub", "opencode-voice")
+    const { lines, log } = logger()
+    expect(migrateFirst(legacies, at("hub"), { log })).toBe("migrated")
+    expect(readFileSync(at("hub"), "utf8")).toBe("opencode-hub")
+    expect(mode(at("hub"))).toBe(0o600)
+    expect(readFileSync(at("opencode-hub"), "utf8")).toBe("opencode-hub")
+    expect(readFileSync(at("opencode-voice"), "utf8")).toBe("opencode-voice")
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toContain(at("opencode-hub"))
+  })
+
+  test("falls back to the opencode-voice copy", () => {
+    const { at, legacies } = homeWith("opencode-voice")
+    const { lines, log } = logger()
+    expect(migrateFirst(legacies, at("hub"), { log })).toBe("migrated")
+    expect(readFileSync(at("hub"), "utf8")).toBe("opencode-voice")
+    expect(lines[0]).toContain(at("opencode-voice"))
+  })
+
+  test("does nothing when the target exists or there is no legacy copy", () => {
+    const existing = homeWith("hub", "opencode-hub")
+    const { lines, log } = logger()
+    expect(migrateFirst(existing.legacies, existing.at("hub"), { log })).toBe("none")
+    expect(readFileSync(existing.at("hub"), "utf8")).toBe("hub")
+    const empty = homeWith()
+    expect(migrateFirst(empty.legacies, empty.at("hub"), { log })).toBe("none")
+    expect(existsSync(empty.at("hub"))).toBe(false)
+    expect(lines).toEqual([])
+  })
+
+  test("passes skip through to directory copies", () => {
+    const dir = temp()
+    const legacy = path.join(dir, "opencode-hub")
+    mkdirSync(legacy, { mode: 0o700 })
+    writeFileSync(path.join(legacy, "keys.json"), "k")
+    writeFileSync(path.join(legacy, "hub.pid"), "{}")
+    const target = path.join(dir, "hub")
+    expect(migrateFirst([legacy, path.join(dir, "opencode-voice")], target, { log: () => {}, skip: ["hub.pid"] })).toBe("migrated")
+    expect(existsSync(path.join(target, "keys.json"))).toBe(true)
+    expect(existsSync(path.join(target, "hub.pid"))).toBe(false)
   })
 })
