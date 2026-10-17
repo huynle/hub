@@ -625,6 +625,8 @@ public URL, `localhost`, `127.0.0.1` and `[::1]` with the same scheme and port c
 | `POST /api/sessions/:id/conversation {on}` | `conversation` | `200 {on, agent}`. 404 when no machine of yours reports the session |
 | `GET /api/sessions/:id` | | `{id, title, directory, parentID?, project?, projectName?, updated, exposed, state, blockers, now?, busy, conversation, status, activity}`; catalog sessions also carry `conversation` |
 | `POST /api/sessions/:id/presence {visible}` | | `204`; the phone posts on `visibilitychange` and every 30 s while visible. A root session is *watched* while any device reported it (or one of its subagent sessions) visible within 45 s |
+| `POST /api/sessions/:id/permission {requestID, decision}` | `permission` | `204`. `decision` is `once`, `always` or `reject`; `:id` is the session or any ancestor. Tried on every process that forwarded the request (OpenCode keeps pending permissions per process and per location; the spoke replies through the plugin instance of the location that holds it). `409 {code: "gone"}` "This request was already answered or expired" when none holds it (its card is dropped). 400 bad decision |
+| `POST /api/sessions/:id/form {formID, answer}` · `{formID, cancel: true}` | `form` | `204`. Answers (or dismisses) a pending OpenCode form, e.g. the agent's question tool. `answer` is field key → text, number, true/false or list of texts (≤ 50 fields, texts ≤ 20,000 characters, lists ≤ 100). Form blockers carry their `fields` (key, type, title, description, options, custom, required, limits, `when`) so a client can render them. The plugin API has no forms: the spoke uses its own server's HTTP API (the background service, or a foreground `opencode serve` with `--port` and `OPENCODE_PASSWORD`), else relays to a TUI of that server that polls RPC `hub.formActions`; with neither, 502 "answer it in the terminal". `409 {code: "gone"}` when no process holds it |
 
 The hub keeps the conversation flag per session in memory. When a process sends a sessions snapshot,
 owns a session in conversation mode, and was not told yet (it reconnected or took over ownership), the
@@ -1014,7 +1016,10 @@ publish before trusted publishing can take over (see the comment in `release.yml
 - Speech-to-text is batch per utterance (on-device voice detection + one request per utterance); no
   streaming STT provider yet.
 - Voice detection is a simple energy detector; noisy rooms may need tuning.
-- Questions (forms) are shown on the page but must be answered in the terminal.
+- Questions (forms) of a headless standalone server (`opencode serve --stdio` without its TUI) cannot be
+  answered from the hub; the background service, a foreground `opencode serve` and TUI-launched
+  standalone servers can.
+- Stop on a subagent session's page stops its whole tree (as on the root's page).
 - Listening with the phone screen off depends on the browser (best-effort on Android Chrome; not
   possible on iOS). Replies and alerts still arrive as push notifications.
 - The voice agent registers as a visible primary agent (`voice`) in OpenCode's agent list.
