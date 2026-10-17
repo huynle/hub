@@ -474,3 +474,8 @@ button.link { background: none; border: 0; padding: 0; color: var(--accent, #fab
 /* Menu rows keep their label; a long hint is cut instead. */
 .menu-label { flex: 1 0 auto; max-width: 100%; }
 .menu-hint { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.crumb { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; white-space: nowrap; max-width: 30%; overflow: hidden; text-overflow: ellipsis; text-decoration: none; }
+.crumb:hover { color: var(--text); }
+.crumb-chev { width: 12px; height: 12px; transform: rotate(180deg); }
+.crumb-sep { margin: 0 4px; }

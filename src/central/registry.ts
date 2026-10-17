@@ -772,7 +772,7 @@ export class Registry {
       if (s && (!info || s.updated > info.updated)) info = s
       if (s?.open && s.terminal && (!terminal || (terminal.source !== "herdr" && s.terminal.source === "herdr"))) terminal = s.terminal
     }
-    if (!info) return undefined
+    if (!info) return this.childView(sessionID)
     const fields = this.browserFields(sessionID)
     const status = this.status(sessionID) ?? []
     const own = status.find((s) => s.id === sessionID)
@@ -790,6 +790,32 @@ export class Registry {
       conversation: this.conversations.has(sessionID),
       status,
       activity: this.activity(sessionID),
+    }
+  }
+
+  /**
+   * A subagent session no process lists (it is known from its root's status tree, e.g. created by a run
+   * the hub watched): its view, with the root's directory and workspace. Undefined for anything else.
+   */
+  private childView(sessionID: string): SessionView | undefined {
+    const rootID = this.rootOf(sessionID)
+    if (!rootID || rootID === sessionID) return undefined
+    const root = this.session(rootID)
+    const own = root?.status.find((s) => s.id === sessionID)
+    if (!root || !own) return undefined
+    return {
+      id: sessionID,
+      title: own.title,
+      directory: root.directory,
+      ...(own.parentID ? { parentID: own.parentID } : {}),
+      ...(root.project ? { project: root.project } : {}),
+      ...(root.projectName ? { projectName: root.projectName } : {}),
+      updated: root.updated,
+      ...this.browserFields(sessionID),
+      busy: this.active.has(sessionID),
+      conversation: this.conversations.has(sessionID),
+      status: root.status,
+      activity: root.activity,
     }
   }
 
@@ -949,7 +975,11 @@ export class Registry {
     const tenant = this.sessionTenant(sessionID)
     const all = [...this.conns.values()].filter((c) => this.tenant(c) === tenant)
     const reporters = all.filter((c) => this.reports(c, sessionID))
-    if (reporters.length === 0) return undefined
+    if (reporters.length === 0) {
+      // A subagent session no process lists runs in the process that runs its root.
+      const rootID = this.rootOf(sessionID)
+      return rootID && rootID !== sessionID ? this.owner(rootID) : undefined
+    }
     const recent = (list: Conn[]) => this.recent(list, sessionID)
     const owned = reporters.filter((c) => this.reports(c, sessionID)?.owned)
     if (owned.length) return recent(owned)
@@ -1060,7 +1090,8 @@ export class Registry {
       let current = id
       for (;;) {
         const parent = reported.get(current)?.parentID
-        if (!parent || !reported.has(parent) || seen.has(parent)) return current
+        // Never nest a session under another tenant's session.
+        if (!parent || !reported.has(parent) || seen.has(parent) || this.sessionTenant(parent) !== this.sessionTenant(current)) return current
         seen.add(current)
         current = parent
       }

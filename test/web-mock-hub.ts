@@ -3,7 +3,8 @@
 // `npm run build:web` first) and fakes
 // the hub API + SSE per the conversation contract. Usage: `bun test/web-mock-hub.ts [port]` (default 4311).
 // Control: POST /mock/transcripts {texts: string[]} (queued /api/transcribe answers; POST /mock/reset-transcripts empties the queue), POST /mock/emit {…SSE message},
-// POST /mock/status {sessions} (status tree of ses_mock, root first; emitted as SSE status),
+// POST /mock/status {sessions} (status tree of ses_mock, root first; emitted as SSE status; children with a
+// parentID open as subagent sessions: their console routes answer like ses_mock's, no process lists them),
 // POST /mock/activity {sessionID?, item} (stored for GET /api/sessions/ses_mock and emitted as SSE activity),
 // GET /mock/log (recorded API calls), POST /mock/reset, POST /mock/workstation {on} (a second online machine), POST /mock/push {endpoints} (the push subscriptions the hub holds).
 // Also fakes presence, push prefs (incl. `say`), devices and the speech settings API (keys masked as last4).
@@ -707,7 +708,8 @@ async function consoleRoute(request: Request, url: URL, user: MockUser): Promise
   const match = /^\/api\/sessions\/([^/]+)\/(timeline|model-prefs|models|summary|diff|read|stop|turn|permission|form)(?:\/messages\/([^/]+)\/(?:parts\/([^/]+)|files\/(\d+)))?$/.exec(p)
   if (!match) return undefined
   const id = decodeURIComponent(match[1]!)
-  const fixture = id === SESSION ? { title: "Mock session", directory: `${HOME}/opencode-voice` } : id === BOB_SESSION ? bobSession() : sessions.find((x) => x.id === id) ?? (id === "ses_scratch" ? { title: "Scratch experiment", directory: "/tmp/scratch" } : undefined)
+  const child = status.find((x) => x.id === id && x.parentID)
+  const fixture = id === SESSION ? { title: "Mock session", directory: `${HOME}/opencode-voice` } : child ? { title: child.title, directory: `${HOME}/opencode-voice` } : id === BOB_SESSION ? bobSession() : sessions.find((x) => x.id === id) ?? (id === "ses_scratch" ? { title: "Scratch experiment", directory: "/tmp/scratch" } : undefined)
   if (!fixture) return Response.json({ error: "Not found" }, { status: 404 })
   const body = async () => (await request.json().catch(() => ({}))) as Record<string, any>
   switch (match[2]) {

@@ -24,6 +24,8 @@ function fakeHost(opts: { forms?: boolean } = {}) {
   /** Current agent per session (absent: the default agent). */
   const agents = new Map<string, string>()
   const known = new Set(["build", "plan", "voice"])
+  /** Parent of sessions as OpenCode reports them (subagent sessions). */
+  const parents = new Map<string, string>()
   let inbox = 0
   const catalog = [
     { providerID: "anthropic", modelID: "claude-haiku", name: "Claude Haiku", enabled: true, status: "active", variants: [{ id: "fast" }] },
@@ -44,7 +46,8 @@ function fakeHost(opts: { forms?: boolean } = {}) {
       calls.get.push(sessionID)
       const agent = agents.get(sessionID)
       const model = models.get(sessionID)
-      return { id: sessionID, title: `Fetched ${sessionID}`, location: { directory: "/fetched" }, time: { updated: 5 }, ...(agent ? { agent } : {}), ...(model ? { model } : {}) }
+      const parentID = parents.get(sessionID)
+      return { id: sessionID, title: `Fetched ${sessionID}`, location: { directory: "/fetched" }, time: { updated: 5 }, ...(parentID ? { parentID } : {}), ...(agent ? { agent } : {}), ...(model ? { model } : {}) }
     },
     ...(opts.forms === false
       ? {}
@@ -76,7 +79,7 @@ function fakeHost(opts: { forms?: boolean } = {}) {
       return { id: `ses_new${calls.create.length}` }
     },
   }
-  return { host, calls, messages, agents, known, models, catalog }
+  return { host, calls, messages, agents, known, models, catalog, parents }
 }
 
 function setup(
@@ -87,7 +90,7 @@ function setup(
   const file = path.join(dir, "config.json")
   const server = opts.server ?? fakeCentral()
   writeConfig(file, { ...defaults("box"), server: server.url, ...config })
-  const { host, calls, messages, agents, known, models, catalog } = fakeHost({ forms: opts.forms })
+  const { host, calls, messages, agents, known, models, catalog, parents } = fakeHost({ forms: opts.forms })
   if (opts.listRecent) (host as { listRecent?: SpokeHost["listRecent"] }).listRecent = opts.listRecent
   const spoke = new Spoke(host, {
     configFile: file,
@@ -109,7 +112,7 @@ function setup(
   cleanups.push(() => server.stop())
   cleanups.push(() => spoke.stop())
   spoke.start()
-  return { spoke, server, host, calls, messages, file, agents, known, models, catalog }
+  return { spoke, server, host, calls, messages, file, agents, known, models, catalog, parents }
 }
 
 const created = (sessionID: string, extra: Record<string, unknown> = {}): Ev => ({
@@ -231,6 +234,18 @@ describe("Spoke", () => {
     expect(res.ok).toBe(false)
     expect(res.error).toMatch(/unknown session/i)
     expect(calls.prompt).toHaveLength(0)
+  })
+
+  test("a subagent session this process has not seen yet is served when OpenCode says it descends from a known one", async () => {
+    const { spoke, server, calls, parents } = setup({ mode: "session", sessions: ["ses_a"], token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    parents.set("ses_kid", "ses_mid")
+    parents.set("ses_mid", "ses_a")
+    const res = await server.request({ op: "steer", sessionID: "ses_kid", text: "focus" })
+    expect(res).toMatchObject({ ok: true })
+    expect(calls.prompt).toEqual([expect.objectContaining({ sessionID: "ses_kid", text: "focus" })])
+    const stranger = await server.request({ op: "steer", sessionID: "ses_stranger", text: "x" })
+    expect(stranger.error).toMatch(/unknown session/i)
   })
 
   test("a permission request no location holds any more is reported as gone, not as an error", async () => {

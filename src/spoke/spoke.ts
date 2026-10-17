@@ -778,7 +778,7 @@ export class Spoke {
     if (req.op === "expose") return this.expose(req.sessionID, req.on)
     if (req.op === "create") return this.create(req.directory, req.title, req.herdrWorkspace)
     // Inspection and control need a session this process knows; Voice (conversation) is gated separately.
-    if (!isReported(this.config, this.tracker, req.sessionID)) throw new Error(UNKNOWN_SESSION)
+    if (!isReported(this.config, this.tracker, req.sessionID) && !(await this.adopt(req.sessionID))) throw new Error(UNKNOWN_SESSION)
     switch (req.op) {
       case "turn":
         return this.turn(req.sessionID, req.text, req.voiceStyle, req.images)
@@ -885,6 +885,44 @@ export class Spoke {
       for (const poll of [...this.relay.polls]) poll()
     })
     return {}
+  }
+
+  /**
+   * A subagent session this process has not seen yet (e.g. created before it started): known once OpenCode
+   * says it descends from a session this process reports. Adds the chain to the tracker.
+   */
+  private async adopt(sessionID: string): Promise<boolean> {
+    if (this.config.mode === "off") return false
+    const chain: HostSession[] = []
+    let current = sessionID
+    for (let depth = 0; depth < 8; depth++) {
+      let session: HostSession
+      try {
+        session = await this.host.getSession(current)
+      } catch {
+        return false
+      }
+      chain.push(session)
+      const parentID = session.parentID
+      if (!parentID || chain.some((s) => s.id === parentID)) return false
+      if (!isReported(this.config, this.tracker, parentID)) {
+        current = parentID
+        continue
+      }
+      const now = Date.now()
+      for (const s of chain) {
+        this.tracker.ensure(s.id, now)
+        this.tracker.setInfo(s.id, {
+          title: s.title ?? "",
+          directory: s.location?.directory ?? "",
+          ...(s.parentID ? { parentID: s.parentID } : {}),
+          updated: s.time?.updated ?? now,
+        })
+      }
+      this.scheduleSnapshot()
+      return true
+    }
+    return false
   }
 
   private modelDefaults(): SessionModelPrefs {

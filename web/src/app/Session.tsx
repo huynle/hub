@@ -6,7 +6,7 @@ import { reconcileSay, statusNotes, type StatusLike } from "../core/conversation
 import { speechSetup, type StatusEntry } from "../core/feedback-core"
 import { Timeline } from "../core/timeline-core"
 import { composerReducer, composerView, initialComposer, type ComposerAction } from "../lib/composer"
-import { treeRunning } from "../lib/store"
+import { subtree, treeRunning } from "../lib/store"
 import { transcriptBlocks, type Block } from "../lib/transcript"
 import { createStore } from "solid-js/store"
 import { unlockAudio } from "../voice/audio"
@@ -19,7 +19,7 @@ import { hub, live, liveTick, lookup, markRead, me, onMessage, rows, speechReady
 import { isPhone, railOpen, setRailOpen, toggleSidebar } from "./layout"
 import { ModelPicker, createModels, modelLabel, type ModelKind } from "./ModelMenu"
 import { DiffPanel, Rail, type Summary } from "./Rail"
-import { navigate } from "./router"
+import { navigate, sessionHref } from "./router"
 import { toast } from "./toast"
 import { allowVoiceNotifications, dictation, dictationFor, drafts, voice, voiceNotifyHint, voiceState } from "./voice"
 import { VoicePill } from "./VoicePill"
@@ -40,9 +40,23 @@ export function SessionView(props: { id: string }) {
   const found = () => lookup(id)
   const row = () => rows().find((r) => r.id === id)
   const status = () => found()?.session.status as readonly StatusEntry[] | undefined
-  const running = () => treeRunning(status())
+  /** Something in this session's subtree works or waits (typed input steers, Stop applies). */
+  const running = () => treeRunning(isChild() ? status()?.filter((s) => tree().has(s.id)) : status())
   const offline = () => !found()
   const exposed = () => found()?.session.exposed !== false
+  /** The root of the session's tree: itself, or (for a subagent session) the session that spawned the tree. */
+  const treeRoot = () => (typeof found()?.session.rootID === "string" ? (found()!.session.rootID as string) : id)
+  const isChild = () => treeRoot() !== id
+  /** This session and the subagent sessions below it. */
+  const tree = createMemo(() => subtree(status() as ReadonlyArray<{ id?: string; parentID?: string }> | undefined, id))
+  /** Live events of the tree root that belong on this page (a subagent page shows only its own subtree). */
+  const mine = (rootID: unknown, sessionID: unknown) => rootID === treeRoot() && (!isChild() || (typeof sessionID === "string" && tree().has(sessionID)))
+  const parent = () => {
+    const parentID = found()?.session.parentID
+    if (typeof parentID !== "string" || !parentID) return undefined
+    const title = (status() as ReadonlyArray<{ id: string; title?: string }> | undefined)?.find((s) => s.id === parentID)?.title || lookup(parentID)?.session.title
+    return { id: parentID, title: title || "Parent session" }
+  }
 
   // ---------- timeline ----------
   const timeline = new Timeline()
@@ -100,7 +114,7 @@ export function SessionView(props: { id: string }) {
   async function loadBacklog() {
     try {
       const info = await getJSON(sessionPath(id))
-      const feed = live.feed(id)
+      const feed = live.feed(treeRoot())
       feed.load(info.activity ?? [])
       if (info.status) feed.status(info.status)
     } catch {
@@ -112,7 +126,7 @@ export function SessionView(props: { id: string }) {
   let lastStatus: readonly StatusLike[] | undefined = untrack(() => status() as readonly StatusLike[] | undefined)
   const unsubscribe = onMessage((m) => {
     const rootID = typeof m.rootID === "string" ? m.rootID : m.sessionID
-    if (m.type === "activity" && rootID === id && m.item && m.item.kind !== "thinking") {
+    if (m.type === "activity" && mine(rootID, m.sessionID) && m.item && m.item.kind !== "thinking") {
       // Tool steps; thinking shows up through streamed reasoning.
       const item = m.item
       timeline.upsert({
@@ -126,10 +140,10 @@ export function SessionView(props: { id: string }) {
         at: timeline.get(`activity:${m.sessionID}:${item.id}`)?.at ?? item.at,
       })
       bump()
-    } else if (m.type === "reasoning" && rootID === id && typeof m.messageID === "string" && typeof m.delta === "string") {
+    } else if (m.type === "reasoning" && mine(rootID, m.sessionID) && typeof m.messageID === "string" && typeof m.delta === "string") {
       timeline.appendReasoning({ sessionID: m.sessionID, messageID: m.messageID, delta: m.delta })
       bump()
-    } else if (m.type === "delta" && rootID === id && typeof m.messageID === "string" && typeof m.text === "string") {
+    } else if (m.type === "delta" && mine(rootID, m.sessionID) && typeof m.messageID === "string" && typeof m.text === "string") {
       const key = `${m.messageID}:text`
       timeline.upsert({
         key,
@@ -143,7 +157,7 @@ export function SessionView(props: { id: string }) {
       // Text after reasoning ends that reasoning.
       timeline.endReasoning(m.sessionID)
       bump()
-    } else if (m.type === "status" && m.sessionID === id) {
+    } else if (m.type === "status" && m.sessionID === treeRoot()) {
       for (const text of statusNotes(lastStatus, m.sessions, id)) note(text, "sys")
       lastStatus = m.sessions
       if (!treeRunning(m.sessions)) {
@@ -407,16 +421,23 @@ export function SessionView(props: { id: string }) {
   })
 
   // ---------- derived ----------
-  const blockers = () => blockersOf(found()?.session)
+  const blockers = () => blockersOf(found()?.session).filter((b) => !isChild() || (b.sessionID !== undefined && tree().has(b.sessionID)))
   const pulse = () => {
     liveTick()
     now()
-    return live.has(id) ? live.feed(id).pulse() : undefined
+    return live.has(treeRoot()) ? live.feed(treeRoot()).pulse() : undefined
   }
   const [tick, setTick] = createSignal(Date.now())
   const ticker = setInterval(() => setTick(Date.now()), 1000)
   onCleanup(() => clearInterval(ticker))
   const working = () => {
+    if (isChild()) {
+      // The root's pulse describes the whole tree; a subagent page shows its own run.
+      const own = (status() as ReadonlyArray<{ id: string; state: string; since?: number }> | undefined)?.find((s) => s.id === id)
+      if (own?.state !== "working") return undefined
+      tick()
+      return `Working${own.since ? ` · ${formatElapsed(Date.now() - own.since)}` : ""}`
+    }
     const p = pulse()
     if (!running() || !p?.busy) return undefined
     tick()
@@ -439,6 +460,14 @@ export function SessionView(props: { id: string }) {
             <IconButton icon="menu" label="Open sidebar" onClick={toggleSidebar} />
           </Show>
           <div class="topbar-title">
+            <Show when={parent()}>
+              {(p) => (
+                <a class="crumb muted" href={sessionHref(p().id)} title={`Back to ${p().title}`} aria-label={`Back to ${p().title}`}>
+                  <Icon name="chevron" class="crumb-chev" /> {p().title}
+                  <span class="crumb-sep" aria-hidden="true">/</span>
+                </a>
+              )}
+            </Show>
             <Show when={row()} fallback={<h1 class="title">{found()?.session.title || (hub.machines ? "Session" : "Loading…")}</h1>}>
               {(r) => (
                 <>
