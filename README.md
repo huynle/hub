@@ -371,9 +371,12 @@ recent activity.
 the Docker image, npm package and binaries ship the build). One store fed by the hub's SSE stream drives:
 
 - **Sidebar** (⌘B collapses; a drawer on phones): search, New session, Needs you, Running, Pinned, sessions open in a
-  terminal grouped by project (or server) with `+`, Recents; rows show status, Voice, an unread dot and a `⋯` menu
-  (pin, hide, stop, Voice on/off).
+  terminal grouped by project (or server) with `+`, Recents; rows show status, a pulsing green dot left of the
+  title for the session live in Voice (in Voice mode here, or in a conversation), an unread dot and a `⋯` menu
+  (pin, hide, stop, Allow/Disallow Voice).
 - **`/`**: All sessions as a sortable, filterable table (a list on phones); filters and sort are kept per device.
+  There is no Voice column or Voice filter: the live Voice session gets the green dot before its title, and the
+  row's `⋯` menu has **Allow Voice** / **Disallow Voice**.
 - **`/s/<id>`**: the transcript (markdown replies, "Thought for Ns", "Used N tools" with full details on demand,
   subagent rows linking to their sessions), permission cards, and the composer: Send while idle, Steer while the
   session tree runs, Stop for the whole tree, Dictate (into this session's draft; leaving the session while
@@ -428,7 +431,7 @@ Pure logic lives in `web/src/core` and `web/src/lib` (bun tests in `test/web-*.t
 - **Recent**: everything else the machine reported (its history window), grouped by workspace with
   nested worktrees and subfolders, with search (title, project name, directory; case- and
   diacritic-insensitive, all words must match, matches highlighted; opens every group) and filter chips
-  All · Active · Needs you · Today · Voice on · Enabled. Groups that are pinned, active, blocked or changed
+  All · Active · Needs you · Today · Enabled. Groups that are pinned, active, blocked or changed
   within a day start open; only open groups render rows, 50 at a time ("Show more"). A **Standalone**
   section lists standalone processes.
 - **Hidden**: hidden workspaces (with how many sessions they hide) and hidden sessions, each with Unhide.
@@ -442,7 +445,7 @@ Pure logic lives in `web/src/core` and `web/src/lib` (bun tests in `test/web-*.t
   without `/api/prefs/view`, they stay on the device. Open/closed groups and the filter stay per device.
 - **Voice off** sessions (`exposed: false`, mode `session`) open, show their status and live activity, and
   take Send, Steer, Stop and permission replies like any other session. Only Voice is off: the row's ⋯
-  menu has **Turn Voice on** (`POST /api/sessions/:id/expose {on:true}`; shown at once, reverted on
+  menu has **Allow Voice** (`POST /api/sessions/:id/expose {on:true}`; shown at once, reverted on
   error), and Voice mode on such a session turns Voice on first.
 - **New session** (`/new`; + in the header, + on any group, or a group's ⋯ menu), composer first: "Describe
   a task or ask a question" (images can be attached), and under it where it runs: **Environment** (your

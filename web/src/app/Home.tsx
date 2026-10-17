@@ -1,13 +1,14 @@
 // Home: All sessions across connected servers. Desktop: a sortable, filterable table; phone: a compact list.
 // Filters and sort are kept in localStorage; the search box is not.
 import { For, Show, createMemo, createSignal } from "solid-js"
-import { DEFAULT_TABLE, parseTable, serializeTable, tableRows, type SessionRow, type SortKey, type TableFilters, type TableState } from "../lib/sessions"
+import { DEFAULT_TABLE, parseTable, serializeTable, tableRows, voiceLive, type SessionRow, type SortKey, type TableFilters, type TableState } from "../lib/sessions"
 import { sessionMenu } from "./actions"
 import { enrollments, hub, live, liveTick, rows, speechReady, me } from "./hub"
 import { isPhone } from "./layout"
 import { navigate, sessionHref } from "./router"
 import { speechSetup } from "../core/feedback-core"
-import { Icon, Menu, SOURCE_LABEL, STATE_LABEL, StatusIcon, ago, now } from "./ui"
+import { Icon, Menu, SOURCE_LABEL, STATE_LABEL, StatusIcon, VoiceDot, ago, now } from "./ui"
+import { voiceState } from "./voice"
 
 const TABLE_KEY = "hub.table"
 
@@ -29,7 +30,6 @@ const COLUMNS: Array<[SortKey, string]> = [
   ["project", "Project"],
   ["server", "Server"],
   ["source", "Open in"],
-  ["voice", "Voice"],
   ["activity", "Last activity"],
 ]
 
@@ -39,8 +39,6 @@ const CHIPS: Array<[string, string, Partial<TableFilters>]> = [
   ["idle", "Idle", { status: "idle" }],
   ["open", "Open in terminal", { source: "open" }],
   ["background", "Background", { source: "background" }],
-  ["voice-on", "Voice on", { voice: "on" }],
-  ["voice-off", "Voice off", { voice: "off" }],
   ["hidden", "Hidden", { hidden: true }],
 ]
 
@@ -163,7 +161,7 @@ function SessionTable(props: { rows: SessionRow[]; table: TableState; sortBy: (k
         </tr>
       </thead>
       <tbody>
-        <For each={props.rows} fallback={<tr><td colSpan={9} class="muted empty-cell">No sessions match.</td></tr>}>
+        <For each={props.rows} fallback={<tr><td colSpan={8} class="muted empty-cell">No sessions match.</td></tr>}>
           {(r) => (
             <tr class={`${r.unread ? "unread" : ""}`} onClick={(e) => !(e.target as Element).closest("button,a,select") && navigate(sessionHref(r.id))}>
               <td class="col-status">
@@ -171,6 +169,9 @@ function SessionTable(props: { rows: SessionRow[]; table: TableState; sortBy: (k
                 <span class="sr-only">{STATE_LABEL[r.state]}</span>
               </td>
               <td class="col-title">
+                <Show when={voiceLive(r, voiceState())}>
+                  <VoiceDot />
+                </Show>
                 <a href={sessionHref(r.id)}>{r.title}</a>
                 <Show when={r.unread}>
                   <span class="unread-dot" role="img" aria-label="Unread" />
@@ -183,9 +184,6 @@ function SessionTable(props: { rows: SessionRow[]; table: TableState; sortBy: (k
                 <span class={r.machineOnline ? "" : "muted"}>{r.machineName}</span>
               </td>
               <td class="col-source">{SOURCE_LABEL[r.source]}</td>
-              <td class="col-voice">
-                <span class={`voice-pill${r.conversation ? " live" : r.exposed ? " on" : ""}`}>{r.conversation ? "Talking" : r.exposed ? "On" : "Off"}</span>
-              </td>
               <td class="col-activity">{ago(r.updated, now())}</td>
               <td class="col-now muted">{currentActivity(r)}</td>
               <td class="col-actions">
@@ -207,6 +205,9 @@ function PhoneRow(props: { row: SessionRow }) {
         <StatusIcon state={r().state} />
         <span class="home-item-text">
           <span class="home-item-title">
+            <Show when={voiceLive(r(), voiceState())}>
+              <VoiceDot />
+            </Show>
             {r().title}
             <Show when={r().unread}>
               <span class="unread-dot" role="img" aria-label="Unread" />
@@ -214,11 +215,6 @@ function PhoneRow(props: { row: SessionRow }) {
           </span>
           <span class="home-item-meta muted">{currentActivity(r()) || `${r().where} · ${r().machineName} · ${ago(r().updated, now())}`}</span>
         </span>
-        <Show when={r().conversation || r().exposed}>
-          <span class={`voice-badge${r().conversation ? " live" : ""}`} title="Voice on">
-            <Icon name={r().conversation ? "wave" : "mic"} />
-          </span>
-        </Show>
       </a>
       <Menu label={`More actions for ${r().title}`} class="icon-btn small" items={() => sessionMenu(r())} />
     </li>

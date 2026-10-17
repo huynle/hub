@@ -322,6 +322,68 @@ async function desktop(browser: Browser): Promise<void> {
     await mock("/mock/fail", { expose: false })
   })
 
+  await check("desktop: home table has no Voice column/filters; a green dot marks only the live Voice session; ⋯ has Allow Voice", async () => {
+    const go = (href: string) =>
+      page.evaluate((h) => {
+        const a = document.createElement("a")
+        a.href = h
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+      }, href)
+    const dotted = () =>
+      page.locator(".sessions-table tbody tr").evaluateAll((trs) =>
+        trs.filter((tr) => tr.querySelector(".col-title .voice-dot")).map((tr) => tr.querySelector(".col-title a")?.textContent ?? ""),
+      )
+    await page.goto(`${BASE}/`)
+    await page.locator(".sessions-table tbody tr").nth(5).waitFor()
+    const headers = (await page.locator(".sessions-table thead th").allTextContents()).map((t) => t.trim())
+    assert(!headers.some((h) => /^Voice/.test(h)), `no Voice column: ${headers.join(" | ")}`)
+    assert((await page.locator(".sessions-table .voice-pill, .col-voice").count()) === 0, "no Voice cells")
+    assert((await page.locator('.chips [data-chip^="voice"]').count()) === 0, "no Voice filter chips")
+    assert((await page.getByRole("button", { name: /^Voice (on|off)$/ }).count()) === 0, "no Voice on/off buttons")
+    const before = await dotted()
+    // Only sessions the catalog reports in a conversation are live; merely exposed ones get nothing.
+    assert(!before.includes("Mock session"), `Mock session not live yet: ${before.join(", ")}`)
+    assert(before.length <= 1, `at most the one fixture in conversation: ${before.join(", ")}`)
+    // Voice mode on in Mock session, then back home in-app (Voice mode keeps running).
+    await page.goto(`${BASE}/s/ses_mock`)
+    await page.locator(".msg.assistant").first().waitFor()
+    await page.getByRole("button", { name: "Start Voice mode" }).click()
+    await page.locator(".voice-bar .voice-state").getByText(/Listening|Thinking/).waitFor()
+    await go("/")
+    await page.getByRole("heading", { name: "All sessions" }).waitFor()
+    await page.locator(".sessions-table tbody tr").nth(5).waitFor()
+    const row = page.locator(".sessions-table tbody tr", { has: page.getByRole("link", { name: "Mock session", exact: true }) })
+    const dot = row.locator(".col-title .voice-dot")
+    await dot.waitFor()
+    assert((await dot.getAttribute("aria-label")) === "Voice mode on", "dot aria-label")
+    assert((await dot.getAttribute("title")) === "Voice mode on", "dot tooltip")
+    assert(await row.locator(".col-title").evaluate((td) => td.firstElementChild?.classList.contains("voice-dot")), "dot is left of the title")
+    const box = await dot.boundingBox()
+    assert(box && Math.round(box.width) === 8 && Math.round(box.height) === 8, `8px dot: ${JSON.stringify(box)}`)
+    const after = await dotted()
+    assert(JSON.stringify([...after].sort()) === JSON.stringify([...before, "Mock session"].sort()), `only the live session gains a dot: ${after.join(", ")}`)
+    assert(await page.locator(".sidebar .side-row.voice-here .voice-dot").first().isVisible(), "sidebar dot for the live session")
+    await row.scrollIntoViewIfNeeded()
+    await shot(page, "desktop-home-voice-dot")
+    // The ⋯ menu keeps the capability: a Voice-off session offers Allow Voice, an exposed one Disallow Voice.
+    await page.getByRole("button", { name: "More actions for PWA icons" }).first().click()
+    await page.getByRole("menuitem", { name: "Allow Voice" }).waitFor()
+    await page.keyboard.press("Escape")
+    await page.getByRole("menuitem", { name: "Allow Voice" }).waitFor({ state: "detached" })
+    await row.getByRole("button", { name: "More actions for Mock session" }).click()
+    await page.getByRole("menuitem", { name: "Disallow Voice" }).waitFor()
+    await page.keyboard.press("Escape")
+    // Ending Voice mode removes the dot.
+    await go("/s/ses_mock")
+    await page.locator(".voice-bar").getByRole("button", { name: "End", exact: true }).click()
+    await page.locator(".voice-bar").waitFor({ state: "detached" })
+    await go("/")
+    await page.locator(".sessions-table tbody tr").nth(5).waitFor()
+    await row.locator(".voice-dot").waitFor({ state: "detached" })
+  })
+
   await check("desktop: /s/<id>?voice=1 (from /voice) starts Voice mode and drops the param", async () => {
     await page.goto(`${BASE}/s/ses_10?voice=1`)
     await page.locator(".voice-bar .voice-state").getByText(/Listening|Thinking/).waitFor({ timeout: 10_000 })
@@ -625,6 +687,10 @@ async function phone(browser: Browser): Promise<void> {
     await page.locator(".home-list .home-item").nth(3).waitFor()
     assert((await page.locator(".sessions-table").count()) === 0, "no table on phone")
     assert((await page.locator(".sidebar").count()) === 0, "sidebar closed")
+    // No exposed-only Voice badges; a dot only on sessions live in Voice (the fixture in a conversation).
+    assert((await page.locator(".home-list .voice-badge").count()) === 0, "no Voice badges")
+    const live = await page.locator(".home-list .home-item").evaluateAll((lis) => lis.filter((li) => li.querySelector(".voice-dot")).length)
+    assert(live <= 1, `at most one live dot: ${live}`)
     await shot(page, "phone-home")
     await page.getByRole("button", { name: "Open sidebar" }).click()
     await page.locator(".sidebar").waitFor()

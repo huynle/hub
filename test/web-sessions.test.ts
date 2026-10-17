@@ -7,6 +7,7 @@ import {
   sessionRows,
   sidebarSections,
   tableRows,
+  voiceLive,
   type SessionRow,
 } from "../web/src/lib/sessions"
 import { normalizePrefs, type ViewMachine, type ViewSession } from "../web/src/core/view-core"
@@ -87,13 +88,11 @@ describe("tableRows", () => {
     expect(ids(tableRows(rows, { ...DEFAULT_TABLE, query: "desktop" }))).toEqual(["far"])
   })
 
-  test("filter chips: status, voice, source, machine; hidden shows only hidden", () => {
+  test("filter chips: status, source, machine; hidden shows only hidden", () => {
     const f = (filters: Partial<typeof DEFAULT_TABLE.filters>) => ids(tableRows(rows, { ...DEFAULT_TABLE, filters: { ...DEFAULT_TABLE.filters, ...filters } }))
     expect(f({ status: "needs" })).toEqual(["need"])
     expect(f({ status: "running" })).toEqual(["work", "need"])
     expect(f({ status: "idle" })).toEqual(["far", "off", "idle-old"])
-    expect(f({ voice: "off" })).toEqual(["off"])
-    expect(f({ voice: "on" })).toEqual(["far", "work", "need", "idle-old"])
     expect(f({ source: "open" })).toEqual(["work"])
     expect(f({ source: "background" })).toEqual(["far", "off", "need", "idle-old"])
     expect(f({ machine: "m2" })).toEqual(["far"])
@@ -108,6 +107,36 @@ describe("tableRows", () => {
     expect(back.query).toBe("") // the search box is not persisted
     expect(parseTable("{nope")).toEqual(DEFAULT_TABLE)
     expect(parseTable(JSON.stringify({ sort: { key: "bogus", dir: "up" }, filters: { status: "weird" } }))).toEqual(DEFAULT_TABLE)
+  })
+
+  test("there is no Voice filter or sort: stale saved voice values are ignored", () => {
+    expect(Object.keys(DEFAULT_TABLE.filters)).not.toContain("voice")
+    expect(parseTable(JSON.stringify({ sort: { key: "voice", dir: "asc" }, filters: { voice: "on" } }))).toEqual(DEFAULT_TABLE)
+    const kept = parseTable(JSON.stringify({ sort: { key: "voice", dir: "asc" }, filters: { voice: "off", status: "needs" } }))
+    expect(kept.sort).toEqual(DEFAULT_TABLE.sort)
+    expect(kept.filters).toEqual({ ...DEFAULT_TABLE.filters, status: "needs" })
+    expect(ids(tableRows(rows, kept))).toEqual(["need"])
+  })
+})
+
+describe("voiceLive", () => {
+  const rows = sessionRows(
+    [machine("m1", [session("talk", { conversation: true }), session("here"), session("exposed"), session("off", { exposed: false })])],
+    normalizePrefs({}),
+    {},
+  )
+  const by = Object.fromEntries(rows.map((r) => [r.id, r]))
+  test("live only for the session in Voice mode here, or one the catalog reports in conversation", () => {
+    const state = { phase: "listening", sessionID: "here" }
+    expect(voiceLive(by.here!, state)).toBe(true)
+    expect(voiceLive(by.talk!, state)).toBe(true)
+    expect(voiceLive(by.exposed!, state)).toBe(false)
+    expect(voiceLive(by.off!, state)).toBe(false)
+  })
+  test("starting counts as live; off does not, even for the remembered session", () => {
+    expect(voiceLive(by.here!, { phase: "starting", sessionID: "here" })).toBe(true)
+    expect(voiceLive(by.here!, { phase: "off", sessionID: "here" })).toBe(false)
+    expect(voiceLive(by.exposed!, { phase: "off" })).toBe(false)
   })
 })
 

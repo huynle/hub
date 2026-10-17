@@ -138,17 +138,17 @@ describe("search", () => {
 
 describe("filters", () => {
   test("chips in order", () => {
-    expect(FILTERS.map((f: [string, string]) => f[1])).toEqual(["All", "Active", "Needs you", "Today", "Voice on", "Enabled"])
+    expect(FILTERS.map((f: [string, string]) => f[1])).toEqual(["All", "Active", "Needs you", "Today", "Enabled"])
   })
 
-  test("active, needs you, voice on, enabled", () => {
+  test("active, needs you, enabled; the old voice filter id passes everything", () => {
     const w = working()
     const b = blocked()
     const idle = ses({ conversation: true, exposed: false })
     expect([w, b, idle].map((s) => passesFilter(s, "all", NOW))).toEqual([true, true, true])
     expect([w, b, idle].map((s) => passesFilter(s, "active", NOW))).toEqual([true, true, false])
     expect([w, b, idle].map((s) => passesFilter(s, "needs", NOW))).toEqual([false, true, false])
-    expect([w, b, idle].map((s) => passesFilter(s, "voice", NOW))).toEqual([false, false, true])
+    expect([w, b, idle].map((s) => passesFilter(s, "voice", NOW))).toEqual([true, true, true])
     expect([w, b, idle].map((s) => passesFilter(s, "enabled", NOW))).toEqual([true, true, false])
   })
 

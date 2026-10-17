@@ -45,12 +45,11 @@ export function sessionRows(machines: readonly ViewMachine[] | undefined, prefs:
 
 // ---------- home table ----------
 
-export type SortKey = "status" | "title" | "project" | "server" | "source" | "voice" | "activity"
+export type SortKey = "status" | "title" | "project" | "server" | "source" | "activity"
 export type SortDir = "asc" | "desc"
 
 export interface TableFilters {
   status: "all" | "needs" | "running" | "idle"
-  voice: "all" | "on" | "off"
   source: "all" | "open" | "background"
   /** Machine ID, "" for all. */
   machine: string
@@ -66,13 +65,12 @@ export interface TableState {
 
 export const DEFAULT_TABLE: TableState = Object.freeze({
   query: "",
-  filters: Object.freeze({ status: "all", voice: "all", source: "all", machine: "", hidden: false }),
+  filters: Object.freeze({ status: "all", source: "all", machine: "", hidden: false }),
   sort: Object.freeze({ key: "activity", dir: "desc" }),
 }) as TableState
 
-const SORT_KEYS: readonly SortKey[] = ["status", "title", "project", "server", "source", "voice", "activity"]
+const SORT_KEYS: readonly SortKey[] = ["status", "title", "project", "server", "source", "activity"]
 const STATUS = ["all", "needs", "running", "idle"] as const
-const VOICE = ["all", "on", "off"] as const
 const SOURCE = ["all", "open", "background"] as const
 
 const text = (a: string, b: string) => a.localeCompare(b, undefined, { sensitivity: "base" })
@@ -85,7 +83,6 @@ const COMPARE: Record<SortKey, (a: SessionRow, b: SessionRow) => number> = {
   project: (a, b) => text(a.workspace, b.workspace) || recent(a, b),
   server: (a, b) => text(a.machineName, b.machineName) || recent(a, b),
   source: (a, b) => text(a.source, b.source) || recent(a, b),
-  voice: (a, b) => Number(b.conversation ?? false) - Number(a.conversation ?? false) || Number(b.exposed) - Number(a.exposed) || recent(a, b),
   activity: (a, b) => a.updated - b.updated,
 }
 
@@ -94,8 +91,6 @@ function passes(r: SessionRow, f: TableFilters): boolean {
   if (f.status === "needs" && r.state !== "blocked") return false
   if (f.status === "running" && !r.running) return false
   if (f.status === "idle" && r.running) return false
-  if (f.voice === "on" && !r.exposed) return false
-  if (f.voice === "off" && r.exposed) return false
   if (f.source === "open" && r.source === "background") return false
   if (f.source === "background" && r.source !== "background") return false
   if (f.machine && r.machineID !== f.machine) return false
@@ -119,7 +114,7 @@ export function tableRows(rows: readonly SessionRow[], state: TableState): Sessi
 
 const pick = <T extends string>(value: unknown, allowed: readonly T[], fallback: T): T => (allowed.includes(value as T) ? (value as T) : fallback)
 
-/** Table filters and sort from localStorage (the search box is not kept). */
+/** Table filters and sort from localStorage (the search box is not kept; unknown keys, e.g. the old voice filter, are dropped). */
 export function parseTable(raw: string | null | undefined): TableState {
   let value: Record<string, any>
   try {
@@ -131,12 +126,12 @@ export function parseTable(raw: string | null | undefined): TableState {
   const f = (value.filters ?? {}) as Record<string, unknown>
   const s = (value.sort ?? {}) as Record<string, unknown>
   const d = DEFAULT_TABLE
+  // An unknown sort key (e.g. the removed "voice" column) resets the whole sort, direction included.
   const key = pick(s.key, SORT_KEYS, d.sort.key)
-  const dir = pick(s.dir, ["asc", "desc"] as const, d.sort.dir)
+  const dir = key === s.key ? pick(s.dir, ["asc", "desc"] as const, d.sort.dir) : d.sort.dir
   const sort = key === d.sort.key && dir === d.sort.dir ? d.sort : { key, dir }
   const filters: TableFilters = {
     status: pick(f.status, STATUS, d.filters.status),
-    voice: pick(f.voice, VOICE, d.filters.voice),
     source: pick(f.source, SOURCE, d.filters.source),
     machine: typeof f.machine === "string" && f.machine.length <= 200 ? f.machine : "",
     hidden: f.hidden === true,
@@ -219,4 +214,14 @@ export function sidebarSections(
   }
   add({ id: "recents", title: "Recents", kind: "recents", rows: visible.filter((r) => !used.has(r.id)).sort(recent).slice(0, recentLimit) })
   return sections
+}
+
+// ---------- live Voice ----------
+
+/**
+ * The session is live in Voice: in Voice mode in this browser (`voice` is the app-level controller state), or in
+ * a conversation per the catalog. Merely allowing Voice (`exposed`) is not live.
+ */
+export function voiceLive(row: SessionRow, voice: { readonly phase: string; readonly sessionID?: string }): boolean {
+  return (voice.phase !== "off" && voice.sessionID === row.id) || row.conversation === true
 }

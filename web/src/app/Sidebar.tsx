@@ -2,12 +2,12 @@
 // account footer. Collapsible on desktop (⌘B); a drawer on phones.
 import { For, Show, createMemo, createSignal } from "solid-js"
 import { account } from "../core/account-core"
-import { sidebarSections, type GroupBy, type SessionRow, type SidebarSort } from "../lib/sessions"
+import { sidebarSections, voiceLive, type GroupBy, type SessionRow, type SidebarSort } from "../lib/sessions"
 import { sessionMenu } from "./actions"
 import { enrollments, me, rows } from "./hub"
 import { HubMark } from "./HubMark"
 import { route, sessionHref } from "./router"
-import { Icon, IconButton, Menu, StatusIcon } from "./ui"
+import { Icon, IconButton, Menu, StatusIcon, VoiceDot } from "./ui"
 import { voiceState } from "./voice"
 
 const GROUP_KEY = "hub.sidebar.groupBy"
@@ -126,17 +126,10 @@ function SideRow(props: { row: SessionRow; active: boolean; onPick: () => void }
     <li class={`side-row${props.active ? " active" : ""}${r().unread ? " unread" : ""}${voiceHere() ? " voice-here" : ""}`}>
       <a href={sessionHref(r().id)} class="side-row-link" aria-current={props.active ? "page" : undefined} onClick={props.onPick} title={`${r().title} · ${r().where} · ${r().machineName}`}>
         <StatusIcon state={r().state} />
-        <span class="side-title">{r().title}</span>
-        <Show when={r().conversation || r().exposed || voiceHere()}>
-          <span
-            class={`voice-badge${r().conversation || voiceHere() ? " live" : ""}`}
-            role="img"
-            aria-label={voiceHere() ? "Voice mode on here" : r().conversation ? "Voice conversation on" : "Voice on"}
-            title={voiceHere() ? "Voice mode on here" : r().conversation ? "Voice conversation on" : "Voice on"}
-          >
-            <Icon name={r().conversation || voiceHere() ? "wave" : "mic"} />
-          </span>
+        <Show when={voiceLive(r(), voiceState())}>
+          <VoiceDot />
         </Show>
+        <span class="side-title">{r().title}</span>
         <Show when={r().unread}>
           <span class="unread-dot" role="img" aria-label="Unread" />
         </Show>

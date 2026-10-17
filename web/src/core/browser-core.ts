@@ -2,7 +2,7 @@
 // and the per-machine view (Needs you, Active now, Workspaces with nested worktrees, Standalone processes).
 
 export type SessionState = "blocked" | "working" | "error" | "idle"
-export type FilterID = "all" | "active" | "needs" | "today" | "voice" | "enabled"
+export type FilterID = "all" | "active" | "needs" | "today" | "enabled"
 
 export const UNTITLED = "Untitled"
 
@@ -12,7 +12,6 @@ export const FILTERS: Array<[FilterID, string]> = [
   ["active", "Active"],
   ["needs", "Needs you"],
   ["today", "Today"],
-  ["voice", "Voice on"],
   ["enabled", "Enabled"],
 ]
 
@@ -239,8 +238,6 @@ export function passesFilter(s: BrowserSession, filter: FilterID | string, now =
       return sessionState(s) === "blocked"
     case "today":
       return (s.updated ?? 0) >= startOfDay(now)
-    case "voice":
-      return !!s.conversation
     case "enabled":
       return s.exposed !== false
     default:
