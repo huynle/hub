@@ -1,9 +1,9 @@
-# OpenCode Hub server. Runtime: Bun, the sources, and the hub's npm dependencies
+# Hub server. Runtime: Bun, the sources, and the hub's npm dependencies
 # (web-push for notifications) at the versions pinned in package-lock.json. Published as
-# ghcr.io/huynle/opencode-hub (see .github/workflows/release.yml; formerly opencode-voice-hub).
-#   docker build -t opencode-hub .
+# ghcr.io/huynle/hub (see .github/workflows/release.yml; formerly opencode-hub and opencode-voice-hub).
+#   docker build -t hub .
 #   docker run -p 127.0.0.1:4097:4097 -v hub-data:/data -e HUB_PUBLIC_URL=https://hub.example.com \
-#     -e OPENROUTER_API_KEY=... opencode-hub
+#     -e OPENROUTER_API_KEY=... hub
 # Legacy VOICE_* variables still work, except that the HUB_HOST/HUB_PORT/HUB_STATE_DIR defaults below
 # win over VOICE_HOST/VOICE_PORT/VOICE_STATE_DIR: rename those overrides to HUB_*.
 # The console (web/, Solid + Vite) is built in its own stage; the image ships only web/dist.
@@ -24,10 +24,10 @@ COPY docker/hub-deps.ts ./
 RUN bun hub-deps.ts /deps web-push
 
 FROM oven/bun:1.3-slim
-LABEL org.opencontainers.image.title="opencode-hub" \
-      org.opencontainers.image.description="OpenCode Hub: remote console, pairing, push and optional Voice for OpenCode sessions" \
+LABEL org.opencontainers.image.title="hub" \
+      org.opencontainers.image.description="Hub: a central hub for AI agent harnesses (OpenCode first): remote console, pairing, push and optional Voice" \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.source="https://github.com/huynle/opencode-hub"
+      org.opencontainers.image.source="https://github.com/huynle/hub"
 WORKDIR /app
 COPY --from=deps /deps/node_modules ./node_modules
 COPY package.json ./

@@ -29,6 +29,6 @@ jobs:
       packages: write
     uses: huynle/.github/.github/workflows/container-release.yml@v1
     with:
-      image: ghcr.io/huynle/opencode-hub
+      image: ghcr.io/huynle/hub
       platforms: linux/amd64,linux/arm64
       runner: ubuntu-latest
