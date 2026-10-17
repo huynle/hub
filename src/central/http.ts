@@ -4,7 +4,7 @@
 import type { Server } from "bun"
 import { diskAssets, type WebAssets } from "./assets"
 import path from "node:path"
-import { PROMPT_IMAGE_MIMES, promptImagesProblem, type EnrollStart, type ModelSelection, type PermissionDecision, type PromptImage, type TurnResult } from "../protocol"
+import { formAnswerProblem, PROMPT_IMAGE_MIMES, promptImagesProblem, type EnrollStart, type FormAnswer, type ModelSelection, type PermissionDecision, type PromptImage, type TurnResult } from "../protocol"
 import { isLoopbackAddress, isLoopbackHost, isLoopbackURL, loopbackOrigins } from "../loopback"
 import { speakable } from "../speakable"
 import { Auth, RateLimitError, ValidationError } from "./auth"
@@ -647,6 +647,7 @@ export function startCentral(options: CentralOptions): Central {
       async ({ params }) => Response.json(await spokes.request(ownerOf(params.session!), { op: "context", sessionID: params.session! })),
     ),
     route("POST", "/api/sessions/:session/permission", "session", ({ request, params }) => permission(request, params.session!)),
+    route("POST", "/api/sessions/:session/form", "session", ({ request, params }) => form(request, params.session!)),
     route("GET", "/api/sessions/:session/summary", "session", async ({ params }) =>
       Response.json(await spokes.request(ownerOf(params.session!), { op: "summary", sessionID: params.session! }), { headers: NO_STORE })),
     route("GET", "/api/sessions/:session/diff", "session", async ({ params, url }) => {
@@ -954,6 +955,35 @@ export function startCentral(options: CentralOptions): Central {
     }
     if (failure) throw failure
     registry.dropPermission(input.requestID)
+    return error(409, PERMISSION_GONE, "gone")
+  }
+
+  /** Answers or cancels a pending form (question) in the session's tree, through a process that holds it. */
+  async function form(request: Request, rootID: string): Promise<Response> {
+    const input = await body(request)
+    if (typeof input.formID !== "string" || !input.formID || input.formID.length > 300) return error(400, "Expected {formID, answer} or {formID, cancel: true}")
+    const cancel = input.cancel === true
+    if (cancel ? input.answer !== undefined : input.cancel !== undefined) return error(400, "Send either an answer or cancel: true")
+    if (!cancel) {
+      const problem = formAnswerProblem(input.answer)
+      if (problem) return error(400, problem)
+    }
+    const targets = registry.formTargets(rootID, input.formID)
+    if (!targets.length) return error(409, PERMISSION_GONE, "gone")
+    let failure: unknown
+    for (const target of targets) {
+      const req = cancel
+        ? { op: "form" as const, sessionID: target.sessionID, formID: input.formID, cancel: true as const }
+        : { op: "form" as const, sessionID: target.sessionID, formID: input.formID, answer: input.answer as FormAnswer }
+      try {
+        const result = await spokes.request(target.connID, req)
+        if (!result?.gone) return new Response(null, { status: 204 })
+      } catch (cause) {
+        failure ??= cause
+      }
+    }
+    if (failure) throw failure
+    registry.dropForm(input.formID)
     return error(409, PERMISSION_GONE, "gone")
   }
 

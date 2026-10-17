@@ -1,7 +1,7 @@
 // One session: top bar, transcript (history + live), permission/question cards, Voice bar, composer, right rail
 // and diff viewer. Works whether Voice is on or off; Voice mode turns Voice on first when needed.
 import { For, Show, batch, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack } from "solid-js"
-import { blockersOf, type Blocker } from "../core/browser-core"
+import { blockersOf } from "../core/browser-core"
 import { reconcileSay, statusNotes, type StatusLike } from "../core/conversation-core"
 import { speechSetup, type StatusEntry } from "../core/feedback-core"
 import { Timeline } from "../core/timeline-core"
@@ -23,6 +23,7 @@ import { navigate } from "./router"
 import { toast } from "./toast"
 import { allowVoiceNotifications, dictation, dictationFor, drafts, voice, voiceNotifyHint, voiceState } from "./voice"
 import { VoicePill } from "./VoicePill"
+import { BlockerCard } from "./BlockerCard"
 import { Transcript, type TickState } from "./Transcript"
 import { Icon, IconButton, Menu, STATE_LABEL, StatusIcon, ago, now } from "./ui"
 import { formatElapsed } from "../core/feedback-core"
@@ -590,45 +591,6 @@ function NotFound() {
       <a class="btn primary" href="/">
         Back to sessions
       </a>
-    </div>
-  )
-}
-
-/** Inline permission card (answerable without Voice) or a question to answer in the terminal. */
-function BlockerCard(props: { sessionID: string; rootID: string; blocker: Blocker }) {
-  const [busy, setBusy] = createSignal(false)
-  const b = () => props.blocker
-  const who = () => (b().sessionID && b().sessionID !== props.rootID ? ` (${b().sessionTitle || "subagent"})` : "")
-  const answer = async (decision: "once" | "always" | "reject") => {
-    setBusy(true)
-    try {
-      await api(`${sessionPath(props.sessionID)}/permission`, { method: "POST", json: { requestID: b().id, decision } })
-      toast(decision === "reject" ? "Denied" : "Allowed")
-    } catch (e) {
-      toast(errorText(e), "err")
-      setBusy(false)
-    }
-  }
-  return (
-    <div class={`card blocker ${b().kind}`} role="group" aria-label={`${b().kind === "permission" ? "Permission request" : "Question"}: ${b().summary}`}>
-      <p class="blocker-head">
-        <strong>{b().kind === "permission" ? "Permission" : "Question"}</strong>
-        {who()}
-      </p>
-      <p class="blocker-text mono">{b().summary}</p>
-      <Show when={b().kind === "permission"} fallback={<p class="muted small">Answer this one in the terminal; the hub cannot reply to questions yet.</p>}>
-        <div class="row">
-          <button type="button" class="btn small primary" disabled={busy()} onClick={() => void answer("once")}>
-            Allow once
-          </button>
-          <button type="button" class="btn small" disabled={busy()} onClick={() => void answer("always")}>
-            Always allow
-          </button>
-          <button type="button" class="btn small danger" disabled={busy()} onClick={() => void answer("reject")}>
-            Deny
-          </button>
-        </div>
-      </Show>
     </div>
   )
 }

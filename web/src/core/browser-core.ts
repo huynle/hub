@@ -19,6 +19,10 @@ export interface Blocker {
   readonly id: string
   readonly kind: string
   readonly summary: string
+  /** form: asked by the agent's question tool. */
+  readonly question?: boolean
+  /** form: its fields (see core/form-core.ts). */
+  readonly fields?: readonly unknown[]
   readonly sessionID?: string
   readonly sessionTitle?: string
 }

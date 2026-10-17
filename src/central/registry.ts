@@ -245,6 +245,8 @@ export class Registry {
   private readonly active = new Map<string, { readonly cancel?: () => void }>()
   private readonly listeners = new Set<(message: RegistryMessage, tenant?: string) => void>()
   private readonly alertListeners = new Set<(alert: Alert) => void>()
+  /** Pending form ID → its session and every connection that forwarded it, first first (like permissions). */
+  private readonly forms = new Map<string, { connIDs: string[]; sessionID: string }>()
   /** Form IDs already alerted (forms may be forwarded by several processes). */
   private readonly alertedForms = new Set<string>()
   /** Sessions in conversation mode → the connection last told so (re-sent when another one takes over). */
@@ -366,6 +368,13 @@ export class Registry {
       this.permissions.delete(requestID)
       this.observeBoards({ type: "permission.replied", data: { sessionID: origin.sessionID, requestID } })
     }
+    for (const [formID, origin] of this.forms) {
+      if (!origin.connIDs.includes(connID)) continue
+      origin.connIDs = origin.connIDs.filter((id) => id !== connID)
+      if (origin.connIDs.length) continue
+      this.forms.delete(formID)
+      this.observeBoards({ type: "form.cancelled", data: { sessionID: origin.sessionID, id: formID } })
+    }
     this.syncBoards()
     this.emit({ type: "catalog" })
   }
@@ -435,6 +444,11 @@ export class Registry {
     }
     if (event.type === "form.created" && sessionID) {
       const formID = (data.form as Record<string, unknown> | undefined)?.id
+      if (typeof formID === "string") {
+        const known = this.forms.get(formID)
+        if (known && !known.connIDs.includes(connID)) known.connIDs.push(connID)
+        else if (!known) remember(this.forms, formID, { connIDs: [connID], sessionID })
+      }
       if (typeof formID === "string" && !this.alertedForms.has(formID)) {
         this.alertedForms.add(formID)
         if (this.alertedForms.size > 1000) this.alertedForms.delete(this.alertedForms.values().next().value!)
@@ -452,6 +466,9 @@ export class Registry {
     }
     if (event.type === "permission.replied" && typeof data.requestID === "string") {
       this.permissions.delete(data.requestID)
+    }
+    if ((event.type === "form.replied" || event.type === "form.cancelled") && typeof data.id === "string") {
+      this.forms.delete(data.id)
     }
 
     if (sessionID) this.trackRun(event.type, sessionID)
@@ -963,6 +980,25 @@ export class Registry {
     return origin.connIDs
       .filter((connID) => this.conns.has(connID) && this.connTenant(connID) === tenant)
       .map((connID) => ({ connID, sessionID: origin.sessionID }))
+  }
+
+  /** Every connected process of the session's tenant that forwarded the pending form, first first. */
+  formTargets(rootID: string, formID: string): Array<{ connID: string; sessionID: string }> {
+    const pending = this.status(rootID)?.some((s) => s.blockers.some((b) => b.kind === "form" && b.id === formID))
+    const origin = this.forms.get(formID)
+    if (!pending || !origin) return []
+    const tenant = this.sessionTenant(rootID)
+    return origin.connIDs
+      .filter((connID) => this.conns.has(connID) && this.connTenant(connID) === tenant)
+      .map((connID) => ({ connID, sessionID: origin.sessionID }))
+  }
+
+  /** A form no process holds any more: drop it and its blocker. */
+  dropForm(formID: string): void {
+    const origin = this.forms.get(formID)
+    if (!origin) return
+    this.forms.delete(formID)
+    this.observeBoards({ type: "form.cancelled", data: { sessionID: origin.sessionID, id: formID } })
   }
 
   /** A permission no process holds any more (answered elsewhere, expired): drop it and its blocker. */

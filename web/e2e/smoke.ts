@@ -240,6 +240,24 @@ async function desktop(browser: Browser): Promise<void> {
     await shot(page, "desktop-voice-off-session")
   })
 
+  await check("desktop: a question from the agent is answered in the console (options, own answer, multi-select)", async () => {
+    await page.goto(`${BASE}/`)
+    await page.locator(".sidebar").getByRole("link", { name: /Reverse proxy route for dashboard/ }).first().click()
+    const card = page.getByRole("group", { name: /^Question/ })
+    await card.waitFor()
+    await card.getByText("Which subdomain should the dashboard use?").waitFor()
+    assert(!(await card.getByText(/answer (it|this one) in the terminal/i).count()), "no terminal hint for an answerable question")
+    await card.getByRole("radio", { name: "ops" }).check()
+    await card.getByLabel("Subdomain: your own answer").fill("status")
+    await card.getByRole("checkbox", { name: "TLS" }).check()
+    await shot(page, "desktop-question-card")
+    await card.getByRole("button", { name: "Submit" }).click()
+    await card.waitFor({ state: "detached" })
+    const { log } = (await (await fetch(`${BASE}/mock/log`)).json()) as { log: Array<{ method: string; path: string; body?: any }> }
+    const sent = log.filter((e) => e.path.endsWith("/form")).at(-1)
+    assert(JSON.stringify(sent?.body) === JSON.stringify({ formID: "q_1", answer: { q0: "status", q1: ["tls"] } }), `form answer sent: ${JSON.stringify(sent?.body)}`)
+  })
+
   await check("desktop: Voice mode on a Voice-off session turns Voice on first, then shows the Voice bar", async () => {
     await page.goto(`${BASE}/s/ses_10`)
     await page.locator(".msg.assistant").first().waitFor()

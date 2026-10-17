@@ -160,6 +160,14 @@ describe("plugin setup", () => {
     expect(again).toMatchObject({ ok: true, result: { gone: true } })
   })
 
+  test("formActions RPC hands relayed form replies to a polling TUI", async () => {
+    tempConfig({ mode: "off" })
+    const fake = fakeContext()
+    cleanups.push((await plugin.setup(fake.ctx as any)) as () => void)
+    expect(await fake.call("formActions", { waitMs: 0 })).toEqual({ actions: [] })
+    expect(await fake.call("formActions", { waitMs: "soon" })).toMatchObject({ type: "invalid" })
+  })
+
   test("presence RPC takes the TUI's sessions; anything but a list is refused", async () => {
     tempConfig({ mode: "off" })
     const fake = fakeContext()

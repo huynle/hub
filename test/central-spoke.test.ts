@@ -329,6 +329,34 @@ describe("permissions asked where several processes see them", () => {
   })
 })
 
+describe("forms (questions)", () => {
+  test("answered from the hub through the process that asked; cancel too; validation and gone", async () => {
+    h = harness()
+    const machine = h.store.addMachine("laptop")
+    const client = await spoke(h, { machine, processID: "a", sessions: [session("ses_1", { owned: true })] })
+    const seen = answer(client, (req) => (req.formID === "frm_gone" ? { gone: true } : {}))
+    const post = (json: unknown) => h.api("/api/sessions/ses_1/form", { method: "POST", json })
+    expect((await post({ formID: "frm_1", answer: { q0: "red" } })).status).toBe(409)
+    client.send({ t: "event", event: { type: "form.created", data: { form: { id: "frm_1", sessionID: "ses_1", title: "Q", fields: [{ key: "q0", type: "string" }] } } } })
+    client.send({ t: "event", event: { type: "form.created", data: { form: { id: "frm_gone", sessionID: "ses_1", title: "Q2" } } } })
+    await waitFor(() => h.registry.formTargets("ses_1", "frm_gone").length > 0)
+    expect((await post({ formID: "frm_1" })).status).toBe(400)
+    expect((await post({ formID: "frm_1", answer: { q0: { x: 1 } } })).status).toBe(400)
+    expect((await post({ formID: "frm_1", answer: { q0: "red", q1: ["a"] } })).status).toBe(204)
+    expect((await post({ formID: "frm_1", cancel: true })).status).toBe(204)
+    expect(seen).toEqual([
+      { op: "form", sessionID: "ses_1", formID: "frm_1", answer: { q0: "red", q1: ["a"] } },
+      { op: "form", sessionID: "ses_1", formID: "frm_1", cancel: true },
+    ])
+    const gone = await post({ formID: "frm_gone", answer: {} })
+    expect(gone.status).toBe(409)
+    expect(((await gone.json()) as any).code).toBe("gone")
+    const view = (await (await h.api("/api/sessions/ses_1")).json()) as any
+    expect(view.blockers.map((b: any) => b.id)).toEqual(["frm_1"])
+    expect(view.blockers[0].fields).toEqual([{ key: "q0", type: "string" }])
+  })
+})
+
 describe("spoke requests", () => {
   test("pairCode returns a code that pairs a device exactly once", async () => {
     h = harness()

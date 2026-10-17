@@ -12,8 +12,9 @@ import { herdrRunner } from "./spoke/herdr"
 import { listServiceSessions } from "./spoke/listing"
 import { ensureLocalHub } from "./spoke/localhub"
 import { replyPermission, type PermissionLocation } from "./spoke/locations"
+import { foregroundEndpoint, formOutcome } from "./spoke/own-server"
 import { joinProcess, type Membership } from "./spoke/singleton"
-import { detectKind, Spoke, SpokeError, type SpokeHost } from "./spoke/spoke"
+import { detectKind, Spoke, SpokeError, type FormAction, type SpokeHost } from "./spoke/spoke"
 
 type Context = Parameters<Parameters<typeof Plugin.define>[0]["setup"]>[0]
 
@@ -43,6 +44,32 @@ async function listRecent(options?: { days: number; max: number; include: readon
   return listServiceSessions(client, options ?? {})
 }
 
+/** A client for this process's own OpenCode server, when it can be reached (see src/spoke/own-server.ts). */
+async function ownClient(kind: "service" | "standalone") {
+  const { OpenCode } = await import("@opencode/client")
+  if (kind === "service") {
+    const { Service } = await import("@opencode/client/service")
+    const endpoint = await Service.discover()
+    return endpoint ? OpenCode.make({ baseUrl: endpoint.url, headers: Service.headers(endpoint) ?? {} }) : undefined
+  }
+  const endpoint = foregroundEndpoint(process.argv, process.env)
+  return endpoint ? OpenCode.make({ baseUrl: endpoint.url, headers: { authorization: endpoint.authorization } }) : undefined
+}
+
+/** Answers or cancels a form through the own server's API (the plugin API has no forms). */
+async function replyForm(kind: "service" | "standalone", action: FormAction): Promise<"replied" | "gone" | "unavailable"> {
+  const client = await ownClient(kind).catch(() => undefined)
+  if (!client) return "unavailable"
+  try {
+    if ("cancel" in action) await client.session.form.cancel({ sessionID: action.sessionID, formID: action.formID })
+    else await client.session.form.reply({ sessionID: action.sessionID, formID: action.formID, answer: action.answer as Record<string, string | number | boolean | string[]> })
+    return "replied"
+  } catch (cause) {
+    if (formOutcome(cause) === "gone") return "gone"
+    throw cause
+  }
+}
+
 /** Plugin API results may arrive bare or wrapped as { location, data }. */
 function unwrap<T>(value: unknown, isBare: (v: any) => boolean): T {
   const v = value as any
@@ -60,7 +87,7 @@ function permissionLocation(ctx: Context): PermissionLocation {
 }
 
 /** `locations`: the permission APIs of every plugin instance in this process (one per location). */
-function hostFrom(ctx: Context, locations: () => PermissionLocation[]): SpokeHost {
+function hostFrom(ctx: Context, locations: () => PermissionLocation[], kind: "service" | "standalone"): SpokeHost {
   const session = ctx.session as any
   const agent = ctx.agent as any
   const mcp = (ctx as any).mcp
@@ -74,6 +101,7 @@ function hostFrom(ctx: Context, locations: () => PermissionLocation[]): SpokeHos
     listModels: async () => unwrap<ReadonlyArray<unknown>>(await (ctx.model as any).list({}), Array.isArray),
     getSession: async (sessionID) => unwrap(await session.get({ sessionID }), (v) => typeof v.id === "string"),
     replyPermission: ({ directory, ...input }) => replyPermission(locations(), input, directory),
+    replyForm: (action) => replyForm(kind, action),
     interrupt: (sessionID) => session.interrupt({ sessionID }),
     switchAgent: (sessionID, id) => session.switchAgent({ sessionID, agent: id }),
     switchModel: (sessionID, model) => session.switchModel({ sessionID, model }),
@@ -111,7 +139,7 @@ export default Plugin.define({
     const kind = detectKind(process.argv)
     const membership: Membership<Spoke> = joinProcess(
       (processID) =>
-        new Spoke(hostFrom(ctx, () => membership.locals<PermissionLocation>()), {
+        new Spoke(hostFrom(ctx, () => membership.locals<PermissionLocation>(), kind), {
           configFile: prepareConfigPath(),
           machineName: hostname(),
           kind,
@@ -180,6 +208,12 @@ export default Plugin.define({
         run(rpc, (s) => s.openLink(input(value).sessionID ? String(input(value).sessionID) : undefined, input(value).voice === true)),
       conversation: (value, rpc) =>
         run(rpc, (s) => s.setConversation(String(input(value).sessionID ?? ""), Boolean(input(value).on))),
+      formActions: (value, rpc) =>
+        run(rpc, (s) => {
+          const { waitMs = 0 } = input(value)
+          if (typeof waitMs !== "number" || !Number.isFinite(waitMs)) throw new SpokeError("invalid", "Expected {waitMs: number}")
+          return s.formActions(Math.max(0, Math.min(waitMs, 25_000))) as Promise<{ actions: Array<Record<string, unknown>> }>
+        }),
       presence: (value, rpc) =>
         run(rpc, (s) => {
           const { sessionIDs, reporter } = input(value)

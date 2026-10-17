@@ -49,6 +49,39 @@ describe("StatusBoard", () => {
     expect(board.get("ses_root")?.state).toBe("idle")
   })
 
+  test("a form blocker carries its fields (bounded) so a phone can answer it; duplicates are ignored", () => {
+    const board = new StatusBoard("ses_root", "Main")
+    const form = {
+      id: "frm_1",
+      sessionID: "ses_root",
+      title: "Questions",
+      metadata: { kind: "question", tool: { id: "x" } },
+      fields: [
+        { key: "q0", type: "string", title: "Color", description: "Pick a color", options: [{ value: "red", label: "Red", description: "warm" }], custom: true, extra: "dropped" },
+        { key: "q1", type: "multiselect", title: "Sizes", options: [{ value: "S", label: "S" }], minItems: 1 },
+        { key: "q2", type: "boolean", title: "Sure?", required: true, default: false },
+        { key: "q3", type: "integer", minimum: 1, maximum: 5 },
+        { key: "q4", type: "external", url: "https://example.com/x", title: "Sign in" },
+        { key: "bad", type: "mystery" },
+        { title: "no key", type: "string" },
+        { key: "long", type: "string", description: "x".repeat(5000) },
+      ],
+    }
+    board.observe(ev("form.created", { form }))
+    board.observe(ev("form.created", { form }))
+    const blockers = board.get("ses_root")!.blockers
+    expect(blockers).toHaveLength(1)
+    expect(blockers[0]).toMatchObject({ kind: "form", id: "frm_1", summary: "Questions", question: true })
+    const fields = blockers[0]!.fields!
+    expect(fields.map((f) => f.key)).toEqual(["q0", "q1", "q2", "q3", "q4", "long"])
+    expect(fields[0]).toEqual({ key: "q0", type: "string", title: "Color", description: "Pick a color", options: [{ value: "red", label: "Red", description: "warm" }], custom: true })
+    expect(fields[1]).toEqual({ key: "q1", type: "multiselect", title: "Sizes", options: [{ value: "S", label: "S" }], minItems: 1 })
+    expect(fields[2]).toEqual({ key: "q2", type: "boolean", title: "Sure?", required: true, default: false })
+    expect(fields[3]).toEqual({ key: "q3", type: "integer", minimum: 1, maximum: 5 })
+    expect(fields[4]).toEqual({ key: "q4", type: "external", url: "https://example.com/x", title: "Sign in" })
+    expect(fields[5]!.description!.length).toBeLessThanOrEqual(2000)
+  })
+
   test("failed executions are reported as error until the next start", () => {
     const board = new StatusBoard("ses_root", "Main")
     board.observe(ev("session.execution.failed", { sessionID: "ses_root", error: { type: "x", message: "boom" } }))
