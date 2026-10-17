@@ -3,7 +3,8 @@
 // `npm run build:web` first) and fakes
 // the hub API + SSE per the conversation contract. Usage: `bun test/web-mock-hub.ts [port]` (default 4311).
 // Control: POST /mock/transcripts {texts: string[]} (queued /api/transcribe answers; POST /mock/reset-transcripts empties the queue), POST /mock/emit {…SSE message},
-// POST /mock/status {sessions} (status tree of ses_mock, root first; emitted as SSE status),
+// POST /mock/status {sessions} (status tree of ses_mock, root first; emitted as SSE status; children with a
+// parentID open as subagent sessions: their console routes answer like ses_mock's, no process lists them),
 // POST /mock/activity {sessionID?, item} (stored for GET /api/sessions/ses_mock and emitted as SSE activity),
 // GET /mock/log (recorded API calls), POST /mock/reset, POST /mock/workstation {on} (a second online machine), POST /mock/push {endpoints} (the push subscriptions the hub holds).
 // Also fakes presence, push prefs (incl. `say`), devices and the speech settings API (keys masked as last4).
@@ -35,7 +36,7 @@
 // Console (0.5): every session is inspectable and controllable with Voice off (only conversation and utterance
 // answer 403 not_exposed); GET …/timeline (+ parts), …/model-prefs (GET/PUT), …/models, …/summary, …/diff?file=,
 // GET …/timeline/messages/:message/files/:index (a 1×1 PNG; ses_mock's first user message lists one image),
-// POST …/read (GET /api/reads), …/stop, …/permission; POST …/turn {text, images?} (up to 4 PNG/JPEG/WebP/GIF images;
+// POST …/read (GET /api/reads), …/stop, …/permission, …/form {formID, answer|cancel} (409 gone when not pending); POST …/turn {text, images?} (up to 4 PNG/JPEG/WebP/GIF images;
 // text may be empty with images; the log keeps each image's mime, name and base64 length) answers 202 {mode:"steer"} while the tree runs,
 // else runs the turn (ses_mock: working → streamed reply → idle; text containing "fail" → 409).
 import { existsSync, readFileSync, statSync } from "node:fs"
@@ -107,6 +108,17 @@ const inHerdr = (id: string, title?: string) => (f: Fixture): Partial<Fixture> =
   terminal: { source: "herdr", workspaceID: id, workspace: HERDR.find((w) => w.id === id)!.label, title: title ?? f.title, status: herdrStatus(f.state) },
 })
 const projectOf = (dir: string) => WORKSPACES.find(([root]) => dir === root || dir.startsWith(`${root}/`))
+/** A question tool form (OpenCode form.created → the hub's form blocker with its fields). */
+const QUESTION_FORM = {
+  id: "q_1",
+  kind: "form",
+  question: true,
+  summary: "Questions",
+  fields: [
+    { key: "q0", type: "string", title: "Subdomain", description: "Which subdomain should the dashboard use?", options: [{ value: "dash", label: "dash", description: "dash.example.com" }, { value: "ops", label: "ops" }], custom: true },
+    { key: "q1", type: "multiselect", title: "Extras", description: "Anything else to set up?", options: [{ value: "tls", label: "TLS" }, { value: "auth", label: "Auth" }] },
+  ],
+}
 function fixtures(): Fixture[] {
   const t = Date.now()
   const out: Fixture[] = []
@@ -136,7 +148,7 @@ function fixtures(): Fixture[] {
     add("/home/user/dotfiles", title, 60 * (2 + i * 9), i > 1 ? { exposed: false } : {})
   }
   const infra = `${HOME}/infra`
-  add(infra, "Reverse proxy route for dashboard", 12, { state: "blocked", blockers: [{ id: "q_1", kind: "question", summary: "Which subdomain should the dashboard use?" }] }, inHerdr("w_ops"))
+  add(infra, "Reverse proxy route for dashboard", 12, { state: "blocked", blockers: [QUESTION_FORM] }, inHerdr("w_ops"))
   add(infra, "Nightly backup job", 60 * 5, {}, inHerdr("w_ops"))
   add(infra, "Grafana alert rules", 8, { state: "working", now: { kind: "tool", tool: "edit", summary: "alerts/disk.yaml" } }, inHerdr("w_ops"))
   add(infra, "DNS server upgrade", 60 * 30, { exposed: false })
@@ -693,10 +705,11 @@ async function consoleRoute(request: Request, url: URL, user: MockUser): Promise
   const p = url.pathname
   const m = request.method
   if (p === "/api/reads" && m === "GET") return Response.json({ reads: reads[user.id] ?? {} })
-  const match = /^\/api\/sessions\/([^/]+)\/(timeline|model-prefs|models|summary|diff|read|stop|turn|permission)(?:\/messages\/([^/]+)\/(?:parts\/([^/]+)|files\/(\d+)))?$/.exec(p)
+  const match = /^\/api\/sessions\/([^/]+)\/(timeline|model-prefs|models|summary|diff|read|stop|turn|permission|form)(?:\/messages\/([^/]+)\/(?:parts\/([^/]+)|files\/(\d+)))?$/.exec(p)
   if (!match) return undefined
   const id = decodeURIComponent(match[1]!)
-  const fixture = id === SESSION ? { title: "Mock session", directory: `${HOME}/opencode-voice` } : id === BOB_SESSION ? bobSession() : sessions.find((x) => x.id === id) ?? (id === "ses_scratch" ? { title: "Scratch experiment", directory: "/tmp/scratch" } : undefined)
+  const child = status.find((x) => x.id === id && x.parentID)
+  const fixture = id === SESSION ? { title: "Mock session", directory: `${HOME}/opencode-voice` } : child ? { title: child.title, directory: `${HOME}/opencode-voice` } : id === BOB_SESSION ? bobSession() : sessions.find((x) => x.id === id) ?? (id === "ses_scratch" ? { title: "Scratch experiment", directory: "/tmp/scratch" } : undefined)
   if (!fixture) return Response.json({ error: "Not found" }, { status: 404 })
   const body = async () => (await request.json().catch(() => ({}))) as Record<string, any>
   switch (match[2]) {
@@ -755,6 +768,16 @@ async function consoleRoute(request: Request, url: URL, user: MockUser): Promise
         if (!s.blockers.length && s.state === "blocked") s.state = "working"
         emitCatalog()
       }
+      return new Response(null, { status: 204 })
+    }
+    case "form": {
+      const input = await body()
+      log[log.length - 1]!.body = input
+      const s = sessions.find((x) => x.id === id)
+      if (!s?.blockers.some((b) => b.id === input.formID)) return Response.json({ error: "This request was already answered or expired", code: "gone" }, { status: 409 })
+      s.blockers = s.blockers.filter((b) => b.id !== input.formID)
+      if (!s.blockers.length && s.state === "blocked") s.state = "working"
+      emitCatalog()
       return new Response(null, { status: 204 })
     }
     case "turn": {

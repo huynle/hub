@@ -277,6 +277,15 @@ pre.code { white-space: pre; font-size: 12px; }
 .blocker { margin: 12px 0; border-color: #5a4a2a; }
 .blocker-head { margin: 0 0 4px; color: var(--warn); }
 .blocker-text { margin: 0 0 10px; font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.form-card fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
+.form-card fieldset:disabled { opacity: 0.6; }
+.form-field { margin: 0 0 12px; display: flex; flex-direction: column; gap: 4px; }
+.field-title { font-weight: 500; }
+.field-desc { display: block; }
+.choice-group { display: flex; flex-direction: column; gap: 4px; }
+.choice, .check { display: flex; align-items: baseline; gap: 8px; cursor: pointer; }
+.choice-group input[type="text"], .form-field > input[type="text"] { width: 100%; }
+.field-error { color: var(--err); margin: 0; }
 .dock { flex: none; padding: 8px 0 calc(12px + env(safe-area-inset-bottom)); background: linear-gradient(transparent, var(--bg) 18px); }
 .composer-box { border: 1px solid var(--line-2); background: var(--raise); border-radius: 14px; padding: 10px 10px 6px 14px; }
 .composer-box:focus-within { border-color: #4a4a45; }
@@ -465,3 +474,8 @@ button.link { background: none; border: 0; padding: 0; color: var(--accent, #fab
 /* Menu rows keep their label; a long hint is cut instead. */
 .menu-label { flex: 1 0 auto; max-width: 100%; }
 .menu-hint { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.crumb { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; white-space: nowrap; max-width: 30%; overflow: hidden; text-overflow: ellipsis; text-decoration: none; }
+.crumb:hover { color: var(--text); }
+.crumb-chev { width: 12px; height: 12px; transform: rotate(180deg); }
+.crumb-sep { margin: 0 4px; }

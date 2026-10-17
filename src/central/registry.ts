@@ -236,12 +236,17 @@ const isOn = (s: SessionInfo) => s.exposed !== false
 export class Registry {
   private readonly conns = new Map<string, Conn>()
   private readonly boards = new Map<string, StatusBoard>()
-  /** permission requestID → where it was asked. */
-  private readonly permissions = new Map<string, { connID: string; sessionID: string }>()
+  /**
+   * permission requestID → its session and every connection that forwarded it, first first. Usually one
+   * process holds it, but several may report the session; a reply tries them in order.
+   */
+  private readonly permissions = new Map<string, { connIDs: string[]; sessionID: string }>()
   /** Sessions with a hub turn in flight, with how to end the waiting request early (stop/interrupt). */
   private readonly active = new Map<string, { readonly cancel?: () => void }>()
   private readonly listeners = new Set<(message: RegistryMessage, tenant?: string) => void>()
   private readonly alertListeners = new Set<(alert: Alert) => void>()
+  /** Pending form ID → its session and every connection that forwarded it, first first (like permissions). */
+  private readonly forms = new Map<string, { connIDs: string[]; sessionID: string }>()
   /** Form IDs already alerted (forms may be forwarded by several processes). */
   private readonly alertedForms = new Set<string>()
   /** Sessions in conversation mode → the connection last told so (re-sent when another one takes over). */
@@ -357,9 +362,18 @@ export class Registry {
     if (this.machineTerminals.get(conn.machine.id)?.connID === connID) this.machineTerminals.delete(conn.machine.id)
     // Nobody can answer permissions asked by a process that is gone.
     for (const [requestID, origin] of this.permissions) {
-      if (origin.connID !== connID) continue
+      if (!origin.connIDs.includes(connID)) continue
+      origin.connIDs = origin.connIDs.filter((id) => id !== connID)
+      if (origin.connIDs.length) continue
       this.permissions.delete(requestID)
       this.observeBoards({ type: "permission.replied", data: { sessionID: origin.sessionID, requestID } })
+    }
+    for (const [formID, origin] of this.forms) {
+      if (!origin.connIDs.includes(connID)) continue
+      origin.connIDs = origin.connIDs.filter((id) => id !== connID)
+      if (origin.connIDs.length) continue
+      this.forms.delete(formID)
+      this.observeBoards({ type: "form.cancelled", data: { sessionID: origin.sessionID, id: formID } })
     }
     this.syncBoards()
     this.emit({ type: "catalog" })
@@ -419,12 +433,22 @@ export class Registry {
     if (sessionID && !streamed) this.flushStream(this.streams.get(sessionID), sessionID)
 
     if (event.type === "permission.asked" && typeof data.id === "string" && sessionID) {
-      if (this.permissions.has(data.id)) return // the same request forwarded by another process
-      this.permissions.set(data.id, { connID, sessionID })
+      const known = this.permissions.get(data.id)
+      if (known) {
+        // The same request forwarded by another process: one more place to answer it.
+        if (!known.connIDs.includes(connID)) known.connIDs.push(connID)
+        return
+      }
+      this.permissions.set(data.id, { connIDs: [connID], sessionID })
       this.alert("blocked", sessionID, "permission", undefined, data.id)
     }
     if (event.type === "form.created" && sessionID) {
       const formID = (data.form as Record<string, unknown> | undefined)?.id
+      if (typeof formID === "string") {
+        const known = this.forms.get(formID)
+        if (known && !known.connIDs.includes(connID)) known.connIDs.push(connID)
+        else if (!known) remember(this.forms, formID, { connIDs: [connID], sessionID })
+      }
       if (typeof formID === "string" && !this.alertedForms.has(formID)) {
         this.alertedForms.add(formID)
         if (this.alertedForms.size > 1000) this.alertedForms.delete(this.alertedForms.values().next().value!)
@@ -442,6 +466,9 @@ export class Registry {
     }
     if (event.type === "permission.replied" && typeof data.requestID === "string") {
       this.permissions.delete(data.requestID)
+    }
+    if ((event.type === "form.replied" || event.type === "form.cancelled") && typeof data.id === "string") {
+      this.forms.delete(data.id)
     }
 
     if (sessionID) this.trackRun(event.type, sessionID)
@@ -745,7 +772,7 @@ export class Registry {
       if (s && (!info || s.updated > info.updated)) info = s
       if (s?.open && s.terminal && (!terminal || (terminal.source !== "herdr" && s.terminal.source === "herdr"))) terminal = s.terminal
     }
-    if (!info) return undefined
+    if (!info) return this.childView(sessionID)
     const fields = this.browserFields(sessionID)
     const status = this.status(sessionID) ?? []
     const own = status.find((s) => s.id === sessionID)
@@ -763,6 +790,32 @@ export class Registry {
       conversation: this.conversations.has(sessionID),
       status,
       activity: this.activity(sessionID),
+    }
+  }
+
+  /**
+   * A subagent session no process lists (it is known from its root's status tree, e.g. created by a run
+   * the hub watched): its view, with the root's directory and workspace. Undefined for anything else.
+   */
+  private childView(sessionID: string): SessionView | undefined {
+    const rootID = this.rootOf(sessionID)
+    if (!rootID || rootID === sessionID) return undefined
+    const root = this.session(rootID)
+    const own = root?.status.find((s) => s.id === sessionID)
+    if (!root || !own) return undefined
+    return {
+      id: sessionID,
+      title: own.title,
+      directory: root.directory,
+      ...(own.parentID ? { parentID: own.parentID } : {}),
+      ...(root.project ? { project: root.project } : {}),
+      ...(root.projectName ? { projectName: root.projectName } : {}),
+      updated: root.updated,
+      ...this.browserFields(sessionID),
+      busy: this.active.has(sessionID),
+      conversation: this.conversations.has(sessionID),
+      status: root.status,
+      activity: root.activity,
     }
   }
 
@@ -922,7 +975,11 @@ export class Registry {
     const tenant = this.sessionTenant(sessionID)
     const all = [...this.conns.values()].filter((c) => this.tenant(c) === tenant)
     const reporters = all.filter((c) => this.reports(c, sessionID))
-    if (reporters.length === 0) return undefined
+    if (reporters.length === 0) {
+      // A subagent session no process lists runs in the process that runs its root.
+      const rootID = this.rootOf(sessionID)
+      return rootID && rootID !== sessionID ? this.owner(rootID) : undefined
+    }
     const recent = (list: Conn[]) => this.recent(list, sessionID)
     const owned = reporters.filter((c) => this.reports(c, sessionID)?.owned)
     if (owned.length) return recent(owned)
@@ -937,15 +994,49 @@ export class Registry {
     return [...list].sort((a, b) => (b.activity.get(sessionID) ?? 0) - (a.activity.get(sessionID) ?? 0) || b.seq - a.seq)[0]?.id
   }
 
-  /** Where to send a reply for a permission that is pending in the session's status tree. */
+  /** Where to send a reply for a permission that is pending in the session's status tree (the first place). */
   permissionTarget(rootID: string, requestID: string): { connID: string; sessionID: string } | undefined {
+    return this.permissionTargets(rootID, requestID)[0]
+  }
+
+  /** Every connected process of the session's tenant that forwarded the pending permission, first first. */
+  permissionTargets(rootID: string, requestID: string): Array<{ connID: string; sessionID: string }> {
     const pending = this.status(rootID)?.some((s) =>
       s.blockers.some((b) => b.kind === "permission" && b.id === requestID),
     )
     const origin = this.permissions.get(requestID)
-    if (!pending || !origin || !this.conns.has(origin.connID)) return undefined
-    if (this.connTenant(origin.connID) !== this.sessionTenant(rootID)) return undefined
-    return { ...origin }
+    if (!pending || !origin) return []
+    const tenant = this.sessionTenant(rootID)
+    return origin.connIDs
+      .filter((connID) => this.conns.has(connID) && this.connTenant(connID) === tenant)
+      .map((connID) => ({ connID, sessionID: origin.sessionID }))
+  }
+
+  /** Every connected process of the session's tenant that forwarded the pending form, first first. */
+  formTargets(rootID: string, formID: string): Array<{ connID: string; sessionID: string }> {
+    const pending = this.status(rootID)?.some((s) => s.blockers.some((b) => b.kind === "form" && b.id === formID))
+    const origin = this.forms.get(formID)
+    if (!pending || !origin) return []
+    const tenant = this.sessionTenant(rootID)
+    return origin.connIDs
+      .filter((connID) => this.conns.has(connID) && this.connTenant(connID) === tenant)
+      .map((connID) => ({ connID, sessionID: origin.sessionID }))
+  }
+
+  /** A form no process holds any more: drop it and its blocker. */
+  dropForm(formID: string): void {
+    const origin = this.forms.get(formID)
+    if (!origin) return
+    this.forms.delete(formID)
+    this.observeBoards({ type: "form.cancelled", data: { sessionID: origin.sessionID, id: formID } })
+  }
+
+  /** A permission no process holds any more (answered elsewhere, expired): drop it and its blocker. */
+  dropPermission(requestID: string): void {
+    const origin = this.permissions.get(requestID)
+    if (!origin) return
+    this.permissions.delete(requestID)
+    this.observeBoards({ type: "permission.replied", data: { sessionID: origin.sessionID, requestID } })
   }
 
   /**
@@ -999,7 +1090,8 @@ export class Registry {
       let current = id
       for (;;) {
         const parent = reported.get(current)?.parentID
-        if (!parent || !reported.has(parent) || seen.has(parent)) return current
+        // Never nest a session under another tenant's session.
+        if (!parent || !reported.has(parent) || seen.has(parent) || this.sessionTenant(parent) !== this.sessionTenant(current)) return current
         seen.add(current)
         current = parent
       }

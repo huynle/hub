@@ -240,6 +240,55 @@ async function desktop(browser: Browser): Promise<void> {
     await shot(page, "desktop-voice-off-session")
   })
 
+  await check("desktop: a question from the agent is answered in the console (options, own answer, multi-select)", async () => {
+    await page.goto(`${BASE}/`)
+    await page.locator(".sidebar").getByRole("link", { name: /Reverse proxy route for dashboard/ }).first().click()
+    const card = page.getByRole("group", { name: /^Question/ })
+    await card.waitFor()
+    await card.getByText("Which subdomain should the dashboard use?").waitFor()
+    assert(!(await card.getByText(/answer (it|this one) in the terminal/i).count()), "no terminal hint for an answerable question")
+    await card.getByRole("radio", { name: "ops" }).check()
+    await card.getByLabel("Subdomain: your own answer").fill("status")
+    await card.getByRole("checkbox", { name: "TLS" }).check()
+    await shot(page, "desktop-question-card")
+    await card.getByRole("button", { name: "Submit" }).click()
+    await card.waitFor({ state: "detached" })
+    const { log } = (await (await fetch(`${BASE}/mock/log`)).json()) as { log: Array<{ method: string; path: string; body?: any }> }
+    const sent = log.filter((e) => e.path.endsWith("/form")).at(-1)
+    assert(JSON.stringify(sent?.body) === JSON.stringify({ formID: "q_1", answer: { q0: "status", q1: ["tls"] } }), `form answer sent: ${JSON.stringify(sent?.body)}`)
+  })
+
+  await check("desktop: a subagent row opens the subagent's own session; its card, live output and a way back", async () => {
+    const child = "ses_mock_child"
+    await page.goto(`${BASE}/s/ses_mock`)
+    await page.locator(".msg.user .pill").first().waitFor()
+    await mock("/mock/status", {
+      sessions: [
+        { id: "ses_mock", title: "Mock session", state: "working", blockers: [] },
+        { id: child, parentID: "ses_mock", title: "Integrate P6.5 sessions", state: "blocked", blockers: [{ kind: "permission", id: "per_kid", summary: "shell: git push" }] },
+        { id: "ses_mock_sibling", parentID: "ses_mock", title: "Sibling work", state: "working", blockers: [] },
+      ],
+    })
+    await page.getByRole("link", { name: /Subagent · Integrate P6.5 sessions/ }).click()
+    await page.waitForURL(new RegExp(`/s/${child}$`))
+    await page.locator(".topbar .title").getByText("Integrate P6.5 sessions").waitFor()
+    await page.locator(".msg.user .pill").first().waitFor()
+    assert(!(await page.getByRole("link", { name: /Subagent · Mock session/ }).count()), "the root is not listed as a subagent of its child")
+    assert(!(await page.getByRole("link", { name: /Subagent · Sibling work/ }).count()), "siblings are not subagents of the child")
+    assert(!(await page.locator(".banner.warn").count()), "not shown as disconnected")
+    await page.getByRole("group", { name: /Permission request: shell: git push/ }).waitFor()
+    assert(await page.getByLabel("Message").isEnabled(), "composer steers the subagent")
+    await mock("/mock/stream", { sessionID: child, kind: "text", messageID: "msg_kid_live", text: "Child is pushing now.", every: 20, size: 8 })
+    await mock("/mock/stream", { sessionID: "ses_mock_sibling", kind: "text", messageID: "msg_sib_live", text: "Sibling output here.", every: 20, size: 8 })
+    await page.getByText("Child is pushing now.").waitFor()
+    await Bun.sleep(400)
+    assert(!(await page.getByText("Sibling output here.").count()), "a sibling's output stays off the child's page")
+    await shot(page, "desktop-subagent-session")
+    await page.getByRole("link", { name: /Back to Mock session/ }).click()
+    await page.waitForURL(/\/s\/ses_mock$/)
+    await mock("/mock/status", { sessions: [{ id: "ses_mock", title: "Mock session", state: "idle", blockers: [] }] })
+  })
+
   await check("desktop: Voice mode on a Voice-off session turns Voice on first, then shows the Voice bar", async () => {
     await page.goto(`${BASE}/s/ses_10`)
     await page.locator(".msg.assistant").first().waitFor()

@@ -9,6 +9,32 @@ export type ProcessKind = "service" | "standalone"
 export type SpokeMode = "always" | "session"
 export type PermissionDecision = "once" | "always" | "reject"
 
+/** An answer to an OpenCode form (question): field key → value, like OpenCode's FormAnswer. */
+export type FormAnswer = Readonly<Record<string, string | number | boolean | readonly string[]>>
+
+export const FORM_ANSWER_MAX_KEYS = 50
+export const FORM_ANSWER_MAX_CHARS = 20_000
+export const FORM_ANSWER_MAX_ITEMS = 100
+
+/** Why an answer object is not acceptable, or undefined when it is. */
+export function formAnswerProblem(v: unknown): string | undefined {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return "answer must be an object"
+  const entries = Object.entries(v)
+  if (entries.length > FORM_ANSWER_MAX_KEYS) return `answer has more than ${FORM_ANSWER_MAX_KEYS} fields`
+  for (const [key, value] of entries) {
+    if (!key || key.length > 300) return "answer keys must be 1–300 characters"
+    if (typeof value === "string" && value.length <= FORM_ANSWER_MAX_CHARS) continue
+    if (typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value))) continue
+    if (
+      Array.isArray(value) &&
+      value.length <= FORM_ANSWER_MAX_ITEMS &&
+      value.every((item) => typeof item === "string" && item.length <= FORM_ANSWER_MAX_CHARS)
+    ) continue
+    return `answer.${key} must be text, a number, true/false or a list of texts`
+  }
+  return undefined
+}
+
 export interface ModelSelection {
   readonly providerID: string
   /** OpenCode's catalog id of the model (Model.Info `id`, what switchModel takes), not its upstream `modelID`. */
@@ -173,6 +199,9 @@ export type ServerRequest =
   /** `text` may be empty when `images` are attached. */
   | { readonly op: "turn"; readonly sessionID: string; readonly text: string; readonly voiceStyle: boolean; readonly images?: readonly PromptImage[] }
   | { readonly op: "permission"; readonly sessionID: string; readonly requestID: string; readonly decision: PermissionDecision }
+  /** Answer (or cancel) a pending form (question) in the session that asked it. */
+  | { readonly op: "form"; readonly sessionID: string; readonly formID: string; readonly answer: FormAnswer }
+  | { readonly op: "form"; readonly sessionID: string; readonly formID: string; readonly cancel: true }
   | { readonly op: "context"; readonly sessionID: string }
   /** Conversation mode: deliver an utterance with delivery "steer" and return at once (replies arrive as events). */
   | { readonly op: "steer"; readonly sessionID: string; readonly text: string; readonly images?: readonly PromptImage[] }
@@ -256,7 +285,10 @@ export type TurnResult =
 /** Result payloads, keyed by op. */
 export interface ResultFor {
   turn: TurnResult
-  permission: Record<string, never>
+  /** `gone`: the request is not pending in this process any more (answered elsewhere, expired). */
+  permission: { readonly gone?: true }
+  /** `gone`: the form is not pending in this process any more (answered elsewhere, cancelled, expired). */
+  form: { readonly gone?: true }
   context: { readonly messages: ReadonlyArray<{ readonly role: "user" | "assistant"; readonly text: string }> }
   pairCode: { readonly code: string; readonly url: string; readonly expiresAt: number }
   handoff: { readonly notified: number }
@@ -429,6 +461,9 @@ function isServerRequest(v: unknown): v is ServerRequest {
       return nonEmpty(v.sessionID) && promptBody(v) && typeof v.voiceStyle === "boolean"
     case "permission":
       return nonEmpty(v.sessionID) && nonEmpty(v.requestID) && ["once", "always", "reject"].includes(v.decision as string)
+    case "form":
+      if (!nonEmpty(v.sessionID) || !nonEmpty(v.formID) || v.formID.length > 300) return false
+      return v.cancel === true ? v.answer === undefined : v.cancel === undefined && formAnswerProblem(v.answer) === undefined
     case "context":
     case "interrupt":
     case "stop":

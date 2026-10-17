@@ -117,6 +117,7 @@ describe("route table", () => {
       "POST /api/sessions/:session/interrupt",
       "POST /api/sessions/:session/conversation",
       "POST /api/sessions/:session/permission",
+      "POST /api/sessions/:session/form",
       "GET /api/sessions/:session/context",
       "GET /api/sessions/:session/timeline/messages/:message/files/:index",
       "POST /api/sessions/:session/stop",
@@ -288,6 +289,30 @@ describe("catalog, SSE and push", () => {
     expect(delta.text).toBe("real")
     expect(JSON.stringify(h.registry.status("ses_alice"))).not.toContain("forged child")
     await aliceEvents.cancel()
+  })
+})
+
+describe("subagent (child) sessions", () => {
+  test("a child known only from its owner's events opens for its owner, steers through the owner's spoke, and stays 404 for bob", async () => {
+    alice.spoke.send(event("session.created", { sessionID: "ses_alice_kid", parentID: "ses_alice", title: "Integrate P6.5 sessions" }))
+    await waitFor(() => h.registry.status("ses_alice")?.some((s) => s.id === "ses_alice_kid") === true)
+    const view = await as(alice, "/api/sessions/ses_alice_kid")
+    expect(view.status).toBe(200)
+    expect(await json(view)).toMatchObject({ id: "ses_alice_kid", parentID: "ses_alice", title: "Integrate P6.5 sessions", directory: "/home/user/work" })
+    expect((await as(alice, "/api/sessions/ses_alice_kid/timeline")).status).toBe(200)
+    expect((await as(alice, "/api/sessions/ses_alice_kid/turn", { method: "POST", json: { text: "focus on tests" } })).status).toBe(200)
+    expect(alice.requests.map((r) => [r.op, r.sessionID])).toEqual([
+      ["timeline", "ses_alice_kid"],
+      ["turn", "ses_alice_kid"],
+    ])
+    for (const pathname of ["/api/sessions/ses_alice_kid", "/api/sessions/ses_alice_kid/timeline"]) expect((await as(bob, pathname)).status).toBe(404)
+    expect((await as(bob, "/api/sessions/ses_alice_kid/turn", { method: "POST", json: { text: "x" } })).status).toBe(404)
+    // bob reporting a session of his own as a child of alice's root does not nest it in alice's tree
+    bob.spoke.send({ t: "sessions", sessions: [session("ses_bob", { owned: true }), session("ses_bob_kid", { parentID: "ses_alice", title: "sneaky" })] })
+    await Bun.sleep(50)
+    expect(JSON.stringify(h.registry.status("ses_alice"))).not.toContain("ses_bob_kid")
+    expect((await as(alice, "/api/sessions/ses_bob_kid")).status).toBe(404)
+    expect(bob.requests).toEqual([])
   })
 })
 

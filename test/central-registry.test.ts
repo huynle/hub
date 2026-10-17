@@ -228,6 +228,36 @@ describe("permission routing", () => {
   })
 })
 
+describe("form routing", () => {
+  test("forms route to every process that forwarded them until replied or cancelled", () => {
+    registry.connect("a", laptop, hello("pa"))
+    registry.setSessions("a", [session("ses_1", { owned: true })])
+    registry.connect("b", laptop, hello("pb", "service"))
+    registry.setSessions("b", [session("ses_1")])
+    registry.observe("a", ev("session.created", { sessionID: "ses_sub", parentID: "ses_1", title: "x" }))
+    const created = ev("form.created", { form: { id: "frm_1", sessionID: "ses_sub", title: "Q", fields: [{ key: "q0", type: "string" }] } })
+    registry.observe("b", created)
+    registry.observe("a", created)
+    expect(registry.formTargets("ses_1", "frm_1")).toEqual([
+      { connID: "b", sessionID: "ses_sub" },
+      { connID: "a", sessionID: "ses_sub" },
+    ])
+    expect(registry.formTargets("ses_1", "frm_2")).toEqual([])
+    registry.observe("a", ev("form.replied", { id: "frm_1", sessionID: "ses_sub", answer: {} }))
+    expect(registry.formTargets("ses_1", "frm_1")).toEqual([])
+  })
+
+  test("a form nobody holds is dropped with its blocker", () => {
+    registry.connect("a", laptop, hello("pa"))
+    registry.setSessions("a", [session("ses_1", { owned: true })])
+    registry.observe("a", ev("form.created", { form: { id: "frm_1", sessionID: "ses_1", title: "Q" } }))
+    expect(registry.status("ses_1")![0]!.blockers).toHaveLength(1)
+    registry.dropForm("frm_1")
+    expect(registry.status("ses_1")![0]!.blockers).toEqual([])
+    expect(registry.formTargets("ses_1", "frm_1")).toEqual([])
+  })
+})
+
 describe("machine connections", () => {
   test("lists connection IDs per machine", () => {
     registry.connect("a", laptop, hello("pa"))

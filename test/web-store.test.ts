@@ -1,10 +1,35 @@
 // The console's hub state reducers (web/src/lib/store.ts): what each SSE message does to the shared state.
 import { describe, expect, test } from "bun:test"
-import { LiveFeeds, applyMessage, findSession, initialHub, isUnread, treeRunning } from "../web/src/lib/store"
+import { LiveFeeds, applyMessage, findSession, initialHub, isUnread, subtree, treeRunning } from "../web/src/lib/store"
 
 const catalog = (sessions: Array<Record<string, unknown>>) => ({
   type: "catalog",
   machines: [{ id: "m1", name: "laptop", online: true, processes: [{ id: "p1", kind: "service", directory: "/", pid: 1, sessions }] }],
+})
+
+describe("subagent sessions", () => {
+  const tree = [
+    { id: "root", title: "Main", state: "working", blockers: [] },
+    { id: "kid", parentID: "root", title: "Integrate", state: "blocked", blockers: [{ id: "per_1", kind: "permission", summary: "shell: ls" }] },
+    { id: "grandkid", parentID: "kid", title: "Search", state: "working", blockers: [] },
+    { id: "sibling", parentID: "root", title: "Other", state: "idle", blockers: [] },
+  ]
+
+  test("a child nobody reports is found through its root's status tree, with its parent and the root", () => {
+    const s = initialHub()
+    applyMessage(s, catalog([{ id: "root", title: "Main", directory: "/x", status: tree }]))
+    const found = findSession(s.machines, "kid")!
+    expect(found.machine.id).toBe("m1")
+    expect(found.session).toMatchObject({ id: "kid", title: "Integrate", parentID: "root", rootID: "root", directory: "/x", state: "blocked" })
+    expect(found.session.status).toEqual(tree)
+    expect(findSession(s.machines, "nope")).toBeUndefined()
+  })
+
+  test("subtree: the session and everything below it", () => {
+    expect([...subtree(tree, "kid")].sort()).toEqual(["grandkid", "kid"])
+    expect([...subtree(tree, "root")].sort()).toEqual(["grandkid", "kid", "root", "sibling"])
+    expect([...subtree(undefined, "x")]).toEqual(["x"])
+  })
 })
 
 describe("applyMessage", () => {

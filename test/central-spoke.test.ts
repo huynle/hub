@@ -285,6 +285,78 @@ describe("permissions", () => {
   })
 })
 
+describe("permissions asked where several processes see them", () => {
+  async function twoForwarders(firstReply: (req: any) => unknown, secondReply: (req: any) => unknown) {
+    h = harness()
+    const machine = h.store.addMachine("laptop")
+    const first = await spoke(h, { machine, processID: "a", hello: { kind: "service" }, sessions: [session("ses_1")] })
+    const firstSeen = answer(first, firstReply)
+    const second = await spoke(h, { machine, processID: "b", sessions: [session("ses_1", { owned: true })] })
+    const secondSeen = answer(second, secondReply)
+    const asked = { t: "event", event: { type: "permission.asked", data: { sessionID: "ses_1", id: "per_1", action: "bash" } } } as const
+    first.send(asked)
+    await waitFor(() => h.registry.permissionTarget("ses_1", "per_1") !== undefined)
+    second.send(asked)
+    await Bun.sleep(50)
+    return { firstSeen, secondSeen, second }
+  }
+
+  test("a process that does not hold the request (gone) is skipped for the next one that saw it", async () => {
+    const { firstSeen, secondSeen } = await twoForwarders(() => ({ gone: true }), () => ({}))
+    const res = await h.api("/api/sessions/ses_1/permission", { method: "POST", json: { requestID: "per_1", decision: "once" } })
+    expect(res.status).toBe(204)
+    expect(firstSeen).toHaveLength(1)
+    expect(secondSeen).toEqual([{ op: "permission", sessionID: "ses_1", requestID: "per_1", decision: "once" }])
+  })
+
+  test("a request nobody holds any more is a 409 with a friendly message and its card goes away", async () => {
+    // An older spoke answers with OpenCode's error instead of {gone: true}.
+    const { firstSeen, secondSeen, second } = await twoForwarders(() => ({ gone: true }), () => undefined)
+    second.ws.addEventListener("message", (event) => {
+      const frame = JSON.parse(String(event.data))
+      if (frame.t === "req") second.send({ t: "res", id: frame.id, ok: false, error: `Permission request not found: ${frame.req.requestID}` })
+    })
+    const res = await h.api("/api/sessions/ses_1/permission", { method: "POST", json: { requestID: "per_1", decision: "once" } })
+    expect(res.status).toBe(409)
+    const body = (await res.json()) as any
+    expect(body.code).toBe("gone")
+    expect(body.error).toMatch(/already answered or expired/i)
+    expect(firstSeen).toHaveLength(1)
+    expect(secondSeen).toHaveLength(1)
+    const view = (await (await h.api("/api/sessions/ses_1")).json()) as any
+    expect(view.blockers).toEqual([])
+    expect((await h.api("/api/sessions/ses_1/permission", { method: "POST", json: { requestID: "per_1", decision: "once" } })).status).toBe(409)
+  })
+})
+
+describe("forms (questions)", () => {
+  test("answered from the hub through the process that asked; cancel too; validation and gone", async () => {
+    h = harness()
+    const machine = h.store.addMachine("laptop")
+    const client = await spoke(h, { machine, processID: "a", sessions: [session("ses_1", { owned: true })] })
+    const seen = answer(client, (req) => (req.formID === "frm_gone" ? { gone: true } : {}))
+    const post = (json: unknown) => h.api("/api/sessions/ses_1/form", { method: "POST", json })
+    expect((await post({ formID: "frm_1", answer: { q0: "red" } })).status).toBe(409)
+    client.send({ t: "event", event: { type: "form.created", data: { form: { id: "frm_1", sessionID: "ses_1", title: "Q", fields: [{ key: "q0", type: "string" }] } } } })
+    client.send({ t: "event", event: { type: "form.created", data: { form: { id: "frm_gone", sessionID: "ses_1", title: "Q2" } } } })
+    await waitFor(() => h.registry.formTargets("ses_1", "frm_gone").length > 0)
+    expect((await post({ formID: "frm_1" })).status).toBe(400)
+    expect((await post({ formID: "frm_1", answer: { q0: { x: 1 } } })).status).toBe(400)
+    expect((await post({ formID: "frm_1", answer: { q0: "red", q1: ["a"] } })).status).toBe(204)
+    expect((await post({ formID: "frm_1", cancel: true })).status).toBe(204)
+    expect(seen).toEqual([
+      { op: "form", sessionID: "ses_1", formID: "frm_1", answer: { q0: "red", q1: ["a"] } },
+      { op: "form", sessionID: "ses_1", formID: "frm_1", cancel: true },
+    ])
+    const gone = await post({ formID: "frm_gone", answer: {} })
+    expect(gone.status).toBe(409)
+    expect(((await gone.json()) as any).code).toBe("gone")
+    const view = (await (await h.api("/api/sessions/ses_1")).json()) as any
+    expect(view.blockers.map((b: any) => b.id)).toEqual(["frm_1"])
+    expect(view.blockers[0].fields).toEqual([{ key: "q0", type: "string" }])
+  })
+})
+
 describe("spoke requests", () => {
   test("pairCode returns a code that pairs a device exactly once", async () => {
     h = harness()

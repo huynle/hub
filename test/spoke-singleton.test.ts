@@ -83,4 +83,14 @@ describe("joinProcess", () => {
     expect(a.active()?.name).toBe("a")
     expect(a.processID).not.toBe("proc_old")
   })
+
+  test("every instance's local value is available, active instance first; leaving drops it", () => {
+    const key = freshKey()
+    const a = joinProcess(() => new FakeSpoke("a"), key, { directory: "/a" })
+    const b = joinProcess(() => new FakeSpoke("b"), key, { directory: "/b" })
+    expect(a.locals()).toEqual([{ directory: "/a" }, { directory: "/b" }])
+    expect(b.locals()).toEqual([{ directory: "/a" }, { directory: "/b" }])
+    a.leave()
+    expect(b.locals()).toEqual([{ directory: "/b" }])
+  })
 })

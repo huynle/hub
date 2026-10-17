@@ -94,7 +94,10 @@ export interface Found {
   readonly process: ViewProcess
 }
 
-/** The most recently updated report of a session, with the machine and process that report it. */
+/**
+ * The most recently updated report of a session, with the machine and process that report it. A subagent
+ * session no process lists is found through its root's status tree: then `session.rootID` is that root.
+ */
 export function findSession(machines: readonly ViewMachine[] | undefined, id: string): Found | undefined {
   let best: Found | undefined
   for (const machine of machines ?? []) {
@@ -103,7 +106,52 @@ export function findSession(machines: readonly ViewMachine[] | undefined, id: st
       if (session && (!best || (session.updated ?? 0) > (best.session.updated ?? 0))) best = { session, machine, process }
     }
   }
-  return best
+  return best ?? findChild(machines, id)
+}
+
+type Node = { readonly id?: string; readonly parentID?: string; readonly title?: string; readonly state?: string; readonly blockers?: readonly unknown[] }
+
+function findChild(machines: readonly ViewMachine[] | undefined, id: string): Found | undefined {
+  for (const machine of machines ?? []) {
+    for (const process of machine.processes) {
+      for (const root of process.sessions) {
+        const tree = (Array.isArray(root.status) ? root.status : []) as readonly Node[]
+        const own = tree.find((n) => n.id === id)
+        if (!own || root.id === id) continue
+        const below = subtree(tree, id)
+        const nodes = tree.filter((n) => n.id && below.has(n.id))
+        const state = nodes.some((n) => n.state === "blocked") ? "blocked" : own.state === "error" ? "error" : nodes.some((n) => n.state === "working") ? "working" : "idle"
+        const session = {
+          ...root,
+          id,
+          title: own.title ?? "",
+          ...(own.parentID ? { parentID: own.parentID } : {}),
+          rootID: root.id,
+          state,
+          blockers: (own.blockers ?? []) as never,
+          busy: false,
+          conversation: false,
+        } as Found["session"]
+        return { session, machine, process }
+      }
+    }
+  }
+  return undefined
+}
+
+/** A session and every session below it in a status tree (parentID links). */
+export function subtree(status: ReadonlyArray<{ readonly id?: string; readonly parentID?: string }> | undefined, id: string): Set<string> {
+  const out = new Set([id])
+  for (let grew = true; grew; ) {
+    grew = false
+    for (const n of status ?? []) {
+      if (n.id && n.parentID && out.has(n.parentID) && !out.has(n.id)) {
+        out.add(n.id)
+        grew = true
+      }
+    }
+  }
+  return out
 }
 
 /** A session updated after the user last read it (never-read sessions are not marked). */

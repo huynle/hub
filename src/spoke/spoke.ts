@@ -7,6 +7,7 @@ import { isLoopbackURL } from "../loopback"
 import {
   compactActivity,
   type HerdrWorkspace,
+  type FormAnswer,
   type PermissionDecision,
   type ProcessKind,
   type PromptImage,
@@ -79,7 +80,17 @@ export interface SpokeHost {
   context(sessionID: string): Promise<ReadonlyArray<unknown>>
   listModels?(): Promise<ReadonlyArray<unknown>>
   getSession(sessionID: string): Promise<HostSession>
-  replyPermission(input: { sessionID: string; requestID: string; decision: PermissionDecision }): Promise<unknown>
+  /**
+   * Replies to a pending permission; "gone" when it is not pending here any more (answered, expired).
+   * `directory` is the session's directory when known (permissions are pending per location).
+   */
+  replyPermission(input: { sessionID: string; requestID: string; decision: PermissionDecision; directory?: string }): Promise<unknown>
+  /**
+   * Answers or cancels a pending form through OpenCode's API: "gone" when it is not pending any more,
+   * "unavailable" when this process cannot reach its own server (then a TUI relays it, see formActions).
+   * Absent: always relayed.
+   */
+  replyForm?(input: FormAction): Promise<"replied" | "gone" | "unavailable">
   interrupt(sessionID: string): Promise<unknown>
   switchAgent(sessionID: string, agent: string): Promise<unknown>
   switchModel(sessionID: string, model: ModelRef): Promise<unknown>
@@ -100,6 +111,17 @@ export interface SpokeHost {
   /** Current branch of a directory. */
   vcsBranch?(directory: string): Promise<string | undefined>
 }
+
+/** A form reply for OpenCode: an answer, or a cancel. */
+export type FormAction =
+  | { readonly sessionID: string; readonly formID: string; readonly answer: FormAnswer }
+  | { readonly sessionID: string; readonly formID: string; readonly cancel: true }
+
+/** A TUI that polled formActions within this window can relay form replies. */
+const RELAY_WINDOW_MS = 30_000
+/** How long a relayed form reply may take to show up as form.replied/cancelled. */
+const RELAY_TIMEOUT_MS = 15_000
+const ANSWER_IN_TERMINAL = "This OpenCode process cannot answer questions from the hub; answer it in the terminal"
 
 export interface SpokeOptions {
   readonly configFile: string
@@ -222,6 +244,14 @@ export class Spoke {
   private started = false
   /** Sessions shown by OpenCode TUIs (voice.presence). */
   private readonly presenceBook = new PresenceBook()
+  /** Form replies waiting for a TUI to carry them out (when the plugin cannot reach its own server). */
+  private readonly relay = {
+    actions: [] as FormAction[],
+    polls: new Set<() => void>(),
+    lastPoll: -Infinity,
+    /** formID → resolves when OpenCode reports the form replied or cancelled. */
+    settled: new Map<string, () => void>(),
+  }
   /** Herdr reader (service process only, while config.herdr is on). */
   private herdr?: HerdrWatcher
   /** Open sessions as last reported, to notice changes. */
@@ -403,6 +433,26 @@ export class Spoke {
   }
 
   // ---------- RPC-facing API ----------
+
+  /**
+   * RPC hub.formActions (TUI): form replies to carry out through the TUI's client, waiting up to `waitMs`
+   * for one. While a TUI polls, the spoke relays form replies it cannot make itself.
+   */
+  formActions(waitMs: number): Promise<{ actions: FormAction[] }> {
+    this.relay.lastPoll = Date.now()
+    const take = () => ({ actions: this.relay.actions.splice(0) })
+    if (this.relay.actions.length || waitMs <= 0) return Promise.resolve(take())
+    return new Promise((resolve) => {
+      const done = () => {
+        clearTimeout(timer)
+        this.relay.polls.delete(done)
+        this.relay.lastPoll = Date.now()
+        resolve(take())
+      }
+      const timer = setTimeout(done, waitMs)
+      this.relay.polls.add(done)
+    })
+  }
 
   status(sessionID?: string): SpokeStatus {
     const connection = this.connection?.state ?? "off"
@@ -728,13 +778,17 @@ export class Spoke {
     if (req.op === "expose") return this.expose(req.sessionID, req.on)
     if (req.op === "create") return this.create(req.directory, req.title, req.herdrWorkspace)
     // Inspection and control need a session this process knows; Voice (conversation) is gated separately.
-    if (!isReported(this.config, this.tracker, req.sessionID)) throw new Error(UNKNOWN_SESSION)
+    if (!isReported(this.config, this.tracker, req.sessionID) && !(await this.adopt(req.sessionID))) throw new Error(UNKNOWN_SESSION)
     switch (req.op) {
       case "turn":
         return this.turn(req.sessionID, req.text, req.voiceStyle, req.images)
-      case "permission":
-        await this.host.replyPermission({ sessionID: req.sessionID, requestID: req.requestID, decision: req.decision })
-        return {}
+      case "permission": {
+        const directory = this.tracker.directoryOf(req.sessionID)
+        const outcome = await this.host.replyPermission({ sessionID: req.sessionID, requestID: req.requestID, decision: req.decision, ...(directory ? { directory } : {}) })
+        return outcome === "gone" ? { gone: true } : {}
+      }
+      case "form":
+        return this.form("cancel" in req ? { sessionID: req.sessionID, formID: req.formID, cancel: true } : { sessionID: req.sessionID, formID: req.formID, answer: req.answer })
       case "context":
         return { messages: contextMessages(await this.host.context(req.sessionID)) }
       case "models": {
@@ -808,6 +862,67 @@ export class Spoke {
       case "conversation":
         return this.setConversation(req.sessionID, req.on)
     }
+  }
+
+  /** Answers a pending form through OpenCode, or through a polling TUI when this process cannot. */
+  private async form(action: FormAction): Promise<ResultFor["form"]> {
+    if (!this.tracker.formPending(action.formID)) return { gone: true }
+    const outcome = this.host.replyForm ? await this.host.replyForm(action) : "unavailable"
+    if (outcome === "gone") return { gone: true }
+    if (outcome !== "unavailable") return {}
+    const relaying = this.relay.polls.size > 0 || Date.now() - this.relay.lastPoll <= RELAY_WINDOW_MS
+    if (!relaying) throw new Error(ANSWER_IN_TERMINAL)
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.relay.settled.delete(action.formID)
+        reject(new Error(`No terminal took the answer in time. ${ANSWER_IN_TERMINAL}`))
+      }, RELAY_TIMEOUT_MS)
+      this.relay.settled.set(action.formID, () => {
+        clearTimeout(timer)
+        resolve()
+      })
+      this.relay.actions.push(action)
+      for (const poll of [...this.relay.polls]) poll()
+    })
+    return {}
+  }
+
+  /**
+   * A subagent session this process has not seen yet (e.g. created before it started): known once OpenCode
+   * says it descends from a session this process reports. Adds the chain to the tracker.
+   */
+  private async adopt(sessionID: string): Promise<boolean> {
+    if (this.config.mode === "off") return false
+    const chain: HostSession[] = []
+    let current = sessionID
+    for (let depth = 0; depth < 8; depth++) {
+      let session: HostSession
+      try {
+        session = await this.host.getSession(current)
+      } catch {
+        return false
+      }
+      chain.push(session)
+      const parentID = session.parentID
+      if (!parentID || chain.some((s) => s.id === parentID)) return false
+      if (!isReported(this.config, this.tracker, parentID)) {
+        current = parentID
+        continue
+      }
+      const now = Date.now()
+      for (const s of chain) {
+        this.tracker.ensure(s.id, now)
+        this.tracker.setInfo(s.id, {
+          title: s.title ?? "",
+          directory: s.location?.directory ?? "",
+          ...(s.parentID ? { parentID: s.parentID } : {}),
+          updated: s.time?.updated ?? now,
+        })
+      }
+      this.scheduleSnapshot()
+      return true
+    }
+    return false
   }
 
   private modelDefaults(): SessionModelPrefs {
@@ -984,6 +1099,13 @@ export class Spoke {
   private observe(event: EventLike): void {
     try {
       this.turns.observe(event)
+      if (event.type === "form.replied" || event.type === "form.cancelled") {
+        const formID = (event.data as Record<string, unknown> | undefined)?.id
+        if (typeof formID === "string") {
+          this.relay.settled.get(formID)?.()
+          this.relay.settled.delete(formID)
+        }
+      }
       if (this.tracker.observe(event, Date.now())) this.scheduleSnapshot()
       if (this.options.kind === "service" && this.host.listRecent && LISTING_EVENTS.has(event.type) && !(event.data as any)?.parentID) {
         this.scheduleSeed()

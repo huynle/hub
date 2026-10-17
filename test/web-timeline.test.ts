@@ -48,6 +48,22 @@ describe("Timeline", () => {
   })
 })
 
+describe("Timeline: a subagent session's own view", () => {
+  test("only the sessions below it are subagents; its root and siblings are not", () => {
+    const timeline = new Timeline()
+    timeline.status(
+      [
+        { id: "root", title: "Main", state: "working" },
+        { id: "child", parentID: "root", title: "Integrate", state: "working" },
+        { id: "sibling", parentID: "root", title: "Other", state: "working" },
+        { id: "grandchild", parentID: "child", title: "Search", state: "working" },
+      ],
+      "child",
+    )
+    expect(timeline.rows().map((r) => r.key)).toEqual(["sub:grandchild"])
+  })
+})
+
 describe("Timeline: live reasoning", () => {
   test("streamed reasoning deltas accumulate into one thought with text", () => {
     const timeline = new Timeline()

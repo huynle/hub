@@ -198,6 +198,11 @@ export class SessionTracker {
     }
   }
 
+  /** A form (question) this process saw asked and not yet replied or cancelled. */
+  formPending(formID: string): boolean {
+    return this.waiting.has(`frm ${formID}`)
+  }
+
   /** Running sessions strictly below a root, deepest first. */
   runningBelow(root: string): string[] {
     return [...this.running]

@@ -78,6 +78,16 @@ const methods = {
     output: empty,
     errors,
   },
+  /**
+   * Form (question) replies from the hub this server cannot make itself (a standalone server started by a
+   * TUI): the TUI polls, carries them out with its client, and the server sees form.replied. Waits up to
+   * `waitMs` (at most 25 s) for one.
+   */
+  formActions: {
+    input: obj({ waitMs: num }),
+    output: obj({ actions: { type: "array", items: { type: "object" } } }, ["actions"]),
+    errors,
+  },
   /** Conversation mode for a session in this process (same path as the server's "conversation" op). */
   conversation: { input: obj({ sessionID: str, on: bool }, ["sessionID", "on"]), output: obj({ agent: str }, ["agent"]), errors },
 } as const

@@ -136,11 +136,25 @@ export class Timeline {
     return this.items.get(key)
   }
 
+  /** Subagent rows from a status tree: the sessions below `rootID` (the session on screen). */
   status(sessions: ReadonlyArray<Record<string, unknown>> | undefined, rootID: string): void {
     const seen = new Set<string>()
+    const below = new Set([rootID])
+    for (let grew = true; grew; ) {
+      grew = false
+      for (const s of sessions ?? []) {
+        if (typeof s?.id === "string" && typeof s.parentID === "string" && below.has(s.parentID) && !below.has(s.id)) {
+          below.add(s.id)
+          grew = true
+        }
+      }
+    }
+    // Older hubs send entries without parentID: everything but the root is below it then.
+    const flat = (sessions ?? []).every((s) => s?.id === rootID || typeof s?.parentID !== "string")
     for (const session of sessions ?? []) {
       const id = session?.id
       if (!session || typeof id !== "string" || !id || id === rootID) continue
+      if (!below.has(id) && !(flat && (sessions ?? [])[0]?.id === rootID)) continue
       seen.add(id)
       const since = typeof session.since === "number" ? session.since : undefined
       const current = this.subagents.get(id) ?? { id, at: since ?? Date.now() }

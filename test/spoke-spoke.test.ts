@@ -15,15 +15,17 @@ afterEach(() => {
   for (const c of cleanups.splice(0).reverse()) c()
 })
 
-function fakeHost() {
+function fakeHost(opts: { forms?: boolean } = {}) {
   const events = new EventQueue<Ev>()
-  const calls = { prompt: [] as unknown[], permission: [] as unknown[], get: [] as string[], interrupt: [] as string[], switch: [] as unknown[], create: [] as unknown[], model: [] as unknown[] }
+  const calls = { form: [] as unknown[], prompt: [] as unknown[], permission: [] as unknown[], get: [] as string[], interrupt: [] as string[], switch: [] as unknown[], create: [] as unknown[], model: [] as unknown[] }
   /** Current model per session (absent: the default model). */
   const models = new Map<string, { providerID: string; id: string; variant?: string }>()
   const messages = new Map<string, unknown[]>()
   /** Current agent per session (absent: the default agent). */
   const agents = new Map<string, string>()
   const known = new Set(["build", "plan", "voice"])
+  /** Parent of sessions as OpenCode reports them (subagent sessions). */
+  const parents = new Map<string, string>()
   let inbox = 0
   const catalog = [
     { providerID: "anthropic", modelID: "claude-haiku", name: "Claude Haiku", enabled: true, status: "active", variants: [{ id: "fast" }] },
@@ -44,10 +46,20 @@ function fakeHost() {
       calls.get.push(sessionID)
       const agent = agents.get(sessionID)
       const model = models.get(sessionID)
-      return { id: sessionID, title: `Fetched ${sessionID}`, location: { directory: "/fetched" }, time: { updated: 5 }, ...(agent ? { agent } : {}), ...(model ? { model } : {}) }
+      const parentID = parents.get(sessionID)
+      return { id: sessionID, title: `Fetched ${sessionID}`, location: { directory: "/fetched" }, time: { updated: 5 }, ...(parentID ? { parentID } : {}), ...(agent ? { agent } : {}), ...(model ? { model } : {}) }
     },
+    ...(opts.forms === false
+      ? {}
+      : {
+          replyForm: async (input: any) => {
+            calls.form.push(input)
+            return input.formID.startsWith("frm_gone") ? ("gone" as const) : ("replied" as const)
+          },
+        }),
     replyPermission: async (input) => {
       calls.permission.push(input)
+      return input.requestID.startsWith("per_gone") ? "gone" : "replied"
     },
     interrupt: async (sessionID) => {
       calls.interrupt.push(sessionID)
@@ -67,18 +79,18 @@ function fakeHost() {
       return { id: `ses_new${calls.create.length}` }
     },
   }
-  return { host, calls, messages, agents, known, models, catalog }
+  return { host, calls, messages, agents, known, models, catalog, parents }
 }
 
 function setup(
   config: Partial<VoiceConfig>,
-  opts: { server?: FakeCentral; kind?: "service" | "standalone"; listRecent?: SpokeHost["listRecent"]; herdr?: HerdrRunner; options?: Partial<SpokeOptions> } = {},
+  opts: { server?: FakeCentral; kind?: "service" | "standalone"; listRecent?: SpokeHost["listRecent"]; herdr?: HerdrRunner; options?: Partial<SpokeOptions>; forms?: boolean } = {},
 ) {
   const dir = mkdtempSync(path.join(tmpdir(), "voice-spoke-"))
   const file = path.join(dir, "config.json")
   const server = opts.server ?? fakeCentral()
   writeConfig(file, { ...defaults("box"), server: server.url, ...config })
-  const { host, calls, messages, agents, known, models, catalog } = fakeHost()
+  const { host, calls, messages, agents, known, models, catalog, parents } = fakeHost({ forms: opts.forms })
   if (opts.listRecent) (host as { listRecent?: SpokeHost["listRecent"] }).listRecent = opts.listRecent
   const spoke = new Spoke(host, {
     configFile: file,
@@ -100,7 +112,7 @@ function setup(
   cleanups.push(() => server.stop())
   cleanups.push(() => spoke.stop())
   spoke.start()
-  return { spoke, server, host, calls, messages, file, agents, known, models, catalog }
+  return { spoke, server, host, calls, messages, file, agents, known, models, catalog, parents }
 }
 
 const created = (sessionID: string, extra: Record<string, unknown> = {}): Ev => ({
@@ -222,6 +234,64 @@ describe("Spoke", () => {
     expect(res.ok).toBe(false)
     expect(res.error).toMatch(/unknown session/i)
     expect(calls.prompt).toHaveLength(0)
+  })
+
+  test("a subagent session this process has not seen yet is served when OpenCode says it descends from a known one", async () => {
+    const { spoke, server, calls, parents } = setup({ mode: "session", sessions: ["ses_a"], token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    parents.set("ses_kid", "ses_mid")
+    parents.set("ses_mid", "ses_a")
+    const res = await server.request({ op: "steer", sessionID: "ses_kid", text: "focus" })
+    expect(res).toMatchObject({ ok: true })
+    expect(calls.prompt).toEqual([expect.objectContaining({ sessionID: "ses_kid", text: "focus" })])
+    const stranger = await server.request({ op: "steer", sessionID: "ses_stranger", text: "x" })
+    expect(stranger.error).toMatch(/unknown session/i)
+  })
+
+  test("a permission request no location holds any more is reported as gone, not as an error", async () => {
+    const { spoke, server } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    const res = await server.request({ op: "permission", sessionID: "ses_a", requestID: "per_gone1", decision: "once" })
+    expect(res).toMatchObject({ ok: true, result: { gone: true } })
+  })
+
+  test("form replies go to OpenCode for pending forms; unknown or settled forms are gone", async () => {
+    const { spoke, server, host, calls } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    host.push({ type: "form.created", data: { form: { id: "frm_1", sessionID: "ses_a", title: "Q", fields: [] } } })
+    host.push({ type: "form.created", data: { form: { id: "frm_gone1", sessionID: "ses_a", title: "Q", fields: [] } } })
+    await until(() => forwarded(server).filter((e) => e.type === "form.created").length === 2)
+    expect(await server.request({ op: "form", sessionID: "ses_a", formID: "frm_1", answer: { q0: "red" } })).toMatchObject({ ok: true, result: {} })
+    expect(await server.request({ op: "form", sessionID: "ses_a", formID: "frm_1", cancel: true })).toMatchObject({ ok: true, result: {} })
+    expect(await server.request({ op: "form", sessionID: "ses_a", formID: "frm_gone1", answer: {} })).toMatchObject({ ok: true, result: { gone: true } })
+    expect(calls.form).toEqual([
+      { sessionID: "ses_a", formID: "frm_1", answer: { q0: "red" } },
+      { sessionID: "ses_a", formID: "frm_1", cancel: true },
+      { sessionID: "ses_a", formID: "frm_gone1", answer: {} },
+    ])
+    host.push({ type: "form.replied", data: { id: "frm_1", sessionID: "ses_a", answer: {} } })
+    await until(() => forwarded(server).some((e) => e.type === "form.replied"))
+    expect(await server.request({ op: "form", sessionID: "ses_a", formID: "frm_1", answer: {} })).toMatchObject({ ok: true, result: { gone: true } })
+    expect(calls.form).toHaveLength(3)
+  })
+
+  test("without its own way to answer forms, the spoke relays to a polling TUI and waits for the reply", async () => {
+    const { spoke, server, host } = setup({ mode: "always", token: "tok" }, { forms: false })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    host.push({ type: "form.created", data: { form: { id: "frm_1", sessionID: "ses_a", title: "Q", fields: [] } } })
+    await until(() => forwarded(server).some((e) => e.type === "form.created"))
+    // No TUI is polling: the user is told to answer in the terminal.
+    const refused = await server.request({ op: "form", sessionID: "ses_a", formID: "frm_1", answer: { q0: "x" } })
+    expect(refused.ok).toBe(false)
+    expect(refused.error).toMatch(/terminal/i)
+
+    const polled = spoke.formActions(2000)
+    const answered = server.request({ op: "form", sessionID: "ses_a", formID: "frm_1", answer: { q0: "x" } })
+    expect(await polled).toEqual({ actions: [{ sessionID: "ses_a", formID: "frm_1", answer: { q0: "x" } }] })
+    host.push({ type: "form.replied", data: { id: "frm_1", sessionID: "ses_a", answer: { q0: "x" } } })
+    expect(await answered).toMatchObject({ ok: true, result: {} })
   })
 
   test("permission and context requests", async () => {

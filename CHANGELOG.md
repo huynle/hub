@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **Permissions**: fixed "Permission request not found" when allowing or denying from the hub. OpenCode
+  keeps pending permissions per location (directory), and the spoke replied through the first plugin
+  instance of the process; it now replies through the instance of the location that holds the request.
+  The hub tries every process that forwarded a request; a request nobody holds any more (answered in the
+  terminal, expired) answers `409 {code: "gone"}` and its card goes away.
+- **Questions**: forms from the agent (the question tool, any OpenCode form) are answered in the console:
+  text, single and multiple choice (with your own answer), yes/no, numbers and links, with validation and
+  Submit / Dismiss (`POST /api/sessions/:id/form`). A standalone server started by a TUI answers through
+  that TUI (RPC `hub.formActions`).
+- **Subagent sessions**: a subagent row opens the subagent's own page with a breadcrumb back to its
+  parent, its own live output, status and permission/question cards, and a composer that steers it. The
+  hub serves subagent sessions no process lists from their root's tree (same owner checks); a session is
+  never nested under another user's session.
+
 - **Console**: the All sessions table has no Voice column and no Voice on/off filter chips (saved Voice
   filters and sort are ignored). The session live in Voice (Voice mode in this browser, or a conversation)
   shows a small pulsing green dot left of its title in the table, the phone list and the sidebar

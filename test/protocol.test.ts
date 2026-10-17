@@ -65,6 +65,19 @@ describe("parseServerMessage", () => {
     expect(parseServerMessage(req("yes"))).toBeUndefined()
   })
 
+  test("validates form replies: an answer object of bounded values, or a cancel", () => {
+    const req = (extra: Record<string, unknown>) => j({ t: "req", id: "r", req: { op: "form", sessionID: "ses_1", formID: "frm_1", ...extra } })
+    expect(parseServerMessage(req({ answer: { q0: "red", q1: ["S", "M"], q2: true, q3: 3 } }))).toBeDefined()
+    expect(parseServerMessage(req({ cancel: true }))).toBeDefined()
+    expect(parseServerMessage(req({}))).toBeUndefined()
+    expect(parseServerMessage(req({ answer: { q0: "a" }, cancel: true }))).toBeUndefined()
+    expect(parseServerMessage(req({ answer: { q0: { nested: 1 } } }))).toBeUndefined()
+    expect(parseServerMessage(req({ answer: { q0: [1] } }))).toBeUndefined()
+    expect(parseServerMessage(req({ answer: { q0: "x".repeat(20_001) } }))).toBeUndefined()
+    expect(parseServerMessage(req({ answer: Object.fromEntries(Array.from({ length: 51 }, (_, i) => [`k${i}`, "v"])) }))).toBeUndefined()
+    expect(parseServerMessage(req({ answer: [] }))).toBeUndefined()
+  })
+
   test("accepts welcome, res and bye", () => {
     expect(parseServerMessage(j({ t: "welcome", v: 1, machineID: "m1", publicURL: "https://voice.example.com" }))).toBeDefined()
     expect(parseServerMessage(j({ t: "res", id: "1", ok: false, error: "x" }))).toBeDefined()

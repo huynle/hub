@@ -4,6 +4,7 @@ import { isLoopbackURL } from "./loopback"
 import { HubRpc } from "./rpc"
 import { localServerFor, modeFor, needsSetup, parseServerInput, setupOptions, type SetupChoice } from "./setup"
 import { hubCommands } from "./tui-commands"
+import { FormRelay } from "./tui-forms"
 import { PresenceReporter, shownSessions } from "./tui-presence"
 import { startVoice } from "./voice-command"
 
@@ -420,6 +421,16 @@ export default Plugin.define({
     })
     presence.start()
 
+    // Questions answered on the hub that this TUI's (standalone) server cannot answer itself.
+    const forms = new FormRelay({
+      poll: (waitMs) => call<{ actions: unknown[] }>("formActions", { waitMs }),
+      apply: (action) =>
+        "cancel" in action
+          ? context.client.session.form.cancel({ sessionID: action.sessionID, formID: action.formID })
+          : context.client.session.form.reply({ sessionID: action.sessionID, formID: action.formID, answer: action.answer as Record<string, string | number | boolean | string[]> }),
+    })
+    void forms.start()
+
     // One entry per command; a new /<feature> is one more entry (src/tui-commands.ts).
     const commands = hubCommands(
       [
@@ -429,7 +440,10 @@ export default Plugin.define({
       (cause) => toast(errorMessage(cause), "error"),
     )
     context.keymap.layer(() => ({ mode: "global", commands }))
-    return () => presence.stop()
+    return () => {
+      presence.stop()
+      forms.stop()
+    }
   },
 })
 
