@@ -4,13 +4,14 @@
 import type { Server } from "bun"
 import { diskAssets, type WebAssets } from "./assets"
 import path from "node:path"
-import { formAnswerProblem, PROMPT_IMAGE_MIMES, promptImagesProblem, type EnrollStart, type FormAnswer, type ModelSelection, type PermissionDecision, type PromptImage, type TurnResult } from "../protocol"
+import { formAnswerProblem, PROMPT_IMAGE_MIMES, promptImagesProblem, type AvailableModel, type EnrollStart, type FormAnswer, type ModelSelection, type PermissionDecision, type PromptImage, type TurnResult } from "../protocol"
 import { isLoopbackAddress, isLoopbackHost, isLoopbackURL, loopbackOrigins } from "../loopback"
 import { speakable } from "../speakable"
 import { Auth, RateLimitError, ValidationError } from "./auth"
 import { emailAllowed, type CentralConfig } from "./config"
 import { authPage, cookieValue, deviceName, OIDC_COOKIE, OidcClient, OidcError } from "./oidc"
 import { Push, type PushSender } from "./push"
+import { pushEndpointProblem, resolveHost as systemResolveHost, type ResolveHost } from "./push-target"
 import { BusyError, Registry } from "./registry"
 import { audioFormat, SpeechError } from "./speech/provider"
 import { SpeechService } from "./speech/service"
@@ -36,6 +37,8 @@ export interface CentralOptions {
   readonly notifier?: Notifier
   /** Overrides web-push delivery (tests; web-push itself needs https push services). */
   readonly pushSender?: PushSender
+  /** Resolves push endpoint hosts at subscribe time (SSRF check); the system resolver by default. */
+  readonly resolveHost?: ResolveHost
   /** Clock for sign-in expiry and the store (tests). */
   readonly now?: () => number
   readonly timing?: {
@@ -520,6 +523,8 @@ export function startCentral(options: CentralOptions): Central {
       const input = await body(request)
       const target = pushTarget(input.subscription)
       if (!target) return error(400, "Invalid push subscription")
+      const problem = await pushEndpointProblem(target.endpoint, options.resolveHost ?? systemResolveHost)
+      if (problem) return error(400, `Invalid push subscription: ${problem}`)
       // pushsubscriptionchange: the service worker sends the endpoint it replaces.
       if (typeof input.oldEndpoint === "string" && input.oldEndpoint !== target.endpoint) store.removePushSubscription(device.id, input.oldEndpoint)
       store.addPushSubscription(device.id, target)
@@ -625,6 +630,7 @@ export function startCentral(options: CentralOptions): Central {
     }),
     route("PUT", "/api/sessions/:session/model-prefs", "session", async ({ request, params, user }) => {
       const change = modelPrefsInput(await request.json())
+      await checkModelSelections(ownerOf(params.session!), params.session!, change)
       const reply = await spokes.request(ownerOf(params.session!), { op: "setModelPrefs", sessionID: params.session!, ...change })
       const prefs = store.setModelPrefs(user.id, params.session!, change)
       return Response.json({ prefs, defaults: reply.defaults }, { headers: NO_STORE })
@@ -857,6 +863,28 @@ export function startCentral(options: CentralOptions): Central {
     return new Response(bytes, {
       headers: { "content-type": file.mime, "content-length": String(bytes.length), "cache-control": "private, no-store", "x-content-type-options": "nosniff" },
     })
+  }
+
+  /**
+   * Every selection must be in the session's catalog (provider, model and variant), so a typo cannot leave
+   * the session failing every turn. A catalog that cannot be fetched is a 502, never an accepted selection.
+   */
+  async function checkModelSelections(connID: string, sessionID: string, change: { voice?: ModelSelection | null; worker?: ModelSelection | null }): Promise<void> {
+    const selections = [change.voice, change.worker].filter((m): m is ModelSelection => !!m)
+    if (selections.length === 0) return
+    let models: readonly AvailableModel[]
+    try {
+      models = (await spokes.request(connID, { op: "models", sessionID })).models
+    } catch (cause) {
+      if (cause instanceof HttpError) throw cause
+      throw new HttpError(502, `Could not fetch the session's model catalog: ${cause instanceof Error ? cause.message : String(cause)}`)
+    }
+    for (const m of selections) {
+      const known = models.find((model) => model.providerID === m.providerID && model.modelID === m.modelID)
+      if (!known || (m.variant !== undefined && m.variant !== "default" && !known.variants.includes(m.variant))) {
+        throw new HttpError(400, `Unknown model ${m.providerID}/${m.modelID}${m.variant ? `#${m.variant}` : ""} for this session`)
+      }
+    }
   }
 
   /** Connection that owns the session, or a 409. */

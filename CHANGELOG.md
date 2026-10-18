@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **GitHub installs**: an install without the built web app (`web/dist`, e.g. `opencode plugin add
+  github:huynle/hub`) no longer starts a local hub that only answers 503: `/hub` → **Start local hub**
+  (and opening the hub, and the automatic start) report that the web app is missing and how to get it
+  (npm package, release binary, or `npm run build:web` in a checkout).
+- **Push security**: `POST /api/push/subscribe` only accepts https endpoints on public hostnames. IP
+  literals in loopback, private, link-local, CGNAT and ULA ranges, `localhost`, `*.local` and `*.internal`
+  are rejected, and the host is resolved at subscribe time and rejected when it resolves to such an address
+  or not at all (400). Push services (FCM, Mozilla, Apple, Windows) keep working.
+- **Model overrides**: `PUT /api/sessions/:id/model-prefs` only accepts models (and variants) from the
+  session's catalog; anything else is `400 Unknown model`, and a catalog that cannot be fetched is a 502
+  instead of an accepted selection. Clearing a Voice model override switches the session back to the model
+  it had before the first override (at the next turn boundary if it is running), unless you picked another
+  model meanwhile.
+- **State directory**: the hub no longer crashes with `EPERM` on a fresh volume whose mount root it does
+  not own (a Kubernetes local-path PVC with `fsGroup`). When the state directory cannot be restricted to
+  0700 but is writable, the hub logs a one-line warning and continues; state files are still written 0600.
+  An unwritable directory still fails.
 - **Permissions**: fixed "Permission request not found" when allowing or denying from the hub. OpenCode
   keeps pending permissions per location (directory), and the spoke replied through the first plugin
   instance of the process; it now replies through the instance of the location that holds the request.

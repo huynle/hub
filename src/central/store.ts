@@ -3,7 +3,7 @@
 // (they must be sent upstream) and never returned by the API. The file is private (dir 0700, file 0600)
 // and written atomically.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { accessSync, chmodSync, constants as fsConstants, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import type { StoredSpeech } from "./speech/settings"
 import type { ModelSelection, SessionModelPrefs } from "../protocol"
@@ -194,6 +194,39 @@ export interface StateData {
 export interface StoreOptions {
   /** pairing: the local user is (re-)enabled as admin on open. */
   readonly mode?: "pairing" | "oidc"
+  /** chmod of the state directory (injected in tests). */
+  readonly chmodDir?: (dir: string, mode: number) => void
+  /** Whether the process can write into the state directory (injected in tests). */
+  readonly writable?: (dir: string) => boolean
+  /** One-line warnings (default console.warn). */
+  readonly warn?: (message: string) => void
+}
+
+const canWrite = (dir: string): boolean => {
+  try {
+    accessSync(dir, fsConstants.W_OK | fsConstants.X_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Creates the state directory and restricts it to the owner. A volume mount root owned by another user
+ * (a fresh Kubernetes PVC: root-owned, group-writable through fsGroup) cannot be chmod-ed by the hub;
+ * that is only a warning while the directory is writable, since every file in it is written 0600.
+ */
+function prepareStateDir(dir: string, options: StoreOptions): void {
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  try {
+    ;(options.chmodDir ?? chmodSync)(dir, 0o700)
+  } catch (cause) {
+    const code = (cause as NodeJS.ErrnoException | undefined)?.code
+    if ((code !== "EPERM" && code !== "EACCES") || !(options.writable ?? canWrite)(dir)) throw cause
+    ;(options.warn ?? console.warn)(
+      `[hub] cannot restrict ${dir} to mode 0700 (${code}; not its owner); continuing, state files are written 0600`,
+    )
+  }
 }
 
 /** Writes of lastSeen alone are throttled to this interval. */
@@ -230,8 +263,7 @@ export class Store {
   ) {}
 
   static open(dir: string, now: () => number = Date.now, options: StoreOptions = {}): Store {
-    mkdirSync(dir, { recursive: true, mode: 0o700 })
-    chmodSync(dir, 0o700)
+    prepareStateDir(dir, options)
     const file = path.join(dir, "state.json")
     let state: StateData = { machines: [], devices: [], push: [], users: [], audit: [] }
     if (existsSync(file)) {

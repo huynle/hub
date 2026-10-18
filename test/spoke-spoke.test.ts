@@ -793,6 +793,60 @@ describe("Spoke", () => {
     await turn
   })
 
+  test("clearing a Voice model override restores the model the session had before it", async () => {
+    const { spoke, server, host, calls, models } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    await until(() => lastSessions(server)?.sessions.length === 1)
+    models.set("ses_a", { providerID: "anthropic", id: "claude-opus", variant: "thinking" })
+    await server.request({ op: "setModelPrefs", sessionID: "ses_a", voice: { providerID: "bad", modelID: "model" } })
+    await server.request({ op: "steer", sessionID: "ses_a", text: "hi" })
+    expect(models.get("ses_a")).toEqual({ providerID: "bad", id: "model" })
+    // Another override keeps the original model as the one to restore.
+    await server.request({ op: "setModelPrefs", sessionID: "ses_a", voice: { providerID: "anthropic", modelID: "claude-haiku" } })
+    await server.request({ op: "steer", sessionID: "ses_a", text: "again" })
+    expect(models.get("ses_a")).toEqual({ providerID: "anthropic", id: "claude-haiku" })
+    await server.request({ op: "setModelPrefs", sessionID: "ses_a", voice: null })
+    expect(models.get("ses_a")).toEqual({ providerID: "anthropic", id: "claude-opus", variant: "thinking" })
+    // Clearing again changes nothing.
+    const switches = calls.model.length
+    await server.request({ op: "setModelPrefs", sessionID: "ses_a", voice: null })
+    expect(calls.model).toHaveLength(switches)
+  })
+
+  test("clearing a Voice override keeps a model the user picked meanwhile", async () => {
+    const { spoke, server, host, calls, models } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    await until(() => lastSessions(server)?.sessions.length === 1)
+    models.set("ses_a", { providerID: "anthropic", id: "claude-opus" })
+    await server.request({ op: "setModelPrefs", sessionID: "ses_a", voice: { providerID: "anthropic", modelID: "claude-haiku" } })
+    await server.request({ op: "steer", sessionID: "ses_a", text: "hi" })
+    models.set("ses_a", { providerID: "user", id: "choice" })
+    const switches = calls.model.length
+    await server.request({ op: "setModelPrefs", sessionID: "ses_a", voice: null })
+    expect(calls.model).toHaveLength(switches)
+    expect(models.get("ses_a")).toEqual({ providerID: "user", id: "choice" })
+  })
+
+  test("clearing a Voice override while the session runs restores it at the next turn boundary", async () => {
+    const { spoke, server, host, models } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    await until(() => lastSessions(server)?.sessions.length === 1)
+    models.set("ses_a", { providerID: "anthropic", id: "claude-opus" })
+    await server.request({ op: "setModelPrefs", sessionID: "ses_a", voice: { providerID: "anthropic", modelID: "claude-haiku" } })
+    await server.request({ op: "steer", sessionID: "ses_a", text: "hi" })
+    host.push({ type: "session.execution.started", data: { sessionID: "ses_a" } })
+    await until(() => forwarded(server).some((e) => e.type === "session.execution.started"))
+    await server.request({ op: "setModelPrefs", sessionID: "ses_a", voice: null })
+    expect(models.get("ses_a")).toEqual({ providerID: "anthropic", id: "claude-haiku" })
+    host.push({ type: "session.execution.succeeded", data: { sessionID: "ses_a" } })
+    await until(() => forwarded(server).some((e) => e.type === "session.execution.succeeded"))
+    await server.request({ op: "steer", sessionID: "ses_a", text: "next" })
+    expect(models.get("ses_a")).toEqual({ providerID: "anthropic", id: "claude-opus" })
+  })
+
   test("model catalog entries are keyed by their OpenCode id, not the upstream modelID (gateway aliases)", async () => {
     const { spoke, server, host, calls, catalog } = setup({ mode: "always", token: "tok" })
     // A gateway provider: OpenCode id "claude-opus-5-5" sends modelID "claude/claude-opus-5-5" upstream.

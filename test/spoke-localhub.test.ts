@@ -63,6 +63,7 @@ const options = (extra: Partial<LocalHubOptions> = {}): LocalHubOptions => ({
   waitMs: 10_000,
   env: { PATH: "/usr/bin", HUB_PORT: "9999", HUB_HOST: "0.0.0.0" },
   pid: 4242,
+  webBuilt: () => true,
   ...extra,
 })
 
@@ -93,6 +94,28 @@ describe("ensureLocalHub", () => {
     up.add("http://127.0.0.1:4097")
     expect(await ensureLocalHub("http://127.0.0.1:4097", options())).toEqual({ status: "running" })
     expect(spawned).toHaveLength(0)
+  })
+
+  test("an install without the built web app (GitHub install) is not started, with a clear reason", async () => {
+    const roots: string[] = []
+    const result = await ensureLocalHub("http://127.0.0.1:4321", options({ webBuilt: (root) => (roots.push(root), false) }))
+    expect(roots).toEqual(["/repo/opencode-voice"])
+    expect(result.status).toBe("failed")
+    const error = (result as { error: string }).error
+    expect(error).toContain("web/dist")
+    expect(error).toContain("npm run build:web")
+    expect(error).toContain("opencode plugin add @huynle/hub")
+    expect(spawned).toHaveLength(0)
+    expect(existsSync(path.join(dir, "hub.pid"))).toBe(false)
+  })
+
+  test("the default web build check looks for web/dist/index.html in the repository", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "voice-localhub-root-"))
+    const { webBuilt: _skip, ...rest } = options({ repoRoot: root })
+    expect((await ensureLocalHub("http://127.0.0.1:4321", rest)).status).toBe("failed")
+    mkdirSync(path.join(root, "web", "dist"), { recursive: true })
+    writeFileSync(path.join(root, "web", "dist", "index.html"), "<!doctype html>")
+    expect((await ensureLocalHub("http://127.0.0.1:4321", rest)).status).toBe("started")
   })
 
   test("refused: starts `bun <repo>/bin/hub.ts` detached on the server's port, logs to hub.log, records the pid", async () => {

@@ -27,6 +27,8 @@ let alice: Person
 let bob: Person
 let admin: { id: string; cookie: string }
 const notified: Array<{ kind: string; sessionID: string; owner?: string }> = []
+/** Endpoints the hub sent a Web Push to. */
+const pushed: string[] = []
 
 const event = (type: string, data: Record<string, unknown>) => ({ t: "event" as const, event: { type, data } })
 
@@ -60,10 +62,12 @@ async function person(email: string, sessionID: string, processID: string): Prom
 
 beforeEach(async () => {
   notified.length = 0
+  pushed.length = 0
   idp = fakeProvider()
   h = harness({
     env: oidcEnv(idp),
     noDevice: true,
+    pushSender: async (target) => void pushed.push(target.endpoint),
     notifier: {
       notify: async (kind, sessionID, _title, _detail, _body, owner) => {
         notified.push({ kind, sessionID, ...(owner ? { owner } : {}) })
@@ -118,6 +122,8 @@ describe("route table", () => {
       "POST /api/sessions/:session/conversation",
       "POST /api/sessions/:session/permission",
       "POST /api/sessions/:session/form",
+      "GET /api/sessions/:session/model-prefs",
+      "PUT /api/sessions/:session/model-prefs",
       "GET /api/sessions/:session/context",
       "GET /api/sessions/:session/timeline/messages/:message/files/:index",
       "POST /api/sessions/:session/stop",
@@ -137,6 +143,12 @@ describe("route table", () => {
       "GET /api/enrollments",
       "GET /api/settings/speech/default",
       "PUT /api/settings/speech/default",
+      "POST /api/push/subscribe",
+      "POST /api/push/unsubscribe",
+      "GET /api/push/prefs",
+      "PUT /api/push/prefs",
+      "PUT /api/push/mute",
+      "POST /api/push/test",
     ]) {
       expect(keys).toContain(required)
     }
@@ -197,6 +209,32 @@ describe("bob cannot reach alice's sessions", () => {
       expect({ route: route.path, status: res.status }).toEqual({ route: route.path, status: 403 })
     }
     expect(h.store.user(alice.id)?.disabled).toBeUndefined()
+  })
+})
+
+describe("bob cannot reach alice's push settings", () => {
+  test("user-scoped push routes only read and change the caller's own device and user", async () => {
+    const endpoint = "https://push.example.com/alice"
+    const subscription = { endpoint, keys: { p256dh: "p256-alice", auth: "auth-alice" } }
+    expect((await as(alice, "/api/push/subscribe", { method: "POST", json: { subscription, prefs: { finished: true } } })).status).toBe(200)
+    expect((await as(alice, "/api/push/mute", { method: "PUT", json: { sessionID: "ses_alice", muted: true } })).status).toBe(200)
+    const before = await json(await as(alice, `/api/push/prefs?endpoint=${encodeURIComponent(endpoint)}`))
+    expect(before).toMatchObject({ subscribed: true, subscriptions: 1, muted: ["ses_alice"] })
+
+    // Bob does not see alice's subscription, cannot remove it, and his changes stay his own.
+    expect(await json(await as(bob, `/api/push/prefs?endpoint=${encodeURIComponent(endpoint)}`))).toMatchObject({ subscribed: false, subscriptions: 0, muted: [] })
+    expect((await as(bob, "/api/push/unsubscribe", { method: "POST", json: { endpoint } })).status).toBe(404)
+    expect((await as(bob, "/api/push/prefs", { method: "PUT", json: { finished: false, handoff: false } })).status).toBe(200)
+    expect((await as(bob, "/api/push/mute", { method: "PUT", json: { sessionID: "ses_alice", muted: false } })).status).toBe(200)
+    expect(await json(await as(bob, "/api/push/test", { method: "POST" }))).toMatchObject({ sent: 0, subscriptions: 0 })
+    // Re-subscribing alice's endpoint from bob's device with oldEndpoint does not drop alice's.
+    expect((await as(bob, "/api/push/subscribe", { method: "POST", json: { subscription: { ...subscription, endpoint: "https://push.example.com/bob" }, oldEndpoint: endpoint } })).status).toBe(200)
+    expect(pushed).toEqual([])
+
+    expect(await json(await as(alice, `/api/push/prefs?endpoint=${encodeURIComponent(endpoint)}`))).toEqual(before)
+    expect(h.store.pushSubscriptions().filter((s) => s.endpoint === endpoint)).toHaveLength(1)
+    expect((await as(alice, "/api/push/test", { method: "POST" })).status).toBe(200)
+    expect(pushed).toEqual([endpoint])
   })
 })
 

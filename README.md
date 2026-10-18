@@ -51,8 +51,9 @@ opencode service restart
 
 Install from npm: the npm package ships the built web app, so the plugin can run a local hub. A GitHub
 install (`opencode plugin add github:huynle/hub`) has no built web app (`web/dist` is not in the
-repository): it works for connecting to a hub that runs elsewhere, but a local hub it starts answers 503
-until you build the app. To run a hub yourself, use the npm package, a [release binary](#running-the-hub)
+repository): it works for connecting to a hub that runs elsewhere, but it does not start a local hub
+(`/hub` → **Start local hub** and the automatic start say the web app is missing; a hub started by hand
+from such an install answers 503 on its pages). To run a hub yourself, use the npm package, a [release binary](#running-the-hub)
 or Docker, or run `npm install && npm run build:web` in a source checkout.
 
 Then, in OpenCode:
@@ -196,7 +197,7 @@ conversation mode and utterances (403 `not_exposed` for sessions not shared with
 | `POST /api/sessions/:id/read` · `GET /api/reads` | per-user read marks, synced to your other devices |
 | `GET /api/push/prefs?endpoint=` | `{prefs, quietHours, muted, subscriptions, subscribed?}`: this device's toggles (`handoff, question, permission, finished, failed, say`) and quiet hours, the user's muted sessions, how many subscriptions the hub holds for this device, and whether it holds `endpoint` |
 | `PUT /api/push/prefs {toggles…, quietHours?}` | boolean toggles (a 0.5.0 `blocked` sets question and permission); `quietHours` `{start: "HH:MM", end: "HH:MM", timeZone}` or `null` (400 when invalid) |
-| `POST /api/push/subscribe {subscription, prefs?, oldEndpoint?}` · `POST /api/push/unsubscribe {endpoint}` | this device's subscriptions; `oldEndpoint` is dropped (rotated subscription) |
+| `POST /api/push/subscribe {subscription, prefs?, oldEndpoint?}` · `POST /api/push/unsubscribe {endpoint}` | this device's subscriptions; `oldEndpoint` is dropped (rotated subscription). The endpoint must be https on a public hostname that resolves only to public addresses (no loopback, private, link-local, CGNAT or ULA hosts, no `localhost`/`*.local`/`*.internal`), else 400 |
 | `POST /api/push/test` | a test notification to the caller's device only: `{sent, failed: [{host, status?}], subscriptions}`; 429 with `retry-after` within 10 s of the last one |
 | `PUT /api/push/mute {sessionID, muted}` | mutes or unmutes a session's notifications for the user: `{muted}` |
 

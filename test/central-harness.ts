@@ -49,6 +49,8 @@ export function harness(overrides: Partial<CentralOptions> & { env?: Record<stri
         return 2
       },
     },
+    // Push endpoints in tests use reserved names (push.example); resolve every host to a public address.
+    resolveHost: async () => ["93.184.215.14"],
     ...rest,
   })
   const cookie = noDevice ? "" : `voice_device=${central.store.addDevice("test phone").token}`

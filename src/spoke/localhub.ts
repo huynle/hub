@@ -47,7 +47,17 @@ export interface LocalHubOptions {
   readonly env?: Readonly<Record<string, string | undefined>>
   /** This process's pid (written to the lock while starting). */
   readonly pid?: number
+  /** Whether the repository has the built web app (default: web/dist/index.html exists). */
+  readonly webBuilt?: (root: string) => boolean
 }
+
+/** Why a local hub is not started from an install without web/dist (e.g. the plugin installed from GitHub). */
+export const WEB_NOT_BUILT =
+  "this Hub install has no built web app (web/dist), so its pages would only show an error. " +
+  "Install the plugin from npm (`opencode plugin add @huynle/hub`) or use a release binary, " +
+  "or in a source checkout run `npm install && npm run build:web` first."
+
+const hasWebBuild = (root: string): boolean => existsSync(path.join(root, "web", "dist", "index.html"))
 
 export type LocalHubResult =
   | { readonly status: "skipped"; readonly reason: string }
@@ -138,6 +148,8 @@ export async function ensureLocalHub(server: string, options: LocalHubOptions = 
   }
 
   if (await answers(url.origin)) return { status: "running" }
+  const root = options.repoRoot ?? repoRoot()
+  if (!(options.webBuilt ?? hasWebBuild)(root)) return { status: "failed", error: WEB_NOT_BUILT }
 
   if (options.stateDir === undefined && !hubEnv(env).HUB_STATE_DIR) {
     migrateFirst(legacyPaths(stateBase(home)), stateDir, { skip: ["hub.pid"], ...(options.log ? { log: options.log } : {}) })
@@ -172,7 +184,6 @@ export async function ensureLocalHub(server: string, options: LocalHubOptions = 
   }
 
   // ---- start ----
-  const root = options.repoRoot ?? repoRoot()
   let child: ChildLike
   let exited: string | undefined
   let log: number | undefined
