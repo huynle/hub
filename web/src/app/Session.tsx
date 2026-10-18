@@ -19,6 +19,7 @@ import { Composer, VoiceBar } from "./Composer"
 import { hub, live, liveTick, lookup, markRead, me, onMessage, rows, speechReady } from "./hub"
 import { isPhone, railOpen, setRailOpen, toggleSidebar } from "./layout"
 import { ModelPicker, createModels, modelLabel, type ModelKind } from "./ModelMenu"
+import { PanelHandle } from "./PanelHandle"
 import { DiffPanel, Rail, type Summary } from "./Rail"
 import { navigate, sessionHref } from "./router"
 import { toast } from "./toast"
@@ -632,6 +633,9 @@ export function SessionView(props: { id: string }) {
       <Show when={railOpen()}>
         <Show when={isPhone()}>
           <div class="sheet-backdrop" onClick={() => setRailOpen(false)} />
+        </Show>
+        <Show when={!isPhone()}>
+          <PanelHandle panel="rail" label="Resize details" />
         </Show>
         <Rail found={found()} summary={summary()} summaryError={summaryError()} loading={summaryLoading()} onFile={(f) => setDiffFile(f)} onClose={() => setRailOpen(false)} />
       </Show>
