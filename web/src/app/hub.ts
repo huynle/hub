@@ -6,7 +6,7 @@ import { createStore, produce } from "solid-js/store"
 import type { Me, AuthInfo } from "../core/account-core"
 import { isAdmin } from "../core/account-core"
 import type { SpeechReadyView } from "../core/feedback-core"
-import { migratePins, normalizePrefs, setPref, type PrefList, type ViewPrefs } from "../core/view-core"
+import { migratePins, normalizePrefs, renameTitle, retitle, setPref, type PrefList, type ViewPrefs } from "../core/view-core"
 import { sessionRows } from "../lib/sessions"
 import { LiveFeeds, applyMessage, findSession, initialHub, type HubState } from "../lib/store"
 import { api, enc, errorText, getJSON, HttpError, sessionPath, setUnauthorized } from "./api"
@@ -278,6 +278,33 @@ export async function setVoice(id: string, on: boolean): Promise<boolean> {
     return true
   } catch (e) {
     toast(`Could not ${on ? "enable" : "disable"} Voice: ${errorText(e)}`, "err")
+    return false
+  }
+}
+
+/**
+ * Optimistic rename (POST …/rename, OpenCode's session.update): shows the new title at once, reverts with a
+ * toast if the hub refuses. Returns whether it was saved (a blank or unchanged title is not sent).
+ */
+export async function renameSession(id: string, raw: string): Promise<boolean> {
+  const checked = renameTitle(raw)
+  if ("error" in checked) {
+    toast(checked.error, "err")
+    return false
+  }
+  const { title } = checked
+  const previous = lookup(id)?.session.title
+  if (previous === title) return false
+  setHub(produce((s) => void retitle(s.machines, id, title)))
+  try {
+    const saved = await (await api(`${sessionPath(id)}/rename`, { method: "POST", json: { title } })).json().catch(() => undefined)
+    const confirmed = typeof saved?.title === "string" && saved.title ? saved.title : title
+    if (confirmed !== title && lookup(id)?.session.title === title) setHub(produce((s) => void retitle(s.machines, id, confirmed)))
+    return true
+  } catch (e) {
+    // Revert unless the catalog already moved on (a newer title from elsewhere).
+    if (previous !== undefined && lookup(id)?.session.title === title) setHub(produce((s) => void retitle(s.machines, id, previous)))
+    toast(`Could not rename: ${errorText(e)}`, "err")
     return false
   }
 }

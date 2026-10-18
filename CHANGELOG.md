@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **Rename sessions**: **Rename…** in a session's `⋯` menu (table, sidebar, phone list, session title menu), or
+  a click on the session title in the top bar, edits the title in place (Enter saves, Escape cancels). The title
+  is set in OpenCode itself (`session.update`), so terminals and other consoles see it; the console shows it at
+  once and reverts with a message if renaming fails. API: `POST /api/sessions/:id/rename {title}` → `{title}`
+  (trimmed, 1–200 characters), through the owning process with a fallback to other processes that report the
+  session; Voice-off sessions can be renamed too. New spoke op `rename`: a machine still on an older plugin
+  does not answer it, so renaming its sessions fails after the 15 s request timeout until it is updated.
+
 ## 0.6.1
 
 - **GitHub installs**: an install without the built web app (`web/dist`, e.g. `opencode plugin add

@@ -1,13 +1,22 @@
-// The ⋯ menu of a session (sidebar rows, table rows, the session title menu).
+// The ⋯ menu of a session (sidebar rows, table rows, the session title menu), and inline renaming.
+import { createSignal } from "solid-js"
 import type { SessionRow } from "../lib/sessions"
 import { changePref, setVoice, stopTree } from "./hub"
 import { mutedSessions, setSessionMuted } from "./push"
 import { navigate, sessionHref } from "./router"
 import type { MenuEntry } from "./ui"
 
-export function sessionMenu(r: SessionRow, { open = true }: { open?: boolean } = {}): MenuEntry[] {
+/** Where a session title is shown; the inline rename field opens in that place only. */
+export type RenamePlace = "table" | "phone" | "sidebar" | "topbar"
+
+/** The session title being renamed inline, and where (one at a time). */
+export const [renaming, setRenaming] = createSignal<{ readonly id: string; readonly place: RenamePlace }>()
+export const isRenaming = (id: string, place: RenamePlace) => renaming()?.id === id && renaming()?.place === place
+
+export function sessionMenu(r: SessionRow, { open = true, place }: { open?: boolean; place?: RenamePlace } = {}): MenuEntry[] {
   return [
     ...(open ? [{ label: "Open", run: () => navigate(sessionHref(r.id)) }] : []),
+    ...(place ? [{ label: "Rename…", run: () => setRenaming({ id: r.id, place }) }] : []),
     { label: r.pinned ? "Unpin" : "Pin", run: () => changePref("pinnedSessions", r.id, !r.pinned) },
     {
       label: r.hidden ? "Unhide" : "Hide",

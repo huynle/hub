@@ -10,7 +10,8 @@ import { subtree, treeRunning } from "../lib/store"
 import { transcriptBlocks, type Block } from "../lib/transcript"
 import { createStore } from "solid-js/store"
 import { unlockAudio } from "../voice/audio"
-import { sessionMenu } from "./actions"
+import { sessionMenu, setRenaming } from "./actions"
+import { RenameTitle } from "./Rename"
 import { api, errorText, getJSON, HttpError, sessionPath } from "./api"
 import { prepareImage } from "./attach"
 import { takeFirstTurn } from "./first-turn"
@@ -472,10 +473,14 @@ export function SessionView(props: { id: string }) {
               {(r) => (
                 <>
                   <StatusIcon state={r().state} />
-                  <h1 class="title" title={r().title}>
-                    {r().title}
-                  </h1>
-                  <Menu label="Session actions" class="icon-btn small" items={() => sessionMenu(r(), { open: false })} />
+                  <RenameTitle id={r().id} title={r().title} place="topbar" class="title">
+                    <h1 class="title">
+                      <button type="button" class="title-btn" title={`${r().title} · click to rename`} onClick={() => setRenaming({ id: r().id, place: "topbar" })}>
+                        {r().title}
+                      </button>
+                    </h1>
+                  </RenameTitle>
+                  <Menu label="Session actions" class="icon-btn small" items={() => sessionMenu(r(), { open: false, place: "topbar" })} />
                 </>
               )}
             </Show>

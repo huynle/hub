@@ -92,6 +92,8 @@ export interface SpokeHost {
    */
   replyForm?(input: FormAction): Promise<"replied" | "gone" | "unavailable">
   interrupt(sessionID: string): Promise<unknown>
+  /** Changes a session's settings in OpenCode (session.update); only the title is used. */
+  updateSession?(sessionID: string, input: { title?: string }): Promise<unknown>
   switchAgent(sessionID: string, agent: string): Promise<unknown>
   switchModel(sessionID: string, model: ModelRef): Promise<unknown>
   hasAgent(id: string): Promise<boolean>
@@ -215,6 +217,8 @@ const FALLBACK_AGENT = "build"
 const LOCAL_HUB_MAX_RETRY_MS = 15 * 60_000
 const ENROLL_RETRY_MS = 500
 const NOT_SHARED = "This session is not shared with voice"
+/** Longest session title the hub sets (OpenCode's own titles are shorter). */
+export const MAX_TITLE_CHARS = 200
 const UNKNOWN_SESSION = "Unknown session"
 /** Events after which the service re-lists its sessions (other processes' sessions appear, change, go). */
 const LISTING_EVENTS = new Set(["session.created", "session.renamed", "session.deleted"])
@@ -853,6 +857,8 @@ export class Spoke {
       case "interrupt":
         await this.host.interrupt(req.sessionID)
         return {}
+      case "rename":
+        return this.rename(req.sessionID, req.title)
       case "stop":
         return this.stopTree(req.sessionID)
       case "summary":
@@ -865,6 +871,20 @@ export class Spoke {
       case "conversation":
         return this.setConversation(req.sessionID, req.on)
     }
+  }
+
+  /**
+   * Renames a session in OpenCode and reports the new title at once (the snapshot goes out before the reply,
+   * on the same socket), without waiting for OpenCode's session.renamed event.
+   */
+  private async rename(sessionID: string, raw: string): Promise<ResultFor["rename"]> {
+    const title = raw.trim()
+    if (!title) throw new Error("Title is empty")
+    if (title.length > MAX_TITLE_CHARS) throw new Error(`Title is longer than ${MAX_TITLE_CHARS} characters`)
+    if (!this.host.updateSession) throw new Error("This OpenCode process cannot rename sessions")
+    await this.host.updateSession(sessionID, { title })
+    if (this.tracker.observe({ type: "session.renamed", data: { sessionID, title } }, Date.now())) this.sendSnapshot()
+    return { title }
   }
 
   /** Answers a pending form through OpenCode, or through a polling TUI when this process cannot. */

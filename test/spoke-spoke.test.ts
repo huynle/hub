@@ -17,7 +17,9 @@ afterEach(() => {
 
 function fakeHost(opts: { forms?: boolean } = {}) {
   const events = new EventQueue<Ev>()
-  const calls = { form: [] as unknown[], prompt: [] as unknown[], permission: [] as unknown[], get: [] as string[], interrupt: [] as string[], switch: [] as unknown[], create: [] as unknown[], model: [] as unknown[] }
+  const calls = { form: [] as unknown[], prompt: [] as unknown[], permission: [] as unknown[], get: [] as string[], interrupt: [] as string[], switch: [] as unknown[], create: [] as unknown[], model: [] as unknown[], update: [] as unknown[] }
+  /** Titles set through updateSession. */
+  const titles = new Map<string, string>()
   /** Current model per session (absent: the default model). */
   const models = new Map<string, { providerID: string; id: string; variant?: string }>()
   const messages = new Map<string, unknown[]>()
@@ -47,7 +49,12 @@ function fakeHost(opts: { forms?: boolean } = {}) {
       const agent = agents.get(sessionID)
       const model = models.get(sessionID)
       const parentID = parents.get(sessionID)
-      return { id: sessionID, title: `Fetched ${sessionID}`, location: { directory: "/fetched" }, time: { updated: 5 }, ...(parentID ? { parentID } : {}), ...(agent ? { agent } : {}), ...(model ? { model } : {}) }
+      return { id: sessionID, title: titles.get(sessionID) ?? `Fetched ${sessionID}`, location: { directory: "/fetched" }, time: { updated: 5 }, ...(parentID ? { parentID } : {}), ...(agent ? { agent } : {}), ...(model ? { model } : {}) }
+    },
+    updateSession: async (sessionID, input) => {
+      calls.update.push({ sessionID, ...input })
+      if (input.title === "boom") throw new Error("OpenCode refused")
+      if (input.title !== undefined) titles.set(sessionID, input.title)
     },
     ...(opts.forms === false
       ? {}
@@ -518,6 +525,46 @@ describe("Spoke", () => {
       delivery: "steer",
       metadata: { source: "hub", mode: "conversation" },
     })
+  })
+
+  test("rename sets the trimmed title in OpenCode and reports it at once", async () => {
+    const { spoke, server, calls, host } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    await until(() => lastSessions(server)?.sessions.some((s) => s.id === "ses_a") === true)
+    const res = await server.request({ op: "rename", sessionID: "ses_a", title: "  Fix the login bug  " })
+    expect(res).toMatchObject({ ok: true, result: { title: "Fix the login bug" } })
+    expect(calls.update).toEqual([{ sessionID: "ses_a", title: "Fix the login bug" }])
+    // The snapshot with the new title goes out before the reply (same socket, in order).
+    const index = server.frames.findIndex((f) => f.t === "res" && (f as { result?: { title?: string } }).result?.title === "Fix the login bug")
+    const before = server.frames.slice(0, index).filter((f) => f.t === "sessions").at(-1) as unknown as { sessions: Array<{ id: string; title: string }> }
+    expect(before.sessions.find((s) => s.id === "ses_a")?.title).toBe("Fix the login bug")
+  })
+
+  test("rename refuses an empty or too long title and unknown sessions; OpenCode errors pass through", async () => {
+    const { spoke, server, calls, host } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    await Bun.sleep(30)
+    for (const title of ["", "   ", "x".repeat(201)]) {
+      const res = await server.request({ op: "rename", sessionID: "ses_a", title })
+      expect(res.ok).toBe(false)
+    }
+    expect(await server.request({ op: "rename", sessionID: "ses_a", title: "y".repeat(200) })).toMatchObject({ ok: true })
+    const failed = await server.request({ op: "rename", sessionID: "ses_a", title: "boom" })
+    expect(failed).toMatchObject({ ok: false, error: "OpenCode refused" })
+    expect(spoke.status().connection).toBe("connected")
+    expect(calls.update).toHaveLength(2)
+    expect(lastSessions(server)?.sessions.find((s) => s.id === "ses_a")?.title).toBe("y".repeat(200))
+  })
+
+  test("rename works for a known session without Voice", async () => {
+    const { spoke, server, calls, host } = setup({ mode: "session", sessions: [], token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_other"))
+    await Bun.sleep(30)
+    expect(await server.request({ op: "rename", sessionID: "ses_other", title: "Renamed" })).toMatchObject({ ok: true, result: { title: "Renamed" } })
+    expect(calls.update).toEqual([{ sessionID: "ses_other", title: "Renamed" }])
   })
 
   test("interrupt interrupts the session", async () => {

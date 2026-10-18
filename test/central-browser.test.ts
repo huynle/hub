@@ -98,6 +98,51 @@ describe("sessions without voice", () => {
     expect(seen[0]).toMatchObject({ op: "turn", sessionID: "ses_off", text: "hi", voiceStyle: false })
   })
 
+  test("rename trims the title, reaches the owner spoke (also without Voice) and answers the title", async () => {
+    h = harness()
+    const { client } = await machine()
+    const seen = answer(client, (req) => (req.op === "rename" ? { title: req.title } : {}))
+    const res = await post("/api/sessions/ses_off/rename", { title: "  Ship the release  " })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ title: "Ship the release" })
+    expect(seen).toEqual([{ op: "rename", sessionID: "ses_off", title: "Ship the release" }])
+  })
+
+  test("rename refuses a missing, empty or too long title without asking the spoke", async () => {
+    h = harness()
+    const { client } = await machine()
+    const seen = answer(client, () => ({ title: "x" }))
+    for (const json of [{}, { title: 5 }, { title: "" }, { title: "   " }, { title: "x".repeat(201) }]) {
+      const res = await post("/api/sessions/ses_on/rename", json)
+      expect(res.status).toBe(400)
+      expect(((await res.json()) as any).error).toMatch(/title/i)
+    }
+    expect((await post("/api/sessions/ses_on/rename", { title: "y".repeat(200) })).status).toBe(200)
+    expect(seen).toHaveLength(1)
+  })
+
+  test("rename falls back to another process reporting the session when the owner fails", async () => {
+    h = harness()
+    const { token } = h.store.addMachine("laptop")
+    const owner = await spoke(h, { machine: { token }, processID: "p_owner", hello: { kind: "standalone" }, sessions: [session("ses_x", { owned: true })] })
+    const other = await spoke(h, { machine: { token }, processID: "p_other", hello: { kind: "service" }, sessions: [session("ses_x")] })
+    let otherFails = false
+    const first = answer(owner, () => new Error("OpenCode refused"))
+    const second = answer(other, (req) => (otherFails ? new Error("Unknown session") : { title: req.title }))
+    const res = await post("/api/sessions/ses_x/rename", { title: "Fallback" })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ title: "Fallback" })
+    expect(first.map((r) => r.op)).toEqual(["rename"])
+    expect(second.map((r) => r.op)).toEqual(["rename"])
+    // Every reporter failing: the owner's error.
+    otherFails = true
+    const failed = await post("/api/sessions/ses_x/rename", { title: "Nope" })
+    expect(failed.status).toBe(502)
+    expect(((await failed.json()) as any).error).toBe("OpenCode refused")
+    expect(first).toHaveLength(2)
+    expect(second).toHaveLength(2)
+  })
+
   test("a typed turn steers while the session tree is running", async () => {
     h = harness()
     const { client } = await machine()

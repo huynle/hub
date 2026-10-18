@@ -1,7 +1,7 @@
 // Session view (0.4.0, docs/session-view.md): open sessions first. Synced view prefs (hide/pin), migration of
 // 0.3 local pins, Open / Recent / Hidden split, Herdr-like grouping and ordering, status dots, new-session targets.
 import { describe, expect, test } from "bun:test"
-import { createBody, dotState, groupKey, newSessionTargets, hiddenView, homeView as typedHomeView, migratePins, normalizePrefs, recentMachine, setPref } from "../web/src/core/view-core"
+import { createBody, dotState, groupKey, newSessionTargets, hiddenView, homeView as typedHomeView, migratePins, normalizePrefs, recentMachine, renameTitle, retitle, setPref } from "../web/src/core/view-core"
 
 type S = any
 const homeView = (...args: Parameters<typeof typedHomeView>): S => typedHomeView(...args)
@@ -278,5 +278,30 @@ describe("new session", () => {
     expect(createBody({ target: herdrTarget, directory: `${P}/api-server`, title: "  Fix auth  ", openInHerdr: true })).toEqual({ directory: `${P}/api-server`, title: "Fix auth", herdrWorkspace: "w2" })
     expect(createBody({ target: herdrTarget, directory: `${P}/api-server`, title: " ", openInHerdr: false })).toEqual({ directory: `${P}/api-server` })
     expect(createBody({ target: folder, directory: "/tmp/x", title: "x".repeat(250), openInHerdr: true })).toEqual({ directory: "/tmp/x", title: "x".repeat(200) })
+  })
+})
+
+describe("rename", () => {
+  test("renameTitle trims and accepts 1–200 characters", () => {
+    expect(renameTitle("  New name ")).toEqual({ title: "New name" })
+    expect(renameTitle("x".repeat(200))).toEqual({ title: "x".repeat(200) })
+    expect(renameTitle("")).toEqual({ error: "Enter a title" })
+    expect(renameTitle("   ")).toEqual({ error: "Enter a title" })
+    expect(renameTitle("x".repeat(201))).toEqual({ error: "Title is longer than 200 characters" })
+  })
+
+  test("retitle sets the title wherever the session appears and returns the previous one", () => {
+    const a = ses({ id: "ses_r", title: "Old", status: [{ id: "ses_r", title: "Old", state: "idle", blockers: [] }] })
+    const machines: S[] = [
+      { id: "m1", name: "one", processes: [{ id: "p1", sessions: [a, ses()] }, { id: "p2", sessions: [{ ...a, status: [] }] }] },
+      { id: "m2", name: "two", processes: [{ id: "p3", sessions: [ses()] }] },
+    ]
+    expect(retitle(machines, "ses_r", "New")).toBe("Old")
+    expect(machines[0].processes[0].sessions[0].title).toBe("New")
+    expect(machines[0].processes[0].sessions[0].status[0].title).toBe("New")
+    expect(machines[0].processes[1].sessions[0].title).toBe("New")
+    expect(machines[0].processes[0].sessions[1].title).not.toBe("New")
+    expect(retitle(machines, "ses_missing", "x")).toBeUndefined()
+    expect(retitle(undefined, "ses_r", "x")).toBeUndefined()
   })
 })

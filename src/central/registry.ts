@@ -989,6 +989,20 @@ export class Registry {
     return recent(all.filter((c) => c.hello.kind === "service" && machines.has(c.machine.id))) ?? recent(reporters)
   }
 
+  /**
+   * Connections to try for a session op that any reporter can carry out (e.g. rename): the owner first, then
+   * the other processes of the session's tenant that report it, most recent activity first.
+   */
+  sessionTargets(sessionID: string): string[] {
+    const owner = this.owner(sessionID)
+    if (!owner) return []
+    const tenant = this.sessionTenant(sessionID)
+    const others = [...this.conns.values()]
+      .filter((c) => c.id !== owner && this.tenant(c) === tenant && this.reports(c, sessionID))
+      .sort((a, b) => (b.activity.get(sessionID) ?? 0) - (a.activity.get(sessionID) ?? 0) || b.seq - a.seq)
+    return [owner, ...others.map((c) => c.id)]
+  }
+
   /** The connection with the most recent activity for the session, then the most recently connected. */
   private recent(list: Conn[], sessionID: string): string | undefined {
     return [...list].sort((a, b) => (b.activity.get(sessionID) ?? 0) - (a.activity.get(sessionID) ?? 0) || b.seq - a.seq)[0]?.id

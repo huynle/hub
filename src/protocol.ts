@@ -206,6 +206,8 @@ export type ServerRequest =
   /** Conversation mode: deliver an utterance with delivery "steer" and return at once (replies arrive as events). */
   | { readonly op: "steer"; readonly sessionID: string; readonly text: string; readonly images?: readonly PromptImage[] }
   | { readonly op: "interrupt"; readonly sessionID: string }
+  /** Rename the session in OpenCode; the spoke trims the title and requires 1–200 characters. */
+  | { readonly op: "rename"; readonly sessionID: string; readonly title: string }
   /** Interrupt the session's whole tree: running descendants deepest first, then the root. */
   | { readonly op: "stop"; readonly sessionID: string }
   /** Right-rail data: context usage, MCP servers, branch and working-tree change stats. */
@@ -295,6 +297,7 @@ export interface ResultFor {
   openLink: { readonly url: string }
   steer: { readonly inboxID: string }
   interrupt: Record<string, never>
+  rename: { readonly title: string }
   stop: { readonly stopped: readonly string[] }
   summary: SessionSummary
   diff: { readonly patch?: FilePatch }
@@ -492,6 +495,8 @@ function isServerRequest(v: unknown): v is ServerRequest {
       return nonEmpty(v.sessionID) && nonEmpty(v.messageID) && v.messageID.length <= 300 && Number.isInteger(v.index) && Number(v.index) >= 0 && Number(v.index) < 1000
     case "diff":
       return nonEmpty(v.sessionID) && nonEmpty(v.file) && v.file.length <= 4096
+    case "rename":
+      return nonEmpty(v.sessionID) && str(v.title) && v.title.length <= 1000
     case "conversation":
     case "expose":
       return nonEmpty(v.sessionID) && typeof v.on === "boolean"

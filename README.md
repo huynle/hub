@@ -191,6 +191,7 @@ conversation mode and utterances (403 `not_exposed` for sessions not shared with
 |---|---|
 | `POST /api/sessions/:id/turn {text, images?}` | sends a turn; while the session tree is running it steers instead. Answers `{mode: "turn" \| "steer"}`. `images` is up to 4 `{mime, data, name?}` (PNG, JPEG, WebP or GIF; canonical base64 whose bytes match the type; each at most 512 KB decoded, together at most 750,000 base64 characters); `text` may be empty when images are attached. They reach OpenCode as inline file attachments. 400 empty, over 100,000 characters or invalid images (with the reason); 409 "A turn is already running for this session" |
 | `GET /api/sessions/:id/timeline/messages/:message/files/:index` | one image attached to a user message, as bytes with its type (`cache-control: private, no-store`). Timeline user items list their attachments as `files: [{index, mime, name?}]` (never the bytes). Only PNG, JPEG, WebP and GIF are served (404 otherwise or when missing); 413 when the image would not fit in a protocol frame (about 650 KB) |
+| `POST /api/sessions/:id/rename` | `{title}` → `{title}`: renames the session in OpenCode (`session.update`), through the process that owns it, else any other process that reports it. The title is trimmed and must be 1–200 characters (400 otherwise). Works with Voice off; the new title shows in every console at once (the spoke reports it before answering) |
 | `POST /api/sessions/:id/stop` | interrupts running descendants deepest first, then the root; idempotent. Also releases the hub's turn lock for the tree: a turn request still waiting answers `{outcome: "interrupted"}` and the next turn can start (`/interrupt` does the same) |
 | `GET /api/sessions/:id/summary` | context usage, todos, MCP status (at most 100 servers), branch and working-tree change stats (each part optional). `changes` lists at most 500 files, most-changed first, with `totalFiles` and `truncated`; its `additions`/`deletions` cover every file |
 | `GET /api/sessions/:id/diff?file=` | one file's patch, on demand (capped at 400 KB as JSON, then `truncated: true`); never stored in the hub |
@@ -374,7 +375,12 @@ the Docker image, npm package and binaries ship the build). One store fed by the
 - **Sidebar** (⌘B collapses; a drawer on phones): search, New session, Needs you, Running, Pinned, sessions open in a
   terminal grouped by project (or server) with `+`, Recents; rows show status, a pulsing green dot left of the
   title for the session live in Voice (in Voice mode here, or in a conversation), an unread dot and a `⋯` menu
-  (pin, hide, stop, Allow/Disallow Voice).
+  (rename, pin, hide, stop, Allow/Disallow Voice).
+- **Rename**: **Rename…** in a session's `⋯` menu (table row, sidebar row, phone list, the session's title
+  menu), or a click on the title in the session's top bar, turns the title into a text field with the title
+  selected: Enter (or clicking away) saves, Escape cancels. The new title shows at once and is set in
+  OpenCode itself (`POST /api/sessions/:id/rename`), so terminals see it too; if that fails the old title
+  comes back with a message.
 - **`/`**: All sessions as a sortable, filterable table (a list on phones); filters and sort are kept per device.
   There is no Voice column or Voice filter: the live Voice session gets the green dot before its title, and the
   row's `⋯` menu has **Allow Voice** / **Disallow Voice**.

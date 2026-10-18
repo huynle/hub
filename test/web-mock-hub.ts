@@ -39,6 +39,8 @@
 // POST …/read (GET /api/reads), …/stop, …/permission, …/form {formID, answer|cancel} (409 gone when not pending); POST …/turn {text, images?} (up to 4 PNG/JPEG/WebP/GIF images;
 // text may be empty with images; the log keeps each image's mime, name and base64 length) answers 202 {mode:"steer"} while the tree runs,
 // else runs the turn (ses_mock: working → streamed reply → idle; text containing "fail" → 409).
+// POST /api/sessions/:id/rename {title} (history fixtures; 400 blank or over 200 characters; POST /mock/fail {rename}
+// answers 502) sets the title and emits a catalog.
 // POST /mock/hold-turns {on} keeps a ses_mock turn working until it is stopped (or the hold is lifted), so a test
 // can steer and stop it without racing the turn's timer.
 import { existsSync, readFileSync, statSync } from "node:fs"
@@ -182,7 +184,7 @@ function fixtures(): Fixture[] {
 }
 let sessions = fixtures()
 let created = 0
-let fail = { expose: false, create: false, models: false, prefs: false, modelPrefs: false }
+let fail = { expose: false, create: false, models: false, prefs: false, modelPrefs: false, rename: false }
 let serviceConnected = true
 /** A second online machine ("workstation", mac_5) with its own service and one session; POST /mock/workstation {on}. */
 let workstation = false
@@ -908,7 +910,7 @@ const server = Bun.serve({
       activity = []
       status = [{ id: SESSION, title: "Mock session", state: "idle", blockers: [] }]
       sessions = fixtures()
-      fail = { expose: false, create: false, models: false, prefs: false, modelPrefs: false }
+      fail = { expose: false, create: false, models: false, prefs: false, modelPrefs: false, rename: false }
       reads = {}
       modelPrefs = {}
       turnRun++
@@ -1100,6 +1102,17 @@ const server = Bun.serve({
       const action = match[2]
       const s = sessions.find((x) => x.id === id)
       if (!s) return notFound()
+      if (action === "rename" && m === "POST") {
+        const body = await json()
+        last().body = body
+        await Bun.sleep(300)
+        const title = typeof body.title === "string" ? body.title.trim() : ""
+        if (!title || title.length > 200) return Response.json({ error: "Expected {title}: a non-empty title" }, { status: 400 })
+        if (fail.rename) return Response.json({ error: "OpenCode did not answer" }, { status: 502 })
+        s.title = title
+        emitCatalog()
+        return Response.json({ title })
+      }
       if (action === "expose" && m === "POST") {
         const body = await json()
         last().body = body

@@ -30,6 +30,38 @@ export function normalizePrefs(raw: unknown): ViewPrefs {
   return Object.fromEntries(PREF_LISTS.map((list) => [list, cleanList(source[list])])) as ViewPrefs
 }
 
+// ---------- rename ----------
+
+/** Longest title the hub accepts (POST /api/sessions/:id/rename). */
+export const MAX_TITLE = 200
+
+/** A typed title, trimmed: 1–200 characters, else why not. */
+export function renameTitle(raw: string): { title: string } | { error: string } {
+  const title = raw.trim()
+  if (!title) return { error: "Enter a title" }
+  if (title.length > MAX_TITLE) return { error: `Title is longer than ${MAX_TITLE} characters` }
+  return { title }
+}
+
+/**
+ * Sets a session's title in the catalog wherever it appears (every process, and its status entries), in place
+ * (inside a store `produce`). Returns the previous title; undefined when the session is not listed.
+ */
+export function retitle(machines: ViewMachine[] | undefined, id: string, title: string): string | undefined {
+  let previous: string | undefined
+  for (const machine of machines ?? []) {
+    for (const process of machine.processes) {
+      for (const s of process.sessions) {
+        if (s.id !== id) continue
+        previous ??= s.title ?? ""
+        ;(s as { title?: string }).title = title
+        for (const entry of (s.status ?? []) as unknown as Array<{ id: string; title?: string }>) if (entry.id === id) entry.title = title
+      }
+    }
+  }
+  return previous
+}
+
 /** Adds (`on`) or removes `key` in one list. Returns the new prefs and the PUT patch (undefined: no change). */
 export function setPref(prefs: ViewPrefs, list: PrefList, key: string, on: boolean): { prefs: ViewPrefs; patch?: Partial<ViewPrefs> } {
   if (!PREF_LISTS.includes(list)) throw new Error(`unknown prefs list: ${list}`)

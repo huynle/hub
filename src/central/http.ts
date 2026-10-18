@@ -615,6 +615,7 @@ export function startCentral(options: CentralOptions): Central {
       registry.cancelTurns(params.session!)
       return Response.json(result, { headers: NO_STORE })
     }),
+    route("POST", "/api/sessions/:session/rename", "session", ({ request, params }) => rename(request, params.session!)),
     route("POST", "/api/sessions/:session/conversation", "session", ({ request, params }) => conversation(request, params.session!), true),
     route("GET", "/api/sessions/:session/models", "session", async ({ params }) =>
       Response.json(await spokes.request(ownerOf(params.session!), { op: "models", sessionID: params.session! }), { headers: NO_STORE })),
@@ -903,6 +904,26 @@ export function startCentral(options: CentralOptions): Central {
     const { inboxID } = await spokes.request(ownerOf(sessionID), { op: "steer", sessionID, text })
     registry.trackUtterance(sessionID, inboxID)
     return Response.json({ inboxID }, { status: 202 })
+  }
+
+  /** Renames a session in OpenCode through its owner process, falling back to other processes that report it. */
+  async function rename(request: Request, sessionID: string): Promise<Response> {
+    const raw = (await body(request)).title
+    const title = typeof raw === "string" ? raw.trim() : ""
+    if (!title) return error(400, "Expected {title}: a non-empty title")
+    if (title.length > MAX_TITLE_CHARS) return error(400, `Title must be at most ${MAX_TITLE_CHARS} characters`)
+    const targets = registry.sessionTargets(sessionID)
+    if (!targets.length) throw new HttpError(409, NO_OWNER)
+    let failure: unknown
+    for (const connID of targets) {
+      try {
+        const result = await spokes.request(connID, { op: "rename", sessionID, title })
+        return Response.json({ title: typeof result?.title === "string" ? result.title : title }, { headers: NO_STORE })
+      } catch (cause) {
+        failure ??= cause
+      }
+    }
+    throw failure
   }
 
   async function conversation(request: Request, sessionID: string): Promise<Response> {

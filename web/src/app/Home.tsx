@@ -2,9 +2,10 @@
 // Filters and sort are kept in localStorage; the search box is not.
 import { For, Show, createMemo, createSignal } from "solid-js"
 import { DEFAULT_TABLE, parseTable, serializeTable, tableRows, voiceLive, type SessionRow, type SortKey, type TableFilters, type TableState } from "../lib/sessions"
-import { sessionMenu } from "./actions"
+import { isRenaming, sessionMenu } from "./actions"
 import { enrollments, hub, live, liveTick, rows, speechReady, me } from "./hub"
 import { isPhone } from "./layout"
+import { RenameTitle } from "./Rename"
 import { navigate, sessionHref } from "./router"
 import { speechSetup } from "../core/feedback-core"
 import { Icon, Menu, SOURCE_LABEL, STATE_LABEL, StatusIcon, VoiceDot, ago, now } from "./ui"
@@ -163,7 +164,7 @@ function SessionTable(props: { rows: SessionRow[]; table: TableState; sortBy: (k
       <tbody>
         <For each={props.rows} fallback={<tr><td colSpan={8} class="muted empty-cell">No sessions match.</td></tr>}>
           {(r) => (
-            <tr class={`${r.unread ? "unread" : ""}`} onClick={(e) => !(e.target as Element).closest("button,a,select") && navigate(sessionHref(r.id))}>
+            <tr class={`${r.unread ? "unread" : ""}`} onClick={(e) => !(e.target as Element).closest("button,a,select,input") && navigate(sessionHref(r.id))}>
               <td class="col-status">
                 <StatusIcon state={r.state} />
                 <span class="sr-only">{STATE_LABEL[r.state]}</span>
@@ -172,7 +173,9 @@ function SessionTable(props: { rows: SessionRow[]; table: TableState; sortBy: (k
                 <Show when={voiceLive(r, voiceState())}>
                   <VoiceDot />
                 </Show>
-                <a href={sessionHref(r.id)}>{r.title}</a>
+                <RenameTitle id={r.id} title={r.title} place="table">
+                  <a href={sessionHref(r.id)}>{r.title}</a>
+                </RenameTitle>
                 <Show when={r.unread}>
                   <span class="unread-dot" role="img" aria-label="Unread" />
                 </Show>
@@ -187,7 +190,7 @@ function SessionTable(props: { rows: SessionRow[]; table: TableState; sortBy: (k
               <td class="col-activity">{ago(r.updated, now())}</td>
               <td class="col-now muted">{currentActivity(r)}</td>
               <td class="col-actions">
-                <Menu label={`More actions for ${r.title}`} class="icon-btn small" items={() => sessionMenu(r)} />
+                <Menu label={`More actions for ${r.title}`} class="icon-btn small" items={() => sessionMenu(r, { place: "table" })} />
               </td>
             </tr>
           )}
@@ -201,6 +204,17 @@ function PhoneRow(props: { row: SessionRow }) {
   const r = () => props.row
   return (
     <li class={`home-item${r().unread ? " unread" : ""}`}>
+      <Show
+        when={!isRenaming(r().id, "phone")}
+        fallback={
+          <span class="home-item-link">
+            <StatusIcon state={r().state} />
+            <RenameTitle id={r().id} title={r().title} place="phone">
+              {null}
+            </RenameTitle>
+          </span>
+        }
+      >
       <a href={sessionHref(r().id)} class="home-item-link">
         <StatusIcon state={r().state} />
         <span class="home-item-text">
@@ -216,7 +230,8 @@ function PhoneRow(props: { row: SessionRow }) {
           <span class="home-item-meta muted">{currentActivity(r()) || `${r().where} · ${r().machineName} · ${ago(r().updated, now())}`}</span>
         </span>
       </a>
-      <Menu label={`More actions for ${r().title}`} class="icon-btn small" items={() => sessionMenu(r())} />
+      </Show>
+      <Menu label={`More actions for ${r().title}`} class="icon-btn small" items={() => sessionMenu(r(), { place: "phone" })} />
     </li>
   )
 }
