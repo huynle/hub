@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+- **Rename sessions**: **Rename…** in a session's `⋯` menu (table, sidebar, phone list, session title menu), or
+  a click on the session title in the top bar, edits the title in place (Enter saves, Escape cancels). The title
+  is set in OpenCode itself (`session.update`), so terminals and other consoles see it; the console shows it at
+  once (also while older catalog updates arrive) and reverts with a message if renaming fails. API: `POST /api/sessions/:id/rename {title}` → `{title}`
+  (trimmed, 1–200 characters), through the owning process with a fallback to other processes that report the
+  session; Voice-off sessions can be renamed too. New spoke op `rename`: a machine still on an older plugin
+  does not answer it, so renaming its sessions fails after the 15 s request timeout until it is updated.
+- **Archive sessions** (replaces Hide): **Archive** / **Unarchive** in a session's `⋯` menu, with **Undo**.
+  Archived sessions leave the table, sidebar groups, Recents and Running on all your devices (synced through
+  the view prefs and their SSE `prefs` event); the **Archived** chip (formerly Hidden; a saved Hidden filter
+  opens Archived) lists them. An archived session that needs you still shows under **Needs you** so a question
+  is not missed. Bulk: checkboxes in the table (and select all shown) with **Archive** / **Unarchive**, and
+  **Archive inactive…** (more than N days without activity, 30 by default; not running, pinned or open in a
+  terminal) after a confirmation with the count. Nothing is deleted and OpenCode is not changed: OpenCode has
+  no archive API yet, so archiving is the hub's own (sessions archived in OpenCode itself are still never
+  listed). Sessions hidden before are archived now: the stored list is the same `hiddenSessions`, which now
+  holds up to 5000 sessions (`PUT /api/prefs/view`; other lists stay at 500), the oldest archives making room.
+- **Composer**: a sent message (typed or dictated) no longer comes back into the input with a raw "Failed to
+  fetch" under it when the connection of the turn's request drops after the hub took the turn (e.g. a proxy
+  cutting the long request). If the session is running, the send counts as delivered: the input and the
+  session's draft stay empty, a note says the connection was lost and the reply streams into the transcript.
+  Only when the session never starts is the text put back (as for any refused send). Network-level failures
+  of console API calls now read "Can't reach the hub: the connection dropped…" instead of the browser's
+  "Failed to fetch".
+- **Typed turns no longer hold a request open for the whole turn**: the console sends `POST
+  /api/sessions/:id/turn` with `Prefer: respond-async`; a turn still running after 1.5 s is answered 202
+  `{mode: "turn"}` and its result (failure notes, a reply that did not stream) arrives as a new SSE `turn`
+  event. Before, the request stayed open until the turn ended, and proxies cut it (Traefik's default
+  `readTimeout` is 60 s), which the console showed as "Failed to fetch". Quick results and refusals (busy,
+  unknown session, spoke errors) answer as before; clients without the header keep the blocking answer.
+- **Console**: table rows, sidebar rows and an open `⋯` menu no longer re-render (and close) when an unrelated
+  catalog update arrives; unchanged rows keep their DOM.
+
 ## 0.6.1
 
 - **GitHub installs**: an install without the built web app (`web/dist`, e.g. `opencode plugin add

@@ -38,7 +38,11 @@
 // GET …/timeline/messages/:message/files/:index (a 1×1 PNG; ses_mock's first user message lists one image),
 // POST …/read (GET /api/reads), …/stop, …/permission, …/form {formID, answer|cancel} (409 gone when not pending); POST …/turn {text, images?} (up to 4 PNG/JPEG/WebP/GIF images;
 // text may be empty with images; the log keeps each image's mime, name and base64 length) answers 202 {mode:"steer"} while the tree runs,
-// else runs the turn (ses_mock: working → streamed reply → idle; text containing "fail" → 409).
+// else runs the turn (ses_mock: working → streamed reply → idle; text containing "fail" → 409). With
+// `Prefer: respond-async` (as the hub) a ses_mock turn still running after 1.5 s answers 202 {mode:"turn"} and its
+// result follows as an SSE {type:"turn"} event. POST /mock/slow-turns {ms} sets how long a ses_mock turn works.
+// POST /api/sessions/:id/rename {title} (history fixtures; 400 blank or over 200 characters; POST /mock/fail {rename}
+// answers 502) sets the title and emits a catalog.
 // POST /mock/hold-turns {on} keeps a ses_mock turn working until it is stopped (or the hold is lifted), so a test
 // can steer and stop it without racing the turn's timer.
 import { existsSync, readFileSync, statSync } from "node:fs"
@@ -182,7 +186,7 @@ function fixtures(): Fixture[] {
 }
 let sessions = fixtures()
 let created = 0
-let fail = { expose: false, create: false, models: false, prefs: false, modelPrefs: false }
+let fail = { expose: false, create: false, models: false, prefs: false, modelPrefs: false, rename: false }
 let serviceConnected = true
 /** A second online machine ("workstation", mac_5) with its own service and one session; POST /mock/workstation {on}. */
 let workstation = false
@@ -202,7 +206,8 @@ function applyPrefs(userID: string, body: Record<string, unknown>): string | und
   for (const list of PREF_LISTS) {
     const value = body[list]
     if (value === undefined) continue
-    if (!Array.isArray(value) || value.length > 500 || !value.every((x) => typeof x === "string" && x.length <= 4096)) return `${list} must be a list of at most 500 strings`
+    const max = list === "hiddenSessions" ? 5000 : 500
+    if (!Array.isArray(value) || value.length > max || !value.every((x) => typeof x === "string" && x.length <= 4096)) return `${list} must be a list of at most ${max} strings`
   }
   for (const list of PREF_LISTS) if (body[list] !== undefined) prefs[list] = [...new Set(body[list] as string[])]
   return undefined
@@ -674,6 +679,10 @@ function treeState(id: string): string {
 
 let turnRun = 0
 let holdTurns = false
+/** POST /mock/slow-turns {ms}: how long a ses_mock turn works before replying (default 2.5 s). */
+let slowTurnMs: number | undefined
+/** As the hub's TURN_ACCEPT_MS: a respond-async turn still running after this is answered 202. */
+const TURN_ACCEPT_MS = 1500
 /** Ends the held turn's wait (stop, or the hold lifted). */
 let releaseTurn: (() => void) | undefined
 /** A typed turn on ses_mock: working → streamed reply → idle (the POST answers when the turn ends). */
@@ -683,7 +692,7 @@ async function mockTurn(text: string): Promise<Record<string, unknown>> {
   setStatus([{ id: SESSION, title: "Mock session", state: "working", blockers: [], since }])
   addActivity(SESSION, { id: `tool_turn_${run}`, kind: "tool", tool: "bash", summary: "bun test", state: "running" })
   if (holdTurns) await new Promise<void>((resolve) => (releaseTurn = resolve))
-  else await sleep(2500)
+  else await sleep(slowTurnMs ?? 2500)
   addActivity(SESSION, { id: `tool_turn_${run}`, kind: "tool", tool: "bash", summary: "bun test", state: "done" })
   const reply = `Done: ${text}`
   await streamText("text", SESSION, `msg_turn_${run}`, reply, 60, 6, () => run === turnRun)
@@ -796,7 +805,15 @@ async function consoleRoute(request: Request, url: URL, user: MockUser): Promise
       log[log.length - 1]!.body = { text, ...(images?.length ? { images: images.map((i: any) => ({ mime: i.mime, name: i.name, length: i.data.length })) } : {}) }
       if (text.includes("fail")) return Response.json({ error: "No OpenCode process for this session is connected" }, { status: 409 })
       if (treeState(id) !== "idle") return Response.json({ mode: "steer", inboxID: `inb_${++inbox}` }, { status: 202 })
-      if (id === SESSION) return Response.json(await mockTurn(text))
+      if (id === SESSION) {
+        const turn = mockTurn(text)
+        if (!/respond-async/i.test(request.headers.get("prefer") ?? "")) return Response.json(await turn)
+        // As the hub: a quick result is answered as usual; a running turn is 202 and its result an SSE `turn` event.
+        const early = await Promise.race([turn, sleep(TURN_ACCEPT_MS).then(() => undefined)])
+        if (early) return Response.json(early)
+        void turn.then((result) => emit({ type: "turn", sessionID: SESSION, ...result }))
+        return Response.json({ mode: "turn" }, { status: 202, headers: { "preference-applied": "respond-async" } })
+      }
       return Response.json({ outcome: "succeeded", reply: `You said: ${text}` })
     }
   }
@@ -827,6 +844,11 @@ const server = Bun.serve({
     if (p === "/mock/emit" && m === "POST") {
       emit(await json())
       return Response.json({ ok: true, clients: clients.size })
+    }
+    if (p === "/mock/slow-turns" && m === "POST") {
+      const ms = (await json()).ms
+      slowTurnMs = typeof ms === "number" ? ms : undefined
+      return Response.json({ ok: true })
     }
     if (p === "/mock/hold-turns" && m === "POST") {
       holdTurns = (await json()).on === true
@@ -903,12 +925,13 @@ const server = Bun.serve({
     if (p === "/mock/log") return Response.json({ log, transcripts, conversation, pushPrefs, quietHours, pushEndpoints, mutedSessions, pushTests, speech, keys, users, audit, enrollments, userSpeech: Object.fromEntries(userSpeech), viewPrefs: Object.fromEntries(viewPrefs), herdr })
     if (p === "/mock/reset" && m === "POST") {
       scenarioRun++
+      slowTurnMs = undefined
       log = []
       transcripts = []
       activity = []
       status = [{ id: SESSION, title: "Mock session", state: "idle", blockers: [] }]
       sessions = fixtures()
-      fail = { expose: false, create: false, models: false, prefs: false, modelPrefs: false }
+      fail = { expose: false, create: false, models: false, prefs: false, modelPrefs: false, rename: false }
       reads = {}
       modelPrefs = {}
       turnRun++
@@ -1100,6 +1123,17 @@ const server = Bun.serve({
       const action = match[2]
       const s = sessions.find((x) => x.id === id)
       if (!s) return notFound()
+      if (action === "rename" && m === "POST") {
+        const body = await json()
+        last().body = body
+        await Bun.sleep(300)
+        const title = typeof body.title === "string" ? body.title.trim() : ""
+        if (!title || title.length > 200) return Response.json({ error: "Expected {title}: a non-empty title" }, { status: 400 })
+        if (fail.rename) return Response.json({ error: "OpenCode did not answer" }, { status: 502 })
+        s.title = title
+        emitCatalog()
+        return Response.json({ title })
+      }
       if (action === "expose" && m === "POST") {
         const body = await json()
         last().body = body

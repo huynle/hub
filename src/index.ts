@@ -103,6 +103,7 @@ function hostFrom(ctx: Context, locations: () => PermissionLocation[], kind: "se
     replyPermission: ({ directory, ...input }) => replyPermission(locations(), input, directory),
     replyForm: (action) => replyForm(kind, action),
     interrupt: (sessionID) => session.interrupt({ sessionID }),
+    updateSession: (sessionID, input) => session.update({ sessionID, ...input }),
     switchAgent: (sessionID, id) => session.switchAgent({ sessionID, agent: id }),
     switchModel: (sessionID, model) => session.switchModel({ sessionID, model }),
     hasAgent: async (id) => {

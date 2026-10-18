@@ -3,7 +3,8 @@
 import { For, Show, createMemo, createSignal } from "solid-js"
 import { account } from "../core/account-core"
 import { sidebarSections, voiceLive, type GroupBy, type SessionRow, type SidebarSort } from "../lib/sessions"
-import { sessionMenu } from "./actions"
+import { isRenaming, sessionMenu } from "./actions"
+import { RenameTitle } from "./Rename"
 import { enrollments, me, rows } from "./hub"
 import { HubMark } from "./HubMark"
 import { route, sessionHref } from "./router"
@@ -124,6 +125,17 @@ function SideRow(props: { row: SessionRow; active: boolean; onPick: () => void }
   const voiceHere = () => voiceState().phase !== "off" && voiceState().sessionID === r().id
   return (
     <li class={`side-row${props.active ? " active" : ""}${r().unread ? " unread" : ""}${voiceHere() ? " voice-here" : ""}`}>
+      <Show
+        when={!isRenaming(r().id, "sidebar")}
+        fallback={
+          <span class="side-row-link">
+            <StatusIcon state={r().state} />
+            <RenameTitle id={r().id} title={r().title} place="sidebar" class="side-title">
+              {null}
+            </RenameTitle>
+          </span>
+        }
+      >
       <a href={sessionHref(r().id)} class="side-row-link" aria-current={props.active ? "page" : undefined} onClick={props.onPick} title={`${r().title} · ${r().where} · ${r().machineName}`}>
         <StatusIcon state={r().state} />
         <Show when={voiceLive(r(), voiceState())}>
@@ -134,7 +146,8 @@ function SideRow(props: { row: SessionRow; active: boolean; onPick: () => void }
           <span class="unread-dot" role="img" aria-label="Unread" />
         </Show>
       </a>
-      <Menu label={`More actions for ${r().title}`} class="icon-btn small row-more" items={() => sessionMenu(r(), { open: false })} />
+      </Show>
+      <Menu label={`More actions for ${r().title}`} class="icon-btn small row-more" items={() => sessionMenu(r(), { open: false, place: "sidebar" })} />
     </li>
   )
 }

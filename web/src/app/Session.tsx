@@ -5,13 +5,14 @@ import { blockersOf } from "../core/browser-core"
 import { reconcileSay, statusNotes, type StatusLike } from "../core/conversation-core"
 import { speechSetup, type StatusEntry } from "../core/feedback-core"
 import { Timeline } from "../core/timeline-core"
-import { composerReducer, composerView, initialComposer, type ComposerAction } from "../lib/composer"
+import { composerReducer, composerView, confirmDelivery, initialComposer, turnAnswer, turnOutcomeNote, type ComposerAction, type TurnResultLike } from "../lib/composer"
 import { subtree, treeRunning } from "../lib/store"
 import { transcriptBlocks, type Block } from "../lib/transcript"
 import { createStore } from "solid-js/store"
 import { unlockAudio } from "../voice/audio"
-import { sessionMenu } from "./actions"
-import { api, errorText, getJSON, HttpError, sessionPath } from "./api"
+import { sessionMenu, setRenaming } from "./actions"
+import { RenameTitle } from "./Rename"
+import { api, errorText, getJSON, HttpError, NetworkError, sessionPath } from "./api"
 import { prepareImage } from "./attach"
 import { takeFirstTurn } from "./first-turn"
 import { Composer, VoiceBar } from "./Composer"
@@ -157,6 +158,10 @@ export function SessionView(props: { id: string }) {
       // Text after reasoning ends that reasoning.
       timeline.endReasoning(m.sessionID)
       bump()
+    } else if (m.type === "turn" && m.sessionID === id && awaitingTurn) {
+      const { sub, sentAt } = awaitingTurn
+      awaitingTurn = undefined
+      finishTurn(m as TurnResultLike, sub, sentAt)
     } else if (m.type === "status" && m.sessionID === treeRoot()) {
       for (const text of statusNotes(lastStatus, m.sessions, id)) note(text, "sys")
       lastStatus = m.sessions
@@ -269,6 +274,8 @@ export function SessionView(props: { id: string }) {
     }
     const sub = ++submitSeq
     const key = `local:${sub}`
+    // A Send to a running tree is a steer; only an idle turn can be confirmed by the tree starting to run.
+    const wasRunning = running()
     const sentAt = Date.now()
     batch(() => {
       act({ type: "submit", id: sub })
@@ -280,19 +287,25 @@ export function SessionView(props: { id: string }) {
     toEnd()
     try {
       const json = { text, ...(images.length ? { images: images.map(({ mime, data, name }) => ({ mime, data, name })) } : {}) }
-      const res = await api(`${sessionPath(id)}/turn`, { method: "POST", json })
+      // respond-async: the hub answers once the turn is under way instead of holding the request for the
+      // whole turn (which proxies cut); the result comes as an SSE `turn` event.
+      const res = await api(`${sessionPath(id)}/turn`, { method: "POST", json, headers: { prefer: "respond-async" } })
       const result = await res.json().catch(() => ({}))
+      const answer = turnAnswer(res.status, result)
       act({ type: "accepted", id: sub })
-      setTicks((t) => ({ ...t, [key]: res.status === 202 ? "sent" : "heard" }))
-      if (res.status === 202) toast("Steered the running session")
-      else {
-        const streamed = timeline.rows().some((r) => r.kind === "assistant" && (r.at ?? 0) >= sentAt && r.text)
-        if (result.reply && !streamed) timeline.upsert({ key: `reply:${sub}`, kind: "assistant", text: result.reply, at: Date.now() })
-        if (result.outcome === "timeout") note("The agent is still working; the reply may be partial.", "sys")
-        else if (result.outcome && result.outcome !== "succeeded") note(`Turn ${result.outcome}${result.message ? `: ${result.message}` : ""}`, "err")
-        bump()
-      }
+      setTicks((t) => ({ ...t, [key]: answer === "result" ? "heard" : "sent" }))
+      if (answer === "steered") toast("Steered the running session")
+      else if (answer === "accepted") awaitingTurn = { sub, sentAt }
+      else finishTurn(result, sub, sentAt)
     } catch (e) {
+      // The connection dropped without an answer (e.g. a proxy cutting the long request): when the session runs,
+      // the hub took the turn; its reply streams into the transcript, so the sent text stays out of the draft.
+      if (e instanceof NetworkError && !wasRunning && (await confirmDelivery(running))) {
+        act({ type: "accepted", id: sub })
+        setTicks((t) => ({ ...t, [key]: "sent" }))
+        note("Lost the connection to the hub after sending; the session is working on your message and its reply will appear here.", "sys")
+        return
+      }
       const message = e instanceof HttpError && e.status === 504 ? "OpenCode did not answer in time. The session may still be working." : errorText(e)
       batch(() => {
         act({ type: "rejected", id: sub, message })
@@ -300,6 +313,17 @@ export function SessionView(props: { id: string }) {
         bump()
       })
     }
+  }
+
+  /** The idle turn accepted with 202, until its SSE `turn` result arrives. */
+  let awaitingTurn: { sub: number; sentAt: number } | undefined
+  /** A finished turn: its reply when nothing streamed it, and a note unless it succeeded. */
+  function finishTurn(result: TurnResultLike, sub: number, sentAt: number) {
+    const streamed = timeline.rows().some((r) => r.kind === "assistant" && (r.at ?? 0) >= sentAt && r.text)
+    if (result.reply && !streamed) timeline.upsert({ key: `reply:${sub}`, kind: "assistant", text: result.reply, at: Date.now() })
+    const outcome = turnOutcomeNote(result)
+    if (outcome) note(outcome.text, outcome.kind)
+    bump()
   }
 
   async function stop() {
@@ -472,10 +496,14 @@ export function SessionView(props: { id: string }) {
               {(r) => (
                 <>
                   <StatusIcon state={r().state} />
-                  <h1 class="title" title={r().title}>
-                    {r().title}
-                  </h1>
-                  <Menu label="Session actions" class="icon-btn small" items={() => sessionMenu(r(), { open: false })} />
+                  <RenameTitle id={r().id} title={r().title} place="topbar" class="title">
+                    <h1 class="title">
+                      <button type="button" class="title-btn" title={`${r().title} · click to rename`} onClick={() => setRenaming({ id: r().id, place: "topbar" })}>
+                        {r().title}
+                      </button>
+                    </h1>
+                  </RenameTitle>
+                  <Menu label="Session actions" class="icon-btn small" items={() => sessionMenu(r(), { open: false, place: "topbar" })} />
                 </>
               )}
             </Show>

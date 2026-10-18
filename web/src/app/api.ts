@@ -11,6 +11,18 @@ export class HttpError extends Error {
   }
 }
 
+/**
+ * The request never got an HTTP answer: the connection failed or was cut (offline, a proxy closing it, the hub
+ * restarting). Browsers report this as a bare TypeError ("Failed to fetch", "Load failed", "NetworkError when
+ * attempting to fetch resource"); this carries a message people can act on instead.
+ */
+export class NetworkError extends Error {
+  override readonly name = "NetworkError"
+  constructor(readonly cause?: unknown) {
+    super("Can't reach the hub: the connection dropped. Check your network and try again.")
+  }
+}
+
 export interface ApiInit {
   method?: string
   json?: unknown
@@ -32,7 +44,14 @@ export async function api(path: string, { method = "GET", json, body, headers = 
     ;(init.headers as Record<string, string>)["content-type"] = "application/json"
     init.body = JSON.stringify(json)
   } else if (body !== undefined) init.body = body
-  const res = await fetch(path, init)
+  let res: Response
+  try {
+    res = await fetch(path, init)
+  } catch (cause) {
+    // fetch rejects with a TypeError only for network-level failures; aborts (AbortError) pass through.
+    if (cause instanceof TypeError) throw new NetworkError(cause)
+    throw cause
+  }
   if (!res.ok) {
     const data = (await res.json().catch(() => ({}))) as { error?: string; code?: string; field?: string }
     if (res.status === 401) onUnauthorized?.()

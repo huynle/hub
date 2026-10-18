@@ -16,27 +16,110 @@ export type ViewPrefs = Record<PrefList, string[]>
 /** The synced lists (GET/PUT /api/prefs/view). */
 export const PREF_LISTS: PrefList[] = ["hiddenSessions", "hiddenWorkspaces", "pinnedSessions", "pinnedWorkspaces"]
 const MAX_ENTRIES = 500
+/** Archived sessions (`hiddenSessions`, the list's name from when Archive was called Hide) the hub keeps. */
+export const MAX_ARCHIVED = 5000
 const MAX_KEY = 4096
+const maxOf = (list: PrefList) => (list === "hiddenSessions" ? MAX_ARCHIVED : MAX_ENTRIES)
 
-const cleanList = (value: unknown): string[] =>
-  Array.isArray(value)
-    ? [...new Set(value.filter((x): x is string => typeof x === "string" && x.length > 0 && x.length <= MAX_KEY))].slice(0, MAX_ENTRIES)
-    : []
+/** Unique non-empty strings; over the limit, the newest (last) entries are kept. */
+const cleanList = (value: unknown, max = MAX_ENTRIES): string[] => {
+  if (!Array.isArray(value)) return []
+  const list = [...new Set(value.filter((x): x is string => typeof x === "string" && x.length > 0 && x.length <= MAX_KEY))]
+  return list.length > max ? list.slice(list.length - max) : list
+}
 
 /** Prefs from the hub (a prefs object or {prefs}); every list present, unique strings, at most 500 each. */
 export function normalizePrefs(raw: unknown): ViewPrefs {
   const r = raw as { prefs?: unknown } | null | undefined
   const source = (r && typeof r === "object" && r.prefs && typeof r.prefs === "object" ? r.prefs : (raw ?? {})) as Record<string, unknown>
-  return Object.fromEntries(PREF_LISTS.map((list) => [list, cleanList(source[list])])) as ViewPrefs
+  return Object.fromEntries(PREF_LISTS.map((list) => [list, cleanList(source[list], maxOf(list))])) as ViewPrefs
+}
+
+// ---------- rename ----------
+
+/** Longest title the hub accepts (POST /api/sessions/:id/rename). */
+export const MAX_TITLE = 200
+
+/** A typed title, trimmed: 1–200 characters, else why not. */
+export function renameTitle(raw: string): { title: string } | { error: string } {
+  const title = raw.trim()
+  if (!title) return { error: "Enter a title" }
+  if (title.length > MAX_TITLE) return { error: `Title is longer than ${MAX_TITLE} characters` }
+  return { title }
+}
+
+/**
+ * Sets a session's title in the catalog wherever it appears (every process, and its status entries), in place
+ * (inside a store `produce`). Returns the previous title; undefined when the session is not listed.
+ */
+export function retitle(machines: ViewMachine[] | undefined, id: string, title: string): string | undefined {
+  let previous: string | undefined
+  for (const machine of machines ?? []) {
+    for (const process of machine.processes) {
+      for (const s of process.sessions) {
+        if (s.id !== id) continue
+        previous ??= s.title ?? ""
+        ;(s as { title?: string }).title = title
+        for (const entry of (s.status ?? []) as unknown as Array<{ id: string; title?: string }>) if (entry.id === id) entry.title = title
+      }
+    }
+  }
+  return previous
+}
+
+/**
+ * Renames the console showed before the catalog confirms them. A catalog sent before the hub applied a rename
+ * would otherwise flip the title back; `apply` re-applies pending titles to each catalog until one carries the
+ * new title, the request fails (`drop`), or `graceMs` passed.
+ */
+export class PendingTitles {
+  private readonly pending = new Map<string, { title: string; at: number }>()
+  constructor(private readonly graceMs = 5000) {}
+
+  set(id: string, title: string, now: number): void {
+    this.pending.set(id, { title, at: now })
+  }
+
+  has(id: string): boolean {
+    return this.pending.has(id)
+  }
+
+  /** Forgets a rename (it failed); only when it is still the newest one for the session. */
+  drop(id: string, title: string): void {
+    if (this.pending.get(id)?.title === title) this.pending.delete(id)
+  }
+
+  /** Re-applies pending titles to a fresh catalog (in place), settling the confirmed and expired ones. */
+  apply(machines: ViewMachine[] | undefined, now: number): void {
+    for (const [id, { title, at }] of [...this.pending]) {
+      const shown = findTitle(machines, id)
+      if (shown === title || now - at > this.graceMs) this.pending.delete(id)
+      else if (shown !== undefined) retitle(machines, id, title)
+    }
+  }
+}
+
+const findTitle = (machines: ViewMachine[] | undefined, id: string): string | undefined => {
+  for (const machine of machines ?? []) for (const process of machine.processes) for (const s of process.sessions) if (s.id === id) return s.title ?? ""
+  return undefined
 }
 
 /** Adds (`on`) or removes `key` in one list. Returns the new prefs and the PUT patch (undefined: no change). */
 export function setPref(prefs: ViewPrefs, list: PrefList, key: string, on: boolean): { prefs: ViewPrefs; patch?: Partial<ViewPrefs> } {
+  return setPrefs(prefs, list, [key], on)
+}
+
+/**
+ * Adds (`on`, in order, after the existing ones) or removes several keys in one list, e.g. a bulk archive. A full
+ * list drops its oldest entries to make room. Returns the new prefs and the PUT patch (undefined: no change).
+ */
+export function setPrefs(prefs: ViewPrefs, list: PrefList, keys: readonly string[], on: boolean): { prefs: ViewPrefs; patch?: Partial<ViewPrefs> } {
   if (!PREF_LISTS.includes(list)) throw new Error(`unknown prefs list: ${list}`)
   const current = prefs[list] ?? []
-  const has = current.includes(key)
-  if (has === on) return { prefs, patch: undefined }
-  const next = on ? [...current, key] : current.filter((x) => x !== key)
+  const has = new Set(current)
+  const change = new Set(keys.filter((key) => has.has(key) !== on))
+  if (!change.size) return { prefs, patch: undefined }
+  const next = on ? cleanList([...current, ...change], maxOf(list)) : current.filter((x) => !change.has(x))
   return { prefs: { ...prefs, [list]: next }, patch: { [list]: next } }
 }
 

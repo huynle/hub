@@ -45,6 +45,8 @@ export interface CentralOptions {
     readonly helloTimeoutMs?: number
     readonly requestTimeoutMs?: number
     readonly turnGraceMs?: number
+    /** `Prefer: respond-async` turns: how long the hub waits for a quick result before answering 202. */
+    readonly turnAcceptMs?: number
     readonly heartbeatMs?: number
     readonly staleMs?: number
   }
@@ -107,6 +109,12 @@ const NO_STORE = { "cache-control": "no-store" }
 export const COOKIE = "voice_device"
 const COOKIE_MAX_AGE = 400 * 24 * 60 * 60
 const SSE_HEARTBEAT_MS = 20_000
+/**
+ * `POST …/turn` with `Prefer: respond-async`: a turn that has not settled after this long is answered 202 and
+ * finishes in the background (result as an SSE `turn` event). Long enough for the quick refusals (busy, unknown
+ * session, spoke error), short enough that no proxy cuts the request (Traefik's default readTimeout is 60 s).
+ */
+export const TURN_ACCEPT_MS = 1500
 const NO_OWNER = "No OpenCode process for this session is connected"
 const NOT_EXPOSED = "Voice is not enabled for this session"
 /** A permission or question that is not pending any more: someone answered it elsewhere, or it expired. */
@@ -118,6 +126,8 @@ const MAX_TITLE_CHARS = 200
 const MAX_HERDR_WORKSPACE_CHARS = 100
 /** View preferences: entries per list and characters per entry. */
 const VIEW_PREF_MAX_ENTRIES = 500
+/** hiddenSessions holds archived sessions (Archive in the console), which add up over time. */
+const VIEW_PREF_MAX_ARCHIVED = 5000
 const VIEW_PREF_MAX_CHARS = 4096
 const DECISIONS = new Set<PermissionDecision>(["once", "always", "reject"])
 /** Longest utterance accepted for conversation mode (characters, after trimming). */
@@ -615,6 +625,7 @@ export function startCentral(options: CentralOptions): Central {
       registry.cancelTurns(params.session!)
       return Response.json(result, { headers: NO_STORE })
     }),
+    route("POST", "/api/sessions/:session/rename", "session", ({ request, params }) => rename(request, params.session!)),
     route("POST", "/api/sessions/:session/conversation", "session", ({ request, params }) => conversation(request, params.session!), true),
     route("GET", "/api/sessions/:session/models", "session", async ({ params }) =>
       Response.json(await spokes.request(ownerOf(params.session!), { op: "models", sessionID: params.session! }), { headers: NO_STORE })),
@@ -843,12 +854,33 @@ export function startCentral(options: CentralOptions): Central {
     })
     const release = registry.beginTurn(sessionID, () => cancel())
     server.timeout(request, 0)
+    const voiceStyle = registry.exposed(sessionID) === true
+    let result: Promise<TurnResult>
     try {
-      const voiceStyle = registry.exposed(sessionID) === true
-      return Response.json(await Promise.race([spokes.request(connID, { op: "turn", sessionID, text, voiceStyle, ...attached }), stopped]))
-    } finally {
+      result = Promise.race([spokes.request(connID, { op: "turn", sessionID, text, voiceStyle, ...attached }), stopped])
+    } catch (cause) {
       release()
+      throw cause
     }
+    // The lock is held until the turn ends, whether this request waits for it or not.
+    void result.then(release, release)
+    if (!/(^|[\s,])respond-async\b/i.test(request.headers.get("prefer") ?? "")) return Response.json(await result)
+    // Asynchronous: answer quick results (and refusals) as usual; a turn still running is accepted (202) and its
+    // result goes to the owner's consoles as an SSE `turn` event (the reply itself streams as deltas meanwhile).
+    const early = await Promise.race([result.then((value) => ({ value }), (cause: unknown) => ({ cause })), sleep(options.timing?.turnAcceptMs ?? TURN_ACCEPT_MS)])
+    if (early) {
+      if ("cause" in early) throw early.cause
+      return Response.json(early.value)
+    }
+    const tenant = registry.sessionTenant(sessionID)
+    void result.then(
+      (value) => broadcast({ type: "turn", sessionID, ...value }, { tenant }),
+      (cause: unknown) => {
+        const message = cause instanceof Error ? cause.message : String(cause)
+        broadcast({ type: "turn", sessionID, ...(cause instanceof RequestTimeoutError ? { outcome: "timeout" } : { outcome: "failed", message }), reply: "" }, { tenant })
+      },
+    )
+    return Response.json({ mode: "turn" }, { status: 202, headers: { "preference-applied": "respond-async" } })
   }
 
   /** GET …/timeline/messages/:message/files/:index: one image of a user message, as bytes. */
@@ -903,6 +935,26 @@ export function startCentral(options: CentralOptions): Central {
     const { inboxID } = await spokes.request(ownerOf(sessionID), { op: "steer", sessionID, text })
     registry.trackUtterance(sessionID, inboxID)
     return Response.json({ inboxID }, { status: 202 })
+  }
+
+  /** Renames a session in OpenCode through its owner process, falling back to other processes that report it. */
+  async function rename(request: Request, sessionID: string): Promise<Response> {
+    const raw = (await body(request)).title
+    const title = typeof raw === "string" ? raw.trim() : ""
+    if (!title) return error(400, "Expected {title}: a non-empty title")
+    if (title.length > MAX_TITLE_CHARS) return error(400, `Title must be at most ${MAX_TITLE_CHARS} characters`)
+    const targets = registry.sessionTargets(sessionID)
+    if (!targets.length) throw new HttpError(409, NO_OWNER)
+    let failure: unknown
+    for (const connID of targets) {
+      try {
+        const result = await spokes.request(connID, { op: "rename", sessionID, title })
+        return Response.json({ title: typeof result?.title === "string" ? result.title : title }, { headers: NO_STORE })
+      } catch (cause) {
+        failure ??= cause
+      }
+    }
+    throw failure
   }
 
   async function conversation(request: Request, sessionID: string): Promise<Response> {
@@ -1148,7 +1200,10 @@ function prefsInput(value: unknown): (Partial<PushPrefs> & LegacyPushPrefs) | un
 /** PUT /api/prefs/view body: any of the four lists, each replacing the stored one. */
 function viewPrefsInput(value: unknown): Partial<ViewPrefs> {
   const invalid = () =>
-    new HttpError(400, `Expected {${VIEW_PREF_KEYS.join("?, ")}?}: lists of at most ${VIEW_PREF_MAX_ENTRIES} strings of at most ${VIEW_PREF_MAX_CHARS} characters`)
+    new HttpError(
+      400,
+      `Expected {${VIEW_PREF_KEYS.join("?, ")}?}: lists of at most ${VIEW_PREF_MAX_ENTRIES} (hiddenSessions: ${VIEW_PREF_MAX_ARCHIVED}) strings of at most ${VIEW_PREF_MAX_CHARS} characters`,
+    )
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw invalid()
   const record = value as Record<string, unknown>
   if (Object.keys(record).some((key) => !(VIEW_PREF_KEYS as readonly string[]).includes(key))) throw invalid()
@@ -1156,7 +1211,7 @@ function viewPrefsInput(value: unknown): Partial<ViewPrefs> {
   for (const key of VIEW_PREF_KEYS) {
     const list = record[key]
     if (list === undefined) continue
-    if (!Array.isArray(list) || list.length > VIEW_PREF_MAX_ENTRIES) throw invalid()
+    if (!Array.isArray(list) || list.length > (key === "hiddenSessions" ? VIEW_PREF_MAX_ARCHIVED : VIEW_PREF_MAX_ENTRIES)) throw invalid()
     if (!list.every((entry) => typeof entry === "string" && entry.length > 0 && entry.length <= VIEW_PREF_MAX_CHARS)) throw invalid()
     out[key] = [...new Set(list as string[])]
   }
@@ -1191,6 +1246,8 @@ function param(raw: string): string {
     throw new HttpError(400, "Bad path")
   }
 }
+
+const sleep = (ms: number) => new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), ms))
 
 async function body(request: Request): Promise<Record<string, unknown>> {
   const value = (await request.json()) as unknown

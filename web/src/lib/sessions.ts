@@ -1,6 +1,10 @@
 // Session rows of the console: one row per root session across machines (with machine, open source, unread
-// and hidden flags), the home table (search, filter chips, sort, persisted in localStorage) and the sidebar
-// sections (Needs you, Running, Pinned, open-session groups, Recents).
+// and archived/hidden flags), the home table (search, filter chips, sort, persisted in localStorage), the sidebar
+// sections (Needs you, Running, Pinned, open-session groups, Recents) and the inactive sessions to archive.
+//
+// Archive is the hub's own (OpenCode has no archive API yet): archived session IDs are the user's synced
+// `hiddenSessions` view pref (the list's name from when Archive was called Hide). Archived sessions show only under
+// the Archived chip, except one that needs you, which also shows under Needs you so a question is never missed.
 import { RANK, fold, matches, type SessionState } from "../core/browser-core"
 import { groupKey, hiddenBy, roots, toRow, type ViewMachine, type ViewPrefs, type ViewRow } from "../core/view-core"
 
@@ -12,7 +16,10 @@ export interface SessionRow extends ViewRow {
   readonly source: Source
   /** The tree works or waits for the user (Steer/Stop apply). */
   readonly running: boolean
+  /** Left out of the default views: archived, or in a hidden workspace. */
   readonly hidden: boolean
+  /** Archived by ID (Archive / Unarchive). */
+  readonly archived: boolean
   readonly unread: boolean
   /** Sidebar/open-group key (`herdr:<id>` or the project folder). */
   readonly group: string
@@ -21,6 +28,7 @@ export interface SessionRow extends ViewRow {
 /** Every root session of every machine, newest first. */
 export function sessionRows(machines: readonly ViewMachine[] | undefined, prefs: ViewPrefs, reads: Readonly<Record<string, number>>): SessionRow[] {
   const pinned = new Set(prefs.pinnedSessions)
+  const archived = new Set(prefs.hiddenSessions)
   const hidden = hiddenBy(prefs)
   const out: SessionRow[] = []
   for (const machine of machines ?? []) {
@@ -35,12 +43,26 @@ export function sessionRows(machines: readonly ViewMachine[] | undefined, prefs:
         source,
         running: row.state === "working" || row.state === "blocked",
         hidden: hidden(s),
+        archived: archived.has(row.id),
         unread: read !== undefined && row.updated > read,
         group: groupKey(s),
       })
     }
   }
   return out.sort((a, b) => b.updated - a.updated)
+}
+
+/**
+ * The new rows, reusing the previous object of every row whose content did not change. Lists render rows by
+ * object identity, so an unchanged row keeps its DOM (an open ⋯ menu or rename field) when the catalog updates.
+ */
+export function stableRows(previous: readonly SessionRow[] | undefined, next: SessionRow[]): SessionRow[] {
+  if (!previous?.length) return next
+  const before = new Map(previous.map((r) => [r.id, r]))
+  return next.map((r) => {
+    const old = before.get(r.id)
+    return old && JSON.stringify(old) === JSON.stringify(r) ? old : r
+  })
 }
 
 // ---------- home table ----------
@@ -53,8 +75,8 @@ export interface TableFilters {
   source: "all" | "open" | "background"
   /** Machine ID, "" for all. */
   machine: string
-  /** Show hidden sessions only. */
-  hidden: boolean
+  /** Show archived (and hidden) sessions only. */
+  archived: boolean
 }
 
 export interface TableState {
@@ -65,7 +87,7 @@ export interface TableState {
 
 export const DEFAULT_TABLE: TableState = Object.freeze({
   query: "",
-  filters: Object.freeze({ status: "all", source: "all", machine: "", hidden: false }),
+  filters: Object.freeze({ status: "all", source: "all", machine: "", archived: false }),
   sort: Object.freeze({ key: "activity", dir: "desc" }),
 }) as TableState
 
@@ -87,7 +109,9 @@ const COMPARE: Record<SortKey, (a: SessionRow, b: SessionRow) => number> = {
 }
 
 function passes(r: SessionRow, f: TableFilters): boolean {
-  if (r.hidden !== f.hidden) return false
+  // An archived session that needs you also shows under Needs you.
+  const needsYou = f.status === "needs" && r.state === "blocked"
+  if (f.archived ? !r.hidden : r.hidden && !needsYou) return false
   if (f.status === "needs" && r.state !== "blocked") return false
   if (f.status === "running" && !r.running) return false
   if (f.status === "idle" && r.running) return false
@@ -134,7 +158,8 @@ export function parseTable(raw: string | null | undefined): TableState {
     status: pick(f.status, STATUS, d.filters.status),
     source: pick(f.source, SOURCE, d.filters.source),
     machine: typeof f.machine === "string" && f.machine.length <= 200 ? f.machine : "",
-    hidden: f.hidden === true,
+    // `hidden` is the saved Hidden chip from before Archive.
+    archived: f.archived === true || f.hidden === true,
   }
   const same = (Object.keys(filters) as Array<keyof TableFilters>).every((k) => filters[k] === d.filters[k])
   if (same && sort === d.sort) return DEFAULT_TABLE
@@ -173,6 +198,7 @@ export function sidebarSections(
   { query, groupBy, sortBy, recentLimit = 20 }: { query: string; groupBy: GroupBy; sortBy: SidebarSort; recentLimit?: number },
 ): SidebarSection[] {
   const visible = rows.filter((r) => !r.hidden)
+  const needsYou = rows.filter((r) => r.state === "blocked")
   const order = sortBy === "title" ? (a: SessionRow, b: SessionRow) => text(a.title, b.title) || recent(a, b) : recent
   if (query.trim()) return [{ id: "results", title: "Results", kind: "results", rows: visible.filter((r) => searched(r, query)).sort(recent) }]
   const used = new Set<string>()
@@ -182,7 +208,7 @@ export function sidebarSections(
   }
   const sections: SidebarSection[] = []
   const add = (section: SidebarSection) => section.rows.length && sections.push(section)
-  add({ id: "needs", title: "Needs you", kind: "needs", rows: take(visible.filter((r) => r.state === "blocked").sort(recent)) })
+  add({ id: "needs", title: "Needs you", kind: "needs", rows: take(needsYou.sort(recent)) })
   add({ id: "running", title: "Running", kind: "running", rows: take(visible.filter((r) => !used.has(r.id) && r.running).sort(recent)) })
   add({ id: "pinned", title: "Pinned", kind: "pinned", rows: take(visible.filter((r) => !used.has(r.id) && r.pinned).sort(order)) })
   const groups = new Map<string, { title: string; key: string; machineID: string; directory: string; rows: SessionRow[] }>()
@@ -214,6 +240,20 @@ export function sidebarSections(
   }
   add({ id: "recents", title: "Recents", kind: "recents", rows: visible.filter((r) => !used.has(r.id)).sort(recent).slice(0, recentLimit) })
   return sections
+}
+
+// ---------- archive inactive sessions ----------
+
+const DAY_MS = 24 * 60 * 60_000
+
+/**
+ * Sessions "Archive inactive" archives: not archived or hidden yet, idle, not pinned, not open in a terminal, and
+ * without activity for more than `days` (a whole number, at least 1) days.
+ */
+export function inactiveRows(rows: readonly SessionRow[], days: number, now: number): SessionRow[] {
+  if (!Number.isInteger(days) || days < 1) return []
+  const before = now - days * DAY_MS
+  return rows.filter((r) => !r.hidden && !r.running && !r.pinned && !r.open && r.updated < before)
 }
 
 // ---------- live Voice ----------

@@ -104,6 +104,44 @@ export function composerView(state: ComposerState, { running, offline }: { runni
   }
 }
 
+/** What a typed turn's `TurnResult` (from the POST, or the SSE `turn` event) needs to say, if anything. */
+export interface TurnResultLike {
+  readonly outcome?: string
+  readonly message?: string
+  readonly reply?: string
+}
+
+/**
+ * How the hub answered `POST …/turn`: 202 `{mode: "turn"}` took an idle turn that is still running (sent with
+ * `Prefer: respond-async`; its result arrives as an SSE `turn` event); any other 202 steered the running tree;
+ * 200 carries the finished turn's result.
+ */
+export function turnAnswer(status: number, body: { readonly mode?: unknown; readonly [key: string]: unknown }): "steered" | "accepted" | "result" {
+  if (status !== 202) return "result"
+  return body.mode === "turn" ? "accepted" : "steered"
+}
+
+/** The note a finished turn leaves in the transcript: none on success. */
+export function turnOutcomeNote(result: TurnResultLike): { text: string; kind: "sys" | "err" } | undefined {
+  if (!result.outcome || result.outcome === "succeeded") return undefined
+  if (result.outcome === "timeout") return { text: "The agent is still working; the reply may be partial.", kind: "sys" }
+  return { text: `Turn ${result.outcome}${result.message ? `: ${result.message}` : ""}`, kind: "err" }
+}
+
+/**
+ * After a Send whose connection dropped (no HTTP answer): did the hub take the turn anyway? It did when the
+ * session is (or starts) running within `timeoutMs`; the turn then shows up in the transcript and the sent text
+ * must not come back into the draft. False means it never started: the submit is treated as rejected.
+ */
+export async function confirmDelivery(isRunning: () => boolean, { timeoutMs = 4000, pollMs = 100 }: { timeoutMs?: number; pollMs?: number } = {}): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (isRunning()) return true
+    if (Date.now() >= deadline) return false
+    await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, Math.max(0, deadline - Date.now()))))
+  }
+}
+
 /** Unsent drafts per session, kept while the console is open (switching sessions keeps each one's text). */
 export class Drafts {
   private readonly drafts = new Map<string, string>()

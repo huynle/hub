@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 // Headless smoke test of the built console against the mock hub (test/web-mock-hub.ts), at desktop (1440×900) and
 // phone (390×844) sizes: home loads, a session opens with its timeline, Send → Steer/Stop → Send, image attachments
-// (attach, remove, attach again, send), the right rail and diff viewer render, and a Voice-off session is inspectable. Screenshots go to $SMOKE_SHOTS (default: the OS temp
+// (attach, remove, attach again, send), Dictate → Send (input cleared, also when the turn's connection drops), a slow turn (202, reply later), the right rail and diff viewer render, a Voice-off session is inspectable, rename (table,
+// sidebar, top bar) and archive (menu, Undo, Archived chip, Needs-you exception, bulk, inactive). Screenshots go to $SMOKE_SHOTS (default: the OS temp
 // dir). Run `npm run build:web && npm run test:e2e`. Chromium: $CHROMIUM_PATH, else Playwright's cache, else PATH.
 import { existsSync, mkdirSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -16,6 +17,8 @@ const BASE = `http://127.0.0.1:${PORT}`
 
 let failures = 0
 const results: string[] = []
+/** The page under test; a failed check leaves a screenshot of it (failed-<n>.png). */
+let current: Page | undefined
 async function check(name: string, run: () => Promise<void>): Promise<void> {
   try {
     await run()
@@ -23,6 +26,7 @@ async function check(name: string, run: () => Promise<void>): Promise<void> {
   } catch (e) {
     failures++
     results.push(`✗ ${name}: ${(e as Error).message.split("\n")[0]}`)
+    await current?.screenshot({ path: path.join(SHOTS, `failed-${failures}.png`) }).catch(() => undefined)
   }
 }
 function assert(ok: unknown, message: string): asserts ok {
@@ -34,6 +38,7 @@ const mock = (route: string, body: unknown = {}) => fetch(`${BASE}${route}`, { m
 async function desktop(browser: Browser): Promise<void> {
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, permissions: ["microphone"] })
   const page = await context.newPage()
+  current = page
   const errors: string[] = []
   page.on("pageerror", (e) => errors.push(e.message))
 
@@ -51,6 +56,198 @@ async function desktop(browser: Browser): Promise<void> {
     assert((await page.locator('th[aria-sort="ascending"]').count()) === 1, "title sort applied")
     assert(await page.locator(".sidebar .side-section").first().isVisible(), "sidebar sections")
     await shot(page, "desktop-home")
+  })
+
+  const apiLog = async () => ((await (await fetch(`${BASE}/mock/log`)).json()) as { log: Array<{ method: string; path: string; body?: any }> }).log
+  const renames = async () => (await apiLog()).filter((e) => e.method === "POST" && e.path.endsWith("/rename"))
+
+  await check("desktop: rename from the table ⋯ menu (inline, Enter saves, Esc cancels, failure reverts)", async () => {
+    const row = (title: string) => page.locator(".sessions-table tbody tr", { has: page.getByRole("link", { name: title, exact: true }) })
+    await row("Image resizing").getByRole("button", { name: "More actions for Image resizing" }).click()
+    await page.getByRole("menuitem", { name: "Rename…" }).click()
+    const field = page.locator(".sessions-table").getByRole("textbox", { name: "Session title" })
+    await field.waitFor()
+    assert((await field.inputValue()) === "Image resizing", "prefilled with the current title")
+    assert(await field.evaluate((el: HTMLInputElement) => el.selectionStart === 0 && el.selectionEnd === el.value.length), "text selected on open")
+    // The title is selected: typing replaces it.
+    await field.pressSequentially("Resize images faster")
+    await field.press("Enter")
+    await row("Resize images faster").waitFor()
+    assert(!(await field.count()), "field closes after saving")
+    const sent = (await renames()).at(-1)
+    assert(sent?.body?.title === "Resize images faster", `rename sent: ${JSON.stringify(sent)}`)
+    // Escape cancels without a request.
+    const before = (await renames()).length
+    await row("Orders API").getByRole("button", { name: "More actions for Orders API" }).click()
+    await page.getByRole("menuitem", { name: "Rename…" }).click()
+    await field.fill("Not this")
+    await field.press("Escape")
+    await row("Orders API").waitFor()
+    assert((await renames()).length === before, "Escape sends nothing")
+    // A refused rename reverts, with a message.
+    await mock("/mock/fail", { rename: true })
+    await row("CLI polish").getByRole("button", { name: "More actions for CLI polish" }).click()
+    await page.getByRole("menuitem", { name: "Rename…" }).click()
+    await field.fill("Polished CLI")
+    await field.press("Enter")
+    await page.getByText(/Could not rename: OpenCode did not answer/).waitFor()
+    await row("CLI polish").waitFor()
+    await mock("/mock/fail", { rename: false })
+    await shot(page, "desktop-rename-table")
+  })
+
+  await check("desktop: rename from a sidebar row ⋯ menu", async () => {
+    const link = page.locator(".sidebar .side-row").first()
+    const title = (await link.locator(".side-title").textContent())!.trim()
+    await link.getByRole("button", { name: `More actions for ${title}` }).click({ force: true })
+    await page.getByRole("menuitem", { name: "Rename…" }).click()
+    const field = page.locator(".sidebar").getByRole("textbox", { name: "Session title" })
+    await field.waitFor()
+    assert((await field.inputValue()) === title, "sidebar field prefilled")
+    await field.fill(`${title} (renamed)`)
+    await field.press("Enter")
+    await page.locator(".sidebar .side-title", { hasText: `${title} (renamed)` }).first().waitFor()
+    assert((await renames()).at(-1)?.body?.title === `${title} (renamed)`, "sidebar rename sent")
+    // Back to the original title for the checks below.
+    const back = page.locator(".sidebar .side-row", { has: page.locator(".side-title", { hasText: `${title} (renamed)` }) }).first()
+    await back.getByRole("button", { name: `More actions for ${title} (renamed)` }).click({ force: true })
+    await page.getByRole("menuitem", { name: "Rename…" }).click()
+    await field.fill(title)
+    await field.press("Enter")
+    await page.locator(".sidebar .side-title", { hasText: title }).first().waitFor()
+  })
+
+  await check("desktop: rename from the session top bar (title click and the title menu)", async () => {
+    await page.goto(`${BASE}/s/ses_10`)
+    const title = page.locator(".topbar .title")
+    const current = "PWA icons"
+    await title.getByRole("button", { name: current }).waitFor()
+    await title.getByRole("button").click()
+    const field = page.locator(".topbar").getByRole("textbox", { name: "Session title" })
+    await field.waitFor()
+    assert((await field.inputValue()) === current, "top bar field prefilled")
+    await field.fill("Top bar title")
+    await field.press("Enter")
+    await page.locator(".topbar .title").getByText("Top bar title").waitFor()
+    await page.getByRole("button", { name: "Session actions" }).click()
+    await page.getByRole("menuitem", { name: "Rename…" }).click()
+    await field.fill("Top bar title, again")
+    await field.press("Enter")
+    await page.locator(".topbar .title").getByText("Top bar title, again").waitFor()
+    assert((await renames()).at(-1)?.body?.title === "Top bar title, again", "top bar rename sent")
+    await shot(page, "desktop-rename-topbar")
+    await title.getByRole("button").click()
+    await field.fill(current)
+    await field.press("Enter")
+    await page
+      .locator(".topbar .title")
+      .getByText(current, { exact: true })
+      .waitFor({ timeout: 5000 })
+      .catch(async () => {
+        throw new Error(`title not restored; renames sent: ${JSON.stringify((await renames()).map((e) => e.body?.title))}`)
+      })
+    // Each rename reached the hub, in order, and the hub ends with the restored title (later checks use it). A
+    // catalog sent before the hub applied a rename must not flip the title back meanwhile.
+    const sent = () => renames().then((list) => list.filter((e) => e.path.includes("/ses_10/")).map((e) => e.body?.title))
+    let stored = ""
+    for (let i = 0; i < 50 && stored !== current; i++) {
+      stored = ((await (await fetch(`${BASE}/api/sessions/ses_10`)).json()) as { title: string }).title
+      if (stored !== current) await Bun.sleep(100)
+    }
+    assert(JSON.stringify(await sent()) === JSON.stringify(["Top bar title", "Top bar title, again", current]), `renames sent: ${JSON.stringify(await sent())}`)
+    assert(stored === current, `hub title restored: ${stored}`)
+    await page.locator(".topbar .title").getByText(current, { exact: true }).waitFor()
+  })
+
+  const prefPuts = async () => (await apiLog()).filter((e) => e.method === "PUT" && e.path === "/api/prefs/view")
+  const tableRow = (title: string) => page.locator(".sessions-table tbody tr", { has: page.getByRole("link", { name: title, exact: true }) })
+  const chip = (name: string) => page.locator(".chips").getByRole("button", { name, exact: true })
+
+  await check("desktop: archive from the ⋯ menu; Undo; the Archived chip; Unarchive", async () => {
+    await page.goto(`${BASE}/`)
+    await tableRow("Orders API").waitFor()
+    await tableRow("Orders API").getByRole("button", { name: "More actions for Orders API" }).click()
+    await page.getByRole("menuitem", { name: /^Archive\b/ }).click()
+    await tableRow("Orders API").waitFor({ state: "detached" })
+    const toast = page.locator(".toast").filter({ hasText: "Archived “Orders API”" })
+    await toast.waitFor()
+    await toast.getByRole("button", { name: "Undo" }).click()
+    await tableRow("Orders API").waitFor()
+    await tableRow("Orders API").getByRole("button", { name: "More actions for Orders API" }).click()
+    await page.getByRole("menuitem", { name: /^Archive\b/ }).click()
+    await tableRow("Orders API").waitFor({ state: "detached" })
+    assert(!(await page.locator(".sidebar").getByRole("link", { name: "Orders API" }).count()), "gone from the sidebar")
+    // The save is in flight: wait for it to reach the hub.
+    let saved: unknown
+    for (let i = 0; i < 50 && !saved; i++) {
+      saved = (await prefPuts()).at(-1)?.body?.hiddenSessions?.at(-1)
+      if (!saved) await Bun.sleep(100)
+    }
+    assert(typeof saved === "string" && saved.startsWith("ses_"), `archived set saved: ${JSON.stringify((await prefPuts()).at(-1))}`)
+    await chip("Archived").click()
+    await tableRow("Orders API").waitFor()
+    await shot(page, "desktop-archived-chip")
+    await tableRow("Orders API").getByRole("button", { name: "More actions for Orders API" }).click()
+    await page.getByRole("menuitem", { name: /^Unarchive\b/ }).click()
+    await tableRow("Orders API").waitFor({ state: "detached" })
+    await chip("Archived").click()
+    await tableRow("Orders API").waitFor()
+  })
+
+  await check("desktop: an archived session that needs you stays under Needs you", async () => {
+    await tableRow("Cart bug").getByRole("button", { name: "More actions for Cart bug" }).click()
+    await page.getByRole("menuitem", { name: /^Archive\b/ }).click()
+    await tableRow("Cart bug").waitFor({ state: "detached" })
+    await page.locator(".sidebar .side-section.needs").getByRole("link", { name: /Cart bug/ }).waitFor()
+    await chip("Needs you").click()
+    await tableRow("Cart bug").waitFor()
+    await tableRow("Cart bug").getByRole("button", { name: "More actions for Cart bug" }).click()
+    await page.getByRole("menuitem", { name: /^Unarchive\b/ }).click()
+    await chip("Needs you").click()
+    await tableRow("Cart bug").waitFor()
+  })
+
+  await check("desktop: select rows and archive them together, with Undo", async () => {
+    const before = await page.locator(".sessions-table tbody tr").count()
+    await tableRow("editor config").getByRole("checkbox", { name: "Select editor config" }).check()
+    await tableRow("shell setup").getByRole("checkbox", { name: "Select shell setup" }).check()
+    const bar = page.getByRole("region", { name: "Selected sessions" })
+    await bar.getByText("2 selected").waitFor()
+    await bar.getByRole("button", { name: "Archive" }).click()
+    await tableRow("editor config").waitFor({ state: "detached" })
+    await tableRow("shell setup").waitFor({ state: "detached" })
+    assert((await page.locator(".sessions-table tbody tr").count()) === before - 2, "two rows left the table")
+    assert(!(await bar.count()), "selection cleared")
+    const toast = page.locator(".toast").filter({ hasText: "Archived 2 sessions" })
+    await toast.getByRole("button", { name: "Undo" }).click()
+    await tableRow("editor config").waitFor()
+    await tableRow("shell setup").waitFor()
+    // Select all (the shown rows) and clear.
+    await page.getByRole("checkbox", { name: "Select all shown sessions" }).check()
+    await bar.getByText(`${before} selected`).waitFor()
+    await bar.getByRole("button", { name: "Clear selection" }).click()
+    await bar.waitFor({ state: "detached" })
+  })
+
+  await check("desktop: archive sessions inactive for more than N days (confirm with the count)", async () => {
+    const before = await page.locator(".sessions-table tbody tr").count()
+    await page.getByRole("button", { name: "Archive inactive…" }).click()
+    const dialog = page.getByRole("dialog", { name: "Archive inactive sessions" })
+    await dialog.waitFor()
+    const days = dialog.getByRole("spinbutton", { name: "Inactive for more than (days)" })
+    assert((await days.inputValue()) === "30", "30 days by default")
+    await days.fill("1")
+    const confirm = dialog.getByRole("button", { name: /^Archive \d+ sessions?$/ })
+    await confirm.waitFor()
+    const n = Number((await confirm.textContent())!.match(/\d+/)![0])
+    assert(n > 0 && n < before, `some sessions are older than a day: ${n} of ${before}`)
+    await shot(page, "desktop-archive-inactive")
+    await confirm.click()
+    await dialog.waitFor({ state: "hidden" })
+    await page.waitForFunction((count) => document.querySelectorAll(".sessions-table tbody tr").length === count, before - n)
+    const toast = page.locator(".toast").filter({ hasText: `Archived ${n} session` })
+    await toast.getByRole("button", { name: "Undo" }).click()
+    await page.waitForFunction((count) => document.querySelectorAll(".sessions-table tbody tr").length === count, before)
   })
 
   await check("desktop: open a session; timeline, thoughts, tool group and rail render", async () => {
@@ -502,6 +699,77 @@ async function desktop(browser: Browser): Promise<void> {
     await page.getByLabel("Message").fill("")
     await go("/s/ses_10")
     await page.getByLabel("Message").fill("")
+  })
+
+  await check("desktop: Dictate → Send clears the input and it stays empty, also when the turn's connection drops", async () => {
+    const box = () => page.getByLabel("Message").inputValue()
+    const dictateText = async (text: string) => {
+      await mock("/mock/transcripts", { texts: [text] })
+      await page.getByRole("button", { name: "Dictate" }).click()
+      await page.getByRole("button", { name: "Stop dictation" }).waitFor()
+      await page.waitForTimeout(600)
+      await page.getByRole("button", { name: "Stop dictation" }).click()
+      await page.waitForFunction((t) => (document.querySelector('textarea[aria-label="Message"]') as HTMLTextAreaElement | null)?.value === t, text)
+    }
+    const idle = () => page.locator("button.send.send").waitFor({ timeout: 15_000 })
+    await page.goto(`${BASE}/s/ses_mock`)
+    await page.locator(".msg.assistant").first().waitFor()
+    await page.getByLabel("Message").fill("")
+    await dictateText("dictated then sent")
+    await page.locator("button.send").click()
+    await page.waitForTimeout(400)
+    assert((await box()) === "", `input cleared after send: ${JSON.stringify(await box())}`)
+    await page.locator(".msg.assistant", { hasText: "Done: dictated then sent" }).waitFor({ timeout: 15_000 })
+    assert((await box()) === "", "input still empty after the reply")
+    assert(!(await page.locator(".composer-error").count()), "no error after a normal send")
+    await idle()
+    // A proxy cuts the long request after the hub took the turn: not a failure, nothing comes back.
+    await page.route("**/api/sessions/*/turn", async (route) => {
+      // The request reaches the hub (which starts the turn); the browser's side is then cut.
+      void route.fetch().catch(() => undefined)
+      await Bun.sleep(300)
+      await route.abort("failed")
+    })
+    try {
+      await dictateText("dictated, connection dropped")
+      await page.locator("button.send").click()
+      await page.getByText(/Lost the connection to the hub after sending/).waitFor()
+      assert((await box()) === "", `input stays empty after a dropped connection: ${JSON.stringify(await box())}`)
+      assert(!(await page.locator(".composer-error").count()), "no error under the input")
+      assert(!(await page.getByText(/Failed to fetch/).count()), "never the raw 'Failed to fetch'")
+      await page.locator(".msg.assistant", { hasText: "Done: dictated, connection dropped" }).waitFor({ timeout: 15_000 })
+      assert((await box()) === "", "input still empty after the reply")
+      await idle()
+    } finally {
+      await page.unroute("**/api/sessions/*/turn")
+      await mock("/mock/reset-transcripts")
+    }
+  })
+
+  await check("desktop: a slow turn is accepted at once (202, no error) and its reply appears when it arrives", async () => {
+    await page.goto(`${BASE}/s/ses_mock`)
+    await page.locator(".msg.assistant").first().waitFor()
+    await mock("/mock/slow-turns", { ms: 6000 })
+    try {
+      const answered = page.waitForResponse((r) => r.request().method() === "POST" && r.url().endsWith("/turn"))
+      await page.getByLabel("Message").fill("a slow one")
+      const sentAt = Date.now()
+      await page.locator("button.send").click()
+      const res = await answered
+      assert(res.status() === 202 && (await res.json()).mode === "turn", `accepted async: ${res.status()}`)
+      assert((await res.request().headerValue("prefer")) === "respond-async", "asks for respond-async")
+      assert(Date.now() - sentAt < 4000, "answered before the turn ended")
+      await page.waitForTimeout(500)
+      assert((await page.getByLabel("Message").inputValue()) === "", "input empty")
+      assert(!(await page.locator(".composer-error").count()), "no error under the input")
+      assert(!(await page.getByText(/Steered the running session/).count()), "an accepted turn is not a steer")
+      await page.locator(".msg.assistant", { hasText: "Done: a slow one" }).waitFor({ timeout: 20_000 })
+      assert(!(await page.locator(".composer-error").count()), "still no error after the reply")
+      assert(!(await page.locator(".note.err").count()), "no failure note")
+      await page.locator("button.send.send").waitFor({ timeout: 15_000 })
+    } finally {
+      await mock("/mock/slow-turns", {})
+    }
   })
 
   await check("desktop: mic picker lists microphones with a level meter", async () => {

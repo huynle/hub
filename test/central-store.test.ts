@@ -87,6 +87,16 @@ describe("Store", () => {
     expect(raw).toContain(hashToken(token))
   })
 
+  test("archived sessions are the stored hiddenSessions list: kept as-is across restarts (no migration), up to 5000", () => {
+    const dir = path.join(tmp(), "state")
+    const store = Store.open(dir)
+    // What 0.6 stored as hidden is what 0.7 shows as archived.
+    const archived = Array.from({ length: 5000 }, (_, i) => `ses_${i}`)
+    store.setViewPrefs("local", { hiddenSessions: archived, pinnedSessions: ["ses_p"] })
+    const again = Store.open(dir)
+    expect(again.viewPrefs("local")).toEqual({ hiddenSessions: archived, hiddenWorkspaces: [], pinnedSessions: ["ses_p"], pinnedWorkspaces: [] })
+  })
+
   test("revoked machines no longer authenticate", () => {
     const store = Store.open(tmp())
     const { machine, token } = store.addMachine("laptop")

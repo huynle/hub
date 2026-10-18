@@ -157,6 +157,14 @@ describe("session browser ops", () => {
     expect(parseServerMessage(r({ op: "create", directory: "/home/user/projects/x", title: "New" }))).toBeDefined()
     expect(parseServerMessage(r({ op: "create", directory: "relative/path" }))).toBeUndefined()
   })
+  test("rename carries a title string (the spoke checks its length and reports why)", () => {
+    expect(parseServerMessage(r({ op: "rename", sessionID: "ses_1", title: "New name" }))).toBeDefined()
+    expect(parseServerMessage(r({ op: "rename", sessionID: "ses_1", title: "" }))).toBeDefined()
+    expect(parseServerMessage(r({ op: "rename", sessionID: "ses_1" }))).toBeUndefined()
+    expect(parseServerMessage(r({ op: "rename", sessionID: "", title: "x" }))).toBeUndefined()
+    expect(parseServerMessage(r({ op: "rename", sessionID: "ses_1", title: 5 }))).toBeUndefined()
+    expect(parseServerMessage(r({ op: "rename", sessionID: "ses_1", title: "x".repeat(1001) }))).toBeUndefined()
+  })
   test("session info accepts optional workspace fields", () => {
     const s = { id: "ses_1", title: "a", directory: "/d/wt", updated: 1, owned: false, exposed: false, project: "/d", projectName: "d" }
     expect(parseSpokeMessage(JSON.stringify({ t: "sessions", sessions: [s] }))).toBeDefined()

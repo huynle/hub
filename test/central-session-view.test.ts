@@ -153,7 +153,8 @@ describe("view preferences", () => {
       { hiddenSessions: "ses_a" },
       { hiddenSessions: [3] },
       { hiddenSessions: ["x".repeat(4097)] },
-      { hiddenSessions: Array.from({ length: 501 }, (_, i) => `ses_${i}`) },
+      { pinnedSessions: Array.from({ length: 501 }, (_, i) => `ses_${i}`) },
+      { hiddenSessions: Array.from({ length: 5001 }, (_, i) => `ses_${i}`) },
       { other: [] },
       {},
       [],
@@ -165,6 +166,8 @@ describe("view preferences", () => {
     expect((await json(await h.api("/api/prefs/view"))).prefs).toEqual(EMPTY)
     // Limits are inclusive.
     expect((await put({ hiddenWorkspaces: Array.from({ length: 500 }, (_, i) => `/w/${i}`), pinnedSessions: ["x".repeat(4096)] })).status).toBe(200)
+    // Archived sessions (hiddenSessions) keep up to 5000 IDs.
+    expect((await put({ hiddenSessions: Array.from({ length: 5000 }, (_, i) => `ses_${i}`) })).status).toBe(200)
   })
 
   test("SSE prefs reach the user's other devices, not the device that changed them, and never another user", async () => {
