@@ -89,6 +89,16 @@ async function desktop(browser: Browser): Promise<void> {
   })
 
   await check("desktop: composer Send → Steer + Stop while running → Send", async () => {
+    // The turn stays working until Stop: steering and stopping never race the mock turn's timer.
+    await mock("/mock/hold-turns", { on: true })
+    try {
+      await composerSteerStop()
+    } finally {
+      await mock("/mock/hold-turns", { on: false })
+    }
+  })
+
+  async function composerSteerStop(): Promise<void> {
     const send = page.locator("button.send")
     assert(await send.isDisabled(), "Send disabled while empty")
     await page.getByLabel("Message").fill("run the tests")
@@ -106,7 +116,7 @@ async function desktop(browser: Browser): Promise<void> {
     await page.getByText(/Stopped 1 session/).waitFor()
     await page.locator("button.send.send").waitFor()
     assert((await page.locator("button.send").textContent())?.includes("Send"), "back to Send after stop")
-  })
+  }
 
   await check("desktop: rejected submit keeps the draft", async () => {
     await page.getByLabel("Message").fill("this will fail")

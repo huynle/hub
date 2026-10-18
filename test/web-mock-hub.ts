@@ -39,6 +39,8 @@
 // POST …/read (GET /api/reads), …/stop, …/permission, …/form {formID, answer|cancel} (409 gone when not pending); POST …/turn {text, images?} (up to 4 PNG/JPEG/WebP/GIF images;
 // text may be empty with images; the log keeps each image's mime, name and base64 length) answers 202 {mode:"steer"} while the tree runs,
 // else runs the turn (ses_mock: working → streamed reply → idle; text containing "fail" → 409).
+// POST /mock/hold-turns {on} keeps a ses_mock turn working until it is stopped (or the hold is lifted), so a test
+// can steer and stop it without racing the turn's timer.
 import { existsSync, readFileSync, statSync } from "node:fs"
 import path from "node:path"
 import { speechModelList } from "../src/central/speech/models"
@@ -671,13 +673,17 @@ function treeState(id: string): string {
 }
 
 let turnRun = 0
+let holdTurns = false
+/** Ends the held turn's wait (stop, or the hold lifted). */
+let releaseTurn: (() => void) | undefined
 /** A typed turn on ses_mock: working → streamed reply → idle (the POST answers when the turn ends). */
 async function mockTurn(text: string): Promise<Record<string, unknown>> {
   const run = ++turnRun
   const since = Date.now()
   setStatus([{ id: SESSION, title: "Mock session", state: "working", blockers: [], since }])
   addActivity(SESSION, { id: `tool_turn_${run}`, kind: "tool", tool: "bash", summary: "bun test", state: "running" })
-  await sleep(2500)
+  if (holdTurns) await new Promise<void>((resolve) => (releaseTurn = resolve))
+  else await sleep(2500)
   addActivity(SESSION, { id: `tool_turn_${run}`, kind: "tool", tool: "bash", summary: "bun test", state: "done" })
   const reply = `Done: ${text}`
   await streamText("text", SESSION, `msg_turn_${run}`, reply, 60, 6, () => run === turnRun)
@@ -757,6 +763,8 @@ async function consoleRoute(request: Request, url: URL, user: MockUser): Promise
       if (id === SESSION) {
         turnRun++
         setStatus([{ id: SESSION, title: "Mock session", state: "idle", blockers: [] }])
+        releaseTurn?.()
+        releaseTurn = undefined
       }
       return Response.json({ stopped: running ? [id] : [] })
     }
@@ -819,6 +827,14 @@ const server = Bun.serve({
     if (p === "/mock/emit" && m === "POST") {
       emit(await json())
       return Response.json({ ok: true, clients: clients.size })
+    }
+    if (p === "/mock/hold-turns" && m === "POST") {
+      holdTurns = (await json()).on === true
+      if (!holdTurns) {
+        releaseTurn?.()
+        releaseTurn = undefined
+      }
+      return Response.json({ ok: true })
     }
     if (p === "/mock/status" && m === "POST") {
       status = (await json()).sessions
