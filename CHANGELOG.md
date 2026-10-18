@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **GitHub installs**: an install without the built web app (`web/dist`, e.g. `opencode plugin add
+  github:huynle/hub`) no longer starts a local hub that only answers 503: `/hub` → **Start local hub**
+  (and opening the hub, and the automatic start) report that the web app is missing and how to get it
+  (npm package, release binary, or `npm run build:web` in a checkout).
 - **Push security**: `POST /api/push/subscribe` only accepts https endpoints on public hostnames. IP
   literals in loopback, private, link-local, CGNAT and ULA ranges, `localhost`, `*.local` and `*.internal`
   are rejected, and the host is resolved at subscribe time and rejected when it resolves to such an address

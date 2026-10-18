@@ -51,8 +51,9 @@ opencode service restart
 
 Install from npm: the npm package ships the built web app, so the plugin can run a local hub. A GitHub
 install (`opencode plugin add github:huynle/hub`) has no built web app (`web/dist` is not in the
-repository): it works for connecting to a hub that runs elsewhere, but a local hub it starts answers 503
-until you build the app. To run a hub yourself, use the npm package, a [release binary](#running-the-hub)
+repository): it works for connecting to a hub that runs elsewhere, but it does not start a local hub
+(`/hub` → **Start local hub** and the automatic start say the web app is missing; a hub started by hand
+from such an install answers 503 on its pages). To run a hub yourself, use the npm package, a [release binary](#running-the-hub)
 or Docker, or run `npm install && npm run build:web` in a source checkout.
 
 Then, in OpenCode:
