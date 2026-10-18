@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Model overrides**: `PUT /api/sessions/:id/model-prefs` only accepts models (and variants) from the
+  session's catalog; anything else is `400 Unknown model`, and a catalog that cannot be fetched is a 502
+  instead of an accepted selection. Clearing a Voice model override switches the session back to the model
+  it had before the first override (at the next turn boundary if it is running), unless you picked another
+  model meanwhile.
 - **State directory**: the hub no longer crashes with `EPERM` on a fresh volume whose mount root it does
   not own (a Kubernetes local-path PVC with `fsGroup`). When the state directory cannot be restricted to
   0700 but is writable, the hub logs a one-line warning and continues; state files are still written 0600.

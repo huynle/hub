@@ -235,6 +235,8 @@ export class Spoke {
   private readonly conversations = new Map<string, { previous?: string; previousModel?: ModelRef; voiceModel?: ModelRef }>()
   /** Per-session selections supplied by the hub; the hub persists them per user. */
   private readonly modelPrefs = new Map<string, SessionModelPrefs>()
+  /** Per session with a Voice override applied: the model to restore when it is cleared, and the override. */
+  private readonly voiceOverrides = new Map<string, { readonly previous?: ModelRef; readonly applied: ModelRef }>()
   private conversationChain: Promise<unknown> = Promise.resolve()
   private readonly abort = new AbortController()
   private snapshotTimer?: ReturnType<typeof setTimeout>
@@ -821,6 +823,7 @@ export class Spoke {
         }
         if (next.voice || next.worker) this.modelPrefs.set(req.sessionID, next)
         else this.modelPrefs.delete(req.sessionID)
+        if (!next.voice && this.voiceOverrides.has(req.sessionID)) await this.applyVoiceModel(req.sessionID)
         return this.modelPrefsResult(req.sessionID)
       }
       case "timeline": {
@@ -988,12 +991,29 @@ export class Spoke {
   }
 
   /** Applies a saved Voice override at the boundary before the next turn; never changes a running tree. */
+  /**
+   * A cleared override switches back to the model the session had before the first override, unless the
+   * user picked another model meanwhile.
+   */
   private async applyVoiceModel(sessionID: string): Promise<void> {
     const selected = this.modelPrefs.get(sessionID)?.voice
-    if (!selected || this.tracker.active().includes(this.tracker.rootOf(sessionID))) return
-    const target = { providerID: selected.providerID, id: selected.modelID, ...(selected.variant ? { variant: selected.variant } : {}) }
+    const override = this.voiceOverrides.get(sessionID)
+    if ((!selected && !override) || this.tracker.active().includes(this.tracker.rootOf(sessionID))) return
     const current = (await this.host.getSession(sessionID)).model
-    if (!current || !sameModel(current, target)) await this.host.switchModel(sessionID, target)
+    const onOverride = override !== undefined && current !== undefined && sameModel(current, override.applied)
+    if (!selected) {
+      this.voiceOverrides.delete(sessionID)
+      if (onOverride && override.previous) await this.host.switchModel(sessionID, override.previous)
+      return
+    }
+    const target = { providerID: selected.providerID, id: selected.modelID, ...(selected.variant ? { variant: selected.variant } : {}) }
+    if (current && sameModel(current, target)) {
+      if (override) this.voiceOverrides.set(sessionID, { ...override, applied: target })
+      return
+    }
+    const previous = onOverride ? override.previous : current ? plainModelRef(current) : undefined
+    this.voiceOverrides.set(sessionID, { ...(previous ? { previous } : {}), applied: target })
+    await this.host.switchModel(sessionID, target)
   }
 
   /** Enables or disables voice for a session this process reported (mode "session" only). */

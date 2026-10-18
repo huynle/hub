@@ -245,6 +245,37 @@ describe("per-session models", () => {
     // Only the Voice-off session's catalog request reached the spoke; invalid input never does.
     expect(seen).toEqual([{ op: "models", sessionID: "ses_off" }])
   })
+
+  test("PUT model-prefs rejects a model or variant that is not in the session's catalog", async () => {
+    h = harness()
+    const { client } = await machine()
+    const seen = answer(client, (req) => {
+      if (req.op === "models") return { models: [{ providerID: "anthropic", modelID: "claude", name: "Claude", enabled: true, status: "active", variants: ["fast"] }] }
+      if (req.op === "setModelPrefs") return { prefs: {}, defaults: {} }
+      return undefined
+    })
+    const put = (json: unknown) => h.api("/api/sessions/ses_on/model-prefs", { method: "PUT", json })
+    const unknownModel = await put({ voice: { providerID: "anthropic", modelID: "nope" } })
+    expect(unknownModel.status).toBe(400)
+    expect(((await unknownModel.json()) as any).error).toMatch(/Unknown model/)
+    expect((await put({ worker: { providerID: "openai", modelID: "claude" } })).status).toBe(400)
+    expect((await put({ voice: { providerID: "anthropic", modelID: "claude", variant: "slow" } })).status).toBe(400)
+    expect(seen.some((req) => req.op === "setModelPrefs")).toBe(false)
+    expect(h.store.modelPrefs("local", "ses_on")).toEqual({})
+    // A known model (with or without a listed variant) and clearing are accepted.
+    expect((await put({ voice: { providerID: "anthropic", modelID: "claude" }, worker: { providerID: "anthropic", modelID: "claude", variant: "fast" } })).status).toBe(200)
+    expect((await put({ voice: null })).status).toBe(200)
+  })
+
+  test("PUT model-prefs answers 502 when the catalog cannot be fetched, and stores nothing", async () => {
+    h = harness()
+    const { client } = await machine()
+    const seen = answer(client, (req) => (req.op === "models" ? new Error("catalog down") : { prefs: {}, defaults: {} }))
+    const res = await h.api("/api/sessions/ses_on/model-prefs", { method: "PUT", json: { voice: { providerID: "anthropic", modelID: "claude" } } })
+    expect(res.status).toBe(502)
+    expect(seen.some((req) => req.op === "setModelPrefs")).toBe(false)
+    expect(h.store.modelPrefs("local", "ses_on")).toEqual({})
+  })
 })
 
 describe("timeline history and details", () => {
