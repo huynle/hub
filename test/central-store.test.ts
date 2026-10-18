@@ -171,3 +171,55 @@ describe("Store", () => {
     expect(reads[`ses_${READS_LIMIT}`]).toBe(200 + READS_LIMIT)
   })
 })
+
+describe("Store state directory permissions", () => {
+  const eperm = () => Object.assign(new Error("EPERM: operation not permitted, chmod"), { code: "EPERM" })
+
+  test("a chmod EPERM on a writable state dir (fresh k8s volume) is a warning, files stay 0600", () => {
+    const dir = tmp()
+    const warnings: string[] = []
+    const store = Store.open(dir, Date.now, {
+      chmodDir: () => {
+        throw eperm()
+      },
+      warn: (message) => warnings.push(message),
+    })
+    store.addMachine("laptop")
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain(dir)
+    expect(warnings[0]).not.toContain("\n")
+    expect(statSync(path.join(dir, "state.json")).mode & 0o777).toBe(0o600)
+  })
+
+  test("a chmod EACCES on a dir the process cannot write still fails", () => {
+    const dir = tmp()
+    expect(() =>
+      Store.open(dir, Date.now, {
+        chmodDir: () => {
+          throw Object.assign(new Error("EACCES: permission denied, chmod"), { code: "EACCES" })
+        },
+        writable: () => false,
+        warn: () => {},
+      }),
+    ).toThrow(/EACCES/)
+  })
+
+  test("other chmod errors still fail", () => {
+    expect(() =>
+      Store.open(tmp(), Date.now, {
+        chmodDir: () => {
+          throw Object.assign(new Error("EIO: i/o error"), { code: "EIO" })
+        },
+        warn: () => {},
+      }),
+    ).toThrow(/EIO/)
+  })
+
+  test("no warning when chmod succeeds; the dir is 0700", () => {
+    const dir = path.join(tmp(), "state")
+    const warnings: string[] = []
+    Store.open(dir, Date.now, { warn: (m) => warnings.push(m) })
+    expect(warnings).toEqual([])
+    expect(statSync(dir).mode & 0o777).toBe(0o700)
+  })
+})

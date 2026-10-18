@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **State directory**: the hub no longer crashes with `EPERM` on a fresh volume whose mount root it does
+  not own (a Kubernetes local-path PVC with `fsGroup`). When the state directory cannot be restricted to
+  0700 but is writable, the hub logs a one-line warning and continues; state files are still written 0600.
+  An unwritable directory still fails.
 - **Permissions**: fixed "Permission request not found" when allowing or denying from the hub. OpenCode
   keeps pending permissions per location (directory), and the spoke replied through the first plugin
   instance of the process; it now replies through the instance of the location that holds the request.
