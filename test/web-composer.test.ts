@@ -1,7 +1,7 @@
 // Composer state machine (web/src/lib/composer.ts): Send while idle, Steer while the tree runs, Stop while it
 // runs, no double submit before a turn starts, and a rejected submit puts its text back into the draft.
 import { describe, expect, test } from "bun:test"
-import { composerReducer, composerView, confirmDelivery, Drafts, initialComposer, type ComposerState } from "../web/src/lib/composer"
+import { composerReducer, composerView, confirmDelivery, Drafts, initialComposer, turnAnswer, turnOutcomeNote, type ComposerState } from "../web/src/lib/composer"
 
 const run = (state: ComposerState, ...actions: Parameters<typeof composerReducer>[1][]) => actions.reduce(composerReducer, state)
 
@@ -112,5 +112,22 @@ describe("Drafts", () => {
     drafts.set("s", "") // Send cleared it
     expect(drafts.get("s")).toBe("")
     expect(drafts.append("s", "said later")).toBe("said later")
+  })
+})
+
+describe("turn answers", () => {
+  test("202 is a steer, or an accepted turn (respond-async) whose result comes later; 200 is the result", () => {
+    expect(turnAnswer(202, { mode: "steer", inboxID: "in_1" })).toBe("steered")
+    expect(turnAnswer(202, {})).toBe("steered") // older hubs: every 202 was a steer
+    expect(turnAnswer(202, { mode: "turn" })).toBe("accepted")
+    expect(turnAnswer(200, { outcome: "succeeded", reply: "hi" })).toBe("result")
+  })
+
+  test("outcome notes: nothing for success, a timeout note, the failure with its message", () => {
+    expect(turnOutcomeNote({ outcome: "succeeded", reply: "x" })).toBeUndefined()
+    expect(turnOutcomeNote({})).toBeUndefined()
+    expect(turnOutcomeNote({ outcome: "timeout" })).toEqual({ text: "The agent is still working; the reply may be partial.", kind: "sys" })
+    expect(turnOutcomeNote({ outcome: "failed", message: "model error" })).toEqual({ text: "Turn failed: model error", kind: "err" })
+    expect(turnOutcomeNote({ outcome: "interrupted" })).toEqual({ text: "Turn interrupted", kind: "err" })
   })
 })

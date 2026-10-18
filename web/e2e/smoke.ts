@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // Headless smoke test of the built console against the mock hub (test/web-mock-hub.ts), at desktop (1440×900) and
 // phone (390×844) sizes: home loads, a session opens with its timeline, Send → Steer/Stop → Send, image attachments
-// (attach, remove, attach again, send), Dictate → Send (input cleared, also when the turn's connection drops), the right rail and diff viewer render, a Voice-off session is inspectable, rename (table,
+// (attach, remove, attach again, send), Dictate → Send (input cleared, also when the turn's connection drops), a slow turn (202, reply later), the right rail and diff viewer render, a Voice-off session is inspectable, rename (table,
 // sidebar, top bar) and archive (menu, Undo, Archived chip, Needs-you exception, bulk, inactive). Screenshots go to $SMOKE_SHOTS (default: the OS temp
 // dir). Run `npm run build:web && npm run test:e2e`. Chromium: $CHROMIUM_PATH, else Playwright's cache, else PATH.
 import { existsSync, mkdirSync } from "node:fs"
@@ -743,6 +743,32 @@ async function desktop(browser: Browser): Promise<void> {
     } finally {
       await page.unroute("**/api/sessions/*/turn")
       await mock("/mock/reset-transcripts")
+    }
+  })
+
+  await check("desktop: a slow turn is accepted at once (202, no error) and its reply appears when it arrives", async () => {
+    await page.goto(`${BASE}/s/ses_mock`)
+    await page.locator(".msg.assistant").first().waitFor()
+    await mock("/mock/slow-turns", { ms: 6000 })
+    try {
+      const answered = page.waitForResponse((r) => r.request().method() === "POST" && r.url().endsWith("/turn"))
+      await page.getByLabel("Message").fill("a slow one")
+      const sentAt = Date.now()
+      await page.locator("button.send").click()
+      const res = await answered
+      assert(res.status() === 202 && (await res.json()).mode === "turn", `accepted async: ${res.status()}`)
+      assert((await res.request().headerValue("prefer")) === "respond-async", "asks for respond-async")
+      assert(Date.now() - sentAt < 4000, "answered before the turn ended")
+      await page.waitForTimeout(500)
+      assert((await page.getByLabel("Message").inputValue()) === "", "input empty")
+      assert(!(await page.locator(".composer-error").count()), "no error under the input")
+      assert(!(await page.getByText(/Steered the running session/).count()), "an accepted turn is not a steer")
+      await page.locator(".msg.assistant", { hasText: "Done: a slow one" }).waitFor({ timeout: 20_000 })
+      assert(!(await page.locator(".composer-error").count()), "still no error after the reply")
+      assert(!(await page.locator(".note.err").count()), "no failure note")
+      await page.locator("button.send.send").waitFor({ timeout: 15_000 })
+    } finally {
+      await mock("/mock/slow-turns", {})
     }
   })
 

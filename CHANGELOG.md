@@ -26,6 +26,12 @@
   Only when the session never starts is the text put back (as for any refused send). Network-level failures
   of console API calls now read "Can't reach the hub: the connection dropped…" instead of the browser's
   "Failed to fetch".
+- **Typed turns no longer hold a request open for the whole turn**: the console sends `POST
+  /api/sessions/:id/turn` with `Prefer: respond-async`; a turn still running after 1.5 s is answered 202
+  `{mode: "turn"}` and its result (failure notes, a reply that did not stream) arrives as a new SSE `turn`
+  event. Before, the request stayed open until the turn ended, and proxies cut it (Traefik's default
+  `readTimeout` is 60 s), which the console showed as "Failed to fetch". Quick results and refusals (busy,
+  unknown session, spoke errors) answer as before; clients without the header keep the blocking answer.
 - **Console**: table rows, sidebar rows and an open `⋯` menu no longer re-render (and close) when an unrelated
   catalog update arrives; unchanged rows keep their DOM.
 

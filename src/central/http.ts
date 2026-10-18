@@ -45,6 +45,8 @@ export interface CentralOptions {
     readonly helloTimeoutMs?: number
     readonly requestTimeoutMs?: number
     readonly turnGraceMs?: number
+    /** `Prefer: respond-async` turns: how long the hub waits for a quick result before answering 202. */
+    readonly turnAcceptMs?: number
     readonly heartbeatMs?: number
     readonly staleMs?: number
   }
@@ -107,6 +109,12 @@ const NO_STORE = { "cache-control": "no-store" }
 export const COOKIE = "voice_device"
 const COOKIE_MAX_AGE = 400 * 24 * 60 * 60
 const SSE_HEARTBEAT_MS = 20_000
+/**
+ * `POST …/turn` with `Prefer: respond-async`: a turn that has not settled after this long is answered 202 and
+ * finishes in the background (result as an SSE `turn` event). Long enough for the quick refusals (busy, unknown
+ * session, spoke error), short enough that no proxy cuts the request (Traefik's default readTimeout is 60 s).
+ */
+export const TURN_ACCEPT_MS = 1500
 const NO_OWNER = "No OpenCode process for this session is connected"
 const NOT_EXPOSED = "Voice is not enabled for this session"
 /** A permission or question that is not pending any more: someone answered it elsewhere, or it expired. */
@@ -846,12 +854,33 @@ export function startCentral(options: CentralOptions): Central {
     })
     const release = registry.beginTurn(sessionID, () => cancel())
     server.timeout(request, 0)
+    const voiceStyle = registry.exposed(sessionID) === true
+    let result: Promise<TurnResult>
     try {
-      const voiceStyle = registry.exposed(sessionID) === true
-      return Response.json(await Promise.race([spokes.request(connID, { op: "turn", sessionID, text, voiceStyle, ...attached }), stopped]))
-    } finally {
+      result = Promise.race([spokes.request(connID, { op: "turn", sessionID, text, voiceStyle, ...attached }), stopped])
+    } catch (cause) {
       release()
+      throw cause
     }
+    // The lock is held until the turn ends, whether this request waits for it or not.
+    void result.then(release, release)
+    if (!/(^|[\s,])respond-async\b/i.test(request.headers.get("prefer") ?? "")) return Response.json(await result)
+    // Asynchronous: answer quick results (and refusals) as usual; a turn still running is accepted (202) and its
+    // result goes to the owner's consoles as an SSE `turn` event (the reply itself streams as deltas meanwhile).
+    const early = await Promise.race([result.then((value) => ({ value }), (cause: unknown) => ({ cause })), sleep(options.timing?.turnAcceptMs ?? TURN_ACCEPT_MS)])
+    if (early) {
+      if ("cause" in early) throw early.cause
+      return Response.json(early.value)
+    }
+    const tenant = registry.sessionTenant(sessionID)
+    void result.then(
+      (value) => broadcast({ type: "turn", sessionID, ...value }, { tenant }),
+      (cause: unknown) => {
+        const message = cause instanceof Error ? cause.message : String(cause)
+        broadcast({ type: "turn", sessionID, ...(cause instanceof RequestTimeoutError ? { outcome: "timeout" } : { outcome: "failed", message }), reply: "" }, { tenant })
+      },
+    )
+    return Response.json({ mode: "turn" }, { status: 202, headers: { "preference-applied": "respond-async" } })
   }
 
   /** GET …/timeline/messages/:message/files/:index: one image of a user message, as bytes. */
@@ -1217,6 +1246,8 @@ function param(raw: string): string {
     throw new HttpError(400, "Bad path")
   }
 }
+
+const sleep = (ms: number) => new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), ms))
 
 async function body(request: Request): Promise<Record<string, unknown>> {
   const value = (await request.json()) as unknown

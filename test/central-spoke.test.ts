@@ -253,6 +253,65 @@ describe("turns", () => {
     expect(dropped.status).toBe(502)
   })
 
+  describe("Prefer: respond-async", () => {
+    const async = { "prefer": "respond-async" }
+
+    test("a slow turn answers 202 at once; the lock holds until it ends; its result comes over SSE", async () => {
+      h = harness({ timing: { turnAcceptMs: 50 } })
+      const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
+      let finish: (() => void) | undefined
+      client.ws.addEventListener("message", (event) => {
+        const frame = JSON.parse(String(event.data))
+        if (frame.t === "req" && frame.req.op === "turn") finish = () => client.send({ t: "res", id: frame.id, ok: true, result: { outcome: "failed", message: "model error", reply: "half" } })
+      })
+      const events = sse(await h.api("/api/events"))
+      const started = Date.now()
+      const res = await h.api("/api/sessions/ses_1/turn", { method: "POST", json: { text: "long task" }, headers: async })
+      expect(res.status).toBe(202)
+      expect(res.headers.get("preference-applied")).toBe("respond-async")
+      expect(await res.json()).toEqual({ mode: "turn" })
+      expect(Date.now() - started).toBeLessThan(2000)
+      // Still the session's turn: a second one is refused until it ends.
+      expect((await h.api("/api/sessions/ses_1/turn", { method: "POST", json: { text: "two" }, headers: async })).status).toBe(409)
+      finish!()
+      expect(await events.next((m) => m.type === "turn")).toEqual({ type: "turn", sessionID: "ses_1", outcome: "failed", message: "model error", reply: "half" })
+      await waitFor(() => h.registry.catalog()[0]!.processes[0]!.sessions[0]!.busy === false)
+      await events.cancel()
+    })
+
+    test("a turn that settles within the accept window answers as before (result or error)", async () => {
+      h = harness({ timing: { turnAcceptMs: 2000 } })
+      const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
+      client.ws.addEventListener("message", (event) => {
+        const frame = JSON.parse(String(event.data))
+        if (frame.t !== "req") return
+        if (frame.req.text === "fail") client.send({ t: "res", id: frame.id, ok: false, error: "boom" })
+        else client.send({ t: "res", id: frame.id, ok: true, result: { outcome: "succeeded", reply: "quick" } })
+      })
+      const quick = await h.api("/api/sessions/ses_1/turn", { method: "POST", json: { text: "hi" }, headers: async })
+      expect(quick.status).toBe(200)
+      expect(await quick.json()).toEqual({ outcome: "succeeded", reply: "quick" })
+      const failed = await h.api("/api/sessions/ses_1/turn", { method: "POST", json: { text: "fail" }, headers: async })
+      expect(failed.status).toBe(502)
+    })
+
+    test("a background turn that errors (spoke gone) reports failed over SSE and releases the lock", async () => {
+      h = harness({ timing: { turnAcceptMs: 50 } })
+      const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
+      let drop: (() => void) | undefined
+      client.ws.addEventListener("message", (event) => {
+        const frame = JSON.parse(String(event.data))
+        if (frame.t === "req" && frame.req.op === "turn") drop = () => client.send({ t: "res", id: frame.id, ok: false, error: "boom" })
+      })
+      const events = sse(await h.api("/api/events"))
+      expect((await h.api("/api/sessions/ses_1/turn", { method: "POST", json: { text: "x" }, headers: async })).status).toBe(202)
+      drop!()
+      expect(await events.next((m) => m.type === "turn")).toMatchObject({ type: "turn", sessionID: "ses_1", outcome: "failed", message: expect.stringContaining("boom") })
+      await waitFor(() => h.registry.catalog()[0]!.processes[0]!.sessions[0]!.busy === false)
+      await events.cancel()
+    })
+  })
+
   test("context is fetched from the owner", async () => {
     h = harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
