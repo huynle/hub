@@ -109,6 +109,32 @@ describe("push API", () => {
     expect(((await (await h.api("/api/push/prefs")).json()) as any).quietHours).toBeNull()
   })
 
+  test("subscribe rejects endpoints on private or local hosts (SSRF), checked by resolving the host", async () => {
+    const lookups: string[] = []
+    h = harness({
+      notifier: undefined,
+      pushSender: async () => {},
+      resolveHost: async (host) => {
+        lookups.push(host)
+        if (host === "fcm.googleapis.com") return ["142.250.80.10"]
+        if (host === "evil.example.com") return ["127.0.0.1"]
+        throw Object.assign(new Error(`getaddrinfo ENOTFOUND ${host}`), { code: "ENOTFOUND" })
+      },
+    })
+    const subscribe = (endpoint: string) =>
+      h.api("/api/push/subscribe", { method: "POST", json: { subscription: { ...subscription(), endpoint } } })
+    for (const endpoint of ["https://127.0.0.1:4097/api/x", "https://[::1]/x", "https://10.0.0.1/x", "https://localhost/x", "https://hub.internal/x"]) {
+      const res = await subscribe(endpoint)
+      expect({ endpoint, status: res.status }).toEqual({ endpoint, status: 400 })
+    }
+    expect(lookups).toEqual([])
+    expect((await subscribe("https://evil.example.com/x")).status).toBe(400)
+    expect((await subscribe("https://gone.example.com/x")).status).toBe(400)
+    expect(h.store.pushSubscriptions()).toEqual([])
+    expect((await subscribe("https://fcm.googleapis.com/fcm/send/abc")).status).toBe(200)
+    expect(h.store.pushSubscriptions().map((s) => s.endpoint)).toEqual(["https://fcm.googleapis.com/fcm/send/abc"])
+  })
+
   test("GET /api/push/prefs?endpoint= says whether the hub holds that subscription for this device", async () => {
     pushHarness()
     const ep = encodeURIComponent(subscription().endpoint)

@@ -196,7 +196,7 @@ conversation mode and utterances (403 `not_exposed` for sessions not shared with
 | `POST /api/sessions/:id/read` · `GET /api/reads` | per-user read marks, synced to your other devices |
 | `GET /api/push/prefs?endpoint=` | `{prefs, quietHours, muted, subscriptions, subscribed?}`: this device's toggles (`handoff, question, permission, finished, failed, say`) and quiet hours, the user's muted sessions, how many subscriptions the hub holds for this device, and whether it holds `endpoint` |
 | `PUT /api/push/prefs {toggles…, quietHours?}` | boolean toggles (a 0.5.0 `blocked` sets question and permission); `quietHours` `{start: "HH:MM", end: "HH:MM", timeZone}` or `null` (400 when invalid) |
-| `POST /api/push/subscribe {subscription, prefs?, oldEndpoint?}` · `POST /api/push/unsubscribe {endpoint}` | this device's subscriptions; `oldEndpoint` is dropped (rotated subscription) |
+| `POST /api/push/subscribe {subscription, prefs?, oldEndpoint?}` · `POST /api/push/unsubscribe {endpoint}` | this device's subscriptions; `oldEndpoint` is dropped (rotated subscription). The endpoint must be https on a public hostname that resolves only to public addresses (no loopback, private, link-local, CGNAT or ULA hosts, no `localhost`/`*.local`/`*.internal`), else 400 |
 | `POST /api/push/test` | a test notification to the caller's device only: `{sent, failed: [{host, status?}], subscriptions}`; 429 with `retry-after` within 10 s of the last one |
 | `PUT /api/push/mute {sessionID, muted}` | mutes or unmutes a session's notifications for the user: `{muted}` |
 

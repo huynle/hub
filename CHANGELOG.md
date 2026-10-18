@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Push security**: `POST /api/push/subscribe` only accepts https endpoints on public hostnames. IP
+  literals in loopback, private, link-local, CGNAT and ULA ranges, `localhost`, `*.local` and `*.internal`
+  are rejected, and the host is resolved at subscribe time and rejected when it resolves to such an address
+  or not at all (400). Push services (FCM, Mozilla, Apple, Windows) keep working.
 - **Model overrides**: `PUT /api/sessions/:id/model-prefs` only accepts models (and variants) from the
   session's catalog; anything else is `400 Unknown model`, and a catalog that cannot be fetched is a 502
   instead of an accepted selection. Clearing a Voice model override switches the session back to the model
