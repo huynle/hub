@@ -2,7 +2,7 @@
 // Headless smoke test of the built console against the mock hub (test/web-mock-hub.ts), at desktop (1440×900) and
 // phone (390×844) sizes: home loads, a session opens with its timeline, Send → Steer/Stop → Send, image attachments
 // (attach, remove, attach again, send), Dictate → Send (input cleared, also when the turn's connection drops), a slow turn (202, reply later), the right rail and diff viewer render, a Voice-off session is inspectable, rename (table,
-// sidebar, top bar) and archive (menu, Undo, Archived chip, Needs-you exception, bulk, inactive). Screenshots go to $SMOKE_SHOTS (default: the OS temp
+// sidebar, top bar), archive (menu, Undo, Archived chip, Needs-you exception, bulk, inactive) and resizable sidebar/rail. Screenshots go to $SMOKE_SHOTS (default: the OS temp
 // dir). Run `npm run build:web && npm run test:e2e`. Chromium: $CHROMIUM_PATH, else Playwright's cache, else PATH.
 import { existsSync, mkdirSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -881,6 +881,77 @@ async function desktop(browser: Browser): Promise<void> {
     await shot(page, "desktop-speech-picker")
   })
 
+  await check("desktop: sidebar and rail resize (drag, keys, double-click, persisted, collapse, window resize)", async () => {
+    const width = (sel: string) => page.locator(sel).first().evaluate((el) => el.getBoundingClientRect().width)
+    const drag = async (sel: string, dx: number) => {
+      const box = (await page.locator(sel).boundingBox())!
+      const x = box.x + box.width / 2
+      const y = box.y + box.height / 2
+      await page.mouse.move(x, y)
+      await page.mouse.down()
+      await page.mouse.move(x + dx / 2, y, { steps: 4 })
+      await page.mouse.move(x + dx, y, { steps: 4 })
+      await page.mouse.up()
+    }
+    await page.goto(`${BASE}/s/ses_mock`)
+    await page.locator(".msg.assistant").first().waitFor()
+    if (!(await page.locator(".rail").count())) await page.getByRole("button", { name: "Show details" }).click()
+    const side = page.getByRole("separator", { name: "Resize sidebar" })
+    const rail = page.getByRole("separator", { name: "Resize details" })
+    await rail.waitFor()
+    assert((await side.getAttribute("aria-orientation")) === "vertical", "vertical separator")
+    assert((await width(".sidebar")) === 235 && (await width(".rail")) === 260, `defaults: ${await width(".sidebar")} / ${await width(".rail")}`)
+    // Drag: the sidebar's handle right, the rail's left.
+    await drag('.panel-handle[data-panel="side"]', 100)
+    assert((await width(".sidebar")) === 335, `sidebar dragged wider: ${await width(".sidebar")}`)
+    await drag('.panel-handle[data-panel="rail"]', -120)
+    assert((await width(".rail")) === 380, `rail dragged wider: ${await width(".rail")}`)
+    assert((await side.getAttribute("aria-valuenow")) === "335", "aria-valuenow follows")
+    assert(!(await page.evaluate(() => document.documentElement.classList.contains("resizing"))), "selection re-enabled after the drag")
+    // Keyboard: 16px, Shift 64px, Home/End.
+    await side.focus()
+    await page.keyboard.press("ArrowRight")
+    assert((await width(".sidebar")) === 351, `ArrowRight +16: ${await width(".sidebar")}`)
+    await page.keyboard.press("Shift+ArrowLeft")
+    assert((await width(".sidebar")) === 287, `Shift+ArrowLeft −64: ${await width(".sidebar")}`)
+    await page.keyboard.press("Home")
+    assert((await width(".sidebar")) === 180, `Home → min: ${await width(".sidebar")}`)
+    await page.keyboard.press("End")
+    assert((await width(".sidebar")) === 480 && (await side.getAttribute("aria-valuemax")) === "480", `End → max: ${await width(".sidebar")}`)
+    await rail.focus()
+    await page.keyboard.press("ArrowLeft")
+    assert((await width(".rail")) === 396, `rail ArrowLeft +16: ${await width(".rail")}`)
+    // Double-click resets to the default.
+    await side.dblclick()
+    assert((await width(".sidebar")) === 235, `double-click reset: ${await width(".sidebar")}`)
+    await drag('.panel-handle[data-panel="side"]', 65)
+    await shot(page, "desktop-resized")
+    // Persisted on this device.
+    await page.reload()
+    await page.locator(".msg.assistant").first().waitFor()
+    await rail.waitFor()
+    assert((await width(".sidebar")) === 300 && (await width(".rail")) === 396, `after reload: ${await width(".sidebar")} / ${await width(".rail")}`)
+    // Long titles still end in an ellipsis, with the full title as a tooltip.
+    const title = page.locator(".sidebar .side-row-link").first()
+    assert((await title.getAttribute("title"))?.startsWith((await title.locator(".side-title").textContent())!.trim()), "row tooltip has the title")
+    assert((await title.locator(".side-title").evaluate((el) => getComputedStyle(el).textOverflow)) === "ellipsis", "titles truncate with an ellipsis")
+    // A narrow window keeps the center column ≥ 420px; widening it restores the remembered widths.
+    await page.setViewportSize({ width: 1000, height: 900 })
+    await page.waitForFunction(() => document.querySelector(".rail")!.getBoundingClientRect().width === 280)
+    assert((await width(".session-main")) >= 420, `center column: ${await width(".session-main")}`)
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.waitForFunction(() => document.querySelector(".rail")!.getBoundingClientRect().width === 396)
+    // Dragging the sidebar well past its minimum collapses it; expanding restores the last width.
+    await drag('.panel-handle[data-panel="side"]', -200)
+    await page.locator(".sidebar").waitFor({ state: "detached" })
+    await page.getByRole("button", { name: "Show sidebar (⌘B)" }).click()
+    await page.locator(".sidebar").waitFor()
+    assert((await width(".sidebar")) === 300, `restored width: ${await width(".sidebar")}`)
+    await side.dblclick()
+    await rail.dblclick()
+    assert((await width(".sidebar")) === 235 && (await width(".rail")) === 260, "back to defaults")
+  })
+
   await check("desktop: ⌘B collapses the sidebar", async () => {
     await page.goto(`${BASE}/`)
     await page.locator(".sidebar").waitFor()
@@ -1005,6 +1076,8 @@ async function tapToStart(browser: Browser): Promise<void> {
 
 async function phone(browser: Browser): Promise<void> {
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 })
+  // Widths remembered from a desktop session must not leak into the phone layout.
+  await context.addInitScript(() => localStorage.setItem("hub.panels", JSON.stringify({ side: 480, rail: 640 })))
   const page = await context.newPage()
   const errors: string[] = []
   page.on("pageerror", (e) => errors.push(e.message))
@@ -1021,6 +1094,10 @@ async function phone(browser: Browser): Promise<void> {
     await shot(page, "phone-home")
     await page.getByRole("button", { name: "Open sidebar" }).click()
     await page.locator(".sidebar").waitFor()
+    // Stored desktop widths do not apply: the drawer keeps its size and has no resize handle.
+    assert((await page.locator(".panel-handle").count()) === 0, "no resize handles on phone")
+    const drawer = await page.locator(".sidebar").evaluate((el) => el.getBoundingClientRect().width)
+    assert(drawer === Math.min(390 * 0.86, 320), `drawer width unaffected: ${drawer}`)
     await shot(page, "phone-drawer")
     await page.locator(".sidebar").getByRole("link", { name: /Mock session/ }).first().click()
     await page.waitForURL(/\/s\/ses_mock$/)
@@ -1036,6 +1113,7 @@ async function phone(browser: Browser): Promise<void> {
     await rail.getByText("31%").waitFor()
     const box = await rail.boundingBox()
     assert(box && box.y > 100 && box.width >= 380, `rail is a bottom sheet (${JSON.stringify(box)})`)
+    assert((await page.locator(".panel-handle").count()) === 0, "no rail resize handle on phone")
     await shot(page, "phone-rail-sheet")
     await page.getByRole("button", { name: "Close details" }).click()
   })

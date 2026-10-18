@@ -3,7 +3,8 @@ import { Match, Show, Switch, createEffect, createSignal, on, onCleanup, onMount
 import { Approve, Pair } from "./Entry"
 import { Home } from "./Home"
 import { ensureMe, hub, loadSpeechReady, me, startEvents } from "./hub"
-import { drawerOpen, isPhone, setDrawerOpen, sidebarCollapsed, toggleSidebar } from "./layout"
+import { drawerOpen, isPhone, setDrawerOpen, shownWidths, sidebarCollapsed, toggleSidebar } from "./layout"
+import { PanelHandle } from "./PanelHandle"
 import { NewSession } from "./NewSession"
 import { syncPush } from "./push"
 import { navigate, route } from "./router"
@@ -57,6 +58,13 @@ export function App() {
     document.addEventListener("keydown", onKey)
     onCleanup(() => document.removeEventListener("keydown", onKey))
   })
+  // Panel widths (desktop): CSS variables on the root, so a drag only restyles the two panels.
+  createEffect(() => {
+    const w = shownWidths()
+    const root = document.documentElement.style
+    root.setProperty("--side-w", `${w.side}px`)
+    root.setProperty("--rail-w", `${w.rail}px`)
+  })
   // One-time sign-in links land on #speech when speech still needs setting up.
   createEffect(() => {
     if (ready() && location.hash === "#speech" && route().name !== "settings") navigate("/settings#speech", { replace: true })
@@ -87,6 +95,9 @@ export function App() {
               </Show>
               <Show when={!sidebarCollapsed() || isPhone()}>
                 <Sidebar phone={isPhone()} onClose={() => setDrawerOpen(false)} onCollapse={toggleSidebar} />
+                <Show when={!isPhone()}>
+                  <PanelHandle panel="side" label="Resize sidebar" />
+                </Show>
               </Show>
             </Show>
             <main class="main">

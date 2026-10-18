@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Resizable sidebar and Details rail** (desktop): drag the thin handle on the sidebar's right edge or the
+  rail's left edge (it lights up on hover and while dragging). Sidebar 180–480 px (default 235), rail 220–640 px
+  (default 260); both give way so the transcript column keeps at least 420 px, and are re-fitted when the window
+  resizes. The handles are focusable separators: Arrow keys resize by 16 px (Shift: 64 px), Home/End jump to the
+  minimum/maximum, a double-click resets the default. Dragging the sidebar well past its minimum collapses it (as
+  ⌘B does) and expanding it restores the last width. Widths are remembered per device (`hub.panels` in local
+  storage); phones keep the drawer and bottom sheet. Long session titles in the sidebar still end in an ellipsis,
+  with the full title as a tooltip.
+
 - **Rename sessions**: **Rename…** in a session's `⋯` menu (table, sidebar, phone list, session title menu), or
   a click on the session title in the top bar, edits the title in place (Enter saves, Escape cancels). The title
   is set in OpenCode itself (`session.update`), so terminals and other consoles see it; the console shows it at
