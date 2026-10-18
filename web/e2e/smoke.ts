@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // Headless smoke test of the built console against the mock hub (test/web-mock-hub.ts), at desktop (1440×900) and
 // phone (390×844) sizes: home loads, a session opens with its timeline, Send → Steer/Stop → Send, image attachments
-// (attach, remove, attach again, send), the right rail and diff viewer render, a Voice-off session is inspectable, rename (table,
+// (attach, remove, attach again, send), Dictate → Send (input cleared, also when the turn's connection drops), the right rail and diff viewer render, a Voice-off session is inspectable, rename (table,
 // sidebar, top bar) and archive (menu, Undo, Archived chip, Needs-you exception, bulk, inactive). Screenshots go to $SMOKE_SHOTS (default: the OS temp
 // dir). Run `npm run build:web && npm run test:e2e`. Chromium: $CHROMIUM_PATH, else Playwright's cache, else PATH.
 import { existsSync, mkdirSync } from "node:fs"
@@ -699,6 +699,51 @@ async function desktop(browser: Browser): Promise<void> {
     await page.getByLabel("Message").fill("")
     await go("/s/ses_10")
     await page.getByLabel("Message").fill("")
+  })
+
+  await check("desktop: Dictate → Send clears the input and it stays empty, also when the turn's connection drops", async () => {
+    const box = () => page.getByLabel("Message").inputValue()
+    const dictateText = async (text: string) => {
+      await mock("/mock/transcripts", { texts: [text] })
+      await page.getByRole("button", { name: "Dictate" }).click()
+      await page.getByRole("button", { name: "Stop dictation" }).waitFor()
+      await page.waitForTimeout(600)
+      await page.getByRole("button", { name: "Stop dictation" }).click()
+      await page.waitForFunction((t) => (document.querySelector('textarea[aria-label="Message"]') as HTMLTextAreaElement | null)?.value === t, text)
+    }
+    const idle = () => page.locator("button.send.send").waitFor({ timeout: 15_000 })
+    await page.goto(`${BASE}/s/ses_mock`)
+    await page.locator(".msg.assistant").first().waitFor()
+    await page.getByLabel("Message").fill("")
+    await dictateText("dictated then sent")
+    await page.locator("button.send").click()
+    await page.waitForTimeout(400)
+    assert((await box()) === "", `input cleared after send: ${JSON.stringify(await box())}`)
+    await page.locator(".msg.assistant", { hasText: "Done: dictated then sent" }).waitFor({ timeout: 15_000 })
+    assert((await box()) === "", "input still empty after the reply")
+    assert(!(await page.locator(".composer-error").count()), "no error after a normal send")
+    await idle()
+    // A proxy cuts the long request after the hub took the turn: not a failure, nothing comes back.
+    await page.route("**/api/sessions/*/turn", async (route) => {
+      // The request reaches the hub (which starts the turn); the browser's side is then cut.
+      void route.fetch().catch(() => undefined)
+      await Bun.sleep(300)
+      await route.abort("failed")
+    })
+    try {
+      await dictateText("dictated, connection dropped")
+      await page.locator("button.send").click()
+      await page.getByText(/Lost the connection to the hub after sending/).waitFor()
+      assert((await box()) === "", `input stays empty after a dropped connection: ${JSON.stringify(await box())}`)
+      assert(!(await page.locator(".composer-error").count()), "no error under the input")
+      assert(!(await page.getByText(/Failed to fetch/).count()), "never the raw 'Failed to fetch'")
+      await page.locator(".msg.assistant", { hasText: "Done: dictated, connection dropped" }).waitFor({ timeout: 15_000 })
+      assert((await box()) === "", "input still empty after the reply")
+      await idle()
+    } finally {
+      await page.unroute("**/api/sessions/*/turn")
+      await mock("/mock/reset-transcripts")
+    }
   })
 
   await check("desktop: mic picker lists microphones with a level meter", async () => {

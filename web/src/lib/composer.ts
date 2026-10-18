@@ -104,6 +104,20 @@ export function composerView(state: ComposerState, { running, offline }: { runni
   }
 }
 
+/**
+ * After a Send whose connection dropped (no HTTP answer): did the hub take the turn anyway? It did when the
+ * session is (or starts) running within `timeoutMs`; the turn then shows up in the transcript and the sent text
+ * must not come back into the draft. False means it never started: the submit is treated as rejected.
+ */
+export async function confirmDelivery(isRunning: () => boolean, { timeoutMs = 4000, pollMs = 100 }: { timeoutMs?: number; pollMs?: number } = {}): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (isRunning()) return true
+    if (Date.now() >= deadline) return false
+    await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, Math.max(0, deadline - Date.now()))))
+  }
+}
+
 /** Unsent drafts per session, kept while the console is open (switching sessions keeps each one's text). */
 export class Drafts {
   private readonly drafts = new Map<string, string>()

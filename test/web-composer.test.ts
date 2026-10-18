@@ -1,7 +1,7 @@
 // Composer state machine (web/src/lib/composer.ts): Send while idle, Steer while the tree runs, Stop while it
 // runs, no double submit before a turn starts, and a rejected submit puts its text back into the draft.
 import { describe, expect, test } from "bun:test"
-import { composerReducer, composerView, initialComposer, type ComposerState } from "../web/src/lib/composer"
+import { composerReducer, composerView, confirmDelivery, Drafts, initialComposer, type ComposerState } from "../web/src/lib/composer"
 
 const run = (state: ComposerState, ...actions: Parameters<typeof composerReducer>[1][]) => actions.reduce(composerReducer, state)
 
@@ -90,5 +90,27 @@ describe("image attachments", () => {
     const failed = run(four, { type: "attachError", message: "Attach at most 4 images" })
     expect(failed.error).toBe("Attach at most 4 images")
     expect(run(failed, { type: "detach", id: "a" }).error).toBeUndefined()
+  })
+})
+
+describe("a sent turn whose connection drops", () => {
+  test("confirmDelivery: true as soon as the session runs, false when it never does", async () => {
+    let running = false
+    setTimeout(() => (running = true), 30)
+    const started = Date.now()
+    expect(await confirmDelivery(() => running, { timeoutMs: 1000, pollMs: 5 })).toBe(true)
+    expect(Date.now() - started).toBeLessThan(500)
+    expect(await confirmDelivery(() => false, { timeoutMs: 40, pollMs: 5 })).toBe(false)
+    expect(await confirmDelivery(() => true, { timeoutMs: 0 })).toBe(true)
+  })
+})
+
+describe("Drafts", () => {
+  test("a dictation landing after the draft was sent adds only its own text", () => {
+    const drafts = new Drafts()
+    drafts.append("s", "dictated and sent")
+    drafts.set("s", "") // Send cleared it
+    expect(drafts.get("s")).toBe("")
+    expect(drafts.append("s", "said later")).toBe("said later")
   })
 })

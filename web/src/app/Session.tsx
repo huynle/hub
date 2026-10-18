@@ -5,14 +5,14 @@ import { blockersOf } from "../core/browser-core"
 import { reconcileSay, statusNotes, type StatusLike } from "../core/conversation-core"
 import { speechSetup, type StatusEntry } from "../core/feedback-core"
 import { Timeline } from "../core/timeline-core"
-import { composerReducer, composerView, initialComposer, type ComposerAction } from "../lib/composer"
+import { composerReducer, composerView, confirmDelivery, initialComposer, type ComposerAction } from "../lib/composer"
 import { subtree, treeRunning } from "../lib/store"
 import { transcriptBlocks, type Block } from "../lib/transcript"
 import { createStore } from "solid-js/store"
 import { unlockAudio } from "../voice/audio"
 import { sessionMenu, setRenaming } from "./actions"
 import { RenameTitle } from "./Rename"
-import { api, errorText, getJSON, HttpError, sessionPath } from "./api"
+import { api, errorText, getJSON, HttpError, NetworkError, sessionPath } from "./api"
 import { prepareImage } from "./attach"
 import { takeFirstTurn } from "./first-turn"
 import { Composer, VoiceBar } from "./Composer"
@@ -270,6 +270,8 @@ export function SessionView(props: { id: string }) {
     }
     const sub = ++submitSeq
     const key = `local:${sub}`
+    // A Send to a running tree is a steer; only an idle turn can be confirmed by the tree starting to run.
+    const wasRunning = running()
     const sentAt = Date.now()
     batch(() => {
       act({ type: "submit", id: sub })
@@ -294,6 +296,14 @@ export function SessionView(props: { id: string }) {
         bump()
       }
     } catch (e) {
+      // The connection dropped without an answer (e.g. a proxy cutting the long request): when the session runs,
+      // the hub took the turn; its reply streams into the transcript, so the sent text stays out of the draft.
+      if (e instanceof NetworkError && !wasRunning && (await confirmDelivery(running))) {
+        act({ type: "accepted", id: sub })
+        setTicks((t) => ({ ...t, [key]: "sent" }))
+        note("Lost the connection to the hub after sending; the session is working on your message and its reply will appear here.", "sys")
+        return
+      }
       const message = e instanceof HttpError && e.status === 504 ? "OpenCode did not answer in time. The session may still be working." : errorText(e)
       batch(() => {
         act({ type: "rejected", id: sub, message })

@@ -19,6 +19,13 @@
   no archive API yet, so archiving is the hub's own (sessions archived in OpenCode itself are still never
   listed). Sessions hidden before are archived now: the stored list is the same `hiddenSessions`, which now
   holds up to 5000 sessions (`PUT /api/prefs/view`; other lists stay at 500), the oldest archives making room.
+- **Composer**: a sent message (typed or dictated) no longer comes back into the input with a raw "Failed to
+  fetch" under it when the connection of the turn's request drops after the hub took the turn (e.g. a proxy
+  cutting the long request). If the session is running, the send counts as delivered: the input and the
+  session's draft stay empty, a note says the connection was lost and the reply streams into the transcript.
+  Only when the session never starts is the text put back (as for any refused send). Network-level failures
+  of console API calls now read "Can't reach the hub: the connection dropped…" instead of the browser's
+  "Failed to fetch".
 - **Console**: table rows, sidebar rows and an open `⋯` menu no longer re-render (and close) when an unrelated
   catalog update arrives; unchanged rows keep their DOM.
 
