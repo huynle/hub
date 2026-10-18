@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 // Headless smoke test of the built console against the mock hub (test/web-mock-hub.ts), at desktop (1440×900) and
 // phone (390×844) sizes: home loads, a session opens with its timeline, Send → Steer/Stop → Send, image attachments
-// (attach, remove, attach again, send), the right rail and diff viewer render, and a Voice-off session is inspectable. Screenshots go to $SMOKE_SHOTS (default: the OS temp
+// (attach, remove, attach again, send), the right rail and diff viewer render, a Voice-off session is inspectable, rename (table,
+// sidebar, top bar) and archive (menu, Undo, Archived chip, Needs-you exception, bulk, inactive). Screenshots go to $SMOKE_SHOTS (default: the OS temp
 // dir). Run `npm run build:web && npm run test:e2e`. Chromium: $CHROMIUM_PATH, else Playwright's cache, else PATH.
 import { existsSync, mkdirSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -16,6 +17,8 @@ const BASE = `http://127.0.0.1:${PORT}`
 
 let failures = 0
 const results: string[] = []
+/** The page under test; a failed check leaves a screenshot of it (failed-<n>.png). */
+let current: Page | undefined
 async function check(name: string, run: () => Promise<void>): Promise<void> {
   try {
     await run()
@@ -23,6 +26,7 @@ async function check(name: string, run: () => Promise<void>): Promise<void> {
   } catch (e) {
     failures++
     results.push(`✗ ${name}: ${(e as Error).message.split("\n")[0]}`)
+    await current?.screenshot({ path: path.join(SHOTS, `failed-${failures}.png`) }).catch(() => undefined)
   }
 }
 function assert(ok: unknown, message: string): asserts ok {
@@ -34,6 +38,7 @@ const mock = (route: string, body: unknown = {}) => fetch(`${BASE}${route}`, { m
 async function desktop(browser: Browser): Promise<void> {
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, permissions: ["microphone"] })
   const page = await context.newPage()
+  current = page
   const errors: string[] = []
   page.on("pageerror", (e) => errors.push(e.message))
 
@@ -115,8 +120,8 @@ async function desktop(browser: Browser): Promise<void> {
   await check("desktop: rename from the session top bar (title click and the title menu)", async () => {
     await page.goto(`${BASE}/s/ses_10`)
     const title = page.locator(".topbar .title")
-    await title.waitFor()
-    const current = (await title.textContent())!.trim()
+    const current = "PWA icons"
+    await title.getByRole("button", { name: current }).waitFor()
     await title.getByRole("button").click()
     const field = page.locator(".topbar").getByRole("textbox", { name: "Session title" })
     await field.waitFor()
@@ -134,7 +139,115 @@ async function desktop(browser: Browser): Promise<void> {
     await title.getByRole("button").click()
     await field.fill(current)
     await field.press("Enter")
+    await page
+      .locator(".topbar .title")
+      .getByText(current, { exact: true })
+      .waitFor({ timeout: 5000 })
+      .catch(async () => {
+        throw new Error(`title not restored; renames sent: ${JSON.stringify((await renames()).map((e) => e.body?.title))}`)
+      })
+    // Each rename reached the hub, in order, and the hub ends with the restored title (later checks use it). A
+    // catalog sent before the hub applied a rename must not flip the title back meanwhile.
+    const sent = () => renames().then((list) => list.filter((e) => e.path.includes("/ses_10/")).map((e) => e.body?.title))
+    let stored = ""
+    for (let i = 0; i < 50 && stored !== current; i++) {
+      stored = ((await (await fetch(`${BASE}/api/sessions/ses_10`)).json()) as { title: string }).title
+      if (stored !== current) await Bun.sleep(100)
+    }
+    assert(JSON.stringify(await sent()) === JSON.stringify(["Top bar title", "Top bar title, again", current]), `renames sent: ${JSON.stringify(await sent())}`)
+    assert(stored === current, `hub title restored: ${stored}`)
     await page.locator(".topbar .title").getByText(current, { exact: true }).waitFor()
+  })
+
+  const prefPuts = async () => (await apiLog()).filter((e) => e.method === "PUT" && e.path === "/api/prefs/view")
+  const tableRow = (title: string) => page.locator(".sessions-table tbody tr", { has: page.getByRole("link", { name: title, exact: true }) })
+  const chip = (name: string) => page.locator(".chips").getByRole("button", { name, exact: true })
+
+  await check("desktop: archive from the ⋯ menu; Undo; the Archived chip; Unarchive", async () => {
+    await page.goto(`${BASE}/`)
+    await tableRow("Orders API").waitFor()
+    await tableRow("Orders API").getByRole("button", { name: "More actions for Orders API" }).click()
+    await page.getByRole("menuitem", { name: /^Archive\b/ }).click()
+    await tableRow("Orders API").waitFor({ state: "detached" })
+    const toast = page.locator(".toast").filter({ hasText: "Archived “Orders API”" })
+    await toast.waitFor()
+    await toast.getByRole("button", { name: "Undo" }).click()
+    await tableRow("Orders API").waitFor()
+    await tableRow("Orders API").getByRole("button", { name: "More actions for Orders API" }).click()
+    await page.getByRole("menuitem", { name: /^Archive\b/ }).click()
+    await tableRow("Orders API").waitFor({ state: "detached" })
+    assert(!(await page.locator(".sidebar").getByRole("link", { name: "Orders API" }).count()), "gone from the sidebar")
+    // The save is in flight: wait for it to reach the hub.
+    let saved: unknown
+    for (let i = 0; i < 50 && !saved; i++) {
+      saved = (await prefPuts()).at(-1)?.body?.hiddenSessions?.at(-1)
+      if (!saved) await Bun.sleep(100)
+    }
+    assert(typeof saved === "string" && saved.startsWith("ses_"), `archived set saved: ${JSON.stringify((await prefPuts()).at(-1))}`)
+    await chip("Archived").click()
+    await tableRow("Orders API").waitFor()
+    await shot(page, "desktop-archived-chip")
+    await tableRow("Orders API").getByRole("button", { name: "More actions for Orders API" }).click()
+    await page.getByRole("menuitem", { name: /^Unarchive\b/ }).click()
+    await tableRow("Orders API").waitFor({ state: "detached" })
+    await chip("Archived").click()
+    await tableRow("Orders API").waitFor()
+  })
+
+  await check("desktop: an archived session that needs you stays under Needs you", async () => {
+    await tableRow("Cart bug").getByRole("button", { name: "More actions for Cart bug" }).click()
+    await page.getByRole("menuitem", { name: /^Archive\b/ }).click()
+    await tableRow("Cart bug").waitFor({ state: "detached" })
+    await page.locator(".sidebar .side-section.needs").getByRole("link", { name: /Cart bug/ }).waitFor()
+    await chip("Needs you").click()
+    await tableRow("Cart bug").waitFor()
+    await tableRow("Cart bug").getByRole("button", { name: "More actions for Cart bug" }).click()
+    await page.getByRole("menuitem", { name: /^Unarchive\b/ }).click()
+    await chip("Needs you").click()
+    await tableRow("Cart bug").waitFor()
+  })
+
+  await check("desktop: select rows and archive them together, with Undo", async () => {
+    const before = await page.locator(".sessions-table tbody tr").count()
+    await tableRow("editor config").getByRole("checkbox", { name: "Select editor config" }).check()
+    await tableRow("shell setup").getByRole("checkbox", { name: "Select shell setup" }).check()
+    const bar = page.getByRole("region", { name: "Selected sessions" })
+    await bar.getByText("2 selected").waitFor()
+    await bar.getByRole("button", { name: "Archive" }).click()
+    await tableRow("editor config").waitFor({ state: "detached" })
+    await tableRow("shell setup").waitFor({ state: "detached" })
+    assert((await page.locator(".sessions-table tbody tr").count()) === before - 2, "two rows left the table")
+    assert(!(await bar.count()), "selection cleared")
+    const toast = page.locator(".toast").filter({ hasText: "Archived 2 sessions" })
+    await toast.getByRole("button", { name: "Undo" }).click()
+    await tableRow("editor config").waitFor()
+    await tableRow("shell setup").waitFor()
+    // Select all (the shown rows) and clear.
+    await page.getByRole("checkbox", { name: "Select all shown sessions" }).check()
+    await bar.getByText(`${before} selected`).waitFor()
+    await bar.getByRole("button", { name: "Clear selection" }).click()
+    await bar.waitFor({ state: "detached" })
+  })
+
+  await check("desktop: archive sessions inactive for more than N days (confirm with the count)", async () => {
+    const before = await page.locator(".sessions-table tbody tr").count()
+    await page.getByRole("button", { name: "Archive inactive…" }).click()
+    const dialog = page.getByRole("dialog", { name: "Archive inactive sessions" })
+    await dialog.waitFor()
+    const days = dialog.getByRole("spinbutton", { name: "Inactive for more than (days)" })
+    assert((await days.inputValue()) === "30", "30 days by default")
+    await days.fill("1")
+    const confirm = dialog.getByRole("button", { name: /^Archive \d+ sessions?$/ })
+    await confirm.waitFor()
+    const n = Number((await confirm.textContent())!.match(/\d+/)![0])
+    assert(n > 0 && n < before, `some sessions are older than a day: ${n} of ${before}`)
+    await shot(page, "desktop-archive-inactive")
+    await confirm.click()
+    await dialog.waitFor({ state: "hidden" })
+    await page.waitForFunction((count) => document.querySelectorAll(".sessions-table tbody tr").length === count, before - n)
+    const toast = page.locator(".toast").filter({ hasText: `Archived ${n} session` })
+    await toast.getByRole("button", { name: "Undo" }).click()
+    await page.waitForFunction((count) => document.querySelectorAll(".sessions-table tbody tr").length === count, before)
   })
 
   await check("desktop: open a session; timeline, thoughts, tool group and rail render", async () => {

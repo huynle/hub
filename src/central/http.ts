@@ -118,6 +118,8 @@ const MAX_TITLE_CHARS = 200
 const MAX_HERDR_WORKSPACE_CHARS = 100
 /** View preferences: entries per list and characters per entry. */
 const VIEW_PREF_MAX_ENTRIES = 500
+/** hiddenSessions holds archived sessions (Archive in the console), which add up over time. */
+const VIEW_PREF_MAX_ARCHIVED = 5000
 const VIEW_PREF_MAX_CHARS = 4096
 const DECISIONS = new Set<PermissionDecision>(["once", "always", "reject"])
 /** Longest utterance accepted for conversation mode (characters, after trimming). */
@@ -1169,7 +1171,10 @@ function prefsInput(value: unknown): (Partial<PushPrefs> & LegacyPushPrefs) | un
 /** PUT /api/prefs/view body: any of the four lists, each replacing the stored one. */
 function viewPrefsInput(value: unknown): Partial<ViewPrefs> {
   const invalid = () =>
-    new HttpError(400, `Expected {${VIEW_PREF_KEYS.join("?, ")}?}: lists of at most ${VIEW_PREF_MAX_ENTRIES} strings of at most ${VIEW_PREF_MAX_CHARS} characters`)
+    new HttpError(
+      400,
+      `Expected {${VIEW_PREF_KEYS.join("?, ")}?}: lists of at most ${VIEW_PREF_MAX_ENTRIES} (hiddenSessions: ${VIEW_PREF_MAX_ARCHIVED}) strings of at most ${VIEW_PREF_MAX_CHARS} characters`,
+    )
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw invalid()
   const record = value as Record<string, unknown>
   if (Object.keys(record).some((key) => !(VIEW_PREF_KEYS as readonly string[]).includes(key))) throw invalid()
@@ -1177,7 +1182,7 @@ function viewPrefsInput(value: unknown): Partial<ViewPrefs> {
   for (const key of VIEW_PREF_KEYS) {
     const list = record[key]
     if (list === undefined) continue
-    if (!Array.isArray(list) || list.length > VIEW_PREF_MAX_ENTRIES) throw invalid()
+    if (!Array.isArray(list) || list.length > (key === "hiddenSessions" ? VIEW_PREF_MAX_ARCHIVED : VIEW_PREF_MAX_ENTRIES)) throw invalid()
     if (!list.every((entry) => typeof entry === "string" && entry.length > 0 && entry.length <= VIEW_PREF_MAX_CHARS)) throw invalid()
     out[key] = [...new Set(list as string[])]
   }

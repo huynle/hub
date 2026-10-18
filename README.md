@@ -26,7 +26,7 @@ Formerly **opencode-voice** and, briefly, **opencode-hub**
   that answers in short spoken sentences on a fast model and hands real work to background subagents.
   Bring your own speech: OpenRouter or any OpenAI-compatible STT/TTS service (including self-hosted).
 - **What's open in your terminals first**: sessions open in Herdr or the OpenCode TUI, grouped like
-  Herdr's sidebar, with the rest under Recent; pin and hide in sync across devices.
+  Herdr's sidebar, with the rest under Recent; rename, pin and archive in sync across devices.
 - **Session details**: context usage, todos, MCP status, branch and per-file diffs, on demand; unread
   marks synced per user.
 - **Self-hostable**: a hub on your computer with nothing extra to install, or your own hub for phones
@@ -375,7 +375,17 @@ the Docker image, npm package and binaries ship the build). One store fed by the
 - **Sidebar** (⌘B collapses; a drawer on phones): search, New session, Needs you, Running, Pinned, sessions open in a
   terminal grouped by project (or server) with `+`, Recents; rows show status, a pulsing green dot left of the
   title for the session live in Voice (in Voice mode here, or in a conversation), an unread dot and a `⋯` menu
-  (rename, pin, hide, stop, Allow/Disallow Voice).
+  (rename, pin, archive, stop, Allow/Disallow Voice).
+- **Archive**: **Archive** in a session's `⋯` menu takes it out of the table, the sidebar's groups, Recents and
+  Running, on all your devices (with **Undo**). Nothing is deleted and OpenCode's history is untouched:
+  archiving is the hub's own, per user, because OpenCode has no archive API yet (when it gets one, Archive
+  will map to it). The **Archived** chip on `/` lists archived sessions with **Unarchive**. One exception: an
+  archived session that needs you (a permission or question) also shows under **Needs you** (sidebar and the
+  Needs you chip), so a question is never missed. In the table, tick rows (or the header box for all shown
+  rows) and press **Archive** (or **Unarchive** under Archived); **Archive inactive…** archives every session
+  without activity for more than N days (30 by default; not running, pinned or open in a terminal) after a
+  confirmation with the count. Sessions archived in OpenCode itself (`time.archived`) never reach the hub.
+  Sessions hidden with an earlier version are archived now (same stored list, `hiddenSessions`).
 - **Rename**: **Rename…** in a session's `⋯` menu (table row, sidebar row, phone list, the session's title
   menu), or a click on the title in the session's top bar, turns the title into a text field with the title
   selected: Enter (or clicking away) saves, Escape cancels. The new title shows at once and is set in
@@ -446,8 +456,8 @@ Pure logic lives in `web/src/core` and `web/src/lib` (bun tests in `test/web-*.t
   group: New session here, Pin / Unpin workspace, Hide / Unhide workspace (and Collapse / Expand in
   Recent). Hiding a workspace hides the sessions in it: a Herdr workspace (`herdr:<id>`), a project
   folder, or a nested folder such as a worktree.
-- **Synced view settings**: pins and hides are per user on the hub (`GET`/`PUT /api/prefs/view`), shown at
-  once, reverted with a message if the hub refuses, with Undo after a hide. Other devices update live
+- **Synced view settings**: pins, archived sessions and hidden workspaces are per user on the hub (`GET`/`PUT /api/prefs/view`), shown at
+  once, reverted with a message if the hub refuses, with Undo after an archive. Other devices update live
   (SSE `prefs`). Pins from 0.3 (stored on the device) are moved into them once. With an older hub
   without `/api/prefs/view`, they stay on the device. Open/closed groups and the filter stay per device.
 - **Voice off** sessions (`exposed: false`, mode `session`) open, show their status and live activity, and
@@ -607,8 +617,8 @@ unchanged sessions frame does not re-broadcast the catalog.
 |---|---|---|
 | `POST /api/sessions/:id/expose {on}` | `expose` | `200 {exposed}` from a reporting process (service first). 400 bad body, 404 not reported, 502 spoke error |
 | `POST /api/machines/:machineID/sessions {directory, title?, herdrWorkspace?}` | `create` | `201 {sessionID, openedIn?: "herdr", warning?}` from the machine's service process; with `herdrWorkspace` (≤ 100 characters) the session is also opened in a new tab of that Herdr workspace, and when that fails the answer has a `warning` instead of `openedIn`. 400 bad input or `unknown workspace` (not a workspace root, session directory or Herdr pane folder of that machine), 404 unknown machine, 409 no service process connected |
-| `GET /api/prefs/view` | – | `{prefs: {hiddenSessions, hiddenWorkspaces, pinnedSessions, pinnedWorkspaces}}`, the caller's view preferences (pairing mode: the single user) |
-| `PUT /api/prefs/view {any of the four lists}` | – | Replaces the lists given (each ≤ 500 non-empty strings of ≤ 4096 characters, duplicates dropped; other keys 400). Stored on the user record; SSE `{type: "prefs", prefs}` goes to the user's other devices (never to other users, not to the device that changed them) |
+| `GET /api/prefs/view` | – | `{prefs: {hiddenSessions, hiddenWorkspaces, pinnedSessions, pinnedWorkspaces}}`, the caller's view preferences (pairing mode: the single user). `hiddenSessions` is the user's **archived** sessions (the name is from before Archive was called Hide) |
+| `PUT /api/prefs/view {any of the four lists}` | – | Replaces the lists given (each ≤ 500 non-empty strings, `hiddenSessions` ≤ 5000, of ≤ 4096 characters, duplicates dropped; other keys 400). Stored on the user record; SSE `{type: "prefs", prefs}` goes to the user's other devices (never to other users, not to the device that changed them) |
 
 For a session reported only with `exposed: false`, `utterance` and `conversation` answer
 `403 {error: "Voice is not enabled for this session", code: "not_exposed"}`; inspecting and controlling it

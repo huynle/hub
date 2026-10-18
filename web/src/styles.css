@@ -202,6 +202,14 @@ input[type="text"].rename-field { flex: 1; min-width: 0; width: 100%; min-height
 .sessions-table .col-title a { color: var(--text); }
 .sessions-table tr.unread .col-title a { font-weight: 600; }
 .col-status { width: 64px; }
+.col-pick { width: 32px; text-align: center; }
+.col-pick input { margin: 0; vertical-align: middle; cursor: pointer; }
+.home-tools .btn.small { height: 32px; }
+.bulk-bar { display: flex; align-items: center; gap: 8px; margin: 8px 0 0; padding: 6px 10px; border: 1px solid var(--line); border-radius: var(--r); background: var(--raise); font-size: 13px; }
+.bulk-bar span { margin-right: auto; }
+.archive-inactive { display: flex; flex-direction: column; gap: 12px; }
+.archive-inactive input[type="number"] { width: 120px; background: var(--raise); border: 1px solid var(--line); border-radius: var(--r); padding: 6px 10px; min-height: 32px; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .col-title { width: 30%; }
 .col-project { width: 16%; }
 .col-server { width: 9%; }

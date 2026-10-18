@@ -1,7 +1,7 @@
 // Session view (0.4.0, docs/session-view.md): open sessions first. Synced view prefs (hide/pin), migration of
 // 0.3 local pins, Open / Recent / Hidden split, Herdr-like grouping and ordering, status dots, new-session targets.
 import { describe, expect, test } from "bun:test"
-import { createBody, dotState, groupKey, newSessionTargets, hiddenView, homeView as typedHomeView, migratePins, normalizePrefs, recentMachine, renameTitle, retitle, setPref } from "../web/src/core/view-core"
+import { MAX_ARCHIVED, PendingTitles, createBody, dotState, groupKey, newSessionTargets, hiddenView, homeView as typedHomeView, migratePins, normalizePrefs, recentMachine, renameTitle, retitle, setPref, setPrefs } from "../web/src/core/view-core"
 
 type S = any
 const homeView = (...args: Parameters<typeof typedHomeView>): S => typedHomeView(...args)
@@ -52,7 +52,7 @@ describe("view prefs", () => {
     })
     expect(normalizePrefs({ prefs: { pinnedSessions: ["s1"] } }).pinnedSessions).toEqual(["s1"])
     const many = Array.from({ length: 600 }, (_, i) => `s${i}`)
-    expect(normalizePrefs({ hiddenSessions: [...many, "x".repeat(5000)] }).hiddenSessions).toHaveLength(500)
+    expect(normalizePrefs({ pinnedSessions: [...many, "x".repeat(5000)] }).pinnedSessions).toHaveLength(500)
   })
 
   test("setPref adds or removes one key and returns the partial patch for PUT", () => {
@@ -65,6 +65,32 @@ describe("view prefs", () => {
     expect(off.prefs.pinnedSessions).toEqual(["b"])
     expect(setPref(prefs, "pinnedSessions", "a", true).patch).toBeUndefined() // no change, no PUT
     expect(() => setPref(prefs, "nope" as any, "a", true)).toThrow()
+  })
+
+  test("setPrefs adds or removes many keys at once (bulk archive) and returns one patch", () => {
+    const prefs = normalizePrefs({ hiddenSessions: ["a", "b"] })
+    const on = setPrefs(prefs, "hiddenSessions", ["b", "c", "d", "c"], true)
+    expect(on.prefs.hiddenSessions).toEqual(["a", "b", "c", "d"])
+    expect(on.patch).toEqual({ hiddenSessions: ["a", "b", "c", "d"] })
+    expect(prefs.hiddenSessions).toEqual(["a", "b"]) // not mutated
+    const off = setPrefs(on.prefs, "hiddenSessions", ["a", "d", "zz"], false)
+    expect(off.prefs.hiddenSessions).toEqual(["b", "c"])
+    expect(setPrefs(prefs, "hiddenSessions", ["a"], true).patch).toBeUndefined()
+    expect(setPrefs(prefs, "hiddenSessions", [], true).patch).toBeUndefined()
+    expect(() => setPrefs(prefs, "nope" as any, ["a"], true)).toThrow()
+  })
+
+  test("the archived list keeps up to 5000 sessions: the oldest archives make room (other lists stay at 500)", () => {
+    expect(MAX_ARCHIVED).toBe(5000)
+    const many = Array.from({ length: MAX_ARCHIVED }, (_, i) => `ses_${i}`)
+    expect(normalizePrefs({ hiddenSessions: many }).hiddenSessions).toHaveLength(5000)
+    expect(normalizePrefs({ pinnedSessions: many }).pinnedSessions).toHaveLength(500)
+    const full = normalizePrefs({ hiddenSessions: many })
+    const more = setPrefs(full, "hiddenSessions", ["ses_new1", "ses_new2"], true)
+    expect(more.prefs.hiddenSessions).toHaveLength(5000)
+    expect(more.prefs.hiddenSessions.slice(0, 2)).toEqual(["ses_2", "ses_3"])
+    expect(more.prefs.hiddenSessions.slice(-2)).toEqual(["ses_new1", "ses_new2"])
+    expect(setPref(full, "hiddenSessions", "ses_one", true).prefs.hiddenSessions).toHaveLength(5000)
   })
 
   test("migratePins merges 0.3 local pins into prefs once and says to clear the local keys", () => {
@@ -303,5 +329,48 @@ describe("rename", () => {
     expect(machines[0].processes[0].sessions[1].title).not.toBe("New")
     expect(retitle(machines, "ses_missing", "x")).toBeUndefined()
     expect(retitle(undefined, "ses_r", "x")).toBeUndefined()
+  })
+})
+
+describe("PendingTitles", () => {
+  const catalog = (title: string): S[] => [{ id: "m1", name: "one", processes: [{ id: "p1", sessions: [ses({ id: "ses_p", title })] }] }]
+  const titleOf = (machines: S[]) => machines[0].processes[0].sessions[0].title
+
+  test("a rename in flight survives catalogs that predate it", () => {
+    const pending = new PendingTitles(5000)
+    pending.set("ses_p", "New", 1000)
+    const stale = catalog("Old")
+    pending.apply(stale, 1100)
+    expect(titleOf(stale)).toBe("New")
+    expect(pending.has("ses_p")).toBe(true)
+  })
+
+  test("settles once a catalog carries the new title, or after the grace period", () => {
+    const pending = new PendingTitles(5000)
+    pending.set("ses_p", "New", 1000)
+    pending.apply(catalog("New"), 1200)
+    expect(pending.has("ses_p")).toBe(false)
+    // A later catalog with another title (renamed elsewhere) wins.
+    const other = catalog("Elsewhere")
+    pending.apply(other, 1300)
+    expect(titleOf(other)).toBe("Elsewhere")
+    pending.set("ses_p", "Newer", 2000)
+    const late = catalog("Old")
+    pending.apply(late, 2000 + 5001)
+    expect(titleOf(late)).toBe("Old")
+    expect(pending.has("ses_p")).toBe(false)
+  })
+
+  test("drop forgets a failed rename; the newest rename of a session wins", () => {
+    const pending = new PendingTitles(5000)
+    pending.set("ses_p", "One", 1000)
+    pending.set("ses_p", "Two", 1001)
+    const c = catalog("Old")
+    pending.apply(c, 1002)
+    expect(titleOf(c)).toBe("Two")
+    pending.drop("ses_p", "One") // an older request finishing does not drop the newer one
+    expect(pending.has("ses_p")).toBe(true)
+    pending.drop("ses_p", "Two")
+    expect(pending.has("ses_p")).toBe(false)
   })
 })

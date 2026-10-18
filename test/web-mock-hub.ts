@@ -204,7 +204,8 @@ function applyPrefs(userID: string, body: Record<string, unknown>): string | und
   for (const list of PREF_LISTS) {
     const value = body[list]
     if (value === undefined) continue
-    if (!Array.isArray(value) || value.length > 500 || !value.every((x) => typeof x === "string" && x.length <= 4096)) return `${list} must be a list of at most 500 strings`
+    const max = list === "hiddenSessions" ? 5000 : 500
+    if (!Array.isArray(value) || value.length > max || !value.every((x) => typeof x === "string" && x.length <= 4096)) return `${list} must be a list of at most ${max} strings`
   }
   for (const list of PREF_LISTS) if (body[list] !== undefined) prefs[list] = [...new Set(body[list] as string[])]
   return undefined

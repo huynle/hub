@@ -6,8 +6,8 @@ import { createStore, produce } from "solid-js/store"
 import type { Me, AuthInfo } from "../core/account-core"
 import { isAdmin } from "../core/account-core"
 import type { SpeechReadyView } from "../core/feedback-core"
-import { migratePins, normalizePrefs, renameTitle, retitle, setPref, type PrefList, type ViewPrefs } from "../core/view-core"
-import { sessionRows } from "../lib/sessions"
+import { migratePins, normalizePrefs, PendingTitles, renameTitle, retitle, setPrefs, type PrefList, type ViewPrefs } from "../core/view-core"
+import { sessionRows, stableRows, type SessionRow } from "../lib/sessions"
 import { LiveFeeds, applyMessage, findSession, initialHub, type HubState } from "../lib/store"
 import { api, enc, errorText, getJSON, HttpError, sessionPath, setUnauthorized } from "./api"
 import { navigate, route } from "./router"
@@ -33,8 +33,10 @@ export function onMessage(fn: Listener): () => void {
 }
 
 /** All root sessions as rows (reactive). */
-export const rows = createRoot(() => createMemo(() => sessionRows(hub.machines, hub.prefs, hub.reads)))
+export const rows = createRoot(() => createMemo<SessionRow[]>((previous) => stableRows(previous, sessionRows(hub.machines, hub.prefs, hub.reads))))
 export const lookup = (id: string) => findSession(hub.machines, id)
+/** Titles renamed here that the catalog may not carry yet. */
+const pendingTitles = new PendingTitles()
 
 // ---------- me ----------
 
@@ -133,6 +135,13 @@ export function dispatch(message: Record<string, any>): void {
     if (message.type === "prefs") {
       setHub(produce((s) => applyMessage(s, message)))
       if (hub.prefsStale && !hub.prefsPending) void reloadPrefs()
+    } else if (message.type === "catalog") {
+      setHub(
+        produce((s) => {
+          applyMessage(s, message)
+          pendingTitles.apply(s.machines, Date.now())
+        }),
+      )
     } else setHub(produce((s) => applyMessage(s, message)))
     if (message.type === "status") {
       const root = lookup(message.sessionID)
@@ -250,20 +259,27 @@ async function savePrefs(patch: Partial<ViewPrefs>): Promise<{ ok: boolean; erro
   }
 }
 
-/** Optimistic pin/hide: shows the result at once, saves, reverts (with a toast) if the hub refuses. */
-export function changePref(list: PrefList, key: string, on: boolean, { message, undo = false }: { message?: string; undo?: boolean } = {}): void {
+/** Optimistic pin/archive: shows the result at once, saves, reverts (with a toast) if the hub refuses. */
+export function changePref(list: PrefList, key: string, on: boolean, options: { message?: string; undo?: boolean } = {}): void {
+  changePrefs(list, [key], on, options)
+}
+
+/** changePref for several keys at once (bulk archive): one save, one message, Undo reverts only what changed. */
+export function changePrefs(list: PrefList, keys: readonly string[], on: boolean, { message, undo = false }: { message?: string; undo?: boolean } = {}): void {
   if (!prefsReady()) {
     toast("Your view settings are still loading. Try again in a moment.", "err")
     void loadViewPrefs()
     return
   }
-  const { prefs, patch } = setPref(hub.prefs, list, key, on)
+  const before = new Set(hub.prefs[list])
+  const changed = keys.filter((key) => before.has(key) !== on)
+  const { prefs, patch } = setPrefs(hub.prefs, list, changed, on)
   if (!patch) return
   setHub("prefs", prefs)
-  if (message) toast(message, "", undo ? { label: "Undo", run: () => changePref(list, key, !on) } : undefined)
+  if (message) toast(message, "", undo ? { label: "Undo", run: () => changePrefs(list, changed, !on) } : undefined)
   void savePrefs(patch).then(({ ok, error }) => {
     if (ok) return
-    setHub("prefs", setPref(hub.prefs, list, key, !on).prefs)
+    setHub("prefs", setPrefs(hub.prefs, list, changed, !on).prefs)
     toast(`Could not save that change: ${errorText(error)}`, "err")
   })
 }
@@ -295,13 +311,19 @@ export async function renameSession(id: string, raw: string): Promise<boolean> {
   const { title } = checked
   const previous = lookup(id)?.session.title
   if (previous === title) return false
+  pendingTitles.set(id, title, Date.now())
   setHub(produce((s) => void retitle(s.machines, id, title)))
   try {
     const saved = await (await api(`${sessionPath(id)}/rename`, { method: "POST", json: { title } })).json().catch(() => undefined)
     const confirmed = typeof saved?.title === "string" && saved.title ? saved.title : title
-    if (confirmed !== title && lookup(id)?.session.title === title) setHub(produce((s) => void retitle(s.machines, id, confirmed)))
+    if (confirmed !== title && lookup(id)?.session.title === title) {
+      pendingTitles.drop(id, title)
+      pendingTitles.set(id, confirmed, Date.now())
+      setHub(produce((s) => void retitle(s.machines, id, confirmed)))
+    }
     return true
   } catch (e) {
+    pendingTitles.drop(id, title)
     // Revert unless the catalog already moved on (a newer title from elsewhere).
     if (previous !== undefined && lookup(id)?.session.title === title) setHub(produce((s) => void retitle(s.machines, id, previous)))
     toast(`Could not rename: ${errorText(e)}`, "err")

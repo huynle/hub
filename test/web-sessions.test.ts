@@ -2,10 +2,12 @@
 import { describe, expect, test } from "bun:test"
 import {
   DEFAULT_TABLE,
+  inactiveRows,
   parseTable,
   serializeTable,
   sessionRows,
   sidebarSections,
+  stableRows,
   tableRows,
   voiceLive,
   type SessionRow,
@@ -42,7 +44,15 @@ describe("sessionRows", () => {
     expect(rows.map((r) => r.id).sort()).toEqual(["a", "b", "c"])
     expect(by.a).toMatchObject({ machineName: "laptop", source: "herdr", running: true, state: "working", unread: false, workspace: "general" })
     expect(by.b).toMatchObject({ source: "tui", pinned: true, unread: true, running: false })
-    expect(by.c).toMatchObject({ source: "background", hidden: true, exposed: false, unread: false })
+    expect(by.c).toMatchObject({ source: "background", hidden: true, archived: true, exposed: false, unread: false })
+    expect(by.a!.archived).toBe(false)
+  })
+
+  test("archived means archived by ID; a hidden workspace hides without archiving", () => {
+    const rows = sessionRows([machine("m1", [session("x"), session("y", { directory: "/p/gone", project: "/p/gone" })])], normalizePrefs({ hiddenSessions: ["x"], hiddenWorkspaces: ["/p/gone"] }), {})
+    const by = Object.fromEntries(rows.map((r) => [r.id, r]))
+    expect(by.x).toMatchObject({ hidden: true, archived: true })
+    expect(by.y).toMatchObject({ hidden: true, archived: false })
   })
 
   test("a session never read is not unread; blocked counts as running", () => {
@@ -96,7 +106,29 @@ describe("tableRows", () => {
     expect(f({ source: "open" })).toEqual(["work"])
     expect(f({ source: "background" })).toEqual(["far", "off", "need", "idle-old"])
     expect(f({ machine: "m2" })).toEqual(["far"])
-    expect(f({ hidden: true })).toEqual(["hid"])
+    expect(f({ archived: true })).toEqual(["hid"])
+  })
+
+  test("archived sessions leave every view but Archived, except Needs you when they need you", () => {
+    const list = sessionRows(
+      [machine("m1", [session("arch-need", { ...blocked("arch-need"), updated: min(3) }), session("arch-run", { ...working("arch-run"), updated: min(4) }), session("plain", { updated: min(5) })])],
+      normalizePrefs({ hiddenSessions: ["arch-need", "arch-run"] }),
+      {},
+    )
+    const f = (filters: Partial<typeof DEFAULT_TABLE.filters>) => ids(tableRows(list, { ...DEFAULT_TABLE, filters: { ...DEFAULT_TABLE.filters, ...filters } }))
+    expect(f({})).toEqual(["plain"])
+    expect(f({ status: "running" })).toEqual([])
+    expect(f({ status: "needs" })).toEqual(["arch-need"])
+    expect(f({ archived: true })).toEqual(["arch-need", "arch-run"])
+    expect(f({ archived: true, status: "running" })).toEqual(["arch-need", "arch-run"])
+  })
+
+  test("the old saved Hidden chip opens Archived", () => {
+    expect(parseTable(JSON.stringify({ filters: { hidden: true } })).filters.archived).toBe(true)
+    const state = { ...DEFAULT_TABLE, filters: { ...DEFAULT_TABLE.filters, archived: true } }
+    expect(JSON.parse(serializeTable(state)).filters).toEqual({ ...DEFAULT_TABLE.filters, archived: true })
+    expect(parseTable(serializeTable(state)).filters.archived).toBe(true)
+    expect(Object.keys(DEFAULT_TABLE.filters)).not.toContain("hidden")
   })
 
   test("table state round-trips through storage and junk falls back to the default", () => {
@@ -116,6 +148,53 @@ describe("tableRows", () => {
     expect(kept.sort).toEqual(DEFAULT_TABLE.sort)
     expect(kept.filters).toEqual({ ...DEFAULT_TABLE.filters, status: "needs" })
     expect(ids(tableRows(rows, kept))).toEqual(["need"])
+  })
+})
+
+describe("inactiveRows", () => {
+  const DAY = 24 * 60 * 60_000
+  const rows = sessionRows(
+    [
+      machine("m1", [
+        session("old", { updated: NOW - 40 * DAY }),
+        session("older", { updated: NOW - 90 * DAY }),
+        session("recent", { updated: NOW - 5 * DAY }),
+        session("edge", { updated: NOW - 30 * DAY }),
+        session("old-running", { ...working("old-running"), updated: NOW - 40 * DAY }),
+        session("old-blocked", { ...blocked("old-blocked"), updated: NOW - 40 * DAY }),
+        session("old-pinned", { updated: NOW - 40 * DAY }),
+        session("old-open", { updated: NOW - 40 * DAY, open: true, terminal: { source: "tui" } }),
+        session("old-archived", { updated: NOW - 40 * DAY }),
+      ]),
+    ],
+    normalizePrefs({ pinnedSessions: ["old-pinned"], hiddenSessions: ["old-archived"] }),
+    {},
+  )
+  test("idle, unpinned, not open, not yet archived, and inactive for more than N days", () => {
+    expect(inactiveRows(rows, 30, NOW).map((r) => r.id).sort()).toEqual(["old", "older"])
+    expect(inactiveRows(rows, 60, NOW).map((r) => r.id)).toEqual(["older"])
+    expect(inactiveRows(rows, 1, NOW).map((r) => r.id).sort()).toEqual(["edge", "old", "older", "recent"])
+  })
+  test("N must be a whole number of days, at least 1", () => {
+    expect(inactiveRows(rows, 0, NOW)).toEqual([])
+    expect(inactiveRows(rows, Number.NaN, NOW)).toEqual([])
+    expect(inactiveRows(rows, 1.5, NOW)).toEqual([])
+  })
+})
+
+describe("stableRows", () => {
+  test("unchanged rows keep their object (open ⋯ menus survive a catalog update); changed and new rows are fresh", () => {
+    const prefs = normalizePrefs({})
+    const first = sessionRows([machine("m1", [session("a"), session("b"), session("c")])], prefs, {})
+    const second = sessionRows([machine("m1", [session("a"), session("b", { title: "B2" }), session("d")])], prefs, {})
+    const stable = stableRows(first, second)
+    const by = (list: SessionRow[], id: string) => list.find((r) => r.id === id)
+    expect(stable.map((r) => r.id)).toEqual(second.map((r) => r.id))
+    expect(by(stable, "a")).toBe(by(first, "a")!)
+    expect(by(stable, "b")).toBe(by(second, "b")!)
+    expect(by(stable, "b")!.title).toBe("B2")
+    expect(by(stable, "d")).toBe(by(second, "d")!)
+    expect(stableRows(undefined, second)).toBe(second)
   })
 })
 
@@ -156,6 +235,20 @@ describe("sidebarSections", () => {
   ]
   const rows = sessionRows(machines, normalizePrefs({ hiddenSessions: ["hid"], pinnedSessions: ["pin"] }), {})
   const shape = (sections: ReturnType<typeof sidebarSections>) => sections.map((s) => [s.title, s.rows.map((r) => r.id)])
+
+  test("an archived session that needs you shows under Needs you; archived running ones stay out", () => {
+    const list = sessionRows(
+      [machine("m1", [session("arch-need", blocked("arch-need")), session("arch-run", working("arch-run")), session("plain")])],
+      normalizePrefs({ hiddenSessions: ["arch-need", "arch-run"] }),
+      {},
+    )
+    expect(shape(sidebarSections(list, { query: "", groupBy: "project", sortBy: "recent" }))).toEqual([
+      ["Needs you", ["arch-need"]],
+      ["Recents", ["plain"]],
+    ])
+    // A search finds only what is not archived.
+    expect(shape(sidebarSections(list, { query: "arch", groupBy: "project", sortBy: "recent" }))).toEqual([["Results", []]])
+  })
 
   test("Needs you, Running, Pinned, open-session groups, then Recents; each session once, hidden ones left out", () => {
     expect(shape(sidebarSections(rows, { query: "", groupBy: "project", sortBy: "recent" }))).toEqual([

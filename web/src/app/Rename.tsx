@@ -10,6 +10,8 @@ import { renameSession } from "./hub"
  * text up instead of starting over.
  */
 let draft: { id: string; place: RenamePlace; value: string } | undefined
+/** Rename fields on screen; when the last one goes away for good (e.g. navigating away), renaming ends. */
+let mounted = 0
 
 export function RenameTitle(props: { id: string; title: string; place: RenamePlace; class?: string; children: JSX.Element }) {
   return (
@@ -32,12 +34,20 @@ function RenameField(props: { id: string; title: string; place: RenamePlace; cla
     if (save && value.trim() && value.trim() !== props.title) void renameSession(props.id, value)
   }
   onMount(() => {
+    mounted++
     input.focus()
     if (resumed === undefined) input.select()
   })
   // Removed without Enter/Escape (the row was re-created, or another rename started): keep the draft, and
   // ignore the blur that removing a focused field fires.
   onCleanup(() => {
+    mounted--
+    // Not re-created right away (the row left the list, or the page changed): stop renaming, drop the draft.
+    setTimeout(() => {
+      if (mounted > 0) return
+      draft = undefined
+      if (renaming()?.id === props.id && renaming()?.place === props.place) setRenaming(undefined)
+    }, 0)
     if (done) return
     done = true
     const current = renaming()

@@ -5,10 +5,22 @@
 - **Rename sessions**: **Rename…** in a session's `⋯` menu (table, sidebar, phone list, session title menu), or
   a click on the session title in the top bar, edits the title in place (Enter saves, Escape cancels). The title
   is set in OpenCode itself (`session.update`), so terminals and other consoles see it; the console shows it at
-  once and reverts with a message if renaming fails. API: `POST /api/sessions/:id/rename {title}` → `{title}`
+  once (also while older catalog updates arrive) and reverts with a message if renaming fails. API: `POST /api/sessions/:id/rename {title}` → `{title}`
   (trimmed, 1–200 characters), through the owning process with a fallback to other processes that report the
   session; Voice-off sessions can be renamed too. New spoke op `rename`: a machine still on an older plugin
   does not answer it, so renaming its sessions fails after the 15 s request timeout until it is updated.
+- **Archive sessions** (replaces Hide): **Archive** / **Unarchive** in a session's `⋯` menu, with **Undo**.
+  Archived sessions leave the table, sidebar groups, Recents and Running on all your devices (synced through
+  the view prefs and their SSE `prefs` event); the **Archived** chip (formerly Hidden; a saved Hidden filter
+  opens Archived) lists them. An archived session that needs you still shows under **Needs you** so a question
+  is not missed. Bulk: checkboxes in the table (and select all shown) with **Archive** / **Unarchive**, and
+  **Archive inactive…** (more than N days without activity, 30 by default; not running, pinned or open in a
+  terminal) after a confirmation with the count. Nothing is deleted and OpenCode is not changed: OpenCode has
+  no archive API yet, so archiving is the hub's own (sessions archived in OpenCode itself are still never
+  listed). Sessions hidden before are archived now: the stored list is the same `hiddenSessions`, which now
+  holds up to 5000 sessions (`PUT /api/prefs/view`; other lists stay at 500), the oldest archives making room.
+- **Console**: table rows, sidebar rows and an open `⋯` menu no longer re-render (and close) when an unrelated
+  catalog update arrives; unchanged rows keep their DOM.
 
 ## 0.6.1
 
