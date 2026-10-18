@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.1
 
 - **GitHub installs**: an install without the built web app (`web/dist`, e.g. `opencode plugin add
   github:huynle/hub`) no longer starts a local hub that only answers 503: `/hub` → **Start local hub**
