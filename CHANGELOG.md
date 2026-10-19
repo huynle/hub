@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- **Faster Voice mode** (release 1 of 3):
+  - **Speak while it writes**: the hub cuts a root reply's streamed text into sentences and sends a `say` per
+    completed sentence (new `seq`, counted per text part from 0) right after its delta; `session.text.ended`
+    flushes the rest, so the first sentence plays while the agent is still writing instead of after the whole
+    reply. Code blocks are one piece (spoken as "(code omitted)"); abbreviations, decimals and file names stay
+    together. One mechanism: each sentence is sent once, also with several processes reporting the session; an
+    interrupted run or Voice mode ending drops the unspoken rest. A subagent's final result is spoken as before
+    (one `say` without `seq`). The phone plays says in order, once, and synthesizes up to two sentences ahead;
+    barge-in also silences the rest of the reply it interrupted. The push for a reply nobody watches is sent
+    once with the whole text. Clients that ignore `seq` still get each sentence's text.
+  - **Instant acknowledgement**: the "heard" tone plays the moment you stop speaking (when the segment goes to
+    transcription), not when the agent receives the utterance; it does not play twice. Typed text in Voice mode
+    still gets it on delivery.
+  - **"Working on it." after 2.5 s** (was 5 s), counted from the end of your speech, and progress cues are
+    event-driven (one timer for the next deadline instead of a 1 s poll).
+  - **Cue phrases ready at once**: "Working on it.", "Started a subagent." and "Still working." are synthesized
+    in parallel when Voice mode starts and kept in the browser's Cache Storage per TTS voice (provider, model,
+    voice, speed, server), so later sessions need no synthesis; a ready phrase starts playing immediately, and
+    one not ready yet plays a short tone instead of arriving late.
+  - **Tighter turn-taking**: a segment ends after 350 ms of silence (was 550 ms), speech must last 300 ms to
+    count (was 250 ms), and an unfinished-looking transcript is held 0.8 s (was 1.5 s); all in `VOICE_TIMINGS`.
+  - **OpenRouter speech-to-text** uploads the audio as an OpenAI-style multipart file (documented by
+    OpenRouter) instead of base64 JSON: a third less to send, no encoding.
+  - **No model lookup per utterance**: the spoke remembers each session's model (from OpenCode's
+    `session.model.selected`, its own switches and lookups) instead of asking OpenCode on every utterance with a
+    Voice model set; it asks again after its event stream reconnects.
+  - **Turn timing**: `performance.mark`s for speech end, transcript, accepted, first say and first audio, and the
+    Voice bar's state tooltip shows "last turn: 1.8 s to first audio" with the steps.
+
 - **Resizable sidebar and Details rail** (desktop): drag the thin handle on the sidebar's right edge or the
   rail's left edge (it lights up on hover and while dragging). Sidebar 180–480 px (default 235), rail 220–640 px
   (default 260); both give way so the transcript column keeps at least 420 px, and are re-fitted when the window
