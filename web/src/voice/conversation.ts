@@ -1,13 +1,13 @@
 // Hands-free conversation mode for one session: always-on mic → energy VAD → speculative per-segment
 // transcription → endpointing → POST utterance; SSE "say" text → sentence TTS queue with barge-in.
-// Progress cues (earcons, "Working on it." …) are scheduled by feedback-core and played by cues.
+// Progress cues (earcons, short phrases like "On it." …) are scheduled by feedback-core and played by cues.
 // The pure parts live in core/conversation-core; this file owns the browser APIs (mic, Web Audio, wake lock,
 // media session). Ported from the 0.4 web/conversation.js; behavior unchanged except the mic device choice.
 import { gestureBlocked } from "../core/voice-autostart"
 import { Endpointer, EnergyVad, SayAssembler, SpeechQueue, TurnTimer, describeTurn, encodeWav, parseCommand, type TurnMark } from "../core/conversation-core"
 import { AudioClip, canStreamMp3, clipFrom, feed } from "../core/audio-stream"
 import { CuePlayer } from "../core/cues"
-import { CUE_PHRASES, CueClock, CueScheduler, isWorking, subagentChanges, type StatusEntry } from "../core/feedback-core"
+import { CueClock, CuePicker, cueTexts, CueScheduler, isWorking, subagentChanges, type StatusEntry } from "../core/feedback-core"
 import type { ApiInit } from "../app/api"
 
 const SENT_LABEL_MS = 2500
@@ -88,7 +88,9 @@ export class Conversation<B = unknown> {
   private typing = 0
   private heardAt = 0
   private lastStatus: readonly StatusEntry[] | undefined
-  private scheduler = new CueScheduler()
+  /** Varied phrases, preferring ones whose audio is already loaded (cuePlayer is set in the constructor). */
+  private cuePicker = new CuePicker({ ready: (text) => this.cuePlayer?.ready(text) ?? false })
+  private scheduler = new CueScheduler({ pick: (cue) => this.cuePicker.pick(cue) })
   private cuePlayer: CuePlayer
   private onVisibility: () => void
   private stream?: MediaStream
@@ -106,7 +108,7 @@ export class Conversation<B = unknown> {
   private turns = new TurnTimer()
   /** Plays progress phrases right on their deadline (re-armed by `poke()` after anything that may move it). */
   private cueClock: CueClock
-  /** When the VAD last ended a segment: "Working on it." counts from the end of the speech that was sent. */
+  /** When the VAD last ended a segment: the acknowledgement counts from the end of the speech that was sent. */
   private speechEndedAt: number | undefined
   private silence?: HTMLAudioElement
   private silenceURL?: string
@@ -218,7 +220,7 @@ export class Conversation<B = unknown> {
   /** Loads the progress phrases now so each plays the moment its cue fires (cached per TTS voice). */
   private prefetchCues(): void {
     if (this.opts.cues === false || !this.scheduler.enabled) return
-    void this.cuePlayer.prefetch(Object.values(CUE_PHRASES), this.cueKey())
+    void this.cuePlayer.prefetch(cueTexts(), this.cueKey())
   }
 
   /** The TTS settings that shape cue audio (provider, model, voice, speed, server); undefined if unknown. */
@@ -407,7 +409,7 @@ export class Conversation<B = unknown> {
     }
   }
 
-  /** Status tree of this root session: drives "Started a subagent.", the subagent-done earcon and "Still working.". */
+  /** Status tree of this root session: drives the hand-off phrase, the subagent-done earcon and the still-working phrase. */
   onStatus(sessions: readonly StatusEntry[]): void {
     const now = Date.now()
     const { started, finished } = subagentChanges(this.lastStatus, sessions, this.sessionID)

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Voice mode: varied progress cues**: instead of the same "Working on it.", "Started a subagent." and
+  "Still working." every time, each cue has several short, natural variants ("On it.", "Give me a sec.",
+  "I'll hand that off.", "Still on it.", "Almost there." …). A shuffle-bag picks them: every variant once
+  before any repeats, never the same one twice in a row, preferring one whose audio is already cached (else
+  the short tone, as before). All variants are prefetched when Voice mode starts, 2 at a time, one of each
+  kind first, and cached per TTS voice as before; ending Voice mode cancels a prefetch still running (aborts
+  its requests), so it never holds the browser's connections.
+
 - **Voice mode: streaming speech and several tasks at once** (release 2 of 3):
   - **Replies play while their audio downloads**: `/api/speak` passes the TTS provider's MP3 through as it
     arrives (nothing is buffered on the hub; a cancelled request aborts the upstream one), and the phone plays

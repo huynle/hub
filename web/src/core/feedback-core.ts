@@ -355,22 +355,111 @@ function itemLabel(x: { kind: string; tool?: string; summary?: string }): string
 // ---------- spoken progress cues ----------
 
 export type CueName = "working" | "subagent" | "still"
-export const CUE_PHRASES: Readonly<Record<CueName, string>> = Object.freeze({
-  working: "Working on it.",
-  subagent: "Started a subagent.",
-  still: "Still working.",
+/** Short spoken variants per cue; CuePicker rotates through them so no phrase plays twice in a row. */
+export const CUE_VARIANTS: Readonly<Record<CueName, readonly string[]>> = Object.freeze({
+  working: Object.freeze([
+    "On it.",
+    "Give me a sec.",
+    "One moment.",
+    "Let me check.",
+    "Okay, looking into it.",
+    "Sure, one sec.",
+    "Hang on.",
+    "Let me see.",
+    "Checking now.",
+    "Bear with me.",
+  ]),
+  subagent: Object.freeze([
+    "I'll hand that off.",
+    "Starting that in the background.",
+    "Sending that off now.",
+    "Getting a helper on it.",
+    "Passing that along.",
+  ]),
+  still: Object.freeze([
+    "Still on it.",
+    "Almost there.",
+    "Still working through it.",
+    "Bear with me, still going.",
+    "Taking a bit longer.",
+  ]),
 })
+
+/** Every cue phrase, interleaved by kind (one of each kind first) so prefetching readies each kind early. */
+export function cueTexts(): string[] {
+  const lists = Object.values(CUE_VARIANTS)
+  const out: string[] = []
+  for (let i = 0; i < Math.max(...lists.map((l) => l.length)); i++) for (const l of lists) if (i < l.length) out.push(l[i]!)
+  return out
+}
+
+/**
+ * Chooses which variant of a cue to speak: a shuffle-bag per kind (every variant once per round, reshuffled
+ * each round), never the phrase that played last for that kind. With `ready` (cached audio), a ready variant
+ * wins: the next ready one in the bag, else the least recently used ready one; with none ready it returns a
+ * fresh variant anyway (the player plays its pending tone and loads it).
+ */
+export class CuePicker {
+  private rng: () => number
+  private ready: (text: string) => boolean
+  private bags = new Map<CueName, string[]>()
+  private last = new Map<CueName, string>()
+  private used = new Map<string, number>()
+  private count = 0
+
+  constructor({ rng = Math.random, ready = () => true }: { rng?: () => number; ready?: (text: string) => boolean } = {}) {
+    this.rng = rng
+    this.ready = ready
+  }
+
+  pick(cue: CueName): string {
+    const all = CUE_VARIANTS[cue]
+    const last = this.last.get(cue)
+    let bag = this.bags.get(cue)
+    if (!bag?.length) {
+      bag = this.shuffle(all)
+      if (bag.length > 1 && bag[0] === last) bag.push(bag.shift()!)
+      this.bags.set(cue, bag)
+    }
+    const fresh = (t: string) => t !== last || all.length < 2
+    let i = bag.findIndex((t) => fresh(t) && this.ready(t))
+    let text: string | undefined
+    if (i >= 0) text = bag.splice(i, 1)[0]
+    else {
+      const lru = all.filter((t) => fresh(t) && this.ready(t)).sort((a, b) => (this.used.get(a) ?? 0) - (this.used.get(b) ?? 0))[0]
+      if (lru) text = lru
+      else {
+        i = bag.findIndex(fresh)
+        text = i >= 0 ? bag.splice(i, 1)[0] : all.find(fresh)
+      }
+    }
+    text ??= all[0]!
+    this.last.set(cue, text)
+    this.used.set(text, ++this.count)
+    return text
+  }
+
+  private shuffle(list: readonly string[]): string[] {
+    const out = [...list]
+    for (let i = out.length - 1; i > 0; i--) {
+      const j = Math.floor(this.rng() * (i + 1))
+      ;[out[i], out[j]] = [out[j]!, out[i]!]
+    }
+    return out
+  }
+}
 
 export type Cue = { readonly type: "earcon"; readonly name: "heard" | "done" } | { readonly type: "speak"; readonly cue: CueName; readonly text: string }
 
 /**
  * Decides when conversation mode plays progress cues. Event methods take the current time and return earcons
  * to play at once; `tick(now)` returns a phrase to speak when one is due and nobody is talking, and
- * `nextDue(now)` says when that will be (CueClock arms one timer for it):
- * - "Working on it." once, ≥ `ackMs` after the end of the speech that was sent (`awaitReply`; else after the hub
+ * `nextDue(now)` says when that will be (CueClock arms one timer for it); which variant is spoken comes from
+ * `pick` (default: a CuePicker):
+ * - a short acknowledgement ("On it.", "One moment." …) once, ≥ `ackMs` after the end of the speech that was sent (`awaitReply`; else after the hub
  *   reported it heard), while working, if the agent has not spoken;
- * - "Started a subagent." when a subagent starts, unless the agent spoke in the last `quietMs`;
- * - "Still working." while work continues and nothing was spoken for `stillMs`.
+ * - a hand-off phrase ("I'll hand that off." …) when a subagent starts, unless the agent spoke in the last `quietMs`;
+ * - a still-working phrase ("Still on it." …) while work continues and nothing was spoken for `stillMs`.
  */
 export class CueScheduler {
   ackMs: number
@@ -386,7 +475,14 @@ export class CueScheduler {
   private agent = false
   private cue = false
 
-  constructor({ ackMs = 2500, quietMs = 3000, stillMs = 40_000 }: { ackMs?: number; quietMs?: number; stillMs?: number } = {}) {
+  private pick: (cue: CueName) => string
+
+  constructor({ ackMs = 2500, quietMs = 3000, stillMs = 40_000, pick }: { ackMs?: number; quietMs?: number; stillMs?: number; pick?: (cue: CueName) => string } = {}) {
+    if (!pick) {
+      const picker = new CuePicker()
+      pick = (cue) => picker.pick(cue)
+    }
+    this.pick = pick
     this.ackMs = ackMs
     this.quietMs = quietMs
     this.stillMs = stillMs
@@ -405,7 +501,7 @@ export class CueScheduler {
     return tone && this.enabled && !this.user ? [{ type: "earcon", name: "heard" }] : []
   }
 
-  /** An utterance whose speech ended at `since` was sent: "Working on it." counts from then. */
+  /** An utterance whose speech ended at `since` was sent: the acknowledgement counts from then. */
   awaitReply(since: number): void {
     this.awaiting = since
   }
@@ -478,7 +574,7 @@ export class CueScheduler {
 
   private say(cue: CueName, now: number): Cue[] {
     this.spoke(now)
-    return [{ type: "speak", cue, text: CUE_PHRASES[cue] }]
+    return [{ type: "speak", cue, text: this.pick(cue) }]
   }
 }
 

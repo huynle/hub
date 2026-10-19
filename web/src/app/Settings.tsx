@@ -283,7 +283,7 @@ function VoiceSection() {
             <span>Progress cues</span>
             <input type="checkbox" checked={voicePrefs.cues} onChange={(e) => (voicePrefs.cues = e.currentTarget.checked)} />
           </label>
-          <p class="small muted">In Voice mode: a soft tone when the agent hears you, “Working on it.”, “Started a subagent.” and “Still working.”</p>
+          <p class="small muted">In Voice mode: a soft tone when the agent hears you, then short, varied acknowledgements while it works (“On it.”, “One moment.”, “I’ll hand that off.”, “Still on it.” …).</p>
         </li>
         <li>
           <label class="switch">

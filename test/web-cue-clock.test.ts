@@ -1,8 +1,8 @@
 // Event-driven progress cues: CueClock arms one timer for the scheduler's next deadline (no polling).
 import { describe, expect, test } from "bun:test"
-import { CUE_PHRASES, CueClock, CueScheduler, type Cue } from "../web/src/core/feedback-core"
+import { CueClock, CueScheduler, type Cue, type CueName } from "../web/src/core/feedback-core"
 
-const speak = (cue: "working" | "subagent" | "still") => [{ type: "speak" as const, cue, text: CUE_PHRASES[cue] }]
+const speak = (cue: CueName) => [{ type: "speak" as const, cue, text: expect.any(String) }]
 
 function setup({ ready = () => true }: { ready?: () => boolean } = {}) {
   let now = 0
@@ -39,7 +39,7 @@ function setup({ ready = () => true }: { ready?: () => boolean } = {}) {
 }
 
 describe("CueScheduler defaults", () => {
-  test("'Working on it.' 2.5 s after the end of speech", () => {
+  test("the acknowledgement 2.5 s after the end of speech", () => {
     expect(new CueScheduler().ackMs).toBe(2500)
   })
 
@@ -85,7 +85,7 @@ describe("CueClock", () => {
     expect(played).toEqual([])
     advance(1)
     expect(played).toEqual([{ at: 2500, cues: speak("working") }])
-    expect(timers().map((t) => t.at)).toEqual([2500 + 40_000]) // then "Still working."
+    expect(timers().map((t) => t.at)).toEqual([2500 + 40_000]) // then the still-working cue
   })
 
   test("pokes replace the timer; agent speech cancels the acknowledgement", () => {
