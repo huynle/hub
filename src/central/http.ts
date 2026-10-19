@@ -21,6 +21,8 @@ import { LOCAL_USER, PUSH_PREF_KEYS, quietHoursInput, Store, VIEW_PREF_KEYS, typ
 export interface Speech {
   transcribe(audio: Uint8Array, format: string): Promise<string>
   speak(text: string): Promise<Uint8Array<ArrayBuffer>>
+  /** Streams the audio as it is synthesized (the built-in providers do; an override may only buffer). */
+  speakStream?(text: string, signal?: AbortSignal): Promise<ReadableStream<Uint8Array>>
 }
 
 export interface CentralOptions {
@@ -526,7 +528,10 @@ export function startCentral(options: CentralOptions): Central {
     route("POST", "/api/speak", "user", async ({ request, user }) => {
       const text = speakable(String((await body(request)).text ?? ""), config.maxSpeechChars)
       if (!text) return error(400, "Nothing to speak")
-      return new Response(await speechFor(user.id).speak(text), { headers: { "content-type": "audio/mpeg" } })
+      const speech = speechFor(user.id)
+      // Passed through as the provider sends it, so the phone can start playing before synthesis ends.
+      const audio = speech.speakStream ? await speech.speakStream(text, request.signal) : await speech.speak(text)
+      return new Response(audio, { headers: { "content-type": "audio/mpeg" } })
     }),
     route("GET", "/api/push/key", "user", () => Response.json({ publicKey: push.publicKey() })),
     route("POST", "/api/push/subscribe", "user", async ({ request, device }) => {

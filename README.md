@@ -684,7 +684,9 @@ Pushes in conversation mode depend on presence: while the session is watched, "f
 (the phone is open and speaking). When nobody watches, "finished" is sent as usual and each spoken text
 of the root session (the whole text part, when it ends) is pushed as kind `say` (title = session title, body = the text, max 180 chars; at
 most one every 10 s per session; on by default, pref `say`). "blocked" is always sent. `/api/transcribe` and `/api/speak` have no rate limit; `/api/speak` accepts up to
-`HUB_MAX_SPEECH_CHARS` per call, so the phone sends sentence-sized chunks.
+`HUB_MAX_SPEECH_CHARS` per call, so the phone sends sentence-sized chunks. `/api/speak` streams the provider's MP3 through as it
+arrives (chunked; nothing is buffered on the hub, and a phone that cancels aborts the upstream request), so playback
+can start before synthesis ends; provider errors still answer 502 before any audio.
 
 ### Speech settings
 

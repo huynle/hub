@@ -1,7 +1,7 @@
 // OpenAI-compatible speech endpoints (OpenAI, Groq, local whisper/kokoro servers, ...):
 // STT as multipart POST {baseURL}/audio/transcriptions (file, model, language?), TTS as
 // POST {baseURL}/audio/speech {model, input, voice, response_format: "mp3", speed?}.
-import { audioMime, SpeechError, upstreamDetail, withSpeedRetry, type SpeechProvider } from "./provider"
+import { audioBody, audioMime, collect, SpeechError, upstreamDetail, withSpeedRetry, type SpeechProvider } from "./provider"
 
 export interface OpenAICompatibleOptions {
   /** Base URL including the version path, e.g. https://api.openai.com/v1 (no trailing slash). */
@@ -39,6 +39,10 @@ export class OpenAICompatible implements SpeechProvider {
   }
 
   async speak(text: string, speed?: number, signal?: AbortSignal): Promise<Uint8Array<ArrayBuffer>> {
+    return collect(await this.speakStream(text, speed, signal))
+  }
+
+  async speakStream(text: string, speed?: number, signal?: AbortSignal): Promise<ReadableStream<Uint8Array>> {
     const { ttsModel: model, voice } = this.options
     const headers = { ...(await this.headers()), "content-type": "application/json" }
     const response = await withSpeedRetry(
@@ -52,7 +56,7 @@ export class OpenAICompatible implements SpeechProvider {
       speed,
     )
     if (!response.ok) throw await failure("speech", response)
-    return new Uint8Array(await response.arrayBuffer())
+    return audioBody(response)
   }
 
   private async headers(): Promise<Record<string, string>> {

@@ -1,6 +1,6 @@
 // OpenRouter speech-to-text (/audio/transcriptions as OpenAI-style multipart: the audio goes up as binary,
 // not as base64 JSON, a third smaller and no encoding) and text-to-speech (/audio/speech).
-import { audioMime, SpeechError, upstreamDetail, withSpeedRetry, type SpeechProvider } from "./provider"
+import { audioBody, audioMime, collect, SpeechError, upstreamDetail, withSpeedRetry, type SpeechProvider } from "./provider"
 
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -44,6 +44,10 @@ export class OpenRouter implements SpeechProvider {
   }
 
   async speak(text: string, speed?: number, signal?: AbortSignal): Promise<Uint8Array<ArrayBuffer>> {
+    return collect(await this.speakStream(text, speed, signal))
+  }
+
+  async speakStream(text: string, speed?: number, signal?: AbortSignal): Promise<ReadableStream<Uint8Array>> {
     const { ttsModel: model, voice } = this.options
     const response = await withSpeedRetry(
       (s) =>
@@ -51,7 +55,7 @@ export class OpenRouter implements SpeechProvider {
       speed,
     )
     if (!response.ok) throw await failure("speech", response)
-    return new Uint8Array(await response.arrayBuffer())
+    return audioBody(response)
   }
 
   /** POSTs JSON, or a form as multipart (fetch sets its content type with the boundary). */

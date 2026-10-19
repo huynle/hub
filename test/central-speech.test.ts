@@ -111,6 +111,20 @@ describe("OpenRouter provider", () => {
 
   })
 
+  test("speakStream hands over the provider's body as it arrives, with the caller's abort signal; errors throw first", async () => {
+    for (const make of [(f: typeof globalThis.fetch) => openrouter(f), (f: typeof globalThis.fetch) => compatible(f)]) {
+      const { fetch, calls } = fakeFetch(mp3)
+      const abort = new AbortController()
+      const stream = await make(fetch).speakStream("Hi", undefined, abort.signal)
+      expect(calls[0]!.init.signal).toBe(abort.signal)
+      expect([...new Uint8Array(await new Response(stream).arrayBuffer())]).toEqual([9, 8, 7])
+      const failing = fakeFetch(() => Response.json({ error: { message: "nope" } }, { status: 500 }))
+      const error = await make(failing.fetch).speakStream("Hi").catch((e) => e)
+      expect(error).toBeInstanceOf(SpeechError)
+      expect(error.message).toContain("nope")
+    }
+  })
+
   test("transcribe uploads the audio as multipart binary (no base64 JSON), with model and language", async () => {
     const stt = fakeFetch(() => Response.json({ text: " x " }))
     expect(await openrouter(stt.fetch, "de").transcribe(new Uint8Array([1, 2, 3]), "wav")).toBe("x")
