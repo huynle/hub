@@ -779,7 +779,8 @@ Pure logic is in `web/src/core/feedback-core.ts` (tested with bun); `web/src/cor
   assistant message); in conversation mode the spoken `say` text is merged into the bubble of the same message.
   The home list shows the same "now" text with a spinner for working sessions.
 - **Progress cues** (conversation mode; Settings → Voice → "Progress cues", on by default): a soft
-  tone when the agent hears an utterance, then "Working on it." if the session is working and the
+  tone as soon as you stop speaking (the moment the segment goes to transcription; typed text gets it when
+  the agent receives it), then "Working on it." if the session is working and the
   agent has not spoken within 5 s. "Started a subagent." plays when a subagent starts, unless the agent
   spoke in the last 3 s. "Still working." plays after 40 s without speech while work continues, and
   a double tone plays when a subagent finishes. Failed tools are not spoken (they show in the feed). Cues never

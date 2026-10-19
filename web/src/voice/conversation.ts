@@ -70,6 +70,9 @@ export class Conversation<B = unknown> {
   agent: string | undefined
   private inflight = 0
   private sent = new Map<string, B | "heard">()
+  /** Typed utterances (no local end-of-speech tone): their hub `heard` plays the tone. */
+  private typed = new Set<string>()
+  private typing = 0
   private heardAt = 0
   private lastStatus: readonly StatusEntry[] | undefined
   private scheduler = new CueScheduler()
@@ -241,7 +244,8 @@ export class Conversation<B = unknown> {
         this.cuePlayer.stop()
         if (this.queue!.speaking) this.queue!.clear() // barge-in: start fires only after VOICE_TIMINGS.minSpeechMs of voice
       } else {
-        this.scheduler.userTalking(false, Date.now())
+        // Instant acknowledgement: the segment goes to transcription, so the user hears it was taken.
+        this.cuePlayer.play(this.scheduler.speechEnded(Date.now()))
         const id = this.endpointer!.segmentEnded(event.durationMs)
         void this.transcribe(id, encodeWav(event.samples, this.vad.sampleRate))
       }
@@ -266,7 +270,7 @@ export class Conversation<B = unknown> {
   }
 
   /** A finished utterance from the endpointer (or typed text): a voice command or a steer. */
-  private async deliver(text: string): Promise<void> {
+  private async deliver(text: string, typed = false): Promise<void> {
     const command = parseCommand(text)
     if (command === "pause") {
       this.ui.note("Paused listening.")
@@ -283,22 +287,28 @@ export class Conversation<B = unknown> {
       return
     }
     const bubble = this.ui.user(text)
+    if (typed) this.typing++
     try {
       const { inboxID } = await (await this.api(`${this.path}/utterance`, { method: "POST", json: { text } })).json()
       if (this.sent.get(inboxID) === "heard") this.ui.tick(bubble, "heard") // delivery beat the response
-      else this.ui.tick(bubble, "sent")
+      else {
+        this.ui.tick(bubble, "sent")
+        if (typed) this.typed.add(inboxID)
+      }
       this.sent.set(inboxID, bubble)
     } catch (e) {
       const err = e as Error & { status?: number }
       this.ui.tick(bubble, "failed")
       this.ui.note(err.status === 409 ? err.message : `Could not send: ${err.message}`, "err")
+    } finally {
+      if (typed) this.typing--
     }
   }
 
   /** Typed text while Voice mode is on goes the same way as speech. */
   sendTyped(text: string): Promise<void> {
     this.queue?.clear()
-    return this.deliver(text)
+    return this.deliver(text, true)
   }
 
   /** Hub SSE messages for this session. */
@@ -309,7 +319,10 @@ export class Conversation<B = unknown> {
       if (bubble !== undefined && bubble !== "heard") this.ui.tick(bubble, "heard")
       else this.sent.set(message.inboxID, "heard")
       this.heardAt = Date.now()
-      if (this.active && !this.paused) this.cuePlayer.play(this.scheduler.heard(this.heardAt))
+      // Spoken utterances were acknowledged at the end of speech; typed ones (also when the hub's heard beats
+      // the POST response) get the tone now.
+      const tone = this.typed.delete(message.inboxID) || (bubble === undefined && this.typing > 0)
+      if (this.active && !this.paused) this.cuePlayer.play(this.scheduler.heard(this.heardAt, { tone }))
       this.refresh()
       setTimeout(() => this.refresh(), SENT_LABEL_MS + 50)
     } else if (message.type === "say") {

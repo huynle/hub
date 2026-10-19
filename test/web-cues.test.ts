@@ -14,6 +14,17 @@ describe("CueScheduler", () => {
     expect(c.heard(0)).toEqual([{ type: "earcon", name: "heard" }])
   })
 
+  test("end of speech plays the heard earcon at once; the hub's heard can skip it (already acknowledged)", () => {
+    const c = new CueScheduler()
+    c.userTalking(true, 0)
+    expect(c.speechEnded(100)).toEqual([{ type: "earcon", name: "heard" }])
+    expect(c.gated).toBe(false)
+    expect(c.heard(400, { tone: false })).toEqual([])
+    const off = new CueScheduler()
+    off.enabled = false
+    expect(off.speechEnded(0)).toEqual([])
+  })
+
   test("heard while the user is talking again: no earcon", () => {
     const c = new CueScheduler()
     c.userTalking(true, 0)

@@ -395,9 +395,19 @@ export class CueScheduler {
     return this.user || this.agent || this.cue
   }
 
-  heard(now: number): Cue[] {
+  /**
+   * The hub reports an utterance reached the agent. `tone: false` when it was already acknowledged locally
+   * (`speechEnded`), so the earcon does not play twice.
+   */
+  heard(now: number, { tone = true }: { tone?: boolean } = {}): Cue[] {
     this.awaiting = now
-    return this.enabled && !this.user ? [{ type: "earcon", name: "heard" }] : []
+    return tone && this.enabled && !this.user ? [{ type: "earcon", name: "heard" }] : []
+  }
+
+  /** The VAD ended a segment of speech that goes to transcription: acknowledge it at once. */
+  speechEnded(now: number): Cue[] {
+    this.userTalking(false, now)
+    return this.enabled ? [{ type: "earcon", name: "heard" }] : []
   }
 
   working(on: boolean, now: number): void {
