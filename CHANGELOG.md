@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- **Voice mode hears you, not the room**:
+  - **On-device speech detection**: Silero VAD v5 (MIT) runs in the browser through onnxruntime-web (MIT; wasm,
+    single-threaded, in a Web Worker) on 16 kHz, 32 ms chunks: speech starts at probability ≥ 0.6 for 250 ms and
+    ends after 350 ms below 0.35. Typing, fans, clatter, beeps and hum no longer start a turn. The energy
+    detector stays as a pre-gate (quiet chunks skip the model) and as the fallback while the model loads or if
+    it fails (logged once). The model and wasm load when Voice mode first starts, as hashed assets outside the
+    main JS chunk; the hub now serves `/assets/*` with `cache-control: public, max-age=31536000, immutable`,
+    `.wasm` and `.onnx` with their types, and compresses big hashed assets (Brotli or gzip) when accepted.
+    Measured about 1 ms per 32 ms chunk; segments end within one chunk of the energy detector.
+  - **Echo guard**: a mono mic track with the browser's echo cancellation, noise suppression and auto gain; while
+    a reply or a progress cue plays (and 400 ms after) a barge-in needs probability ≥ 0.85 and 8 dB more energy.
+  - **Settings → Voice → Mic sensitivity** (Low / Normal / High, per device, applies at once): model thresholds,
+    speech needed to start, and the energy margins.
+  - **Noise transcripts dropped**: "Thank you.", "you", "Thanks for watching!", "Subtitles by …", "[Music]",
+    punctuation-only and repeated-word transcripts, and one or two words from under 400 ms of speech (unless a
+    command or answer like "yes", "no", "stop", "go ahead", "cancel that") never reach the agent; the Voice bar
+    shows them dim for a moment ("ignored: …").
+  - **Whisper's no-speech rating**: with a Whisper model the hub asks for `verbose_json` and drops segments with
+    `no_speech_prob` > 0.6 (falls back to plain requests for providers that refuse it).
+
 - **Voice mode: varied progress cues**: instead of the same "Working on it.", "Started a subagent." and
   "Still working." every time, each cue has several short, natural variants ("On it.", "Give me a sec.",
   "I'll hand that off.", "Still on it.", "Almost there." …). A shuffle-bag picks them: every variant once
