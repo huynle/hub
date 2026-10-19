@@ -335,7 +335,14 @@ not persist those potentially sensitive details.
   keeps listening. The phone's stop words ("stop", "cancel", "never mind", "stop that", "hold on") still
   interrupt the root turn at once.
 - Child text and execution events are paired by the hub. The latest assistant message of a successful
-  child is emitted as root-session speech; failures, interruptions and stale partial results are not.
+  child is emitted as root-session speech; interruptions and stale partial results are not. **Announcements**
+  (hub, `src/central/registry.ts`): while another worker of the session runs or waits, or one was announced in
+  the last minute, a result starts with the task's title ("Deploy check finished: …"); a result the voice agent
+  already said in the last two minutes is not read again. A failed worker is announced once with its reason
+  ("Lint failed: rate limit exceeded."), a worker's permission request or question once per request ("Cleanup
+  needs your permission.", "… has a question."); a stopped worker is not. Announcements are ordinary `say`s
+  without `seq` (`messageID` `announce:failed:<session>`, `announce:permission:<id>`, `announce:form:<id>`),
+  so the phone queues them after the sentence playing and never cuts one off.
 - Server ops: `steer` sends the text with `delivery: "steer"` (metadata `{source: "hub", mode:
   "conversation"}`, or `mode: "remote"` for a session not shared with Voice; 0.5 wrote `source:
   "opencode-hub"` and 0.4 and earlier `source: "opencode-voice"`, and readers accept all three) and returns the inbox ID at once; `interrupt`

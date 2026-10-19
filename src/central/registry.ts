@@ -91,6 +91,20 @@ const ACTIVITY_ROOTS = 200
 export const PRESENCE_WINDOW_MS = 45_000
 /** Child completion text is useful only while its matching run completion is still nearby. */
 export const WORKER_SPEECH_TTL_MS = 5 * 60_000
+/** A worker result is prefixed with its task's title while another worker runs or was announced within this window. */
+export const ANNOUNCE_GROUP_MS = 60_000
+/** Root speech within this window counts as heard: a worker result it already contained is not read again. */
+export const HEARD_WINDOW_MS = 2 * 60_000
+/** Another process forwarding the same worker failure within this window is not announced again. */
+const FAILURE_DEDUPE_MS = 30_000
+const ANNOUNCE_REASON_MAX = 150
+
+/** Lowercase words only, for "was this already said" checks. */
+const spokenForm = (text: string) =>
+  text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
 
 /** Push-worthy transitions of a root session. Kept off the SSE stream. */
 export interface Alert {
@@ -273,6 +287,13 @@ export class Registry {
   private readonly rootSpeech = new Map<string, RootSpeech>()
   /** Child session → latest text and completion state, while its root is in conversation mode. */
   private readonly workerSpeech = new Map<string, WorkerSpeech>()
+  /** Root → what it said lately (spokenForm), so a worker result the voice agent already relayed is skipped. */
+  private readonly rootHeard = new Map<string, Array<{ text: string; at: number }>>()
+  /** Root → when a worker announcement of its tree was last spoken. */
+  private readonly lastAnnounced = new Map<string, number>()
+  /** Worker → when its failure was announced; permission/form ID → announced. */
+  private readonly announcedFailures = new Map<string, number>()
+  private readonly announcedBlockers = new Map<string, true>()
   /** Utterance inboxID → session, until OpenCode reports it delivered. */
   private readonly utterances = new Map<string, string>()
   /** Deliveries not (yet) matched to an utterance: the steer result can arrive after the event. */
@@ -493,6 +514,7 @@ export class Registry {
     this.observeBoards(event, tenant)
     if (sessionID) this.observeActivity(event, sessionID, data)
     if (sessionID) this.observeWorkerSpeech(event.type, sessionID, data)
+    if (sessionID) this.observeWorkerBlockers(event.type, sessionID, data)
 
     if (streamed && sessionID) {
       const rootID = this.rootOf(sessionID)
@@ -612,6 +634,7 @@ export class Registry {
   }
 
   private emitSentence(state: RootSpeech, messageID: string, ordinal: number, text: string): void {
+    this.heardFrom(state.sessionID, text)
     this.emit({ type: "say", sessionID: state.sessionID, messageID, ordinal, seq: state.seq++, text })
   }
 
@@ -635,6 +658,73 @@ export class Registry {
     this.emit({ type: "say", sessionID, messageID, ordinal, text })
     // Nobody is listening on a phone: push the reply so it reaches a locked screen.
     if (!this.watched(sessionID)) this.alert("say", sessionID, undefined, text)
+  }
+
+  /** Records root speech for `alreadyHeard`, keeping the last few minutes. */
+  private heardFrom(rootID: string, text: string): void {
+    const now = this.now()
+    const recent = (this.rootHeard.get(rootID) ?? []).filter((entry) => now - entry.at <= HEARD_WINDOW_MS).slice(-30)
+    recent.push({ text: spokenForm(text), at: now })
+    remember(this.rootHeard, rootID, recent, ACTIVITY_ROOTS)
+  }
+
+  /** True when the root's recent speech already contained this text (the voice agent relayed the result). */
+  private alreadyHeard(rootID: string, text: string): boolean {
+    const wanted = spokenForm(text)
+    if (wanted.length < 8) return false
+    const now = this.now()
+    const said = (this.rootHeard.get(rootID) ?? []).filter((entry) => now - entry.at <= HEARD_WINDOW_MS).map((entry) => entry.text)
+    return said.join(" ").includes(wanted)
+  }
+
+  /** A worker's task title (its session title on the root's status board). */
+  private workerTitle(rootID: string, childID: string): string {
+    return this.status(rootID)?.find((s) => s.id === childID)?.title?.trim() || "A worker"
+  }
+
+  /** Several workers are in play: another one runs (or waits) now, or one was announced a moment ago. */
+  private severalWorkers(rootID: string, childID: string): boolean {
+    const others = (this.status(rootID) ?? []).filter((s) => s.id !== rootID && s.id !== childID)
+    if (others.some((s) => s.state === "working" || s.state === "blocked")) return true
+    const last = this.lastAnnounced.get(rootID)
+    return last !== undefined && this.now() - last <= ANNOUNCE_GROUP_MS
+  }
+
+  /** Speaks a hub-made announcement through the conversation root (pushed when nobody watches, if asked). */
+  private announce(rootID: string, messageID: string, text: string, push: boolean): void {
+    remember(this.lastAnnounced, rootID, this.now(), ACTIVITY_ROOTS)
+    this.emit({ type: "say", sessionID: rootID, messageID, ordinal: 0, text })
+    if (push && !this.watched(rootID)) this.alert("say", rootID, undefined, text)
+  }
+
+  /** The conversation root of a worker session, if it is one. */
+  private conversationRootOf(sessionID: string): string | undefined {
+    const rootID = this.rootOf(sessionID)
+    return rootID && rootID !== sessionID && this.conversations.has(rootID) && this.boards.has(rootID) ? rootID : undefined
+  }
+
+  /** A worker that fails, needs a permission or asks a question is announced once ("Deploy check failed: …"). */
+  private observeWorkerBlockers(type: string, sessionID: string, data: Record<string, unknown>): void {
+    if (type !== "session.execution.failed" && type !== "permission.asked" && type !== "form.created") return
+    const rootID = this.conversationRootOf(sessionID)
+    if (!rootID) return
+    const title = this.workerTitle(rootID, sessionID)
+    if (type === "session.execution.failed") {
+      const at = this.announcedFailures.get(sessionID)
+      if (at !== undefined && this.now() - at <= FAILURE_DEDUPE_MS) return
+      remember(this.announcedFailures, sessionID, this.now())
+      const message = (data.error as { message?: unknown } | undefined)?.message
+      const reason = (typeof message === "string" ? message : "").replace(/\s+/g, " ").trim().replace(/[.!]+$/, "").slice(0, ANNOUNCE_REASON_MAX)
+      return this.announce(rootID, `announce:failed:${sessionID}`, reason ? `${title} failed: ${reason}.` : `${title} failed.`, true)
+    }
+    const id = type === "permission.asked" ? data.id : (data.form as { id?: unknown } | undefined)?.id
+    if (typeof id !== "string") return
+    const key = `${type} ${id}`
+    if (this.announcedBlockers.has(key)) return
+    remember(this.announcedBlockers, key, true)
+    // "blocked" is pushed already; this is for the ears of whoever is in Voice mode.
+    if (type === "permission.asked") this.announce(rootID, `announce:permission:${id}`, `${title} needs your permission.`, false)
+    else this.announce(rootID, `announce:form:${id}`, `${title} has a question.`, false)
   }
 
   /** Pairs a child session's latest assistant message with successful execution and speaks it once. */
@@ -683,19 +773,31 @@ export class Registry {
       const held = state
       state.timer = this.timers.set(() => {
         held.timer = undefined
-        if (this.workerSpeech.get(sessionID) === held) this.flushWorkerSpeech(held)
+        if (this.workerSpeech.get(sessionID) === held) this.flushWorkerSpeech(sessionID, held)
       }, STREAM_INTERVAL_MS)
       return
     }
-    this.flushWorkerSpeech(state)
+    this.flushWorkerSpeech(sessionID, state)
   }
 
-  private flushWorkerSpeech(state: WorkerSpeech): void {
+  /**
+   * Speaks a successful worker's result: prefixed with its task's title when several workers are in play, not at
+   * all when the voice agent already said it.
+   */
+  private flushWorkerSpeech(childID: string, state: WorkerSpeech): void {
     if (!state.succeeded || !state.messageID || state.parts.size === 0 || !this.conversations.has(state.rootID)) return
-    for (const [ordinal, text] of [...state.parts].sort(([a], [b]) => a - b)) {
-      this.emitSay(state.rootID, { assistantMessageID: state.messageID, ordinal, text })
-    }
+    const parts = [...state.parts].sort(([a], [b]) => a - b).filter(([ordinal]) => !this.spoken.has(`${state.messageID} ${ordinal}`))
     state.parts.clear()
+    if (!parts.length) return
+    if (this.alreadyHeard(state.rootID, parts.map(([, text]) => text).join(" "))) {
+      for (const [ordinal] of parts) remember(this.spoken, `${state.messageID} ${ordinal}`, true)
+      return
+    }
+    const prefix = this.severalWorkers(state.rootID, childID) ? `${this.workerTitle(state.rootID, childID)} finished: ` : ""
+    parts.forEach(([ordinal, text], index) => {
+      this.emitSay(state.rootID, { assistantMessageID: state.messageID, ordinal, text: index === 0 ? prefix + text : text })
+    })
+    remember(this.lastAnnounced, state.rootID, this.now(), ACTIVITY_ROOTS)
   }
 
   private clearWorkerSpeech(sessionID: string): void {
