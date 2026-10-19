@@ -1,10 +1,33 @@
 // Progress cue output for conversation mode: short Web Audio earcons and fixed phrases spoken through
-// /api/speak (fetched once per phrase and kept in memory). Timing decisions live in feedback-core.ts.
+// /api/speak. Phrases are prefetched when Voice mode starts and kept in memory and, keyed by the TTS voice
+// and the text, in Cache Storage, so later sessions start with them ready. A phrase that is not ready when
+// its cue fires plays a short tone instead (it never waits for synthesis). Timing decisions live in
+// feedback-core.ts.
 import type { Cue } from "./feedback-core"
 
-const EARCONS: Record<string, Array<{ freq?: number; ms?: number; gap?: number }>> = {
+const EARCONS = {
   heard: [{ freq: 880, ms: 80 }],
   done: [{ freq: 660, ms: 70 }, { gap: 50 }, { freq: 990, ms: 70 }],
+  /** Stands in for a phrase that is not synthesized yet. */
+  pending: [{ freq: 587, ms: 110 }],
+} satisfies Record<string, Array<{ freq?: number; ms?: number; gap?: number }>>
+export type EarconName = keyof typeof EARCONS
+
+/** Cache Storage name and the (never fetched) URLs that key cue audio: one folder per voice key. */
+export const CUE_CACHE = "hub-cues-v1"
+const CUE_URL = "https://hub-cues.invalid"
+const cueFolder = (key: string) => `${CUE_URL}/${encodeURIComponent(key)}/`
+const cueURL = (key: string, text: string) => `${cueFolder(key)}${encodeURIComponent(text)}`
+
+type CueStore = Pick<Cache, "match" | "put" | "keys" | "delete">
+
+async function cueStore(): Promise<CueStore | undefined> {
+  try {
+    const storage = (globalThis as { caches?: CacheStorage }).caches
+    return storage ? await storage.open(CUE_CACHE) : undefined
+  } catch {
+    return undefined // no Cache Storage here (insecure context, private mode): memory only
+  }
 }
 
 type RateTarget = { defaultPlaybackRate?: number; playbackRate?: number; preservesPitch?: boolean; webkitPreservesPitch?: boolean }
@@ -34,6 +57,10 @@ export class CuePlayer {
   private speed?: () => number
   private onSpeaking?: (speaking: boolean) => void
   private phrases = new Map<string, Promise<string>>()
+  /** Object URLs of phrases that are ready to play at once. */
+  private urls = new Map<string, string>()
+  /** Voice key of the cached audio (undefined: memory only). */
+  private key: Promise<string | undefined> = Promise.resolve(undefined)
   private audio: Playable
   private ctx: AudioContext | undefined
   speaking = false
@@ -62,9 +89,9 @@ export class CuePlayer {
     }
   }
 
-  earcon(name: "heard" | "done"): void {
+  earcon(name: EarconName): void {
     const ctx = this.ctx
-    const parts = EARCONS[name]
+    const parts: ReadonlyArray<{ freq?: number; ms?: number; gap?: number }> = EARCONS[name]
     if (!ctx || !parts || ctx.state === "closed") return
     let t = ctx.currentTime + 0.01
     for (const part of parts) {
@@ -87,36 +114,86 @@ export class CuePlayer {
     }
   }
 
-  /** Cached object URL for a fixed phrase (one /api/speak call per phrase per page load). */
+  /**
+   * Loads every phrase in parallel (call when Voice mode starts). With a voice `key` (TTS provider, model,
+   * voice, speed) the audio is read from and stored in Cache Storage, and other voices' entries are dropped.
+   * Never rejects: a phrase that fails stays unready (its cue plays the tone) and is tried again next time.
+   */
+  async prefetch(texts: readonly string[], key?: string | Promise<string | undefined>): Promise<void> {
+    this.key = Promise.resolve(key).catch(() => undefined)
+    await Promise.all([this.prune(), ...texts.map((text) => this.phrase(text).catch(() => undefined))])
+  }
+
+  /** True when `text` plays at once (no synthesis needed). */
+  ready(text: string): boolean {
+    return this.urls.has(text)
+  }
+
+  /** Object URL for a fixed phrase: loaded once per page (from Cache Storage when possible). */
   phrase(text: string): Promise<string> {
     let url = this.phrases.get(text)
     if (!url) {
-      url = this.api("/api/speak", { method: "POST", json: { text } }).then(async (res) => URL.createObjectURL(await res.blob()))
+      url = this.load(text)
       this.phrases.set(text, url)
       url.catch(() => this.phrases.delete(text))
     }
     return url
   }
 
-  async say(text: string): Promise<void> {
-    let url: string
-    try {
-      url = await this.phrase(text)
-    } catch {
-      return // cues are best-effort
+  private async load(text: string): Promise<string> {
+    const key = await this.key
+    const store = key ? await cueStore() : undefined
+    const request = key ? cueURL(key, text) : ""
+    let blob = store ? await store.match(request).then((res) => res?.blob(), () => undefined) : undefined
+    if (!blob) {
+      blob = await (await this.api("/api/speak", { method: "POST", json: { text } })).blob()
+      await store?.put(request, new Response(blob, { headers: { "content-type": blob.type || "audio/mpeg" } })).catch(() => {})
     }
+    const url = URL.createObjectURL(blob)
+    this.urls.set(text, url)
+    return url
+  }
+
+  /** Drops cached cue audio of other voices. */
+  private async prune(): Promise<void> {
+    const key = await this.key
+    const store = key ? await cueStore() : undefined
+    if (!store || !key) return
+    try {
+      for (const request of await store.keys()) if (!request.url.startsWith(cueFolder(key))) await store.delete(request)
+    } catch {
+      // best-effort
+    }
+  }
+
+  /**
+   * Speaks a phrase. A ready phrase starts playing synchronously (well within 50 ms of its trigger); one that
+   * is not ready plays the short "pending" tone instead and keeps loading for next time.
+   */
+  say(text: string): Promise<void> {
+    const url = this.urls.get(text)
+    if (!url) {
+      this.earcon("pending")
+      this.phrase(text).catch(() => {}) // cues are best-effort
+      return Promise.resolve()
+    }
+    return this.playURL(url)
+  }
+
+  private async playURL(url: string): Promise<void> {
     const audio = this.audio
     this.setSpeaking(true)
     audio.src = url
     applyRate(audio, this.speed?.() ?? 1)
+    // Listen before play() so a very short phrase cannot end unnoticed.
+    const finished = new Promise<void>((resolve) => {
+      audio.onended = audio.onpause = audio.onerror = () => resolve()
+    })
     const played = await audio.play().then(
       () => true,
       () => false,
     )
-    if (!played) return this.setSpeaking(false)
-    await new Promise<void>((resolve) => {
-      audio.onended = audio.onpause = audio.onerror = () => resolve()
-    })
+    if (played) await finished
     audio.onended = audio.onpause = audio.onerror = null
     this.setSpeaking(false)
   }

@@ -692,6 +692,90 @@ describe("streaming text and reasoning", () => {
     expect(queue).toEqual([])
   })
 
+  describe("speak while it writes", () => {
+    const says = () => messages.filter((m) => m.type === "say") as any[]
+    const ended = (sessionID: string, assistantMessageID: string, text: string, ordinal = 0) =>
+      ev("session.text.ended", { sessionID, assistantMessageID, ordinal, text })
+    let alerts: any[]
+    beforeEach(() => {
+      alerts = []
+      registry.subscribeAlerts((a) => alerts.push(a))
+    })
+
+    test("root text in conversation mode is spoken sentence by sentence while it streams, after its deltas", () => {
+      registry.setConversation("ses_1", true, "c1")
+      registry.observe("c1", text("ses_1", "msg_1", "I checked the build."))
+      expect(says()).toEqual([])
+      t = 1010
+      registry.observe("c1", text("ses_1", "msg_1", " It"))
+      expect(says()).toEqual([{ type: "say", sessionID: "ses_1", messageID: "msg_1", ordinal: 0, seq: 0, text: "I checked the build." }])
+      // the held delta went out first, so the say never overtakes the bubble's text
+      const order = messages.filter((m) => m.type === "delta" || m.type === "say").map((m: any) => `${m.type}:${m.text}`)
+      expect(order).toEqual(["delta:I checked the build.", "delta: It", "say:I checked the build."])
+      registry.observe("c1", text("ses_1", "msg_1", " passes! Ship"))
+      registry.observe("c1", ended("ses_1", "msg_1", "I checked the build. It passes! Ship it."))
+      expect(says().map((m) => [m.seq, m.text])).toEqual([
+        [0, "I checked the build."],
+        [1, "It passes!"],
+        [2, "Ship it."],
+      ])
+      // nobody watching: one push with the whole text, at the end
+      expect(alerts).toEqual([{ kind: "say", sessionID: "ses_1", title: "title ses_1", text: "I checked the build. It passes! Ship it." }])
+      advance(5000)
+      expect(says()).toHaveLength(3)
+    })
+
+    test("text that ends without streamed deltas is spoken as sentences too", () => {
+      registry.setConversation("ses_1", true, "c1")
+      registry.observe("c1", ended("ses_1", "msg_1", "One. Two."))
+      expect(says().map((m) => [m.seq, m.text])).toEqual([
+        [0, "One."],
+        [1, "Two."],
+      ])
+    })
+
+    test("two processes reporting the same text: each sentence is spoken once", () => {
+      registry.connect("c2", laptop, hello("p2", "service"))
+      registry.setSessions("c2", [session("ses_1"), session("ses_kid", { parentID: "ses_1" })])
+      registry.setConversation("ses_1", true, "c1")
+      for (const conn of ["c1", "c2"]) registry.observe(conn, text("ses_1", "msg_1", "First one. "))
+      for (const conn of ["c1", "c2"]) registry.observe(conn, text("ses_1", "msg_1", "Second"))
+      for (const conn of ["c1", "c2"]) registry.observe(conn, ended("ses_1", "msg_1", "First one. Second one."))
+      expect(says().map((m) => m.text)).toEqual(["First one.", "Second one."])
+    })
+
+    test("each text part (ordinal) has its own sentence sequence", () => {
+      registry.setConversation("ses_1", true, "c1")
+      registry.observe("c1", ended("ses_1", "msg_1", "Part one.", 0))
+      registry.observe("c1", ev("session.text.delta", { sessionID: "ses_1", assistantMessageID: "msg_1", ordinal: 1, delta: "Part two. And" }))
+      registry.observe("c1", ended("ses_1", "msg_1", "Part two. And three.", 1))
+      expect(says().map((m) => [m.ordinal, m.seq, m.text])).toEqual([
+        [0, 0, "Part one."],
+        [1, 0, "Part two."],
+        [1, 1, "And three."],
+      ])
+    })
+
+    test("not spoken: conversation mode off, and subagent text (its paired final message path is unchanged)", () => {
+      registry.observe("c1", text("ses_1", "msg_1", "Quiet one. Quiet two."))
+      registry.observe("c1", ended("ses_1", "msg_1", "Quiet one. Quiet two."))
+      registry.setConversation("ses_1", true, "c1")
+      registry.observe("c1", text("ses_kid", "msg_k", "Worker chatter. More chatter."))
+      expect(says()).toEqual([])
+    })
+
+    test("an interrupted run or conversation mode turning off drops the unspoken rest", () => {
+      registry.setConversation("ses_1", true, "c1")
+      registry.observe("c1", text("ses_1", "msg_1", "Spoken. Never"))
+      registry.observe("c1", ev("session.execution.interrupted", { sessionID: "ses_1" }))
+      registry.observe("c1", text("ses_1", "msg_2", "Also spoken. Not"))
+      registry.setConversation("ses_1", false)
+      registry.setConversation("ses_1", true, "c1")
+      registry.observe("c1", text("ses_1", "msg_2", " this. Later"))
+      expect(says().map((m) => m.text)).toEqual(["Spoken.", "Also spoken."])
+    })
+  })
+
   test("reasoning.ended closes the thinking item; a reasoning delta without a start opens one", () => {
     const activity = () => messages.filter((m) => m.type === "activity").map((m: any) => [m.item.id, m.item.sessionID, m.item.state])
     registry.observe("c1", thought("ses_kid", "msg_k", "hmm"))

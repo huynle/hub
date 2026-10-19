@@ -1,4 +1,4 @@
-// Speech providers: OpenRouter (JSON base64 STT) and OpenAI-compatible (multipart STT), both TTS via
+// Speech providers: OpenRouter and OpenAI-compatible (both multipart binary STT), both TTS via
 // /audio/speech, with an optional speed that is dropped and retried once when the provider rejects it.
 import { describe, expect, test } from "bun:test"
 import { OpenAICompatible } from "../src/central/speech/openai"
@@ -109,9 +109,27 @@ describe("OpenRouter provider", () => {
     expect(calls.map((c) => json(c).speed)).toEqual([0.75, undefined])
     expect(json(calls[1]!)).toEqual({ model: "hexgrad/kokoro-82m", input: "Hi", voice: "af_heart", response_format: "mp3" })
 
-    const stt = fakeFetch(() => Response.json({ text: "x" }))
-    await openrouter(stt.fetch, "de").transcribe(new Uint8Array([1]), "webm")
-    expect(json(stt.calls[0]!)).toEqual({ model: "openai/whisper-1", input_audio: { data: "AQ==", format: "webm" }, language: "de" })
+  })
+
+  test("transcribe uploads the audio as multipart binary (no base64 JSON), with model and language", async () => {
+    const stt = fakeFetch(() => Response.json({ text: " x " }))
+    expect(await openrouter(stt.fetch, "de").transcribe(new Uint8Array([1, 2, 3]), "wav")).toBe("x")
+    const call = stt.calls[0]!
+    expect(call.url).toBe("https://openrouter.ai/api/v1/audio/transcriptions")
+    const headers = new Headers(call.init.headers)
+    expect(headers.get("authorization")).toBe("Bearer sk-or")
+    expect(headers.has("content-type")).toBe(false) // fetch sets the multipart boundary
+    const form = call.init.body as FormData
+    expect(form).toBeInstanceOf(FormData)
+    expect(form.get("model")).toBe("openai/whisper-1")
+    expect(form.get("language")).toBe("de")
+    const file = form.get("file") as File
+    expect(file.name).toBe("audio.wav")
+    expect(file.type).toBe("audio/wav")
+    expect([...new Uint8Array(await file.arrayBuffer())]).toEqual([1, 2, 3])
+    const bare = fakeFetch(() => Response.json({ text: "y" }))
+    await openrouter(bare.fetch).transcribe(new Uint8Array([1]), "webm")
+    expect((bare.calls[0]!.init.body as FormData).has("language")).toBe(false)
   })
 
   test("OpenRouterError is a SpeechError", () => {

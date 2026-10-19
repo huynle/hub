@@ -365,9 +365,10 @@ export type Cue = { readonly type: "earcon"; readonly name: "heard" | "done" } |
 
 /**
  * Decides when conversation mode plays progress cues. Event methods take the current time and return earcons
- * to play at once; `tick(now)` (call about once a second) returns a phrase to speak when one is due and nobody
- * is talking:
- * - "Working on it." once, ≥ `ackMs` after an utterance was heard, while working, if the agent has not spoken;
+ * to play at once; `tick(now)` returns a phrase to speak when one is due and nobody is talking, and
+ * `nextDue(now)` says when that will be (CueClock arms one timer for it):
+ * - "Working on it." once, ≥ `ackMs` after the end of the speech that was sent (`awaitReply`; else after the hub
+ *   reported it heard), while working, if the agent has not spoken;
  * - "Started a subagent." when a subagent starts, unless the agent spoke in the last `quietMs`;
  * - "Still working." while work continues and nothing was spoken for `stillMs`.
  */
@@ -385,7 +386,7 @@ export class CueScheduler {
   private agent = false
   private cue = false
 
-  constructor({ ackMs = 5000, quietMs = 3000, stillMs = 40_000 }: { ackMs?: number; quietMs?: number; stillMs?: number } = {}) {
+  constructor({ ackMs = 2500, quietMs = 3000, stillMs = 40_000 }: { ackMs?: number; quietMs?: number; stillMs?: number } = {}) {
     this.ackMs = ackMs
     this.quietMs = quietMs
     this.stillMs = stillMs
@@ -395,9 +396,24 @@ export class CueScheduler {
     return this.user || this.agent || this.cue
   }
 
-  heard(now: number): Cue[] {
-    this.awaiting = now
-    return this.enabled && !this.user ? [{ type: "earcon", name: "heard" }] : []
+  /**
+   * The hub reports an utterance reached the agent. `tone: false` when it was already acknowledged locally
+   * (`speechEnded`), so the earcon does not play twice.
+   */
+  heard(now: number, { tone = true }: { tone?: boolean } = {}): Cue[] {
+    this.awaiting = Math.min(this.awaiting ?? now, now)
+    return tone && this.enabled && !this.user ? [{ type: "earcon", name: "heard" }] : []
+  }
+
+  /** An utterance whose speech ended at `since` was sent: "Working on it." counts from then. */
+  awaitReply(since: number): void {
+    this.awaiting = since
+  }
+
+  /** The VAD ended a segment of speech that goes to transcription: acknowledge it at once. */
+  speechEnded(now: number): Cue[] {
+    this.userTalking(false, now)
+    return this.enabled ? [{ type: "earcon", name: "heard" }] : []
   }
 
   working(on: boolean, now: number): void {
@@ -437,6 +453,14 @@ export class CueScheduler {
     return this.enabled && !this.user ? [{ type: "earcon", name: "done" }] : []
   }
 
+  /** When `tick` will next have a phrase to speak; undefined when nothing is pending or someone is talking. */
+  nextDue(now: number): number | undefined {
+    if (!this.enabled || this.gated) return undefined
+    if (this.pendingSubagent) return now
+    if (!this.busy) return undefined
+    return Math.min(this.awaiting !== undefined ? this.awaiting + this.ackMs : Infinity, this.lastSpoke + this.stillMs)
+  }
+
   tick(now: number): Cue[] {
     if (!this.enabled || this.gated) return []
     if (this.pendingSubagent) return this.say("subagent", now)
@@ -455,6 +479,64 @@ export class CueScheduler {
   private say(cue: CueName, now: number): Cue[] {
     this.spoke(now)
     return [{ type: "speak", cue, text: CUE_PHRASES[cue] }]
+  }
+}
+
+export interface CueClockOptions {
+  readonly scheduler: CueScheduler
+  readonly play: (cues: Cue[]) => void
+  /** False while cues must wait (Voice mode muted or off): nothing is armed; poke again when ready. */
+  readonly ready?: () => boolean
+  readonly now?: () => number
+  readonly setTimer?: (fn: () => void, ms: number) => unknown
+  readonly clearTimer?: (id: any) => void
+}
+
+/**
+ * Plays the scheduler's phrases right on their deadline: one timer for `nextDue`, re-armed by `poke()` after
+ * anything that may change it (speech, status, cue or agent playback). Nothing runs while nothing is due.
+ */
+export class CueClock {
+  private scheduler: CueScheduler
+  private playFn: (cues: Cue[]) => void
+  private ready: () => boolean
+  private now: () => number
+  private setTimer: (fn: () => void, ms: number) => unknown
+  private clearTimer: (id: any) => void
+  private timer: unknown
+
+  constructor({ scheduler, play, ready = () => true, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }: CueClockOptions) {
+    this.scheduler = scheduler
+    this.playFn = play
+    this.ready = ready
+    this.now = now
+    this.setTimer = setTimer
+    this.clearTimer = clearTimer
+  }
+
+  poke(): void {
+    this.stop()
+    if (!this.ready()) return
+    // A due phrase plays at once; playing it moves the deadline (bounded in case it does not).
+    for (let i = 0; i < 3; i++) {
+      const now = this.now()
+      const due = this.scheduler.nextDue(now)
+      if (due === undefined || !Number.isFinite(due)) return
+      if (due > now) {
+        this.timer = this.setTimer(() => {
+          this.timer = undefined
+          this.poke()
+        }, due - now)
+        return
+      }
+      const cues = this.scheduler.tick(now)
+      if (cues.length) this.playFn(cues)
+    }
+  }
+
+  stop(): void {
+    if (this.timer !== undefined) this.clearTimer(this.timer)
+    this.timer = undefined
   }
 }
 

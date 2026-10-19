@@ -4,13 +4,13 @@
 // The pure parts live in core/conversation-core; this file owns the browser APIs (mic, Web Audio, wake lock,
 // media session). Ported from the 0.4 web/conversation.js; behavior unchanged except the mic device choice.
 import { gestureBlocked } from "../core/voice-autostart"
-import { Endpointer, EnergyVad, SpeechQueue, encodeWav, parseCommand, splitSentences } from "../core/conversation-core"
+import { Endpointer, EnergyVad, SayAssembler, SpeechQueue, TurnTimer, describeTurn, encodeWav, parseCommand, type TurnMark } from "../core/conversation-core"
 import { CuePlayer } from "../core/cues"
-import { CueScheduler, isWorking, subagentChanges, type StatusEntry } from "../core/feedback-core"
+import { CUE_PHRASES, CueClock, CueScheduler, isWorking, subagentChanges, type StatusEntry } from "../core/feedback-core"
 import type { ApiInit } from "../app/api"
 
 const SENT_LABEL_MS = 2500
-const CUE_TICK_MS = 1000
+
 const SILENCE_SECONDS = 2
 
 /** Shown (as a button) when the browser starts Voice mode only after a tap, e.g. when opened from /voice. */
@@ -41,6 +41,17 @@ export interface ConversationUI<B> {
   agent(message: { messageID?: string; text: string }): void
   note(text: string, kind?: string): void
   ended(): void
+  /** The last turn's timing ("last turn: 1.8 s to first audio" and its steps), after its first audio played. */
+  timing?(turn: { summary: string; detail: string }): void
+}
+
+/** performance.mark names of a turn's steps (visible in the browser's performance tools). */
+const TURN_MARKS: Record<TurnMark, string> = {
+  speechEnd: "hub-voice:speech-end",
+  transcript: "hub-voice:transcript",
+  accepted: "hub-voice:accepted",
+  firstSay: "hub-voice:first-say",
+  firstAudio: "hub-voice:first-audio",
 }
 
 export interface ConversationOptions {
@@ -70,6 +81,9 @@ export class Conversation<B = unknown> {
   agent: string | undefined
   private inflight = 0
   private sent = new Map<string, B | "heard">()
+  /** Typed utterances (no local end-of-speech tone): their hub `heard` plays the tone. */
+  private typed = new Set<string>()
+  private typing = 0
   private heardAt = 0
   private lastStatus: readonly StatusEntry[] | undefined
   private scheduler = new CueScheduler()
@@ -83,7 +97,13 @@ export class Conversation<B = unknown> {
   private vad?: EnergyVad
   private endpointer?: Endpointer
   private queue?: SpeechQueue<string>
-  private ticker?: ReturnType<typeof setInterval>
+  /** Orders and dedupes the sentence-by-sentence says; barge-in mutes the replies speaking. */
+  private says = new SayAssembler()
+  private turns = new TurnTimer()
+  /** Plays progress phrases right on their deadline (re-armed by `poke()` after anything that may move it). */
+  private cueClock: CueClock
+  /** When the VAD last ended a segment: "Working on it." counts from the end of the speech that was sent. */
+  private speechEndedAt: number | undefined
   private silence?: HTMLAudioElement
   private silenceURL?: string
   private wakeLock?: WakeLockSentinel
@@ -101,7 +121,15 @@ export class Conversation<B = unknown> {
     this.lastStatus = options.status
     this.scheduler.enabled = this.opts.cues !== false
     this.scheduler.working(isWorking(options.status), Date.now())
-    this.cuePlayer = new CuePlayer({ api: this.api as never, speed: this.opts.speed, onSpeaking: (on) => this.scheduler.cueSpeaking(on, Date.now()) })
+    this.cuePlayer = new CuePlayer({
+      api: this.api as never,
+      speed: this.opts.speed,
+      onSpeaking: (on) => {
+        this.scheduler.cueSpeaking(on, Date.now())
+        this.cueClock.poke()
+      },
+    })
+    this.cueClock = new CueClock({ scheduler: this.scheduler, play: (cues) => this.cuePlayer.play(cues), ready: () => this.active && !this.paused })
     this.onVisibility = () => {
       if (document.visibilityState === "visible" && this.active && !this.opts.background) void this.lockScreen()
     }
@@ -164,6 +192,7 @@ export class Conversation<B = unknown> {
       return false
     }
     this.active = true
+    this.prefetchCues()
     try {
       await this.listen()
     } catch (e) {
@@ -177,9 +206,26 @@ export class Conversation<B = unknown> {
     if (this.opts.background) this.mediaSession()
     else void this.lockScreen()
     document.addEventListener("visibilitychange", this.onVisibility)
-    this.ticker = setInterval(() => this.tickCues(), CUE_TICK_MS)
+    this.cueClock.poke()
     this.refresh()
     return true
+  }
+
+  /** Loads the progress phrases now so each plays the moment its cue fires (cached per TTS voice). */
+  private prefetchCues(): void {
+    if (this.opts.cues === false || !this.scheduler.enabled) return
+    void this.cuePlayer.prefetch(Object.values(CUE_PHRASES), this.cueKey())
+  }
+
+  /** The TTS settings that shape cue audio (provider, model, voice, speed, server); undefined if unknown. */
+  private async cueKey(): Promise<string | undefined> {
+    try {
+      const { tts } = (await (await this.api("/api/settings/speech")).json()) as { tts?: Record<string, unknown> }
+      if (!tts?.voice) return undefined
+      return [tts.provider, tts.model, tts.voice, tts.speed ?? "", tts.baseURL ?? ""].join("|")
+    } catch {
+      return undefined
+    }
   }
 
   private async listen(): Promise<void> {
@@ -221,6 +267,7 @@ export class Conversation<B = unknown> {
         if (this.vad) this.vad.speaking = speaking
         this.scheduler.agentSpeaking(speaking, Date.now())
         if (speaking) this.cuePlayer.stop() // the agent's own speech wins over a cue
+        this.cueClock.poke()
         this.refresh()
       },
       onError: (error) => {
@@ -239,12 +286,16 @@ export class Conversation<B = unknown> {
         this.endpointer!.speechStarted()
         this.scheduler.userTalking(true, Date.now())
         this.cuePlayer.stop()
-        if (this.queue!.speaking) this.queue!.clear() // barge-in: start fires only after 250 ms of voice
+        if (this.queue!.speaking) this.hushReplies() // barge-in: start fires only after VOICE_TIMINGS.minSpeechMs of voice
       } else {
-        this.scheduler.userTalking(false, Date.now())
+        // Instant acknowledgement: the segment goes to transcription, so the user hears it was taken.
+        this.speechEndedAt = Date.now()
+        this.markTurn("speechEnd")
+        this.cuePlayer.play(this.scheduler.speechEnded(this.speechEndedAt))
         const id = this.endpointer!.segmentEnded(event.durationMs)
         void this.transcribe(id, encodeWav(event.samples, this.vad.sampleRate))
       }
+      this.cueClock.poke()
       this.refresh()
     }
   }
@@ -261,19 +312,20 @@ export class Conversation<B = unknown> {
       this.inflight--
     }
     if (!this.active) return
+    if (text.trim()) this.markTurn("transcript")
     this.endpointer?.transcribed(id, text)
     this.refresh()
   }
 
   /** A finished utterance from the endpointer (or typed text): a voice command or a steer. */
-  private async deliver(text: string): Promise<void> {
+  private async deliver(text: string, typed = false): Promise<void> {
     const command = parseCommand(text)
     if (command === "pause") {
       this.ui.note("Paused listening.")
       return this.stop()
     }
     if (command === "interrupt") {
-      this.queue?.clear()
+      this.hushReplies()
       this.ui.note(`“${text}” — interrupting.`)
       try {
         await this.api(`${this.path}/interrupt`, { method: "POST", json: {} })
@@ -283,22 +335,37 @@ export class Conversation<B = unknown> {
       return
     }
     const bubble = this.ui.user(text)
+    if (typed) this.typing++
+    this.scheduler.awaitReply(typed ? Date.now() : (this.speechEndedAt ?? Date.now()))
+    this.cueClock.poke()
     try {
       const { inboxID } = await (await this.api(`${this.path}/utterance`, { method: "POST", json: { text } })).json()
+      this.markTurn("accepted")
       if (this.sent.get(inboxID) === "heard") this.ui.tick(bubble, "heard") // delivery beat the response
-      else this.ui.tick(bubble, "sent")
+      else {
+        this.ui.tick(bubble, "sent")
+        if (typed) this.typed.add(inboxID)
+      }
       this.sent.set(inboxID, bubble)
     } catch (e) {
       const err = e as Error & { status?: number }
       this.ui.tick(bubble, "failed")
       this.ui.note(err.status === 409 ? err.message : `Could not send: ${err.message}`, "err")
+    } finally {
+      if (typed) this.typing--
     }
   }
 
   /** Typed text while Voice mode is on goes the same way as speech. */
   sendTyped(text: string): Promise<void> {
+    this.hushReplies()
+    return this.deliver(text, true)
+  }
+
+  /** Stops reading replies aloud, including their sentences still to come. */
+  private hushReplies(): void {
     this.queue?.clear()
-    return this.deliver(text)
+    this.says.mute()
   }
 
   /** Hub SSE messages for this session. */
@@ -309,15 +376,24 @@ export class Conversation<B = unknown> {
       if (bubble !== undefined && bubble !== "heard") this.ui.tick(bubble, "heard")
       else this.sent.set(message.inboxID, "heard")
       this.heardAt = Date.now()
-      if (this.active && !this.paused) this.cuePlayer.play(this.scheduler.heard(this.heardAt))
+      // Spoken utterances were acknowledged at the end of speech; typed ones (also when the hub's heard beats
+      // the POST response) get the tone now.
+      const tone = this.typed.delete(message.inboxID) || (bubble === undefined && this.typing > 0)
+      if (this.active && !this.paused) this.cuePlayer.play(this.scheduler.heard(this.heardAt, { tone }))
+      this.cueClock.poke()
       this.refresh()
       setTimeout(() => this.refresh(), SENT_LABEL_MS + 50)
     } else if (message.type === "say") {
       if (!this.active) return
+      // Root replies arrive one sentence at a time while they are written (seq); played in order, once.
+      const accepted = this.says.accept(message as { messageID?: string; ordinal?: number; seq?: number; text: string })
+      if (!accepted) return
       this.scheduler.agentSaid(Date.now())
       this.cuePlayer.stop()
-      this.ui.agent(message as { messageID?: string; text: string })
-      this.queue?.enqueue(splitSentences(message.text))
+      this.cueClock.poke()
+      this.ui.agent({ messageID: message.messageID, text: accepted.text })
+      if (accepted.sentences.length) this.markTurn("firstSay")
+      this.queue?.enqueue(accepted.sentences)
     } else if (message.type === "conversation" && !message.on && this.active) {
       this.ui.note("Voice mode was turned off.")
       void this.stop({ post: false })
@@ -333,17 +409,14 @@ export class Conversation<B = unknown> {
     if (!this.active) return
     for (let i = 0; i < started.length; i++) this.scheduler.subagentStarted(now)
     if (finished.length && !this.paused) this.cuePlayer.play(this.scheduler.subagentFinished(now))
-    this.tickCues()
-  }
-
-  private tickCues(): void {
-    if (!this.active || this.paused) return
-    this.cuePlayer.play(this.scheduler.tick(Date.now()))
+    this.cueClock.poke()
   }
 
   setCues(on: boolean): void {
     this.scheduler.enabled = on
     if (!on) this.cuePlayer.stop()
+    else if (this.active) this.prefetchCues()
+    this.cueClock.poke()
   }
 
   /** Switches screen-off listening while active: wake lock ↔ media session + silent loop. */
@@ -366,7 +439,8 @@ export class Conversation<B = unknown> {
   pause(): void {
     if (!this.active || this.paused) return
     this.paused = true
-    this.queue?.clear()
+    this.cueClock.stop()
+    this.hushReplies()
     this.cuePlayer.stop()
     this.endpointer?.reset()
     this.vad?.reset()
@@ -386,6 +460,7 @@ export class Conversation<B = unknown> {
       this.silence?.play().catch(() => {})
       if (navigator.mediaSession) navigator.mediaSession.playbackState = "playing"
     }
+    this.cueClock.poke()
     this.refresh()
   }
 
@@ -427,7 +502,7 @@ export class Conversation<B = unknown> {
   /** Stops reading aloud; resumes listening when muted. */
   hush(): void {
     if (this.paused) return this.resume()
-    this.queue?.clear()
+    this.hushReplies()
     this.cuePlayer.stop()
   }
 
@@ -449,6 +524,7 @@ export class Conversation<B = unknown> {
         this.warnedAutoplay = true
         return
       }
+      this.markTurn("firstAudio")
       await new Promise<void>((resolve) => {
         player.onended = player.onpause = player.onerror = () => resolve()
       })
@@ -456,6 +532,18 @@ export class Conversation<B = unknown> {
       player.onended = player.onpause = player.onerror = null
       URL.revokeObjectURL(url)
     }
+  }
+
+  /** Records a turn step (also as a performance mark); the first audio reports the turn's timing. */
+  private markTurn(name: TurnMark): void {
+    if (!this.turns.mark(name, Date.now())) return
+    try {
+      performance.mark(TURN_MARKS[name])
+    } catch {
+      // no User Timing here
+    }
+    const turn = name === "firstAudio" ? describeTurn(this.turns.last) : undefined
+    if (turn) this.ui.timing?.(turn)
   }
 
   private refresh(): void {
@@ -500,7 +588,7 @@ export class Conversation<B = unknown> {
     this.paused = false
     this.state = undefined
     document.removeEventListener("visibilitychange", this.onVisibility)
-    clearInterval(this.ticker)
+    this.cueClock.stop()
     this.cuePlayer.close()
     this.stopSilence()
     if (this.opts.background) this.clearMediaSession()

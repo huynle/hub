@@ -2,9 +2,10 @@
 // Headless smoke test of the built console against the mock hub (test/web-mock-hub.ts), at desktop (1440×900) and
 // phone (390×844) sizes: home loads, a session opens with its timeline, Send → Steer/Stop → Send, image attachments
 // (attach, remove, attach again, send), Dictate → Send (input cleared, also when the turn's connection drops), a slow turn (202, reply later), the right rail and diff viewer render, a Voice-off session is inspectable, rename (table,
-// sidebar, top bar), archive (menu, Undo, Archived chip, Needs-you exception, bulk, inactive) and resizable sidebar/rail. Screenshots go to $SMOKE_SHOTS (default: the OS temp
+// sidebar, top bar), archive (menu, Undo, Archived chip, Needs-you exception, bulk, inactive), resizable sidebar/rail, and
+// Voice mode speaking a streamed reply before its text ends, with the turn timed (a browser with a silent fake mic). Screenshots go to $SMOKE_SHOTS (default: the OS temp
 // dir). Run `npm run build:web && npm run test:e2e`. Chromium: $CHROMIUM_PATH, else Playwright's cache, else PATH.
-import { existsSync, mkdirSync } from "node:fs"
+import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { chromium, type Browser, type Page } from "playwright-core"
@@ -1053,6 +1054,80 @@ const GESTURE_POLICY = `(() => {
   Object.defineProperty(navigator, "userActivation", { get: () => ({ hasBeenActive: tapped, isActive: tapped }), configurable: true })
 })()`
 
+/**
+ * Speak while it writes, timed: a browser whose fake microphone is silent (the default fake device beeps, which the
+ * VAD can take for speech and barge in on the reply).
+ */
+async function voiceSpeed(browser: Browser): Promise<void> {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, permissions: ["microphone"] })
+  const page = await context.newPage()
+  const errors: string[] = []
+  page.on("pageerror", (e) => errors.push(e.message))
+  await check("voice speed: Voice mode speaks a streamed reply sentence by sentence, starting before the text ends; the Voice bar times the turn", async () => {
+    type Entry = { at: number; method: string; path: string; body?: any }
+    const state = async () => (await (await fetch(`${BASE}/mock/log`)).json()) as { log: Entry[]; textEnded: Array<{ messageID: string; at: number }> }
+    await page.goto(`${BASE}/s/ses_mock`)
+    await page.locator(".msg.assistant").first().waitFor()
+    await page.getByRole("button", { name: "Start Voice mode" }).click()
+    await page.locator(".voice-bar .voice-state").getByText(/Listening|Thinking/).waitFor({ timeout: 10_000 })
+    const from = Date.now()
+    // A typed turn in Voice mode (an utterance): the reply then streams in.
+    const accepted = page.waitForResponse((r) => r.url().endsWith("/utterance") && r.status() === 202)
+    await page.getByLabel("Message").fill("how is the build?")
+    await page.locator("button.send").click()
+    await accepted
+    const sentences = ["The first sentence is ready.", "Then a much longer second sentence follows, written slowly.", "And a third one ends it."]
+    await mock("/mock/stream", { kind: "text", messageID: "msg_fast", text: sentences.join(" "), every: 120, size: 5 })
+    await page.locator(".msg.assistant", { hasText: "And a third one ends it." }).waitFor({ timeout: 15_000 })
+    let s = await state()
+    for (let i = 0; i < 30 && s.log.filter((e) => e.path === "/api/speak" && e.at >= from && sentences.includes(e.body?.text)).length < 3; i++) {
+      await page.waitForTimeout(200)
+      s = await state()
+    }
+    const speaks = s.log.filter((e) => e.path === "/api/speak" && e.at >= from && sentences.includes(e.body?.text))
+    const ended = s.textEnded.find((e) => e.messageID === "msg_fast")
+    assert(ended, "the streamed text ended")
+    const calls = s.log.filter((e) => e.at >= from && !e.path.endsWith("/presence")).map((e) => `${e.at - from} ${e.method} ${e.path} ${e.body?.text ?? ""}`)
+    assert(JSON.stringify(speaks.map((e) => e.body.text)) === JSON.stringify(sentences), `each sentence spoken once, in order: ${JSON.stringify(speaks.map((e) => e.body?.text))}; calls: ${calls.join(" | ")}`)
+    assert(speaks[0]!.at < ended!.at - 1000, `first sentence synthesized ${ended!.at - speaks[0]!.at} ms before the text ended`)
+    // The reply's first audio played before its text ended (performance marks), and the Voice bar says how long.
+    const firstAudio = await page.evaluate(() => {
+      const mark = performance.getEntriesByName("hub-voice:first-audio").at(-1)
+      return mark ? performance.timeOrigin + mark.startTime : undefined
+    })
+    assert(firstAudio !== undefined && firstAudio < ended!.at, `first audio ${firstAudio === undefined ? "missing" : `${Math.round(ended!.at - firstAudio)} ms before the text ended`}`)
+    const title = await page.locator(".voice-bar .voice-state").getAttribute("title")
+    assert(/^last turn: \d+\.\d s to first audio\nfirst reply \d+\.\d s · audio \d+\.\d s$/.test(title ?? ""), `Voice bar timing tooltip: ${JSON.stringify(title)}`)
+    await page.locator(".voice-bar").getByRole("button", { name: "End", exact: true }).click()
+    await page.locator(".voice-bar").waitFor({ state: "detached" })
+  })
+
+  await check("voice speed: no page errors", async () => assert(!errors.length, errors.join("; ")))
+  await context.close()
+}
+
+/** A silent 16 kHz mono WAV for Chromium's fake microphone. */
+function silentWav(file: string): string {
+  const samples = 16_000 * 2
+  const bytes = new Uint8Array(44 + samples * 2)
+  const view = new DataView(bytes.buffer)
+  const ascii = (at: number, text: string) => [...text].forEach((c, i) => (bytes[at + i] = c.charCodeAt(0)))
+  ascii(0, "RIFF")
+  view.setUint32(4, bytes.length - 8, true)
+  ascii(8, "WAVEfmt ")
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, 1, true)
+  view.setUint32(24, 16_000, true)
+  view.setUint32(28, 32_000, true)
+  view.setUint16(32, 2, true)
+  view.setUint16(34, 16, true)
+  ascii(36, "data")
+  view.setUint32(40, samples * 2, true)
+  writeFileSync(file, bytes)
+  return file
+}
+
 async function tapToStart(browser: Browser): Promise<void> {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, permissions: ["microphone"] })
   await context.addInitScript(GESTURE_POLICY)
@@ -1129,6 +1204,7 @@ if (!existsSync(path.join(ROOT, "web", "dist", "index.html"))) {
 }
 const hub = Bun.spawn(["bun", path.join(ROOT, "test", "web-mock-hub.ts"), String(PORT)], { stdout: "ignore", stderr: "inherit" })
 let browser: Browser | undefined
+let quiet: Browser | undefined
 try {
   for (let i = 0; i < 50; i++) {
     if (await fetch(`${BASE}/api/auth`).then((r) => r.ok, () => false)) break
@@ -1146,11 +1222,19 @@ try {
   await notifications(browser)
   await mock("/mock/reset")
   await tapToStart(browser)
+  await mock("/mock/reset")
+  quiet = await chromium.launch({
+    executablePath,
+    headless: true,
+    args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream", `--use-file-for-fake-audio-capture=${silentWav(path.join(SHOTS, "silence.wav"))}`],
+  })
+  await voiceSpeed(quiet)
 } catch (e) {
   failures++
   results.push(`✗ setup: ${(e as Error).message}`)
 } finally {
   await browser?.close()
+  await quiet?.close()
   hub.kill()
 }
 console.log(results.join("\n"))

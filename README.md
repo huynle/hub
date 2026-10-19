@@ -652,9 +652,16 @@ hub sends it `{op: "conversation", on: true}` once. Deleting the session clears 
 SSE (`/api/events`) adds:
 
 - `{type: "conversation", sessionID, on}` when the flag changes.
-- `{type: "say", sessionID, messageID, ordinal, text}` for each `session.text.ended` of a **root** session
-  in conversation mode (subagent text is not spoken); deduped by `(messageID, ordinal)` across
-  processes; blank text is skipped.
+- `{type: "say", sessionID, messageID, ordinal, seq, text}`: **root** text in conversation mode is spoken
+  while it is written. The hub cuts the streamed `session.text.delta`s of each text part (`messageID`,
+  `ordinal`) into sentences (`src/central/say-stream.ts`: sentence ends followed by the next sentence, line
+  breaks, whole fenced code blocks, abbreviations/decimals/file names kept together, runs over 300 chars cut
+  at a comma) and sends one `say` per completed sentence right after its delta, `seq` counting from 0 per text
+  part; `session.text.ended` (authoritative: missed deltas are recovered) flushes the rest. Sentences are
+  raw slices of the text: `/api/speak` makes each one speakable. One process's deltas are used per text part
+  and the end is handled once, so each sentence is sent once; an interrupted or failed run, or conversation
+  mode turning off, drops the unspoken rest. A successful subagent's final message is spoken through its
+  root as before: one `say` per text part without `seq`. Blank text is skipped.
 - `{type: "heard", sessionID, inboxID}` when OpenCode delivers an utterance's inbox item (also when the
   delivery event arrives before the steer result).
 - `{type: "activity", sessionID, rootID, item}` when an activity item is created or changes state, for
@@ -675,7 +682,7 @@ SSE (`/api/events`) adds:
 
 Pushes in conversation mode depend on presence: while the session is watched, "finished" is not sent
 (the phone is open and speaking). When nobody watches, "finished" is sent as usual and each spoken text
-of the root session is pushed as kind `say` (title = session title, body = the text, max 180 chars; at
+of the root session (the whole text part, when it ends) is pushed as kind `say` (title = session title, body = the text, max 180 chars; at
 most one every 10 s per session; on by default, pref `say`). "blocked" is always sent. `/api/transcribe` and `/api/speak` have no rate limit; `/api/speak` accepts up to
 `HUB_MAX_SPEECH_CHARS` per call, so the phone sends sentence-sized chunks.
 
@@ -687,8 +694,8 @@ STT and TTS each use a provider configured from the phone (Settings → Speech) 
 provider than `hub.json`, the file's section is ignored for that direction; when it picks another base
 URL, the file's key is not sent there. Providers:
 
-- `openrouter` (default, base `https://openrouter.ai/api/v1`): STT is JSON with base64 `input_audio`,
-  TTS is `POST /audio/speech`.
+- `openrouter` (default, base `https://openrouter.ai/api/v1`): STT is an OpenAI-style multipart upload
+  (`file`, `model`, `language?`: the audio goes up as binary, not base64 JSON), TTS is `POST /audio/speech`.
 - `openai-compatible` (`baseURL` required: `https://…`, or `http://localhost` / `127.0.0.1` for local
   servers): STT is multipart `POST {baseURL}/audio/transcriptions` (`file`, `model`, `language?`), TTS is
   `POST {baseURL}/audio/speech {model, input, voice, response_format: "mp3", speed?}`. No env key.
@@ -715,19 +722,27 @@ it again, say "pause listening", or leave the page to turn it off. Leaving the p
 
 - **VAD** (`web/conversation-core.js`, frames from `web/vad-worklet.js`, with a ScriptProcessor fallback):
   energy-based detection on about 20 ms frames. The noise floor falls fast and rises slowly, and the
-  threshold is 10 dB above it with 4 dB of hysteresis. Speech must last 250 ms to count, and 300 ms of
-  audio before it is kept. The threshold rises by 8 dB while the phone is speaking.
-- **Endpointing**: a segment ends after 550 ms of silence. It is encoded to 16 kHz mono 16-bit WAV
+  threshold is 10 dB above it with 4 dB of hysteresis. Speech must last 300 ms to count, and 300 ms of
+  audio before it is kept. The threshold rises by 8 dB while the phone is speaking. These timings live in
+  `VOICE_TIMINGS` (`web/src/core/conversation-core.ts`).
+- **Endpointing**: a segment ends after 350 ms of silence. It is encoded to 16 kHz mono 16-bit WAV
   and sent to `/api/transcribe` at once. A transcript that reads as complete is sent right away:
   it ends in `. ? !`, or has 3+ words and doesn't end in "and", "but", "so", "um", "the" and the like.
-  Otherwise it waits up to 1.5 s. If you speak again during the wait, the next segment's transcript
+  Otherwise it waits up to 0.8 s. If you speak again during the wait, the next segment's transcript
   is joined to it. Empty and filler-only transcripts are dropped. Utterances are capped at 60 s.
 - **Commands**: an utterance that is only "stop", "cancel", "never mind", "stop that" or "hold on"
   calls `POST …/interrupt` and stops speech. "Pause listening" turns the mode off.
-- **Speech out**: each SSE `say` is split into sentences. Abbreviations, decimals, file names and
+- **Speech out**: root replies arrive one sentence at a time while they are written (`say` with `seq`);
+  the phone plays them in `seq` order per text part and drops duplicates (`SayAssembler`). A `say` without
+  `seq` (a subagent's result) is split into sentences. Abbreviations, decimals, file names and
   list items are handled, and fenced code becomes "(code omitted)". Each sentence goes to `/api/speak`,
-  one ahead of playback, and plays through one `<audio>` element. Speech that lasts 250 ms or more
-  (barge-in) pauses playback and clears the queue. The transcript shows your utterances with ✓ (sent)
+  up to two ahead of playback, and plays through one `<audio>` element. Speech that lasts 300 ms or more
+  (barge-in) pauses playback, clears the queue and mutes the rest of the replies that were speaking (their
+  later sentences still show in the transcript); a new reply speaks again.
+- **Turn timing**: each turn's steps are `performance.mark`s (`hub-voice:speech-end`, `…:transcript`,
+  `…:accepted`, `…:first-say`, `…:first-audio`; visible in the browser's performance tools), and the Voice bar's
+  state has the last turn as its tooltip: "last turn: 1.8 s to first audio" with the steps (transcript,
+  accepted, first reply, audio). A typed turn counts from when the hub accepted it. The transcript shows your utterances with ✓ (sent)
   and ✓✓ (heard). Agent text is merged with the bubble already streamed from deltas. Subagents
   starting, finishing or failing appear as small notes. Typed text is sent as an utterance while the
   mode is on.
@@ -778,12 +793,17 @@ Pure logic is in `web/src/core/feedback-core.ts` (tested with bun); `web/src/cor
   assistant message); in conversation mode the spoken `say` text is merged into the bubble of the same message.
   The home list shows the same "now" text with a spinner for working sessions.
 - **Progress cues** (conversation mode; Settings → Voice → "Progress cues", on by default): a soft
-  tone when the agent hears an utterance, then "Working on it." if the session is working and the
-  agent has not spoken within 5 s. "Started a subagent." plays when a subagent starts, unless the agent
+  tone as soon as you stop speaking (the moment the segment goes to transcription; typed text gets it when
+  the agent receives it), then "Working on it." if the session is working and the
+  agent has not spoken within 2.5 s of the end of your speech. "Started a subagent." plays when a subagent starts, unless the agent
   spoke in the last 3 s. "Still working." plays after 40 s without speech while work continues, and
   a double tone plays when a subagent finishes. Failed tools are not spoken (they show in the feed). Cues never
   play while you are talking or the agent's speech is playing; they wait, and are dropped once the agent
-  speaks. Each phrase is synthesized once per page load and cached in memory.
+  speaks. Cues are event-driven: one timer for the next deadline (no polling), re-armed on speech, status and
+  playback changes. The phrases are synthesized in parallel when Voice mode starts and kept in memory and in
+  the browser's Cache Storage (`hub-cues-v1`, keyed by TTS provider, model, voice, speed and server, so a later
+  session starts with them ready and a voice change fetches them again); a ready phrase starts playing at
+  once. A phrase that is not ready yet when its cue fires plays a short tone instead.
 - **Presence**: while a session view is open, the phone posts `POST /api/sessions/:id/presence
   {visible}` on visibility changes and every 30 s while visible, and `{visible:false}` on `pagehide` and
   when leaving the view. The hub uses this to decide when to push.

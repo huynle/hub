@@ -1,4 +1,4 @@
-// Conversation mode: per-sentence TTS queue with one-ahead prefetch, sequential playback and barge-in clear.
+// Conversation mode: per-sentence TTS queue with two-ahead prefetch, sequential playback and barge-in clear.
 import { describe, expect, test } from "bun:test"
 import { SpeechQueue } from "../web/src/core/conversation-core"
 
@@ -43,11 +43,11 @@ function setup() {
 }
 
 describe("SpeechQueue", () => {
-  test("plays sentences in order, prefetching only one ahead", async () => {
+  test("plays sentences in order, prefetching up to two ahead", async () => {
     const { q, synths, plays, log } = setup()
-    q.enqueue(["A.", "B.", "C."])
+    q.enqueue(["A.", "B.", "C.", "D."])
     await tick()
-    expect([...synths.keys()]).toEqual(["A.", "B."]) // C waits
+    expect([...synths.keys()]).toEqual(["A.", "B.", "C."]) // D waits
     expect(q.speaking).toBe(true)
     synths.get("B.")!.d.resolve("audio-B") // out of order: B arrives first, still waits for A
     await tick()
@@ -58,11 +58,14 @@ describe("SpeechQueue", () => {
     plays[0]!.d.resolve()
     await tick()
     expect(plays.map((p) => p.audio)).toEqual(["audio-A", "audio-B"])
-    expect([...synths.keys()]).toEqual(["A.", "B.", "C."]) // C prefetched while B plays
+    expect([...synths.keys()]).toEqual(["A.", "B.", "C.", "D."]) // C and D prefetched while B plays
     synths.get("C.")!.d.resolve("audio-C")
+    synths.get("D.")!.d.resolve("audio-D")
     plays[1]!.d.resolve()
     await tick()
     plays[2]!.d.resolve()
+    await tick()
+    plays[3]!.d.resolve()
     await tick()
     expect(q.speaking).toBe(false)
     expect(log.filter((l) => l.startsWith("speaking"))).toEqual(["speaking true", "speaking false"])
@@ -85,7 +88,7 @@ describe("SpeechQueue", () => {
 
   test("clear (barge-in) stops playback, aborts fetches and drops the queue", async () => {
     const { q, synths, plays, log, stops } = setup()
-    q.enqueue(["A.", "B.", "C."])
+    q.enqueue(["A.", "B.", "C.", "X."])
     await tick()
     synths.get("A.")!.d.resolve("audio-A")
     await tick()
@@ -98,7 +101,8 @@ describe("SpeechQueue", () => {
     synths.get("B.")!.d.resolve("audio-B")
     await tick()
     expect(plays.length).toBe(1)
-    expect(synths.has("C.")).toBe(false)
+    expect(synths.get("C.")!.signal.aborted).toBe(true)
+    expect(synths.has("X.")).toBe(false)
     expect(log.filter((l) => l.startsWith("speaking"))).toEqual(["speaking true", "speaking false"])
     // Works again afterwards.
     q.enqueue(["D."])

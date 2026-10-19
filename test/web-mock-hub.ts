@@ -15,7 +15,9 @@
 // (patch a session and emit a catalog), POST /mock/fail {expose?, create?, models?} (make those calls fail),
 // POST /mock/service {connected} (409 for create while false).
 // Streaming: POST /mock/stream {sessionID?, kind: "text"|"reasoning", messageID, text, every?, size?} emits the text in
-// chunks as SSE delta/reasoning (with rootID ses_mock); POST /mock/scenario {say?} plays a scripted run of ses_mock: root
+// chunks as SSE delta/reasoning (with rootID ses_mock); ses_mock text in conversation mode is also spoken like the hub
+// does it (a say per completed sentence with seq, the rest when the text ends; GET /mock/log lists `textEnded`
+// times); POST /mock/scenario {say?} plays a scripted run of ses_mock: root
 // reasoning, a shell tool, two subagents (ses_mock_kid, ses_mock_kid2) streaming their output, root reply text (and say
 // events when conversation mode is on), then idle. Status entries of working sessions carry `since`.
 // Multi-user (0.3.0, docs/multi-user.md): POST /mock/auth {mode?: "pairing"|"oidc", as?: userID} switches the auth mode
@@ -47,6 +49,7 @@
 // can steer and stop it without racing the turn's timer.
 import { existsSync, readFileSync, statSync } from "node:fs"
 import path from "node:path"
+import { SentenceStream } from "../src/central/say-stream"
 import { speechModelList } from "../src/central/speech/models"
 import gatewayModels from "./fixtures/openai-compatible-gateway-models.json"
 
@@ -525,12 +528,29 @@ function sse(request: Request, user: MockUser): Response {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
-/** Emits text in small chunks as SSE delta (text) or reasoning messages, like the hub after coalescing. */
+/** When streamed root texts ended (`{messageID, at}`), for checks that speech starts before the text ends. */
+const textEnded: Array<{ messageID: string; at: number }> = []
+
+/**
+ * Emits text in small chunks as SSE delta (text) or reasoning messages, like the hub after coalescing. Root text
+ * in conversation mode is also spoken like the hub does it: a say per completed sentence (SentenceStream), the
+ * rest when the text ends.
+ */
 async function streamText(kind: "text" | "reasoning", sessionID: string, messageID: string, text: string, every = 100, size = 7, alive = () => true) {
+  const speech = kind === "text" && sessionID === SESSION ? new SentenceStream() : undefined
+  let seq = 0
+  const say = (sentences: string[]) => {
+    if (conversation) for (const s of sentences) emit({ type: "say", sessionID, messageID, ordinal: 0, seq: seq++, text: s })
+  }
   for (let i = 0; i < text.length && alive(); i += size) {
     const chunk = text.slice(i, i + size)
     emit(kind === "text" ? { type: "delta", sessionID, rootID: SESSION, messageID, text: chunk } : { type: "reasoning", sessionID, rootID: SESSION, messageID, delta: chunk })
+    if (speech) say(speech.push(chunk))
     await sleep(every)
+  }
+  if (speech && alive()) {
+    textEnded.push({ messageID, at: Date.now() })
+    say(speech.end(text))
   }
 }
 
@@ -582,7 +602,6 @@ async function scenario() {
   const kid2Work = streamText("text", "ses_mock_kid2", "msg_k3", "Adding the picker to the Speech settings section.\nDocumenting reasoning SSE.", 140, 6, alive)
   const reply1 = "I started two subagents: one fixes the failing tests, the other updates the README. I'll tell you when they're done."
   await streamText("text", SESSION, "msg_t1", reply1, 80, 8, alive)
-  if (conversation) emit({ type: "say", sessionID: SESSION, messageID: "msg_t1", ordinal: 0, text: reply1 })
   await kid2Work
   if (!alive()) return
   setStatus([root("working"), kid("ses_mock_kid", "Fix failing tests", "working", k1), kid("ses_mock_kid2", "Update README", "idle", k2)])
@@ -592,7 +611,6 @@ async function scenario() {
   addActivity(SESSION, { id: "tool_task", kind: "tool", tool: "task", summary: "Fix failing tests", background: true, state: "done" })
   const reply2 = "All done: the tests pass and the README is updated."
   await streamText("text", SESSION, "msg_t2", reply2, 80, 8, alive)
-  if (conversation) emit({ type: "say", sessionID: SESSION, messageID: "msg_t2", ordinal: 0, text: reply2 })
   await sleep(300)
   if (!alive()) return
   setStatus([root("idle"), kid("ses_mock_kid", "Fix failing tests", "idle", k1), kid("ses_mock_kid2", "Update README", "idle", k2)])
@@ -830,8 +848,11 @@ const server = Bun.serve({
     const m = request.method
     const json = async () => (await request.json().catch(() => ({}))) as Record<string, any>
     let match0: RegExpExecArray | null
-    if (p.startsWith("/api/") && p !== "/api/events") log.push({ at: Date.now(), method: m, path: p, contentType: request.headers.get("content-type") ?? undefined })
-    const last = () => log[log.length - 1]!
+    // This request's own log entry (concurrent requests must not record into each other's).
+    const entry: (typeof log)[number] | undefined =
+      p.startsWith("/api/") && p !== "/api/events" ? { at: Date.now(), method: m, path: p, contentType: request.headers.get("content-type") ?? undefined } : undefined
+    if (entry) log.push(entry)
+    const last = () => entry ?? log[log.length - 1]!
 
     if (p === "/mock/reset-transcripts" && m === "POST") {
       transcripts = []
@@ -922,7 +943,7 @@ const server = Bun.serve({
       emitCatalog()
       return Response.json({ mode: authMode, as: loginAs })
     }
-    if (p === "/mock/log") return Response.json({ log, transcripts, conversation, pushPrefs, quietHours, pushEndpoints, mutedSessions, pushTests, speech, keys, users, audit, enrollments, userSpeech: Object.fromEntries(userSpeech), viewPrefs: Object.fromEntries(viewPrefs), herdr })
+    if (p === "/mock/log") return Response.json({ log, textEnded, transcripts, conversation, pushPrefs, quietHours, pushEndpoints, mutedSessions, pushTests, speech, keys, users, audit, enrollments, userSpeech: Object.fromEntries(userSpeech), viewPrefs: Object.fromEntries(viewPrefs), herdr })
     if (p === "/mock/reset" && m === "POST") {
       scenarioRun++
       slowTurnMs = undefined

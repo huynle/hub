@@ -176,9 +176,19 @@ export function encodeWav(samples: ArrayLike<number>, rate: number): Uint8Array<
   return bytes
 }
 
+// ---------- turn-taking timings ----------
+
+/**
+ * Voice mode's turn-taking timings, in one place. `minSpeechMs` of voice starts a segment (shorter knocks and
+ * echo blips never count; it also delays barge-in), `endSilenceMs` of silence ends it (keeping `trailingKeepMs`
+ * of that silence and `preRollMs` from before the onset), and the endpointer holds an unfinished-looking
+ * transcript for `holdMs` waiting for more speech.
+ */
+export const VOICE_TIMINGS = Object.freeze({ minSpeechMs: 300, endSilenceMs: 350, trailingKeepMs: 200, preRollMs: 300, holdMs: 800 })
+
 // ---------- voice activity detection ----------
 
-const TRAILING_KEEP_MS = 200 // silence kept at the end of a segment
+const TRAILING_KEEP_MS = VOICE_TIMINGS.trailingKeepMs // silence kept at the end of a segment
 const ONSET_GAP_MS = 120 // dip tolerated while an onset is still being confirmed
 const HYSTERESIS_DB = 4
 
@@ -235,9 +245,9 @@ export class EnergyVad {
 
   constructor({
     sampleRate,
-    minSpeechMs = 250,
-    endSilenceMs = 550,
-    preRollMs = 300,
+    minSpeechMs = VOICE_TIMINGS.minSpeechMs,
+    endSilenceMs = VOICE_TIMINGS.endSilenceMs,
+    preRollMs = VOICE_TIMINGS.preRollMs,
     maxSegmentMs = 60_000,
     marginDb = 10,
     minDb = -50,
@@ -370,7 +380,7 @@ export class Endpointer {
   private speaking = false
   private timer: unknown
 
-  constructor({ send, holdMs = 1500, maxUtteranceMs = 60_000, onHeld, setTimer = setTimeout, clearTimer = clearTimeout }: EndpointerOptions) {
+  constructor({ send, holdMs = VOICE_TIMINGS.holdMs, maxUtteranceMs = 60_000, onHeld, setTimer = setTimeout, clearTimer = clearTimeout }: EndpointerOptions) {
     this.sendFn = send
     this.holdMs = holdMs
     this.maxUtteranceMs = maxUtteranceMs
@@ -465,7 +475,10 @@ export interface SpeechQueueOptions<A> {
   readonly onError?: (error: any, text: string) => void
 }
 
-/** Speaks sentences one after another, fetching at most one sentence ahead; `clear` is the barge-in. */
+/** Sentences synthesized ahead of the one playing (or of the one being fetched for playback). */
+const PREFETCH_AHEAD = 2
+
+/** Speaks sentences one after another, fetching up to two sentences ahead; `clear` is the barge-in. */
 export class SpeechQueue<A = unknown> {
   private synth: SpeechQueueOptions<A>["synth"]
   private play: SpeechQueueOptions<A>["play"]
@@ -493,10 +506,9 @@ export class SpeechQueue<A = unknown> {
     else this.prefetch()
   }
 
-  /** While a sentence plays, the next one is fetched; while one is being fetched, so is the one after it. */
+  /** While a sentence plays, the next two are fetched; while one is being fetched, so are the two after it. */
   private prefetch(): void {
-    this.fetch(this.items[0])
-    if (!this.playing) this.fetch(this.items[1])
+    for (const item of this.items.slice(0, this.playing ? PREFETCH_AHEAD : PREFETCH_AHEAD + 1)) this.fetch(item)
   }
 
   clear(): void {
@@ -550,6 +562,134 @@ export class SpeechQueue<A = unknown> {
     this.speaking = speaking
     this.onState?.(speaking)
   }
+}
+
+// ---------- incremental speech ----------
+
+/** An SSE say: root text comes one sentence at a time (`seq` per message text part); worker results whole. */
+export interface SayInput {
+  readonly messageID?: string
+  readonly ordinal?: number
+  readonly seq?: number
+  readonly text: string
+}
+
+interface SayPart {
+  next: number
+  held: Map<number, string>
+  texts: string[]
+  muted: boolean
+}
+
+/**
+ * Orders and dedupes incremental says. `accept` returns the sentences to speak now (in order, each through
+ * splitSentences so code becomes "(code omitted)") and the text part so far for the transcript bubble, or
+ * undefined for a duplicate or a sentence waiting for an earlier one. `mute` (barge-in) silences the rest of
+ * the replies heard so far; later replies speak normally.
+ */
+export class SayAssembler {
+  private parts = new Map<string, SayPart>()
+  private limit: number
+
+  constructor({ limit = 50 }: { limit?: number } = {}) {
+    this.limit = limit
+  }
+
+  get size(): number {
+    return this.parts.size
+  }
+
+  accept(say: SayInput): { sentences: string[]; text: string } | undefined {
+    const text = String(say.text ?? "")
+    if (typeof say.seq !== "number") return { sentences: splitSentences(text), text }
+    const key = `${say.messageID ?? ""} ${say.ordinal ?? 0}`
+    let part = this.parts.get(key)
+    if (!part) {
+      part = { next: 0, held: new Map(), texts: [], muted: false }
+      this.parts.set(key, part)
+      if (this.parts.size > this.limit) this.parts.delete(this.parts.keys().next().value!)
+    }
+    if (say.seq < part.next || part.held.has(say.seq)) return undefined
+    part.held.set(say.seq, text)
+    const released: string[] = []
+    while (part.held.has(part.next)) {
+      released.push(part.held.get(part.next)!)
+      part.held.delete(part.next++)
+    }
+    if (!released.length) return undefined
+    part.texts.push(...released)
+    return { sentences: part.muted ? [] : released.flatMap((s) => splitSentences(s)), text: part.texts.join(" ") }
+  }
+
+  mute(): void {
+    for (const part of this.parts.values()) part.muted = true
+  }
+}
+
+// ---------- turn timing ----------
+
+/** Steps of a Voice turn, in order: the user stops speaking … the reply starts playing. */
+export type TurnMark = "speechEnd" | "transcript" | "accepted" | "firstSay" | "firstAudio"
+export type Turn = Readonly<Partial<Record<TurnMark, number>>>
+
+/**
+ * Times one Voice turn at a time. Speech end and transcript wait for the utterance to be accepted (the latest
+ * segment counts); then the first say and the first reply audio complete it into `last`. Marks out of order
+ * (a subagent's say with no turn waiting) are ignored.
+ */
+export class TurnTimer {
+  private pending: Partial<Record<TurnMark, number>> = {}
+  private turn: Partial<Record<TurnMark, number>> | undefined
+  last: Turn | undefined
+
+  /** Records a step; true when it was recorded. */
+  mark(name: TurnMark, at: number): boolean {
+    switch (name) {
+      case "speechEnd":
+        this.pending = { speechEnd: at }
+        return true
+      case "transcript":
+        if (this.pending.speechEnd === undefined) return false
+        this.pending.transcript = at
+        return true
+      case "accepted":
+        this.turn = { ...this.pending, accepted: at }
+        this.pending = {}
+        return true
+      case "firstSay":
+        if (!this.turn || this.turn.firstSay !== undefined) return false
+        this.turn.firstSay = at
+        return true
+      case "firstAudio":
+        if (this.turn?.firstSay === undefined) return false
+        this.last = { ...this.turn, firstAudio: at }
+        this.turn = undefined
+        return true
+    }
+  }
+}
+
+const seconds = (ms: number) => `${(ms / 1000).toFixed(1)} s`
+
+/** "last turn: 1.8 s to first audio" and the steps (for the Voice bar's tooltip). */
+export function describeTurn(turn: Turn | undefined): { summary: string; detail: string } | undefined {
+  const start = turn?.speechEnd ?? turn?.accepted
+  if (!turn || start === undefined || turn.firstAudio === undefined) return undefined
+  const steps: Array<[TurnMark, string]> = [
+    ["transcript", "transcript"],
+    ["accepted", "accepted"],
+    ["firstSay", "first reply"],
+    ["firstAudio", "audio"],
+  ]
+  const parts: string[] = []
+  let previous = start
+  for (const [mark, label] of steps) {
+    const at = turn[mark]
+    if (at === undefined || (mark === "accepted" && turn.speechEnd === undefined)) continue
+    parts.push(`${label} ${seconds(at - previous)}`)
+    previous = at
+  }
+  return { summary: `last turn: ${seconds(turn.firstAudio - start)} to first audio`, detail: parts.join(" · ") }
 }
 
 // ---------- transcript ----------

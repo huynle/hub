@@ -26,20 +26,31 @@ class FakeAudio {
 
 let mic: ReturnType<typeof deferred<unknown>>
 let stopped: number
+/** Earcon oscillators started on any fake AudioContext: [frequency, start time]. */
+let tones: Array<[number, number]>
 const g = globalThis as any
 beforeEach(() => {
   mic = deferred<unknown>()
   stopped = 0
+  tones = []
   g.Audio = FakeAudio
   g.window = g
   const node = () => ({ connect() {}, disconnect() {}, gain: { value: 1 } })
   g.AudioContext = class {
     state = "running"
     sampleRate = 48_000
+    currentTime = 5
     destination = {}
     createMediaStreamSource = node
-    createGain = node
     createScriptProcessor = node
+    createGain() {
+      const param = { value: 1, setValueAtTime() {}, exponentialRampToValueAtTime() {} }
+      return { connect: (x: unknown) => x, disconnect() {}, gain: param }
+    }
+    createOscillator() {
+      const osc = { type: "", frequency: { value: 0 }, connect: (x: unknown) => x, start: (t: number) => tones.push([osc.frequency.value, t]), stop() {} }
+      return osc
+    }
     resume() {
       return Promise.resolve()
     }
@@ -66,6 +77,8 @@ async function make() {
     api: async (path, init) => {
       posts.push({ path, json: (init as { json?: unknown } | undefined)?.json })
       if (path.endsWith("/conversation") && (init as any)?.json?.on === true) await hub.promise
+      if (path.endsWith("/utterance")) return Response.json({ inboxID: `inb_${posts.length}` }, { status: 202 })
+      if (path === "/api/transcribe") return Response.json({ text: transcript })
       return Response.json({ agent: "voice", on: true })
     },
     player: new FakeAudio() as never,
@@ -73,6 +86,62 @@ async function make() {
   })
   return { conversation, posts, states, hub: () => hub, resetHub: () => (hub = deferred<void>()) }
 }
+
+let transcript = ""
+const RATE = 48_000
+const frame = (amp: number) => Float32Array.from({ length: RATE / 50 }, (_, i) => amp * Math.sin((2 * Math.PI * 220 * i) / RATE) + ((i * 7919) % 13) / 13e4)
+/** Feeds `ms` of audio in 20 ms frames straight into the conversation's VAD tap. */
+const feed = (c: unknown, amp: number, ms: number) => {
+  for (let t = 0; t < ms; t += 20) (c as { frame(s: Float32Array): void }).frame(frame(amp))
+}
+
+async function listening() {
+  const made = await make()
+  const started = made.conversation.start()
+  mic.resolve(stream())
+  made.hub().resolve()
+  expect(await started).toBe(true)
+  return made
+}
+
+describe("Conversation: instant acknowledgement", () => {
+  test("the heard tone plays as soon as the VAD ends a segment, not again when the hub reports it heard", async () => {
+    transcript = "Run the tests."
+    const { conversation, posts } = await listening()
+    feed(conversation, 0.001, 600)
+    feed(conversation, 0.3, 700)
+    expect(tones).toEqual([])
+    feed(conversation, 0.001, 340)
+    expect(tones).toEqual([])
+    feed(conversation, 0.001, 40) // end of speech: 350 ms of silence
+    expect(tones).toEqual([[880, 5.01]])
+    await Bun.sleep(5)
+    const utterance = posts.find((p) => p.path.endsWith("/utterance"))
+    expect(utterance?.json).toEqual({ text: "Run the tests." })
+    conversation.onEvent({ type: "heard", sessionID: "A", inboxID: `inb_${posts.indexOf(utterance!) + 1}` })
+    expect(tones).toEqual([[880, 5.01]])
+    await conversation.stop()
+  })
+
+  test("noise too short to be speech plays no tone", async () => {
+    const { conversation } = await listening()
+    feed(conversation, 0.001, 600)
+    feed(conversation, 0.3, 200)
+    feed(conversation, 0.001, 800)
+    expect(tones).toEqual([])
+    await conversation.stop()
+  })
+
+  test("typed text in Voice mode: the tone plays when the hub reports it heard", async () => {
+    const { conversation, posts } = await listening()
+    await conversation.sendTyped("hello there")
+    expect(tones).toEqual([])
+    const utterance = posts.find((p) => p.path.endsWith("/utterance"))!
+    conversation.onEvent({ type: "heard", sessionID: "A", inboxID: `inb_${posts.indexOf(utterance) + 1}` })
+    expect(tones).toEqual([[880, 5.01]])
+    await conversation.stop()
+  })
+})
 
 describe("Conversation start/stop race", () => {
   test("stopped while waiting for the microphone: start fails, the mic is released, the hub is never asked", async () => {

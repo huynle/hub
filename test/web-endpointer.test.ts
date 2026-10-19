@@ -29,10 +29,11 @@ function clock() {
   }
 }
 
+/** The hold is pinned at 1500 ms here (the default, VOICE_TIMINGS.holdMs, is tested in web-voice-timings). */
 function setup(options = {}) {
   const c = clock()
   const sent: string[] = []
-  const e = new Endpointer({ send: (text: string) => sent.push(text), setTimer: c.setTimer, clearTimer: c.clearTimer, ...options })
+  const e = new Endpointer({ send: (text: string) => sent.push(text), setTimer: c.setTimer, clearTimer: c.clearTimer, holdMs: 1500, ...options })
   /** One spoken segment: speech start → end (returns the segment id). */
   const say = (ms = 1000) => {
     e.speechStarted()
