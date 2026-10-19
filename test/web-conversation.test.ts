@@ -72,6 +72,7 @@ async function make() {
   const posts: Array<{ path: string; json: unknown }> = []
   let hub = deferred<void>()
   const states: string[] = []
+  const player = new FakeAudio() as FakeAudio & { onended?: (() => void) | null }
   const conversation = new Conversation<string>({
     sessionID: "A",
     api: async (path, init) => {
@@ -81,10 +82,10 @@ async function make() {
       if (path === "/api/transcribe") return Response.json({ text: transcript })
       return Response.json({ agent: "voice", on: true })
     },
-    player: new FakeAudio() as never,
+    player: player as never,
     ui: { state: (s) => states.push(s), level: () => {}, user: (t) => t, tick: () => {}, agent: () => {}, note: () => {}, ended: () => states.push("ended") },
   })
-  return { conversation, posts, states, hub: () => hub, resetHub: () => (hub = deferred<void>()) }
+  return { conversation, posts, states, player, hub: () => hub, resetHub: () => (hub = deferred<void>()) }
 }
 
 let transcript = ""
@@ -167,5 +168,46 @@ describe("Conversation start/stop race", () => {
     expect(conversation.active).toBe(false)
     expect(stopped).toBe(1)
     expect(posts.map((p) => p.json)).toEqual([{ on: true }, { on: false }])
+  })
+})
+
+describe("Conversation: barge-in", () => {
+  const say = (seq: number, text: string) => ({ type: "say", sessionID: "A", messageID: "msg_reply", ordinal: 0, seq, text })
+  const spoken = (posts: Array<{ path: string; json: unknown }>, text: string) => posts.filter((p) => p.path === "/api/speak" && (p.json as any)?.text === text).length
+
+  test("speaking while a reply is still being written drops its unspoken rest, also between two sentences", async () => {
+    transcript = "Actually, check staging too."
+    const { conversation, posts, player } = await listening()
+    conversation.onEvent(say(0, "First sentence of the reply."))
+    for (let i = 0; i < 20 && !player.onended; i++) await Bun.sleep(1)
+    expect(spoken(posts, "First sentence of the reply.")).toBe(1)
+    player.onended!() // the first sentence ends; the next is not written yet
+    await Bun.sleep(5)
+    feed(conversation, 0.001, 600)
+    feed(conversation, 0.3, 700) // the user starts talking
+    conversation.onEvent(say(1, "Second sentence nobody wants now."))
+    feed(conversation, 0.001, 400)
+    await Bun.sleep(10)
+    expect(spoken(posts, "Second sentence nobody wants now.")).toBe(0)
+    // The utterance steers the agent; nothing is interrupted (background workers keep running).
+    expect(posts.find((p) => p.path.endsWith("/utterance"))?.json).toEqual({ text: "Actually, check staging too." })
+    expect(posts.filter((p) => p.path.endsWith("/interrupt"))).toEqual([])
+    // A new reply speaks again.
+    conversation.onEvent({ type: "say", sessionID: "A", messageID: "msg_next", ordinal: 0, seq: 0, text: "Checking staging now." })
+    await Bun.sleep(5)
+    expect(spoken(posts, "Checking staging now.")).toBe(1)
+    await conversation.stop()
+  })
+
+  test("a stop phrase interrupts the agent's turn at once", async () => {
+    transcript = "Stop."
+    const { conversation, posts } = await listening()
+    feed(conversation, 0.001, 600)
+    feed(conversation, 0.3, 700)
+    feed(conversation, 0.001, 400)
+    await Bun.sleep(10)
+    expect(posts.filter((p) => p.path.endsWith("/interrupt"))).toHaveLength(1)
+    expect(posts.filter((p) => p.path.endsWith("/utterance"))).toEqual([])
+    await conversation.stop()
   })
 })

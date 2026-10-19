@@ -290,7 +290,10 @@ export class Conversation<B = unknown> {
         this.endpointer!.speechStarted()
         this.scheduler.userTalking(true, Date.now())
         this.cuePlayer.stop()
-        if (this.queue!.speaking) this.hushReplies() // barge-in: start fires only after VOICE_TIMINGS.minSpeechMs of voice
+        // Barge-in (start fires only after VOICE_TIMINGS.minSpeechMs of voice): the reply speaking, or one still being
+        // written between two sentences, goes quiet; the utterance then steers the agent. Workers are not touched.
+        if (this.queue!.speaking) this.hushReplies()
+        else this.says.mute()
       } else {
         // Instant acknowledgement: the segment goes to transcription, so the user hears it was taken.
         this.speechEndedAt = Date.now()
