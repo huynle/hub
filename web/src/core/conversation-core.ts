@@ -176,9 +176,19 @@ export function encodeWav(samples: ArrayLike<number>, rate: number): Uint8Array<
   return bytes
 }
 
+// ---------- turn-taking timings ----------
+
+/**
+ * Voice mode's turn-taking timings, in one place. `minSpeechMs` of voice starts a segment (shorter knocks and
+ * echo blips never count; it also delays barge-in), `endSilenceMs` of silence ends it (keeping `trailingKeepMs`
+ * of that silence and `preRollMs` from before the onset), and the endpointer holds an unfinished-looking
+ * transcript for `holdMs` waiting for more speech.
+ */
+export const VOICE_TIMINGS = Object.freeze({ minSpeechMs: 300, endSilenceMs: 350, trailingKeepMs: 200, preRollMs: 300, holdMs: 800 })
+
 // ---------- voice activity detection ----------
 
-const TRAILING_KEEP_MS = 200 // silence kept at the end of a segment
+const TRAILING_KEEP_MS = VOICE_TIMINGS.trailingKeepMs // silence kept at the end of a segment
 const ONSET_GAP_MS = 120 // dip tolerated while an onset is still being confirmed
 const HYSTERESIS_DB = 4
 
@@ -235,9 +245,9 @@ export class EnergyVad {
 
   constructor({
     sampleRate,
-    minSpeechMs = 250,
-    endSilenceMs = 550,
-    preRollMs = 300,
+    minSpeechMs = VOICE_TIMINGS.minSpeechMs,
+    endSilenceMs = VOICE_TIMINGS.endSilenceMs,
+    preRollMs = VOICE_TIMINGS.preRollMs,
     maxSegmentMs = 60_000,
     marginDb = 10,
     minDb = -50,
@@ -370,7 +380,7 @@ export class Endpointer {
   private speaking = false
   private timer: unknown
 
-  constructor({ send, holdMs = 1500, maxUtteranceMs = 60_000, onHeld, setTimer = setTimeout, clearTimer = clearTimeout }: EndpointerOptions) {
+  constructor({ send, holdMs = VOICE_TIMINGS.holdMs, maxUtteranceMs = 60_000, onHeld, setTimer = setTimeout, clearTimer = clearTimeout }: EndpointerOptions) {
     this.sendFn = send
     this.holdMs = holdMs
     this.maxUtteranceMs = maxUtteranceMs

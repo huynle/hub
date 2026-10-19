@@ -239,7 +239,7 @@ export class Conversation<B = unknown> {
         this.endpointer!.speechStarted()
         this.scheduler.userTalking(true, Date.now())
         this.cuePlayer.stop()
-        if (this.queue!.speaking) this.queue!.clear() // barge-in: start fires only after 250 ms of voice
+        if (this.queue!.speaking) this.queue!.clear() // barge-in: start fires only after VOICE_TIMINGS.minSpeechMs of voice
       } else {
         this.scheduler.userTalking(false, Date.now())
         const id = this.endpointer!.segmentEnded(event.durationMs)

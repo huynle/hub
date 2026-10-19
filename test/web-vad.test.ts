@@ -44,18 +44,18 @@ describe("EnergyVad", () => {
     expect(run(vad(), noise(0.001, 2000)).events).toEqual([])
   })
 
-  test("a blip shorter than 250 ms is ignored", () => {
+  test("a blip shorter than 300 ms is ignored", () => {
     expect(run(vad(), concat(noise(0.001, 1000), tone(0.3, 160), noise(0.001, 1000))).events).toEqual([])
   })
 
-  test("speech: start after 250 ms sustained, end after 550 ms silence, with 300 ms pre-roll", () => {
+  test("speech: start after 300 ms sustained, end after 350 ms silence, with 300 ms pre-roll", () => {
     const { events } = run(vad(), concat(noise(0.001, 1000), tone(0.3, 600), noise(0.001, 1000)))
     expect(events.map((e) => e.type)).toEqual(["start", "end"])
     const [start, end] = events
-    expect(start!.atMs).toBeGreaterThanOrEqual(1240)
-    expect(start!.atMs).toBeLessThanOrEqual(1300)
-    expect(end!.atMs).toBeGreaterThanOrEqual(1600 + 540)
-    expect(end!.atMs).toBeLessThanOrEqual(1600 + 600)
+    expect(start!.atMs).toBeGreaterThanOrEqual(1290)
+    expect(start!.atMs).toBeLessThanOrEqual(1350)
+    expect(end!.atMs).toBeGreaterThanOrEqual(1600 + 340)
+    expect(end!.atMs).toBeLessThanOrEqual(1600 + 400)
     // pre-roll (300) + speech (600) + up to 200 ms of trailing silence
     expect(end!.durationMs).toBeGreaterThanOrEqual(880)
     expect(end!.durationMs).toBeLessThanOrEqual(1120)

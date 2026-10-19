@@ -715,18 +715,19 @@ it again, say "pause listening", or leave the page to turn it off. Leaving the p
 
 - **VAD** (`web/conversation-core.js`, frames from `web/vad-worklet.js`, with a ScriptProcessor fallback):
   energy-based detection on about 20 ms frames. The noise floor falls fast and rises slowly, and the
-  threshold is 10 dB above it with 4 dB of hysteresis. Speech must last 250 ms to count, and 300 ms of
-  audio before it is kept. The threshold rises by 8 dB while the phone is speaking.
-- **Endpointing**: a segment ends after 550 ms of silence. It is encoded to 16 kHz mono 16-bit WAV
+  threshold is 10 dB above it with 4 dB of hysteresis. Speech must last 300 ms to count, and 300 ms of
+  audio before it is kept. The threshold rises by 8 dB while the phone is speaking. These timings live in
+  `VOICE_TIMINGS` (`web/src/core/conversation-core.ts`).
+- **Endpointing**: a segment ends after 350 ms of silence. It is encoded to 16 kHz mono 16-bit WAV
   and sent to `/api/transcribe` at once. A transcript that reads as complete is sent right away:
   it ends in `. ? !`, or has 3+ words and doesn't end in "and", "but", "so", "um", "the" and the like.
-  Otherwise it waits up to 1.5 s. If you speak again during the wait, the next segment's transcript
+  Otherwise it waits up to 0.8 s. If you speak again during the wait, the next segment's transcript
   is joined to it. Empty and filler-only transcripts are dropped. Utterances are capped at 60 s.
 - **Commands**: an utterance that is only "stop", "cancel", "never mind", "stop that" or "hold on"
   calls `POST …/interrupt` and stops speech. "Pause listening" turns the mode off.
 - **Speech out**: each SSE `say` is split into sentences. Abbreviations, decimals, file names and
   list items are handled, and fenced code becomes "(code omitted)". Each sentence goes to `/api/speak`,
-  one ahead of playback, and plays through one `<audio>` element. Speech that lasts 250 ms or more
+  one ahead of playback, and plays through one `<audio>` element. Speech that lasts 300 ms or more
   (barge-in) pauses playback and clears the queue. The transcript shows your utterances with ✓ (sent)
   and ✓✓ (heard). Agent text is merged with the bubble already streamed from deltas. Subagents
   starting, finishing or failing appear as small notes. Typed text is sent as an utterance while the
