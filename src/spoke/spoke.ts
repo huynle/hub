@@ -29,6 +29,7 @@ import type { LocalHubResult } from "./localhub"
 import { PresenceBook } from "./presence"
 import { changeStats, contextUsage, filePatch, mcpServers } from "./summary"
 import { browserSessions, isExposed, isReported, SessionTracker, shouldForward, type EventLike, type SessionDetails } from "./tracker"
+import { renderTaskBoard, TaskBoard } from "./taskboard"
 import { watchConfig, type ConfigWatcher } from "./watch"
 
 export type SpokeErrorName = "not_connected" | "not_enrolled" | "invalid" | "unreachable"
@@ -231,6 +232,8 @@ export class Spoke {
   private connection?: SpokeConnection
   private connectionKey = ""
   private readonly tracker = new SessionTracker()
+  /** The background workers each session started (the voice agent's task board). */
+  private readonly tasks = new TaskBoard()
   private readonly turns = new TurnTracker()
   private readonly voiceTurns = new Map<string, number>()
   private readonly running = new Set<string>()
@@ -342,6 +345,11 @@ export class Spoke {
     const entry = this.conversations.get(sessionID)
     if (!entry?.voiceModel) return undefined
     return this.config.workModel ?? (entry.previousModel ? formatModelRef(entry.previousModel) : undefined)
+  }
+
+  /** The rendered task board of a session's workers (for the voice agent's context); undefined without any. */
+  taskBoard(sessionID: string): string | undefined {
+    return renderTaskBoard(this.tasks.children(sessionID), Date.now())
   }
 
   subagent(): string {
@@ -1181,6 +1189,7 @@ export class Spoke {
           this.relay.settled.delete(formID)
         }
       }
+      this.tasks.observe(event, Date.now())
       if (this.tracker.observe(event, Date.now())) this.scheduleSnapshot()
       if (this.options.kind === "service" && this.host.listRecent && LISTING_EVENTS.has(event.type) && !(event.data as any)?.parentID) {
         this.scheduleSeed()

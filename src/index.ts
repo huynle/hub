@@ -171,6 +171,7 @@ export default Plugin.define({
           conversation: spoke?.inConversation(event.sessionID) ?? false,
           subagent: spoke?.subagent() ?? DEFAULT_SUBAGENT,
           workModel: spoke?.workModelFor(event.sessionID),
+          taskBoard: spoke?.taskBoard(event.sessionID),
         })
         for (const text of parts) event.system.push({ type: "text", text })
       })

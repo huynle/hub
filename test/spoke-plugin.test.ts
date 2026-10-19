@@ -250,6 +250,30 @@ describe("plugin setup", () => {
     expect(event.system[1]!.text).toContain('agent "general"')
   })
 
+  test("the context hook gives the voice agent a live task board of its workers (not other sessions')", async () => {
+    tempConfig({ mode: "always" })
+    const fake = fakeContext()
+    cleanups.push((await plugin.setup(fake.ctx as any)) as () => void)
+    await fake.call("conversation", { sessionID: "ses_a", on: true })
+    fake.queue.push({ type: "session.created", data: { sessionID: "ses_w1", parentID: "ses_a", title: "Deploy check" } })
+    fake.queue.push({ type: "session.execution.started", data: { sessionID: "ses_w1" } })
+    fake.queue.push({ type: "session.created", data: { sessionID: "ses_w2", parentID: "ses_a", title: "Changelog" } })
+    fake.queue.push({ type: "session.execution.started", data: { sessionID: "ses_w2" } })
+    fake.queue.push({ type: "session.created", data: { sessionID: "ses_x", parentID: "ses_other", title: "Someone else" } })
+    const board = () => {
+      const event = { sessionID: "ses_a", agent: "voice", system: [] as Array<{ text: string }> }
+      fake.hooks[0]!(event)
+      return event.system.map((p) => p.text).find((t) => t.startsWith("Task board"))
+    }
+    await until(() => board()?.includes("Changelog") ?? false)
+    expect(board()).toContain('"Deploy check" (sessionID ses_w1): working')
+    expect(board()).not.toContain("Someone else")
+    // A plain session (no conversation, not the voice agent) gets nothing.
+    const plain = { sessionID: "ses_other", agent: "build", system: [] as unknown[] }
+    fake.hooks[0]!(plain)
+    expect(plain.system).toEqual([])
+  })
+
   test("conversation RPC refuses sessions that are not shared", async () => {
     tempConfig({ mode: "session", sessions: ["ses_a"] })
     const fake = fakeContext()

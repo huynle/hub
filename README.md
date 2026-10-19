@@ -323,6 +323,11 @@ not persist those potentially sensitive details.
   agent exists, the session keeps its agent and the `context` hook adds the orchestrator prompt instead.
 - The delegate agent (`subagent` in the config) is added per request by the `context` hook, so changing
   it needs no restart.
+- **Task board**: the `context` hook also gives the voice agent (and a conversation on another agent) a live
+  list of the workers it started (`src/spoke/taskboard.ts`, from this process's events): title, sessionID,
+  state (working, blocked with what it waits for, done with its latest text, failed with the reason, stopped)
+  and for how long, at most 8 (live ones first) of at most 200 characters each. So "what's running?" or "how's
+  the deploy going?" needs no tool call. A session without workers gets no board.
 - Child text and execution events are paired by the hub. The latest assistant message of a successful
   child is emitted as root-session speech; failures, interruptions and stale partial results are not.
 - Server ops: `steer` sends the text with `delivery: "steer"` (metadata `{source: "hub", mode:

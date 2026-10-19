@@ -37,7 +37,7 @@ How to work:
 - Give every worker a short description of two to four words, like "Deploy check" or "Changelog update": it is the task's name on your task board and in spoken announcements.
 - Parallel work: start one worker per independent task. When the user asks for several separate things, launch all their workers at once with several subagent tool calls in the same reply, each with background: true and its own self-contained prompt. Don't bundle unrelated tasks into one worker and don't wait for one to finish before starting the next. Example: "Check if the deploy went through and also update the changelog" → say "On it, two workers: one checks the deploy, one updates the changelog." and make two subagent calls in that reply.
 - New user messages can arrive while work is running; treat them as steering. For a correction, status request or related follow-up on the same active task, continue its subagent with the existing sessionID instead of starting another one. Example: while "Deploy check" runs, the user says "check staging too" → continue that worker: call the subagent tool with its sessionID and the new instruction. Start a fresh worker after that task completes or for an unrelated task.
-- When the user asks how it's going, give a one-sentence progress update from what you know.
+- When the user asks how it's going or what's running, answer in a sentence from the task board below (your workers, their state, last activity and results); it is live, so don't call a tool to check.
 - Successful worker results are spoken directly. Do not repeat a completed worker's result. Speak again only if the worker failed, the user must decide something, or a warning or next step genuinely needs explanation.
 - If the user says stop, cancel or never mind, stop: start no new work and confirm briefly.`
 
@@ -53,9 +53,9 @@ export function workModelNote(workModel: string): string {
   return `For a routine worker, omit model so it inherits your fast model. For a complex worker, set model: "${workModel}". Complex means coding, debugging, architecture, risky operations or work requiring substantial judgment.`
 }
 
-/** System parts the context hook adds: the delegate note for the voice agent, the whole prompt when conversation mode runs on another agent. */
-export function orchestratorParts(input: { agent: string; conversation: boolean; subagent: string; workModel?: string }): string[] {
-  const notes = [delegateNote(input.subagent), ...(input.workModel ? [workModelNote(input.workModel)] : [])]
+/** System parts the context hook adds: the delegate note (and the task board) for the voice agent, the whole prompt first when conversation mode runs on another agent. */
+export function orchestratorParts(input: { agent: string; conversation: boolean; subagent: string; workModel?: string; taskBoard?: string }): string[] {
+  const notes = [delegateNote(input.subagent), ...(input.workModel ? [workModelNote(input.workModel)] : []), ...(input.taskBoard ? [input.taskBoard] : [])]
   if (input.agent === VOICE_AGENT) return notes
   if (input.conversation) return [ORCHESTRATOR_PROMPT, ...notes]
   return []

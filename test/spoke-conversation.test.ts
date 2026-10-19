@@ -66,6 +66,14 @@ describe("orchestrator prompt", () => {
     expect(ORCHESTRATOR_PROMPT).toContain("Never run a subagent in the foreground")
   })
 
+  test("the task board follows the notes for the voice agent and for a conversation on another agent", () => {
+    const board = "Task board: …"
+    expect(orchestratorParts({ agent: VOICE_AGENT, conversation: true, subagent: "general", taskBoard: board })).toEqual([delegateNote("general"), board])
+    expect(orchestratorParts({ agent: "build", conversation: true, subagent: "general", taskBoard: board })).toEqual([ORCHESTRATOR_PROMPT, delegateNote("general"), board])
+    expect(orchestratorParts({ agent: "build", conversation: false, subagent: "general", taskBoard: board })).toEqual([])
+    expect(ORCHESTRATOR_PROMPT).toContain("task board")
+  })
+
   test("the voice agent gets only the delegate note; a conversation on another agent gets the full prompt", () => {
     expect(orchestratorParts({ agent: VOICE_AGENT, conversation: true, subagent: "general" })).toEqual([delegateNote("general")])
     expect(orchestratorParts({ agent: VOICE_AGENT, conversation: false, subagent: "x" })).toEqual([delegateNote("x")])
