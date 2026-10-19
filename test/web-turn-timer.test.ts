@@ -33,6 +33,18 @@ describe("TurnTimer", () => {
     expect(t.last).toMatchObject({ speechEnd: 2000, transcript: 2400, firstSay: 3000, firstAudio: 3200 })
   })
 
+  test("the first audio byte is a step between the first reply and playing (streamed speech)", () => {
+    const t = new TurnTimer()
+    t.mark("accepted", 500)
+    expect(t.mark("firstByte", 600)).toBe(false) // no reply yet: a cue or an older sentence
+    t.mark("firstSay", 1200)
+    expect(t.mark("firstByte", 1400)).toBe(true)
+    expect(t.mark("firstByte", 1450)).toBe(false)
+    t.mark("firstAudio", 1500)
+    expect(t.last).toEqual({ accepted: 500, firstSay: 1200, firstByte: 1400, firstAudio: 1500 })
+    expect(describeTurn(t.last)).toEqual({ summary: "last turn: 1.0 s to first audio", detail: "first reply 0.7 s · first byte 0.2 s · audio 0.1 s" })
+  })
+
   test("a typed turn counts from when it was accepted", () => {
     const t = new TurnTimer()
     t.mark("accepted", 500)

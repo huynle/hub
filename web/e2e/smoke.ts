@@ -3,7 +3,7 @@
 // phone (390×844) sizes: home loads, a session opens with its timeline, Send → Steer/Stop → Send, image attachments
 // (attach, remove, attach again, send), Dictate → Send (input cleared, also when the turn's connection drops), a slow turn (202, reply later), the right rail and diff viewer render, a Voice-off session is inspectable, rename (table,
 // sidebar, top bar), archive (menu, Undo, Archived chip, Needs-you exception, bulk, inactive), resizable sidebar/rail, and
-// Voice mode speaking a streamed reply before its text ends, with the turn timed (a browser with a silent fake mic). Screenshots go to $SMOKE_SHOTS (default: the OS temp
+// Voice mode speaking a streamed reply before its text ends (each sentence playing while its MP3 still downloads), with the turn timed (a browser with a silent fake mic). Screenshots go to $SMOKE_SHOTS (default: the OS temp
 // dir). Run `npm run build:web && npm run test:e2e`. Chromium: $CHROMIUM_PATH, else Playwright's cache, else PATH.
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -1064,7 +1064,7 @@ async function voiceSpeed(browser: Browser): Promise<void> {
   const errors: string[] = []
   page.on("pageerror", (e) => errors.push(e.message))
   await check("voice speed: Voice mode speaks a streamed reply sentence by sentence, starting before the text ends; the Voice bar times the turn", async () => {
-    type Entry = { at: number; method: string; path: string; body?: any }
+    type Entry = { at: number; method: string; path: string; body?: any; done?: number }
     const state = async () => (await (await fetch(`${BASE}/mock/log`)).json()) as { log: Entry[]; textEnded: Array<{ messageID: string; at: number }> }
     await page.goto(`${BASE}/s/ses_mock`)
     await page.locator(".msg.assistant").first().waitFor()
@@ -1096,8 +1096,21 @@ async function voiceSpeed(browser: Browser): Promise<void> {
       return mark ? performance.timeOrigin + mark.startTime : undefined
     })
     assert(firstAudio !== undefined && firstAudio < ended!.at, `first audio ${firstAudio === undefined ? "missing" : `${Math.round(ended!.at - firstAudio)} ms before the text ended`}`)
+    // Streamed playback: the first sentence started playing before its audio finished downloading (the mock sends
+    // the MP3 in chunks over ~1.2 s), right after its first byte.
+    const marks = await page.evaluate(() => {
+      const at = (name: string) => {
+        const mark = performance.getEntriesByName(name).at(-1)
+        return mark ? performance.timeOrigin + mark.startTime : undefined
+      }
+      return { firstByte: at("hub-voice:first-byte"), firstAudio: at("hub-voice:first-audio") }
+    })
+    for (let i = 0; i < 20 && !(await state()).log.find((e) => e.path === "/api/speak" && e.at === speaks[0]!.at)?.done; i++) await page.waitForTimeout(100)
+    const firstDone = (await state()).log.find((e) => e.path === "/api/speak" && e.at === speaks[0]!.at)?.done
+    assert(marks.firstByte !== undefined && marks.firstByte <= firstAudio!, `first byte ${JSON.stringify(marks)}`)
+    assert(firstDone !== undefined && firstAudio! < firstDone - 300, `first sentence played ${firstDone === undefined ? "(download never ended)" : `${Math.round(firstDone - firstAudio!)} ms`} before its audio finished downloading`)
     const title = await page.locator(".voice-bar .voice-state").getAttribute("title")
-    assert(/^last turn: \d+\.\d s to first audio\nfirst reply \d+\.\d s · audio \d+\.\d s$/.test(title ?? ""), `Voice bar timing tooltip: ${JSON.stringify(title)}`)
+    assert(/^last turn: \d+\.\d s to first audio\nfirst reply \d+\.\d s · first byte \d+\.\d s · audio \d+\.\d s$/.test(title ?? ""), `Voice bar timing tooltip: ${JSON.stringify(title)}`)
     await page.locator(".voice-bar").getByRole("button", { name: "End", exact: true }).click()
     await page.locator(".voice-bar").waitFor({ state: "detached" })
   })

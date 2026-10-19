@@ -629,7 +629,7 @@ export class SayAssembler {
 // ---------- turn timing ----------
 
 /** Steps of a Voice turn, in order: the user stops speaking … the reply starts playing. */
-export type TurnMark = "speechEnd" | "transcript" | "accepted" | "firstSay" | "firstAudio"
+export type TurnMark = "speechEnd" | "transcript" | "accepted" | "firstSay" | "firstByte" | "firstAudio"
 export type Turn = Readonly<Partial<Record<TurnMark, number>>>
 
 /**
@@ -660,6 +660,10 @@ export class TurnTimer {
         if (!this.turn || this.turn.firstSay !== undefined) return false
         this.turn.firstSay = at
         return true
+      case "firstByte":
+        if (this.turn?.firstSay === undefined || this.turn.firstByte !== undefined) return false
+        this.turn.firstByte = at
+        return true
       case "firstAudio":
         if (this.turn?.firstSay === undefined) return false
         this.last = { ...this.turn, firstAudio: at }
@@ -679,6 +683,7 @@ export function describeTurn(turn: Turn | undefined): { summary: string; detail:
     ["transcript", "transcript"],
     ["accepted", "accepted"],
     ["firstSay", "first reply"],
+    ["firstByte", "first byte"],
     ["firstAudio", "audio"],
   ]
   const parts: string[] = []

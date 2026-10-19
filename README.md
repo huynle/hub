@@ -738,13 +738,16 @@ it again, say "pause listening", or leave the page to turn it off. Leaving the p
   the phone plays them in `seq` order per text part and drops duplicates (`SayAssembler`). A `say` without
   `seq` (a subagent's result) is split into sentences. Abbreviations, decimals, file names and
   list items are handled, and fenced code becomes "(code omitted)". Each sentence goes to `/api/speak`,
-  up to two ahead of playback, and plays through one `<audio>` element. Speech that lasts 300 ms or more
+  up to two ahead of playback, and plays through one `<audio>` element while its MP3 is still downloading:
+  through MediaSource (`audio/mpeg` SourceBuffer; Chrome, Android, Firefox), appending bytes as they arrive
+  (`web/src/core/audio-stream.ts`). Browsers without MP3 in MediaSource (some iOS Safari versions) play each
+  sentence once it has fully downloaded, as before. Prefetched sentences keep downloading while they wait. Speech that lasts 300 ms or more
   (barge-in) pauses playback, clears the queue and mutes the rest of the replies that were speaking (their
   later sentences still show in the transcript); a new reply speaks again.
 - **Turn timing**: each turn's steps are `performance.mark`s (`hub-voice:speech-end`, `…:transcript`,
-  `…:accepted`, `…:first-say`, `…:first-audio`; visible in the browser's performance tools), and the Voice bar's
+  `…:accepted`, `…:first-say`, `…:first-byte` (the reply's first audio byte arrived), `…:first-audio` (it plays); visible in the browser's performance tools), and the Voice bar's
   state has the last turn as its tooltip: "last turn: 1.8 s to first audio" with the steps (transcript,
-  accepted, first reply, audio). A typed turn counts from when the hub accepted it. The transcript shows your utterances with ✓ (sent)
+  accepted, first reply, first byte, audio). A typed turn counts from when the hub accepted it. The transcript shows your utterances with ✓ (sent)
   and ✓✓ (heard). Agent text is merged with the bubble already streamed from deltas. Subagents
   starting, finishing or failing appear as small notes. Typed text is sent as an utterance while the
   mode is on.
