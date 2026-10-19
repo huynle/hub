@@ -1,7 +1,8 @@
 // The built console (web/dist, `npm run build:web`) served by the hub: app routes, manifest, icons, service
 // worker, hashed same-origin assets. scripts/test-ci.sh builds it before the tests.
 import { afterEach, describe, expect, test } from "bun:test"
-import { existsSync } from "node:fs"
+import { existsSync, readdirSync, readFileSync } from "node:fs"
+import { gunzipSync, brotliDecompressSync } from "node:zlib"
 import path from "node:path"
 import { harness, type Harness } from "./central-harness"
 
@@ -69,6 +70,56 @@ describe("console assets", () => {
     expect(source).toContain('registerProcessor("vad-tap"')
     expect(() => new Function(source)).not.toThrow()
   })
+
+  test("Silero VAD assets: the worker, onnxruntime's wasm and the model, hashed, typed, cached for good, outside the main chunk", async () => {
+    h = harness({ webDir: WEB })
+    const assets = readdirSync(path.join(WEB, "assets"))
+    const worker = assets.find((f) => /^silero-worker-.+\.js$/.test(f))
+    const wasm = assets.find((f) => f.endsWith(".wasm"))
+    const model = assets.find((f) => /^silero_vad-.+\.onnx$/.test(f))
+    expect([worker, wasm, model].every(Boolean)).toBe(true)
+    const workerSource = readFileSync(path.join(WEB, "assets", worker!), "utf8")
+    expect(workerSource).toContain(wasm!)
+    expect(workerSource).toContain(model!)
+    // The main chunk only knows the worker's URL; onnxruntime stays out of it.
+    const html = await (await fetch(`${h.url}/`)).text()
+    const main = /<script type="module"[^>]* src="\/assets\/([^"]+\.js)"/.exec(html)![1]!
+    const mainSource = readFileSync(path.join(WEB, "assets", main), "utf8")
+    expect(mainSource).toContain(worker!)
+    expect(mainSource).not.toContain("InferenceSession")
+    for (const [file, type] of [
+      [worker!, "text/javascript; charset=utf-8"],
+      [wasm!, "application/wasm"],
+      [model!, "application/octet-stream"],
+    ] as const) {
+      const res = await fetch(`${h.url}/assets/${file}`)
+      expect(res.status).toBe(200)
+      expect(res.headers.get("content-type")).toBe(type)
+      expect(res.headers.get("cache-control")).toBe("public, max-age=31536000, immutable")
+      expect(new Uint8Array(await res.arrayBuffer())).toEqual(new Uint8Array(readFileSync(path.join(WEB, "assets", file))))
+    }
+    // Files outside assets/ are not hashed: no long-lived caching.
+    expect((await fetch(`${h.url}/vad-worklet.js`)).headers.get("cache-control")).toBeNull()
+  })
+
+  test("big compressible assets (the 12 MB wasm) are sent compressed when the browser accepts it", async () => {
+    h = harness({ webDir: WEB })
+    const wasm = readdirSync(path.join(WEB, "assets")).find((f) => f.endsWith(".wasm"))!
+    const bytes = new Uint8Array(readFileSync(path.join(WEB, "assets", wasm)))
+    const get = (encoding: string) => fetch(`${h.url}/assets/${wasm}`, { headers: { "accept-encoding": encoding }, decompress: false } as RequestInit)
+    const br = await get("gzip, deflate, br")
+    expect(br.headers.get("content-encoding")).toBe("br")
+    expect(br.headers.get("vary")).toBe("Accept-Encoding")
+    const brBody = new Uint8Array(await br.arrayBuffer())
+    expect(brBody.length).toBeLessThan(bytes.length / 3)
+    expect(new Uint8Array(brotliDecompressSync(brBody))).toEqual(bytes)
+    const gz = await get("gzip")
+    expect(gz.headers.get("content-encoding")).toBe("gzip")
+    expect(new Uint8Array(gunzipSync(new Uint8Array(await gz.arrayBuffer())))).toEqual(bytes)
+    const plain = await get("identity")
+    expect(plain.headers.get("content-encoding")).toBeNull()
+    expect(new Uint8Array(await plain.arrayBuffer()).length).toBe(bytes.length)
+  }, 60_000)
 
   test("without a build the shell explains how to build it", async () => {
     h = harness({ webDir: path.join(WEB, "missing") })

@@ -65,6 +65,8 @@ const TYPES: Record<string, string> = {
   ".webmanifest": "application/manifest+json",
   ".svg": "image/svg+xml",
   ".png": "image/png",
+  ".wasm": "application/wasm",
+  ".onnx": "application/octet-stream",
 }
 
 type Log = { at: number; method: string; path: string; contentType?: string; bytes?: number; body?: unknown; done?: number }

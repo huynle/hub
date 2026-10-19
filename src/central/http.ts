@@ -4,6 +4,8 @@
 import type { Server } from "bun"
 import { diskAssets, type WebAssets } from "./assets"
 import path from "node:path"
+import { promisify } from "node:util"
+import { brotliCompress, constants as zlib, gzip } from "node:zlib"
 import { formAnswerProblem, PROMPT_IMAGE_MIMES, promptImagesProblem, type AvailableModel, type EnrollStart, type FormAnswer, type ModelSelection, type PermissionDecision, type PromptImage, type TurnResult } from "../protocol"
 import { isLoopbackAddress, isLoopbackHost, isLoopbackURL, loopbackOrigins } from "../loopback"
 import { speakable } from "../speakable"
@@ -161,6 +163,29 @@ const CONTENT_TYPES: Record<string, string> = {
   ".svg": "image/svg+xml",
   ".png": "image/png",
   ".ico": "image/x-icon",
+  // Voice mode's on-device speech detection (Silero VAD through onnxruntime-web)
+  ".wasm": "application/wasm",
+  ".onnx": "application/octet-stream",
+}
+/** Vite's content-hashed build output: a changed file gets a new name, so it can be cached for good. */
+const HASHED_ASSET = /^assets\//
+const IMMUTABLE = "public, max-age=31536000, immutable"
+/** Hashed assets sent compressed when the browser accepts it (onnxruntime's wasm: 12 MB → 2.3 MB with Brotli). */
+const COMPRESSIBLE = new Set([".js", ".mjs", ".css", ".wasm", ".json", ".svg"])
+const MIN_COMPRESS_BYTES = 1024
+const brotli = promisify(brotliCompress)
+const gzipAsync = promisify(gzip)
+
+/** "br" or "gzip" when the Accept-Encoding header allows it (q=0 refuses), else undefined. */
+function pickEncoding(header: string | null): "br" | "gzip" | undefined {
+  const accepted = new Map<string, number>()
+  for (const part of (header ?? "").toLowerCase().split(",")) {
+    const [name, ...params] = part.trim().split(";")
+    const q = params.map((p) => /^\s*q=([\d.]+)\s*$/.exec(p)?.[1]).find(Boolean)
+    if (name) accepted.set(name.trim(), q === undefined ? 1 : Number(q))
+  }
+  for (const encoding of ["br", "gzip"] as const) if ((accepted.get(encoding) ?? 0) > 0) return encoding
+  return undefined
 }
 
 class HttpError extends Error {
@@ -425,7 +450,7 @@ export function startCentral(options: CentralOptions): Central {
       if (oidc && method === "GET" && pathname === "/auth/login") return await authLogin(url)
       if (oidc && method === "GET" && pathname === "/auth/callback") return await authCallback(request, url)
       if (pathname.startsWith("/api/")) return await api(request, server, url)
-      if (method === "GET") return staticFile(pathname)
+      if (method === "GET") return await staticFile(pathname, request.headers.get("accept-encoding"))
       return error(404, "Not found")
     } catch (cause) {
       return failure(cause)
@@ -1125,7 +1150,23 @@ export function startCentral(options: CentralOptions): Central {
     })
   }
 
-  function staticFile(pathname: string): Response {
+  /** Compressed copies of hashed assets, made once per file and encoding (they never change). */
+  const compressed = new Map<string, Promise<Uint8Array>>()
+  function compress(name: string, bytes: Uint8Array, encoding: "br" | "gzip"): Promise<Uint8Array> {
+    const key = `${encoding} ${name}`
+    let done = compressed.get(key)
+    if (!done) {
+      done =
+        encoding === "br"
+          ? brotli(bytes, { params: { [zlib.BROTLI_PARAM_QUALITY]: 6, [zlib.BROTLI_PARAM_SIZE_HINT]: bytes.length } })
+          : gzipAsync(bytes, { level: 9 })
+      done.catch(() => compressed.delete(key))
+      compressed.set(key, done)
+    }
+    return done
+  }
+
+  async function staticFile(pathname: string, acceptEncoding: string | null): Promise<Response> {
     const name = APP_ROUTES.test(pathname) ? "index.html" : STATIC_PATH.test(pathname) ? pathname.slice(1) : undefined
     const type = name && CONTENT_TYPES[path.extname(name).toLowerCase()]
     const bytes = name && type ? web.read(name) : undefined
@@ -1139,6 +1180,16 @@ export function startCentral(options: CentralOptions): Central {
       headers.set("service-worker-allowed", "/")
     } else if (type.startsWith("text/html")) {
       headers.set("cache-control", "no-cache")
+    } else if (HASHED_ASSET.test(name)) {
+      headers.set("cache-control", IMMUTABLE)
+      if (COMPRESSIBLE.has(path.extname(name).toLowerCase()) && bytes.length >= MIN_COMPRESS_BYTES) {
+        headers.set("vary", "Accept-Encoding")
+        const encoding = pickEncoding(acceptEncoding)
+        if (encoding) {
+          headers.set("content-encoding", encoding)
+          return new Response(new Uint8Array(await compress(name, bytes, encoding)), { headers })
+        }
+      }
     }
     return new Response(bytes, { headers })
   }

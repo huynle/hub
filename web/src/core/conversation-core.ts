@@ -192,12 +192,22 @@ const TRAILING_KEEP_MS = VOICE_TIMINGS.trailingKeepMs // silence kept at the end
 const ONSET_GAP_MS = 120 // dip tolerated while an onset is still being confirmed
 const HYSTERESIS_DB = 4
 
-export interface VadOptions {
+export interface SegmenterOptions {
   readonly sampleRate: number
   readonly minSpeechMs?: number
   readonly endSilenceMs?: number
   readonly preRollMs?: number
   readonly maxSegmentMs?: number
+  /** A dip tolerated while an onset is still being confirmed. */
+  readonly onsetGapMs?: number
+  /**
+   * Share of an onset that must be voiced (checked on each unvoiced frame): rejects isolated voiced frames
+   * (typing clicks) that the gap tolerance alone would add up. 0 (the energy VAD) disables the check.
+   */
+  readonly minVoicedRatio?: number
+}
+
+export interface VadOptions extends Omit<SegmenterOptions, "onsetGapMs" | "minVoicedRatio"> {
   readonly marginDb?: number
   readonly minDb?: number
   readonly speakingBoostDb?: number
@@ -205,7 +215,14 @@ export interface VadOptions {
 
 export type VadEvent =
   | { readonly type: "start" }
-  | { readonly type: "end"; readonly samples: Float32Array; readonly durationMs: number; readonly forced: boolean }
+  | {
+      readonly type: "end"
+      readonly samples: Float32Array
+      readonly durationMs: number
+      readonly forced: boolean
+      /** Voiced time in the segment (without pre-roll, pauses and trailing silence). */
+      readonly speechMs: number
+    }
 
 interface Frame {
   samples: Float32Array
@@ -219,26 +236,23 @@ function trimFront(frames: Frame[], maxMs: number): void {
 }
 
 /**
- * Energy VAD: frame RMS in dBFS against an adaptive noise floor (falls fast, rises slowly), with hysteresis.
- * "start" fires after `minSpeechMs` of voice (so short knocks and echo blips never count); "end" fires after
- * `endSilenceMs` of silence with the segment's samples, including `preRollMs` of audio from before the onset.
+ * Turns voiced/unvoiced frames into speech segments. "start" fires after `minSpeechMs` of voice (so short knocks
+ * and echo blips never count); "end" fires after `endSilenceMs` of silence with the segment's samples, including
+ * `preRollMs` of audio from before the onset and up to `trailingKeepMs` of the silence.
  */
-export class EnergyVad {
+export class Segmenter {
   readonly sampleRate: number
   minSpeechMs: number
   endSilenceMs: number
   preRollMs: number
   maxSegmentMs: number
-  marginDb: number
-  minDb: number
-  speakingBoostDb: number
-  /** True while the app is playing speech: raises the voice threshold. */
-  speaking = false
-  floor: number | undefined = undefined
+  onsetGapMs: number
+  minVoicedRatio: number
   state: "silence" | "onset" | "speech" = "silence"
   private preroll: Frame[] = []
   private frames: Frame[] = []
   private segmentMs = 0
+  private onsetMs = 0
   private voicedMs = 0
   private gapMs = 0
   private silenceMs = 0
@@ -249,18 +263,16 @@ export class EnergyVad {
     endSilenceMs = VOICE_TIMINGS.endSilenceMs,
     preRollMs = VOICE_TIMINGS.preRollMs,
     maxSegmentMs = 60_000,
-    marginDb = 10,
-    minDb = -50,
-    speakingBoostDb = 8,
-  }: VadOptions) {
+    onsetGapMs = ONSET_GAP_MS,
+    minVoicedRatio = 0,
+  }: SegmenterOptions) {
     this.sampleRate = sampleRate
     this.minSpeechMs = minSpeechMs
     this.endSilenceMs = endSilenceMs
     this.preRollMs = preRollMs
     this.maxSegmentMs = maxSegmentMs
-    this.marginDb = marginDb
-    this.minDb = minDb
-    this.speakingBoostDb = speakingBoostDb
+    this.onsetGapMs = onsetGapMs
+    this.minVoicedRatio = minVoicedRatio
     this.reset()
   }
 
@@ -273,24 +285,14 @@ export class EnergyVad {
     this.preroll = []
     this.frames = []
     this.segmentMs = 0
+    this.onsetMs = 0
     this.voicedMs = 0
     this.gapMs = 0
     this.silenceMs = 0
   }
 
-  process(input: ArrayLike<number>): { level: number; voiced: boolean; events: VadEvent[] } {
+  process(input: ArrayLike<number>, voiced: boolean): VadEvent[] {
     const frame: Frame = { samples: Float32Array.from(input), ms: (input.length / this.sampleRate) * 1000 }
-    let sum = 0
-    for (const x of frame.samples) sum += x * x
-    const db = 20 * Math.log10(Math.max(Math.sqrt(sum / Math.max(1, input.length)), 1e-7))
-    this.floor ??= db
-    const on = Math.max(this.floor + this.marginDb, this.minDb) + (this.speaking ? this.speakingBoostDb : 0)
-    const voiced = db >= (this.state === "speech" ? on - HYSTERESIS_DB : on)
-    const level = Math.max(0, Math.min(1, (db - this.floor) / 36))
-    // Noise floor: follow quiet frames quickly, louder ones slowly (slower still during speech).
-    const rise = frame.ms / (this.state === "speech" ? 15_000 : 4_000)
-    this.floor += (db - this.floor) * (db < this.floor ? 0.2 : Math.min(1, rise))
-
     const events: VadEvent[] = []
     if (this.state === "silence") {
       if (voiced) {
@@ -298,7 +300,7 @@ export class EnergyVad {
         this.frames = [...this.preroll, frame]
         this.segmentMs = duration(this.frames)
         this.preroll = []
-        this.voicedMs = frame.ms
+        this.onsetMs = this.voicedMs = frame.ms
         this.gapMs = 0
       } else {
         this.preroll.push(frame)
@@ -307,10 +309,11 @@ export class EnergyVad {
     } else if (this.state === "onset") {
       this.frames.push(frame)
       this.segmentMs += frame.ms
+      this.onsetMs += frame.ms
       if (voiced) {
         this.voicedMs += frame.ms
         this.gapMs = 0
-      } else if ((this.gapMs += frame.ms) > ONSET_GAP_MS) {
+      } else if ((this.gapMs += frame.ms) > this.onsetGapMs || this.voicedMs < this.minVoicedRatio * this.onsetMs) {
         this.preroll = this.frames
         trimFront(this.preroll, this.preRollMs)
         this.frames = []
@@ -324,6 +327,7 @@ export class EnergyVad {
     } else {
       this.frames.push(frame)
       this.segmentMs += frame.ms
+      if (voiced) this.voicedMs += frame.ms
       this.silenceMs = voiced ? 0 : this.silenceMs + frame.ms
       if (this.silenceMs >= this.endSilenceMs) {
         let drop = this.silenceMs - TRAILING_KEEP_MS
@@ -333,7 +337,7 @@ export class EnergyVad {
         events.push(this.finish(true))
       }
     }
-    return { level, voiced, events }
+    return events
   }
 
   private finish(forced: boolean): VadEvent {
@@ -343,8 +347,94 @@ export class EnergyVad {
       samples.set(f.samples, at)
       at += f.samples.length
     }
+    const speechMs = this.voicedMs
     this.reset()
-    return { type: "end", samples, durationMs: (samples.length / this.sampleRate) * 1000, forced }
+    return { type: "end", samples, durationMs: (samples.length / this.sampleRate) * 1000, forced, speechMs }
+  }
+}
+
+export interface EnergyMeterOptions {
+  readonly marginDb?: number
+  readonly minDb?: number
+  readonly speakingBoostDb?: number
+}
+
+/** Frame RMS in dBFS against an adaptive noise floor (falls fast, rises slowly). */
+export class EnergyMeter {
+  marginDb: number
+  minDb: number
+  speakingBoostDb: number
+  /** True while the app is playing speech: raises the voice threshold. */
+  speaking = false
+  floor: number | undefined = undefined
+
+  constructor({ marginDb = 10, minDb = -50, speakingBoostDb = 8 }: EnergyMeterOptions = {}) {
+    this.marginDb = marginDb
+    this.minDb = minDb
+    this.speakingBoostDb = speakingBoostDb
+  }
+
+  /** `inSpeech`: a segment is open (lower threshold, slower floor). `floor` is the floor before this frame. */
+  measure(input: ArrayLike<number>, ms: number, inSpeech: boolean): { db: number; floor: number; level: number; voiced: boolean } {
+    let sum = 0
+    for (let i = 0; i < input.length; i++) sum += input[i]! * input[i]!
+    const db = 20 * Math.log10(Math.max(Math.sqrt(sum / Math.max(1, input.length)), 1e-7))
+    const floor = (this.floor ??= db)
+    const on = Math.max(floor + this.marginDb, this.minDb) + (this.speaking ? this.speakingBoostDb : 0)
+    const voiced = db >= (inSpeech ? on - HYSTERESIS_DB : on)
+    const level = Math.max(0, Math.min(1, (db - floor) / 36))
+    // Noise floor: follow quiet frames quickly, louder ones slowly (slower still during speech).
+    const rise = ms / (inSpeech ? 15_000 : 4_000)
+    this.floor += (db - floor) * (db < floor ? 0.2 : Math.min(1, rise))
+    return { db, floor, level, voiced }
+  }
+}
+
+/** Energy VAD: an EnergyMeter (with hysteresis) deciding the frames of a Segmenter. */
+export class EnergyVad {
+  readonly sampleRate: number
+  private meter: EnergyMeter
+  private segmenter: Segmenter
+
+  constructor({ sampleRate, minSpeechMs, endSilenceMs, preRollMs, maxSegmentMs, marginDb, minDb, speakingBoostDb }: VadOptions) {
+    this.sampleRate = sampleRate
+    this.meter = new EnergyMeter({ marginDb, minDb, speakingBoostDb })
+    this.segmenter = new Segmenter({ sampleRate, minSpeechMs, endSilenceMs, preRollMs, maxSegmentMs })
+  }
+
+  get minSpeechMs(): number {
+    return this.segmenter.minSpeechMs
+  }
+  get endSilenceMs(): number {
+    return this.segmenter.endSilenceMs
+  }
+  get preRollMs(): number {
+    return this.segmenter.preRollMs
+  }
+  get speaking(): boolean {
+    return this.meter.speaking
+  }
+  /** True while the app is playing speech: raises the voice threshold. */
+  set speaking(on: boolean) {
+    this.meter.speaking = on
+  }
+  get floor(): number | undefined {
+    return this.meter.floor
+  }
+  get state(): Segmenter["state"] {
+    return this.segmenter.state
+  }
+  get active(): boolean {
+    return this.segmenter.active
+  }
+
+  reset(): void {
+    this.segmenter.reset()
+  }
+
+  process(input: ArrayLike<number>): { level: number; voiced: boolean; events: VadEvent[] } {
+    const { level, voiced } = this.meter.measure(input, (input.length / this.sampleRate) * 1000, this.segmenter.state === "speech")
+    return { level, voiced, events: this.segmenter.process(input, voiced) }
   }
 }
 

@@ -585,6 +585,7 @@ export function SessionView(props: { id: string }) {
                 notifyHint={voiceNotifyHint()}
                 onAllowNotifications={() => void allowVoiceNotifications()}
                 timing={vs().timing}
+                detector={vs().detector}
               />
             </Show>
             <Show when={voiceNeedsTap()}>

@@ -1110,7 +1110,7 @@ async function voiceSpeed(browser: Browser): Promise<void> {
     assert(marks.firstByte !== undefined && marks.firstByte <= firstAudio!, `first byte ${JSON.stringify(marks)}`)
     assert(firstDone !== undefined && firstAudio! < firstDone - 300, `first sentence played ${firstDone === undefined ? "(download never ended)" : `${Math.round(firstDone - firstAudio!)} ms`} before its audio finished downloading`)
     const title = await page.locator(".voice-bar .voice-state").getAttribute("title")
-    assert(/^last turn: \d+\.\d s to first audio\nfirst reply \d+\.\d s · first byte \d+\.\d s · audio \d+\.\d s$/.test(title ?? ""), `Voice bar timing tooltip: ${JSON.stringify(title)}`)
+    assert(/^last turn: \d+\.\d s to first audio\nfirst reply \d+\.\d s · first byte \d+\.\d s · audio \d+\.\d s\nspeech detection: .+$/.test(title ?? ""), `Voice bar timing tooltip: ${JSON.stringify(title)}`)
     await page.locator(".voice-bar").getByRole("button", { name: "End", exact: true }).click()
     await page.locator(".voice-bar").waitFor({ state: "detached" })
   })
