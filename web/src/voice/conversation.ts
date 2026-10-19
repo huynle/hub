@@ -7,6 +7,7 @@
 import { gestureBlocked } from "../core/voice-autostart"
 import { Endpointer, micConstraints, SayAssembler, SpeechQueue, TurnTimer, describeTurn, encodeWav, parseCommand, type TurnMark, type VadEvent } from "../core/conversation-core"
 import { sensitivityParams, VoiceDetector, type DetectorMode, type Sensitivity } from "../core/speech-vad"
+import { junkTranscript } from "../core/junk-transcript"
 import { loadSilero } from "./silero"
 import { AudioClip, canStreamMp3, clipFrom, feed } from "../core/audio-stream"
 import { CuePlayer } from "../core/cues"
@@ -14,6 +15,8 @@ import { CueClock, CuePicker, cueTexts, CueScheduler, isWorking, subagentChanges
 import type { ApiInit } from "../app/api"
 
 const SENT_LABEL_MS = 2500
+/** How long the Voice bar shows a dropped transcript ("ignored: Thank you."). */
+const IGNORED_LABEL_MS = 3000
 
 /** The model failing to load is logged once per page, not per Voice start. */
 let warnedModel = false
@@ -50,6 +53,8 @@ export interface ConversationUI<B> {
   ended(): void
   /** The last turn's timing ("last turn: 1.8 s to first audio" and its steps), after its first audio played. */
   timing?(turn: { summary: string; detail: string }): void
+  /** A transcript dropped as noise ("Thank you.", "you" …), shown briefly; "" clears it. */
+  ignored?(text: string): void
   /** Which speech detector runs (the Silero model once loaded, else energy) and its mean inference round trip. */
   detector?(info: DetectorInfo): void
 }
@@ -129,6 +134,7 @@ export class Conversation<B = unknown> {
   private wakeLock?: WakeLockSentinel
   private warnedAutoplay = false
   private state: ConversationState | undefined
+  private ignoredTimer: ReturnType<typeof setTimeout> | undefined
   /** The sensitivity the detector is tuned to. */
   private sensitivity: Sensitivity = "normal"
   /** A progress cue is playing (its echo must not barge in either). */
@@ -357,7 +363,7 @@ export class Conversation<B = unknown> {
         this.markTurn("speechEnd")
         this.cuePlayer.play(this.scheduler.speechEnded(this.speechEndedAt))
         const id = this.endpointer!.segmentEnded(event.durationMs)
-        void this.transcribe(id, encodeWav(event.samples, vad.sampleRate))
+        void this.transcribe(id, encodeWav(event.samples, vad.sampleRate), event.speechMs)
         this.ui.detector?.({ mode: vad.mode, ...(vad.mode === "silero" ? { avgMs: vad.stats.avgMs } : {}) })
       }
       this.cueClock.poke()
@@ -365,7 +371,7 @@ export class Conversation<B = unknown> {
     }
   }
 
-  private async transcribe(id: number, wav: Uint8Array<ArrayBuffer>): Promise<void> {
+  private async transcribe(id: number, wav: Uint8Array<ArrayBuffer>, speechMs: number): Promise<void> {
     this.inflight++
     this.refresh()
     let text = ""
@@ -377,9 +383,20 @@ export class Conversation<B = unknown> {
       this.inflight--
     }
     if (!this.active) return
+    // Speech-to-text's take on noise ("Thank you.", "you", "[Music]" …) never reaches the agent.
+    if (junkTranscript(text, { speechMs })) {
+      if (text.trim()) this.showIgnored(text.trim())
+      text = ""
+    }
     if (text.trim()) this.markTurn("transcript")
     this.endpointer?.transcribed(id, text)
     this.refresh()
+  }
+
+  private showIgnored(text: string): void {
+    clearTimeout(this.ignoredTimer)
+    this.ui.ignored?.(text)
+    this.ignoredTimer = setTimeout(() => this.ui.ignored?.(""), IGNORED_LABEL_MS)
   }
 
   /** A finished utterance from the endpointer (or typed text): a voice command or a steer. */
@@ -729,6 +746,8 @@ export class Conversation<B = unknown> {
     this.wakeLock = undefined
     this.ui.level(0)
     this.ui.held?.("")
+    clearTimeout(this.ignoredTimer)
+    this.ui.ignored?.("")
     this.ui.state("off")
     this.ui.ended()
     if (post && wasActive) {

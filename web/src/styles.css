@@ -350,6 +350,7 @@ pre.code { white-space: pre; font-size: 12px; }
 .voice-bar.speaking .wave span:nth-child(4) { animation-delay: 0.45s; }
 @keyframes talk { 50% { transform: scaleY(0.25); } }
 .voice-state { font-size: 13px; }
+.voice-ignored { color: var(--faint); font-style: italic; }
 .btn.end { color: var(--err); }
 
 /* rail */

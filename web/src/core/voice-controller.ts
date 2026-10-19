@@ -46,6 +46,8 @@ export interface VoiceState {
   readonly voice: ConversationState
   readonly level: number
   readonly held: string
+  /** A transcript just dropped as noise (shown dim for a moment), else "". */
+  readonly ignored?: string
   readonly paused: boolean
   readonly agent?: string
   /** The last turn's timing: "last turn: 1.8 s to first audio" and its steps. */
@@ -113,6 +115,7 @@ export class VoiceController<C extends VoiceConversation = VoiceConversation> {
       state: (voice) => run === this.run && this.set({ ...this.state, voice, paused: voice === "paused" }),
       level: (level) => run === this.run && this.set({ ...this.state, level }),
       held: (held) => run === this.run && this.set({ ...this.state, held }),
+      ignored: (ignored) => run === this.run && this.set({ ...this.state, ignored }),
       timing: (timing) => run === this.run && this.set({ ...this.state, timing }),
       detector: (detector) => run === this.run && this.set({ ...this.state, detector }),
       user: (text) => this.sinks.get(sessionID)?.user(text) ?? `voice:${++this.bubbles}`,

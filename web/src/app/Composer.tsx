@@ -306,6 +306,8 @@ export function VoiceBar(props: {
   state: ConversationState
   level: number
   held: string
+  /** A transcript just dropped as noise. */
+  ignored?: string
   working: boolean
   model: string
   onMute: () => void
@@ -330,6 +332,9 @@ export function VoiceBar(props: {
         {label()}
         <Show when={props.held}>
           <span class="muted"> · “{props.held}…”</span>
+        </Show>
+        <Show when={props.ignored}>
+          <span class="voice-ignored" title="Heard as background noise, not sent"> · ignored: “{props.ignored}”</span>
         </Show>
       </span>
       <span class="grow" />

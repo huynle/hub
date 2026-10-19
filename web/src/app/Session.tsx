@@ -577,6 +577,7 @@ export function SessionView(props: { id: string }) {
                 state={vs().voice}
                 level={vs().level}
                 held={vs().held}
+                ignored={vs().ignored}
                 working={running()}
                 model={modelLabel(models.prefs(), "voice")}
                 onMute={() => voice.mute()}

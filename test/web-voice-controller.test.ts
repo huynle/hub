@@ -252,4 +252,14 @@ describe("VoiceController", () => {
     expect(h.controller.state).toMatchObject({ level: 0.5, held: "so I was" })
     expect(changes).toBeGreaterThan(3)
   })
+
+  test("a transcript dropped as noise and the speech detector in use reach subscribers", async () => {
+    const h = harness()
+    await h.controller.toggle("A")
+    h.convs[0]!.ui.ignored?.("Thank you.")
+    h.convs[0]!.ui.detector?.({ mode: "silero", avgMs: 0.8 })
+    expect(h.controller.state).toMatchObject({ ignored: "Thank you.", detector: { mode: "silero", avgMs: 0.8 } })
+    h.convs[0]!.ui.ignored?.("")
+    expect(h.controller.state.ignored).toBe("")
+  })
 })
