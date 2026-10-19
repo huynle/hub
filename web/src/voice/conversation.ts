@@ -6,11 +6,11 @@
 import { gestureBlocked } from "../core/voice-autostart"
 import { Endpointer, EnergyVad, SpeechQueue, encodeWav, parseCommand, splitSentences } from "../core/conversation-core"
 import { CuePlayer } from "../core/cues"
-import { CueScheduler, isWorking, subagentChanges, type StatusEntry } from "../core/feedback-core"
+import { CueClock, CueScheduler, isWorking, subagentChanges, type StatusEntry } from "../core/feedback-core"
 import type { ApiInit } from "../app/api"
 
 const SENT_LABEL_MS = 2500
-const CUE_TICK_MS = 1000
+
 const SILENCE_SECONDS = 2
 
 /** Shown (as a button) when the browser starts Voice mode only after a tap, e.g. when opened from /voice. */
@@ -86,7 +86,10 @@ export class Conversation<B = unknown> {
   private vad?: EnergyVad
   private endpointer?: Endpointer
   private queue?: SpeechQueue<string>
-  private ticker?: ReturnType<typeof setInterval>
+  /** Plays progress phrases right on their deadline (re-armed by `poke()` after anything that may move it). */
+  private cueClock: CueClock
+  /** When the VAD last ended a segment: "Working on it." counts from the end of the speech that was sent. */
+  private speechEndedAt: number | undefined
   private silence?: HTMLAudioElement
   private silenceURL?: string
   private wakeLock?: WakeLockSentinel
@@ -104,7 +107,15 @@ export class Conversation<B = unknown> {
     this.lastStatus = options.status
     this.scheduler.enabled = this.opts.cues !== false
     this.scheduler.working(isWorking(options.status), Date.now())
-    this.cuePlayer = new CuePlayer({ api: this.api as never, speed: this.opts.speed, onSpeaking: (on) => this.scheduler.cueSpeaking(on, Date.now()) })
+    this.cuePlayer = new CuePlayer({
+      api: this.api as never,
+      speed: this.opts.speed,
+      onSpeaking: (on) => {
+        this.scheduler.cueSpeaking(on, Date.now())
+        this.cueClock.poke()
+      },
+    })
+    this.cueClock = new CueClock({ scheduler: this.scheduler, play: (cues) => this.cuePlayer.play(cues), ready: () => this.active && !this.paused })
     this.onVisibility = () => {
       if (document.visibilityState === "visible" && this.active && !this.opts.background) void this.lockScreen()
     }
@@ -180,7 +191,7 @@ export class Conversation<B = unknown> {
     if (this.opts.background) this.mediaSession()
     else void this.lockScreen()
     document.addEventListener("visibilitychange", this.onVisibility)
-    this.ticker = setInterval(() => this.tickCues(), CUE_TICK_MS)
+    this.cueClock.poke()
     this.refresh()
     return true
   }
@@ -224,6 +235,7 @@ export class Conversation<B = unknown> {
         if (this.vad) this.vad.speaking = speaking
         this.scheduler.agentSpeaking(speaking, Date.now())
         if (speaking) this.cuePlayer.stop() // the agent's own speech wins over a cue
+        this.cueClock.poke()
         this.refresh()
       },
       onError: (error) => {
@@ -245,10 +257,12 @@ export class Conversation<B = unknown> {
         if (this.queue!.speaking) this.queue!.clear() // barge-in: start fires only after VOICE_TIMINGS.minSpeechMs of voice
       } else {
         // Instant acknowledgement: the segment goes to transcription, so the user hears it was taken.
-        this.cuePlayer.play(this.scheduler.speechEnded(Date.now()))
+        this.speechEndedAt = Date.now()
+        this.cuePlayer.play(this.scheduler.speechEnded(this.speechEndedAt))
         const id = this.endpointer!.segmentEnded(event.durationMs)
         void this.transcribe(id, encodeWav(event.samples, this.vad.sampleRate))
       }
+      this.cueClock.poke()
       this.refresh()
     }
   }
@@ -288,6 +302,8 @@ export class Conversation<B = unknown> {
     }
     const bubble = this.ui.user(text)
     if (typed) this.typing++
+    this.scheduler.awaitReply(typed ? Date.now() : (this.speechEndedAt ?? Date.now()))
+    this.cueClock.poke()
     try {
       const { inboxID } = await (await this.api(`${this.path}/utterance`, { method: "POST", json: { text } })).json()
       if (this.sent.get(inboxID) === "heard") this.ui.tick(bubble, "heard") // delivery beat the response
@@ -323,12 +339,14 @@ export class Conversation<B = unknown> {
       // the POST response) get the tone now.
       const tone = this.typed.delete(message.inboxID) || (bubble === undefined && this.typing > 0)
       if (this.active && !this.paused) this.cuePlayer.play(this.scheduler.heard(this.heardAt, { tone }))
+      this.cueClock.poke()
       this.refresh()
       setTimeout(() => this.refresh(), SENT_LABEL_MS + 50)
     } else if (message.type === "say") {
       if (!this.active) return
       this.scheduler.agentSaid(Date.now())
       this.cuePlayer.stop()
+      this.cueClock.poke()
       this.ui.agent(message as { messageID?: string; text: string })
       this.queue?.enqueue(splitSentences(message.text))
     } else if (message.type === "conversation" && !message.on && this.active) {
@@ -346,17 +364,13 @@ export class Conversation<B = unknown> {
     if (!this.active) return
     for (let i = 0; i < started.length; i++) this.scheduler.subagentStarted(now)
     if (finished.length && !this.paused) this.cuePlayer.play(this.scheduler.subagentFinished(now))
-    this.tickCues()
-  }
-
-  private tickCues(): void {
-    if (!this.active || this.paused) return
-    this.cuePlayer.play(this.scheduler.tick(Date.now()))
+    this.cueClock.poke()
   }
 
   setCues(on: boolean): void {
     this.scheduler.enabled = on
     if (!on) this.cuePlayer.stop()
+    this.cueClock.poke()
   }
 
   /** Switches screen-off listening while active: wake lock ↔ media session + silent loop. */
@@ -379,6 +393,7 @@ export class Conversation<B = unknown> {
   pause(): void {
     if (!this.active || this.paused) return
     this.paused = true
+    this.cueClock.stop()
     this.queue?.clear()
     this.cuePlayer.stop()
     this.endpointer?.reset()
@@ -399,6 +414,7 @@ export class Conversation<B = unknown> {
       this.silence?.play().catch(() => {})
       if (navigator.mediaSession) navigator.mediaSession.playbackState = "playing"
     }
+    this.cueClock.poke()
     this.refresh()
   }
 
@@ -513,7 +529,7 @@ export class Conversation<B = unknown> {
     this.paused = false
     this.state = undefined
     document.removeEventListener("visibilitychange", this.onVisibility)
-    clearInterval(this.ticker)
+    this.cueClock.stop()
     this.cuePlayer.close()
     this.stopSilence()
     if (this.opts.background) this.clearMediaSession()

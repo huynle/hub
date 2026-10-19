@@ -1,4 +1,5 @@
-// Spoken progress cues in conversation mode: pure scheduler with injected time.
+// Spoken progress cues in conversation mode: pure scheduler with injected time (ackMs pinned at 5 s here;
+// the 2.5 s default and the event-driven CueClock are tested in web-cue-clock).
 import { describe, expect, test } from "bun:test"
 import { CUE_PHRASES, CueScheduler, isWorking, subagentChanges } from "../web/src/core/feedback-core"
 
@@ -10,29 +11,29 @@ describe("CueScheduler", () => {
   })
 
   test("heard plays a soft earcon right away", () => {
-    const c = new CueScheduler()
+    const c = new CueScheduler({ ackMs: 5000 })
     expect(c.heard(0)).toEqual([{ type: "earcon", name: "heard" }])
   })
 
   test("end of speech plays the heard earcon at once; the hub's heard can skip it (already acknowledged)", () => {
-    const c = new CueScheduler()
+    const c = new CueScheduler({ ackMs: 5000 })
     c.userTalking(true, 0)
     expect(c.speechEnded(100)).toEqual([{ type: "earcon", name: "heard" }])
     expect(c.gated).toBe(false)
     expect(c.heard(400, { tone: false })).toEqual([])
-    const off = new CueScheduler()
+    const off = new CueScheduler({ ackMs: 5000 })
     off.enabled = false
     expect(off.speechEnded(0)).toEqual([])
   })
 
   test("heard while the user is talking again: no earcon", () => {
-    const c = new CueScheduler()
+    const c = new CueScheduler({ ackMs: 5000 })
     c.userTalking(true, 0)
     expect(c.heard(10)).toEqual([])
   })
 
   test("'Working on it.' 5 s after heard when working and the agent said nothing; only once", () => {
-    const c = new CueScheduler()
+    const c = new CueScheduler({ ackMs: 5000 })
     c.heard(0)
     c.working(true, 1000)
     expect(c.tick(4999)).toEqual([])
@@ -42,7 +43,7 @@ describe("CueScheduler", () => {
   })
 
   test("agent speech within 5 s cancels the acknowledgement", () => {
-    const c = new CueScheduler()
+    const c = new CueScheduler({ ackMs: 5000 })
     c.heard(0)
     c.working(true, 500)
     c.agentSaid(3000)
@@ -51,13 +52,13 @@ describe("CueScheduler", () => {
   })
 
   test("not working yet at 5 s: acknowledges once work starts; finished silently: nothing", () => {
-    const c = new CueScheduler()
+    const c = new CueScheduler({ ackMs: 5000 })
     c.heard(0)
     expect(c.tick(6000)).toEqual([])
     c.working(true, 8000)
     expect(c.tick(8000)).toEqual(speak("working"))
 
-    const d = new CueScheduler()
+    const d = new CueScheduler({ ackMs: 5000 })
     d.heard(0)
     d.working(true, 1000)
     d.working(false, 2000)
@@ -67,7 +68,7 @@ describe("CueScheduler", () => {
   })
 
   test("never speaks while the user talks, the agent speaks, or a cue plays; waits politely", () => {
-    const c = new CueScheduler()
+    const c = new CueScheduler({ ackMs: 5000 })
     c.heard(0)
     c.working(true, 0)
     c.userTalking(true, 4500)
@@ -75,7 +76,7 @@ describe("CueScheduler", () => {
     c.userTalking(false, 6000)
     expect(c.tick(6000)).toEqual(speak("working"))
 
-    const d = new CueScheduler()
+    const d = new CueScheduler({ ackMs: 5000 })
     d.heard(0)
     d.working(true, 0)
     d.cueSpeaking(true, 100)
@@ -85,7 +86,7 @@ describe("CueScheduler", () => {
   })
 
   test("agent speech playing holds the cue; the say that started it cancels the acknowledgement", () => {
-    const c = new CueScheduler()
+    const c = new CueScheduler({ ackMs: 5000 })
     c.heard(0)
     c.working(true, 0)
     c.agentSpeaking(true, 4000)
@@ -97,19 +98,19 @@ describe("CueScheduler", () => {
   })
 
   test("'Started a subagent.' unless the agent said something in the last 3 s", () => {
-    const c = new CueScheduler()
+    const c = new CueScheduler({ ackMs: 5000 })
     c.working(true, 0)
     c.subagentStarted(10_000)
     expect(c.tick(10_000)).toEqual(speak("subagent"))
     expect(c.tick(11_000)).toEqual([])
 
-    const d = new CueScheduler()
+    const d = new CueScheduler({ ackMs: 5000 })
     d.working(true, 0)
     d.agentSaid(8000)
     d.subagentStarted(10_000)
     expect(d.tick(10_000)).toEqual([])
 
-    const e = new CueScheduler()
+    const e = new CueScheduler({ ackMs: 5000 })
     e.working(true, 0)
     e.agentSaid(6000)
     e.subagentStarted(10_000)
@@ -117,7 +118,7 @@ describe("CueScheduler", () => {
   })
 
   test("a pending subagent cue is dropped when the agent speaks first", () => {
-    const c = new CueScheduler()
+    const c = new CueScheduler({ ackMs: 5000 })
     c.working(true, 0)
     c.userTalking(true, 9000)
     c.subagentStarted(10_000)
@@ -127,7 +128,7 @@ describe("CueScheduler", () => {
   })
 
   test("the subagent cue also serves as the acknowledgement", () => {
-    const c = new CueScheduler()
+    const c = new CueScheduler({ ackMs: 5000 })
     c.heard(0)
     c.working(true, 100)
     c.subagentStarted(1000)
@@ -136,7 +137,7 @@ describe("CueScheduler", () => {
   })
 
   test("'Still working.' after 40 s without speech while work continues, at most every 40 s", () => {
-    const c = new CueScheduler()
+    const c = new CueScheduler({ ackMs: 5000 })
     c.working(true, 0)
     expect(c.tick(39_999)).toEqual([])
     expect(c.tick(40_000)).toEqual(speak("still"))
@@ -149,7 +150,7 @@ describe("CueScheduler", () => {
   })
 
   test("speech playback ending restarts the 40 s quiet window", () => {
-    const c = new CueScheduler()
+    const c = new CueScheduler({ ackMs: 5000 })
     c.working(true, 0)
     c.agentSpeaking(true, 30_000)
     c.agentSpeaking(false, 35_000)
@@ -158,14 +159,14 @@ describe("CueScheduler", () => {
   })
 
   test("subagent finished: double earcon; nothing while the user talks", () => {
-    const c = new CueScheduler()
+    const c = new CueScheduler({ ackMs: 5000 })
     expect(c.subagentFinished(0)).toEqual([{ type: "earcon", name: "done" }])
     c.userTalking(true, 1)
     expect(c.subagentFinished(2)).toEqual([])
   })
 
   test("disabled: no cues at all", () => {
-    const c = new CueScheduler()
+    const c = new CueScheduler({ ackMs: 5000 })
     c.enabled = false
     expect(c.heard(0)).toEqual([])
     c.working(true, 0)

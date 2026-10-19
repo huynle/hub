@@ -781,11 +781,12 @@ Pure logic is in `web/src/core/feedback-core.ts` (tested with bun); `web/src/cor
 - **Progress cues** (conversation mode; Settings → Voice → "Progress cues", on by default): a soft
   tone as soon as you stop speaking (the moment the segment goes to transcription; typed text gets it when
   the agent receives it), then "Working on it." if the session is working and the
-  agent has not spoken within 5 s. "Started a subagent." plays when a subagent starts, unless the agent
+  agent has not spoken within 2.5 s of the end of your speech. "Started a subagent." plays when a subagent starts, unless the agent
   spoke in the last 3 s. "Still working." plays after 40 s without speech while work continues, and
   a double tone plays when a subagent finishes. Failed tools are not spoken (they show in the feed). Cues never
   play while you are talking or the agent's speech is playing; they wait, and are dropped once the agent
-  speaks. Each phrase is synthesized once per page load and cached in memory.
+  speaks. Cues are event-driven: one timer for the next deadline (no polling), re-armed on speech, status and
+  playback changes. Each phrase is synthesized once per page load and cached in memory.
 - **Presence**: while a session view is open, the phone posts `POST /api/sessions/:id/presence
   {visible}` on visibility changes and every 30 s while visible, and `{visible:false}` on `pagehide` and
   when leaving the view. The hub uses this to decide when to push.
