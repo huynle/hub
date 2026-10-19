@@ -289,10 +289,25 @@ const VOICE_LABEL: Record<ConversationState, string> = {
   off: "Off",
 }
 
+/** The Voice bar's tooltip: the last turn's timing, then which speech detector runs. */
+function voiceTooltip(timing?: { summary: string; detail: string }, detector?: { mode: "silero" | "energy"; avgMs?: number }): string | undefined {
+  const lines = timing ? [timing.summary, timing.detail] : []
+  if (detector) {
+    lines.push(
+      detector.mode === "silero"
+        ? `speech detection: on-device model${detector.avgMs ? ` (${detector.avgMs.toFixed(1)} ms per 32 ms of audio)` : ""}`
+        : "speech detection: loudness (the on-device model is loading or unavailable)",
+    )
+  }
+  return lines.length ? lines.join("\n") : undefined
+}
+
 export function VoiceBar(props: {
   state: ConversationState
   level: number
   held: string
+  /** A transcript just dropped as noise. */
+  ignored?: string
   working: boolean
   model: string
   onMute: () => void
@@ -303,18 +318,23 @@ export function VoiceBar(props: {
   onAllowNotifications?: () => void
   /** The last turn's timing, as the state's tooltip. */
   timing?: { summary: string; detail: string }
+  /** The speech detector running (also in the tooltip). */
+  detector?: { mode: "silero" | "energy"; avgMs?: number }
 }) {
   const label = () => (props.state === "listening" && props.working ? "Thinking" : VOICE_LABEL[props.state])
   const bars = [0.5, 0.8, 1, 0.7, 0.45]
   return (
-    <div class={`voice-bar ${props.state}`} role="region" aria-label="Voice mode">
+    <div class={`voice-bar ${props.state}`} role="region" aria-label="Voice mode" data-vad={props.detector?.mode}>
       <div class="wave" aria-hidden="true">
         <For each={bars}>{(k) => <span style={{ transform: `scaleY(${Math.max(0.15, Math.min(1, (props.state === "speaking" ? 0.6 : props.level) * k * 1.6))})` }} />}</For>
       </div>
-      <span class="voice-state" role="status" aria-live="polite" title={props.timing ? `${props.timing.summary}\n${props.timing.detail}` : undefined}>
+      <span class="voice-state" role="status" aria-live="polite" title={voiceTooltip(props.timing, props.detector)}>
         {label()}
         <Show when={props.held}>
           <span class="muted"> · “{props.held}…”</span>
+        </Show>
+        <Show when={props.ignored}>
+          <span class="voice-ignored" title="Heard as background noise, not sent"> · ignored: “{props.ignored}”</span>
         </Show>
       </span>
       <span class="grow" />

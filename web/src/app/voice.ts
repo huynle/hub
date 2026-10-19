@@ -35,6 +35,7 @@ export const voice = new VoiceController<Conversation<string>>({
         cues: voicePrefs.cues,
         background: voicePrefs.background,
         speed: () => voicePrefs.speed,
+        sensitivity: () => voicePrefs.sensitivity,
         title: () => lookup(sessionID)?.session.title || "OpenCode session",
         status: lookup(sessionID)?.session.status,
         deviceId: micDevice() || undefined,

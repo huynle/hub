@@ -84,3 +84,45 @@ export async function withSpeedRetry(send: (speed?: number) => Promise<Response>
   await response.body?.cancel().catch(() => {})
   return send(undefined)
 }
+
+/** Whisper segments rated more likely than this to hold no speech are dropped (Whisper's own no-speech threshold). */
+export const NO_SPEECH_MAX = 0.6
+
+/** Whisper models report no_speech_prob per segment in verbose_json; other speech-to-text models do not take it. */
+export function wantsVerbose(model: string): boolean {
+  return /whisper/i.test(model)
+}
+
+interface TranscriptBody {
+  text?: unknown
+  segments?: Array<{ text?: unknown; no_speech_prob?: unknown }>
+}
+
+/**
+ * The transcript of a json or verbose_json response. With segments that carry no_speech_prob, the ones above
+ * NO_SPEECH_MAX (noise Whisper turned into "Thank you." and the like) are left out.
+ */
+export function transcriptText(body: unknown): string {
+  const { text, segments } = (body ?? {}) as TranscriptBody
+  if (Array.isArray(segments) && segments.some((s) => typeof s?.no_speech_prob === "number")) {
+    return segments
+      .filter((s) => !(typeof s?.no_speech_prob === "number" && s.no_speech_prob > NO_SPEECH_MAX))
+      .map((s) => String(s?.text ?? "").trim())
+      .filter(Boolean)
+      .join(" ")
+  }
+  return String(text ?? "").trim()
+}
+
+/**
+ * Sends a transcription, verbose (verbose_json) when asked; a 400 to the verbose request is retried once plain,
+ * and when the plain one works the provider is told (`refused`) not to ask for verbose_json again.
+ */
+export async function withVerboseRetry(send: (verbose: boolean) => Promise<Response>, verbose: boolean, refused: () => void): Promise<Response> {
+  const response = await send(verbose)
+  if (!verbose || response.status !== 400) return response
+  await response.body?.cancel().catch(() => {})
+  const plain = await send(false)
+  if (plain.ok) refused()
+  return plain
+}

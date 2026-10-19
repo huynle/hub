@@ -7,6 +7,9 @@ import solid from "vite-plugin-solid"
 export default defineConfig({
   root: import.meta.dirname,
   plugins: [solid()],
+  // The Silero VAD worker (web/src/voice/silero-worker.ts) is an ES module worker: its own chunk, with
+  // onnxruntime-web's .wasm and the .onnx model emitted as hashed assets next to it.
+  worker: { format: "es" },
   build: {
     outDir: "dist",
     emptyOutDir: true,

@@ -4,7 +4,7 @@
 // running while the user looks at other sessions; session views attach to show its transcript bubbles and
 // notes. Failures leave Voice mode off with the error kept for the session that failed. No DOM: enabling Voice,
 // creating conversations and stopping playback are injected.
-import type { ConversationState, ConversationUI, Tick } from "../voice/conversation"
+import type { ConversationState, ConversationUI, DetectorInfo, Tick } from "../voice/conversation"
 
 /** What the controller needs of a conversation (web/src/voice/conversation.ts implements it). */
 export interface VoiceConversation {
@@ -46,10 +46,14 @@ export interface VoiceState {
   readonly voice: ConversationState
   readonly level: number
   readonly held: string
+  /** A transcript just dropped as noise (shown dim for a moment), else "". */
+  readonly ignored?: string
   readonly paused: boolean
   readonly agent?: string
   /** The last turn's timing: "last turn: 1.8 s to first audio" and its steps. */
   readonly timing?: { readonly summary: string; readonly detail: string }
+  /** The speech detector running (on-device model or energy) and its mean inference time. */
+  readonly detector?: DetectorInfo
   /** The last failure to turn Voice mode on, for the session it was for; `gesture`: the browser waits for a tap. */
   readonly error?: { readonly sessionID: string; readonly message: string; readonly gesture?: boolean }
 }
@@ -111,7 +115,9 @@ export class VoiceController<C extends VoiceConversation = VoiceConversation> {
       state: (voice) => run === this.run && this.set({ ...this.state, voice, paused: voice === "paused" }),
       level: (level) => run === this.run && this.set({ ...this.state, level }),
       held: (held) => run === this.run && this.set({ ...this.state, held }),
+      ignored: (ignored) => run === this.run && this.set({ ...this.state, ignored }),
       timing: (timing) => run === this.run && this.set({ ...this.state, timing }),
+      detector: (detector) => run === this.run && this.set({ ...this.state, detector }),
       user: (text) => this.sinks.get(sessionID)?.user(text) ?? `voice:${++this.bubbles}`,
       tick: (bubble, kind) => this.sinks.get(sessionID)?.tick(bubble, kind),
       agent: (message) => this.sinks.get(sessionID)?.agent(message),

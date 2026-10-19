@@ -16,6 +16,7 @@ import {
   type UserSort,
 } from "../core/account-core"
 import { SPEED_MAX, SPEED_MIN, SPEED_STEP, formatSpeed } from "../core/feedback-core"
+import { SENSITIVITIES, type Sensitivity } from "../core/speech-vad"
 import { api, enc, errorText, getJSON } from "./api"
 import { enrollments, ensureMe, hub, loadEnrollments, me, setMe, stopEvents } from "./hub"
 import { isPhone, toggleSidebar } from "./layout"
@@ -256,8 +257,11 @@ function NotificationsSection() {
   )
 }
 
+const SENSITIVITY_LABEL: Record<Sensitivity, string> = { low: "Low", normal: "Normal", high: "High" }
+
 function VoiceSection() {
   const [speed, setSpeed] = createSignal(voicePrefs.speed)
+  const [sensitivity, setSensitivity] = createSignal(voicePrefs.sensitivity)
   return (
     <Section id="voice" title="Voice">
       <ul class="switches">
@@ -277,6 +281,33 @@ function VoiceSection() {
             }}
           />
           <output for="voice-speed">{formatSpeed(speed())}</output>
+        </li>
+        <li>
+          <div class="switch">
+            <span id="voice-sensitivity">Mic sensitivity</span>
+            <div class="chips" role="radiogroup" aria-labelledby="voice-sensitivity">
+              <For each={SENSITIVITIES}>
+                {(level) => (
+                  <button
+                    type="button"
+                    class="chip"
+                    role="radio"
+                    aria-checked={sensitivity() === level}
+                    aria-pressed={sensitivity() === level}
+                    onClick={() => {
+                      voicePrefs.sensitivity = level
+                      setSensitivity(level)
+                    }}
+                  >
+                    {SENSITIVITY_LABEL[level]}
+                  </button>
+                )}
+              </For>
+            </div>
+          </div>
+          <p class="small muted">
+            How sure Voice mode must be that you are speaking to it. Low: noisy places (only clear, sustained speech counts). High: quiet rooms and soft voices. On this device; applies at once, also while Voice mode is on.
+          </p>
         </li>
         <li>
           <label class="switch">

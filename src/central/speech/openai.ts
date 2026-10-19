@@ -1,7 +1,7 @@
 // OpenAI-compatible speech endpoints (OpenAI, Groq, local whisper/kokoro servers, ...):
 // STT as multipart POST {baseURL}/audio/transcriptions (file, model, language?), TTS as
 // POST {baseURL}/audio/speech {model, input, voice, response_format: "mp3", speed?}.
-import { audioBody, audioMime, collect, SpeechError, upstreamDetail, withSpeedRetry, type SpeechProvider } from "./provider"
+import { audioBody, audioMime, collect, SpeechError, transcriptText, upstreamDetail, wantsVerbose, withSpeedRetry, withVerboseRetry, type SpeechProvider } from "./provider"
 
 export interface OpenAICompatibleOptions {
   /** Base URL including the version path, e.g. https://api.openai.com/v1 (no trailing slash). */
@@ -17,25 +17,28 @@ export interface OpenAICompatibleOptions {
 
 export class OpenAICompatible implements SpeechProvider {
   private readonly fetch: typeof globalThis.fetch
+  /** Ask for verbose_json (a Whisper model whose server has not refused it). */
+  private verbose: boolean
 
   constructor(private readonly options: OpenAICompatibleOptions) {
     this.fetch = options.fetch ?? globalThis.fetch
+    this.verbose = wantsVerbose(options.sttModel)
   }
 
   async transcribe(audio: Uint8Array, format: string, signal?: AbortSignal): Promise<string> {
-    const form = new FormData()
-    form.append("file", new File([new Uint8Array(audio)], `audio.${format}`, { type: audioMime(format) }))
-    form.append("model", this.options.sttModel)
-    if (this.options.language) form.append("language", this.options.language)
-    const response = await this.fetch(`${this.options.baseURL}/audio/transcriptions`, {
-      method: "POST",
-      headers: await this.headers(),
-      body: form,
-      signal,
-    })
+    const headers = await this.headers()
+    const send = (verbose: boolean) => {
+      const form = new FormData()
+      form.append("file", new File([new Uint8Array(audio)], `audio.${format}`, { type: audioMime(format) }))
+      form.append("model", this.options.sttModel)
+      if (this.options.language) form.append("language", this.options.language)
+      // Whisper's verbose_json rates each segment's no_speech_prob: noise transcribed as "Thank you." is dropped.
+      if (verbose) form.append("response_format", "verbose_json")
+      return this.fetch(`${this.options.baseURL}/audio/transcriptions`, { method: "POST", headers, body: form, signal })
+    }
+    const response = await withVerboseRetry(send, this.verbose, () => (this.verbose = false))
     if (!response.ok) throw await failure("transcription", response)
-    const body = (await response.json()) as { text?: unknown }
-    return String(body.text ?? "").trim()
+    return transcriptText(await response.json())
   }
 
   async speak(text: string, speed?: number, signal?: AbortSignal): Promise<Uint8Array<ArrayBuffer>> {

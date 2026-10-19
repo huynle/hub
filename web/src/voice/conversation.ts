@@ -1,16 +1,25 @@
-// Hands-free conversation mode for one session: always-on mic → energy VAD → speculative per-segment
-// transcription → endpointing → POST utterance; SSE "say" text → sentence TTS queue with barge-in.
+// Hands-free conversation mode for one session: always-on mic → speech detection (Silero VAD on-device, energy
+// VAD as pre-gate and fallback) → speculative per-segment transcription → endpointing → POST utterance; SSE "say"
+// text → sentence TTS queue with barge-in.
 // Progress cues (earcons, short phrases like "On it." …) are scheduled by feedback-core and played by cues.
 // The pure parts live in core/conversation-core; this file owns the browser APIs (mic, Web Audio, wake lock,
 // media session). Ported from the 0.4 web/conversation.js; behavior unchanged except the mic device choice.
 import { gestureBlocked } from "../core/voice-autostart"
-import { Endpointer, EnergyVad, SayAssembler, SpeechQueue, TurnTimer, describeTurn, encodeWav, parseCommand, type TurnMark } from "../core/conversation-core"
+import { Endpointer, micConstraints, SayAssembler, SpeechQueue, TurnTimer, describeTurn, encodeWav, parseCommand, type TurnMark, type VadEvent } from "../core/conversation-core"
+import { sensitivityParams, VoiceDetector, type DetectorMode, type Sensitivity } from "../core/speech-vad"
+import { junkTranscript } from "../core/junk-transcript"
+import { loadSilero } from "./silero"
 import { AudioClip, canStreamMp3, clipFrom, feed } from "../core/audio-stream"
 import { CuePlayer } from "../core/cues"
 import { CueClock, CuePicker, cueTexts, CueScheduler, isWorking, subagentChanges, type StatusEntry } from "../core/feedback-core"
 import type { ApiInit } from "../app/api"
 
 const SENT_LABEL_MS = 2500
+/** How long the Voice bar shows a dropped transcript ("ignored: Thank you."). */
+const IGNORED_LABEL_MS = 3000
+
+/** The model failing to load is logged once per page, not per Voice start. */
+let warnedModel = false
 
 const SILENCE_SECONDS = 2
 
@@ -44,6 +53,16 @@ export interface ConversationUI<B> {
   ended(): void
   /** The last turn's timing ("last turn: 1.8 s to first audio" and its steps), after its first audio played. */
   timing?(turn: { summary: string; detail: string }): void
+  /** A transcript dropped as noise ("Thank you.", "you" …), shown briefly; "" clears it. */
+  ignored?(text: string): void
+  /** Which speech detector runs (the Silero model once loaded, else energy) and its mean inference round trip. */
+  detector?(info: DetectorInfo): void
+}
+
+export interface DetectorInfo {
+  readonly mode: DetectorMode
+  /** Mean model round trip per 32 ms chunk (worker message + inference), in ms. */
+  readonly avgMs?: number
 }
 
 /** performance.mark names of a turn's steps (visible in the browser's performance tools). */
@@ -64,13 +83,13 @@ export interface ConversationOptions {
   status?: readonly StatusEntry[]
   /** Microphone deviceId ("" or undefined: the default). */
   deviceId?: string
+  /** Mic sensitivity (Settings → Voice), read live: a change applies to the next audio. */
+  sensitivity?: () => Sensitivity
 }
 
 type Api = (path: string, init?: ApiInit) => Promise<Response>
 
-export function micConstraints(deviceId?: string): MediaStreamConstraints {
-  return { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, ...(deviceId ? { deviceId: { exact: deviceId } } : {}) } }
-}
+export { micConstraints }
 
 export class Conversation<B = unknown> {
   readonly sessionID: string
@@ -98,7 +117,7 @@ export class Conversation<B = unknown> {
   private source?: MediaStreamAudioSourceNode
   private sink?: GainNode
   private tap?: AudioWorkletNode | ScriptProcessorNode
-  private vad?: EnergyVad
+  private vad?: VoiceDetector
   private endpointer?: Endpointer
   private queue?: SpeechQueue<AudioClip>
   /** MediaSource plays a sentence while it downloads; without it (some iOS versions) each plays as a whole blob. */
@@ -115,6 +134,11 @@ export class Conversation<B = unknown> {
   private wakeLock?: WakeLockSentinel
   private warnedAutoplay = false
   private state: ConversationState | undefined
+  private ignoredTimer: ReturnType<typeof setTimeout> | undefined
+  /** The sensitivity the detector is tuned to. */
+  private sensitivity: Sensitivity = "normal"
+  /** A progress cue is playing (its echo must not barge in either). */
+  private cueSpeaking = false
   /** Bumped by start() and stop(); a start that sees another value was cancelled. */
   private attempt = 0
 
@@ -123,7 +147,7 @@ export class Conversation<B = unknown> {
     this.api = api
     this.player = player
     this.ui = ui
-    this.opts = { cues: true, background: false, speed: () => 1, title: () => "OpenCode session", ...options }
+    this.opts = { cues: true, background: false, speed: () => 1, title: () => "OpenCode session", sensitivity: () => "normal", ...options }
     this.lastStatus = options.status
     this.scheduler.enabled = this.opts.cues !== false
     this.scheduler.working(isWorking(options.status), Date.now())
@@ -131,6 +155,8 @@ export class Conversation<B = unknown> {
       api: this.api as never,
       speed: this.opts.speed,
       onSpeaking: (on) => {
+        this.cueSpeaking = on
+        this.guardEcho()
         this.scheduler.cueSpeaking(on, Date.now())
         this.cueClock.poke()
       },
@@ -258,7 +284,27 @@ export class Conversation<B = unknown> {
     this.source.connect(this.tap)
     this.tap.connect(this.sink)
 
-    this.vad = new EnergyVad({ sampleRate: ctx.sampleRate })
+    this.sensitivity = this.opts.sensitivity()
+    const detector = (this.vad = new VoiceDetector({
+      sampleRate: ctx.sampleRate,
+      params: sensitivityParams(this.sensitivity),
+      onEvents: (events) => this.vadEvents(events),
+      onLevel: (level) => this.ui.level(level),
+    }))
+    this.ui.detector?.({ mode: "energy" })
+    // The model loads in the background (energy detection meanwhile); it stays loaded for later starts.
+    loadSilero().then(
+      (silero) => {
+        if (this.vad !== detector) return
+        silero.reset()
+        detector.classifier = (chunk) => silero.classify(chunk)
+        this.ui.detector?.({ mode: "silero" })
+      },
+      (error) => {
+        if (!warnedModel) console.warn(`Voice: on-device speech detection unavailable (${error?.message ?? error}); using the energy detector`)
+        warnedModel = true
+      },
+    )
     this.endpointer = new Endpointer({
       send: (text) => void this.deliver(text),
       onHeld: (text) => this.ui.held?.(text),
@@ -270,7 +316,7 @@ export class Conversation<B = unknown> {
         if (!this.player.paused) this.player.pause()
       },
       onState: (speaking) => {
-        if (this.vad) this.vad.speaking = speaking
+        this.guardEcho()
         this.scheduler.agentSpeaking(speaking, Date.now())
         if (speaking) this.cuePlayer.stop() // the agent's own speech wins over a cue
         this.cueClock.poke()
@@ -282,17 +328,32 @@ export class Conversation<B = unknown> {
     })
   }
 
+  /** The detector's echo guard is up while a reply or a cue plays (and briefly after). */
+  private guardEcho(): void {
+    if (this.vad) this.vad.speaking = !!this.queue?.speaking || this.cueSpeaking
+  }
+
   /** One ~20 ms frame from the mic. */
   private frame(samples: Float32Array): void {
     if (!this.active || !this.vad || this.paused) return
-    const { level, events } = this.vad.process(samples)
-    this.ui.level(level)
+    const sensitivity = this.opts.sensitivity()
+    if (sensitivity !== this.sensitivity) {
+      this.sensitivity = sensitivity
+      this.vad.params = sensitivityParams(sensitivity)
+    }
+    this.vad.push(samples)
+  }
+
+  /** Speech starts and ends from the detector (in stream order; possibly after the frame, when the model answers). */
+  private vadEvents(events: readonly VadEvent[]): void {
+    const vad = this.vad
+    if (!this.active || !vad || this.paused) return
     for (const event of events) {
       if (event.type === "start") {
         this.endpointer!.speechStarted()
         this.scheduler.userTalking(true, Date.now())
         this.cuePlayer.stop()
-        // Barge-in (start fires only after VOICE_TIMINGS.minSpeechMs of voice): the reply speaking, or one still being
+        // Barge-in (start fires only after the detector's minSpeechMs of voice): the reply speaking, or one still being
         // written between two sentences, goes quiet; the utterance then steers the agent. Workers are not touched.
         if (this.queue!.speaking) this.hushReplies()
         else this.says.mute()
@@ -302,14 +363,15 @@ export class Conversation<B = unknown> {
         this.markTurn("speechEnd")
         this.cuePlayer.play(this.scheduler.speechEnded(this.speechEndedAt))
         const id = this.endpointer!.segmentEnded(event.durationMs)
-        void this.transcribe(id, encodeWav(event.samples, this.vad.sampleRate))
+        void this.transcribe(id, encodeWav(event.samples, vad.sampleRate), event.speechMs)
+        this.ui.detector?.({ mode: vad.mode, ...(vad.mode === "silero" ? { avgMs: vad.stats.avgMs } : {}) })
       }
       this.cueClock.poke()
       this.refresh()
     }
   }
 
-  private async transcribe(id: number, wav: Uint8Array<ArrayBuffer>): Promise<void> {
+  private async transcribe(id: number, wav: Uint8Array<ArrayBuffer>, speechMs: number): Promise<void> {
     this.inflight++
     this.refresh()
     let text = ""
@@ -321,9 +383,20 @@ export class Conversation<B = unknown> {
       this.inflight--
     }
     if (!this.active) return
+    // Speech-to-text's take on noise ("Thank you.", "you", "[Music]" …) never reaches the agent.
+    if (junkTranscript(text, { speechMs })) {
+      if (text.trim()) this.showIgnored(text.trim())
+      text = ""
+    }
     if (text.trim()) this.markTurn("transcript")
     this.endpointer?.transcribed(id, text)
     this.refresh()
+  }
+
+  private showIgnored(text: string): void {
+    clearTimeout(this.ignoredTimer)
+    this.ui.ignored?.(text)
+    this.ignoredTimer = setTimeout(() => this.ui.ignored?.(""), IGNORED_LABEL_MS)
   }
 
   /** A finished utterance from the endpointer (or typed text): a voice command or a steer. */
@@ -673,6 +746,8 @@ export class Conversation<B = unknown> {
     this.wakeLock = undefined
     this.ui.level(0)
     this.ui.held?.("")
+    clearTimeout(this.ignoredTimer)
+    this.ui.ignored?.("")
     this.ui.state("off")
     this.ui.ended()
     if (post && wasActive) {
