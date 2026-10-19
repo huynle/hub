@@ -241,6 +241,11 @@ export class Spoke {
   private readonly modelPrefs = new Map<string, SessionModelPrefs>()
   /** Per session with a Voice override applied: the model to restore when it is cleared, and the override. */
   private readonly voiceOverrides = new Map<string, { readonly previous?: ModelRef; readonly applied: ModelRef }>()
+  /**
+   * Session → its current model as last seen (getSession, our switchModel, OpenCode's session.model.selected),
+   * so an utterance needs no getSession round trip. Cleared when the event stream restarts (events may be lost).
+   */
+  private readonly sessionModels = new Map<string, { readonly model?: ModelRef }>()
   private conversationChain: Promise<unknown> = Promise.resolve()
   private readonly abort = new AbortController()
   private snapshotTimer?: ReturnType<typeof setTimeout>
@@ -723,6 +728,7 @@ export class Spoke {
   private async conversationOn(sessionID: string): Promise<ResultFor["conversation"]> {
     const entry = this.conversations.get(sessionID)
     const session = await this.host.getSession(sessionID)
+    this.rememberModel(sessionID, session.model)
     const current = session.agent
     const models = await this.voiceModelOn(sessionID, session, entry)
     if (!(await this.host.hasAgent(VOICE_AGENT))) {
@@ -751,7 +757,7 @@ export class Spoke {
     const current = session.model
     const onVoice = current !== undefined && sameModel(current, voiceModel)
     const previousModel = entry?.voiceModel ? entry.previousModel : onVoice || !current ? undefined : plainModelRef(current)
-    if (!onVoice) await this.host.switchModel(sessionID, voiceModel)
+    if (!onVoice) await this.switchModel(sessionID, voiceModel)
     return { voiceModel, ...(previousModel ? { previousModel } : {}) }
   }
 
@@ -759,9 +765,10 @@ export class Spoke {
     const entry = this.conversations.get(sessionID)
     this.conversations.delete(sessionID)
     const session = await this.host.getSession(sessionID)
+    this.rememberModel(sessionID, session.model)
     // Restore the model only if the session is still on the voice model (the user may have picked another).
     if (entry?.voiceModel && entry.previousModel && session.model && sameModel(session.model, entry.voiceModel)) {
-      await this.host.switchModel(sessionID, entry.previousModel)
+      await this.switchModel(sessionID, entry.previousModel)
     }
     const current = session.agent
     if (current !== VOICE_AGENT) return { agent: current ?? (await this.defaultAgent()) }
@@ -1019,11 +1026,11 @@ export class Spoke {
     const selected = this.modelPrefs.get(sessionID)?.voice
     const override = this.voiceOverrides.get(sessionID)
     if ((!selected && !override) || this.tracker.active().includes(this.tracker.rootOf(sessionID))) return
-    const current = (await this.host.getSession(sessionID)).model
+    const current = await this.currentModel(sessionID)
     const onOverride = override !== undefined && current !== undefined && sameModel(current, override.applied)
     if (!selected) {
       this.voiceOverrides.delete(sessionID)
-      if (onOverride && override.previous) await this.host.switchModel(sessionID, override.previous)
+      if (onOverride && override.previous) await this.switchModel(sessionID, override.previous)
       return
     }
     const target = { providerID: selected.providerID, id: selected.modelID, ...(selected.variant ? { variant: selected.variant } : {}) }
@@ -1033,7 +1040,32 @@ export class Spoke {
     }
     const previous = onOverride ? override.previous : current ? plainModelRef(current) : undefined
     this.voiceOverrides.set(sessionID, { ...(previous ? { previous } : {}), applied: target })
-    await this.host.switchModel(sessionID, target)
+    await this.switchModel(sessionID, target)
+  }
+
+  /** The session's current model: remembered, else asked from OpenCode (and remembered). */
+  private async currentModel(sessionID: string): Promise<ModelRef | undefined> {
+    const known = this.sessionModels.get(sessionID)
+    if (known) return known.model
+    const { model } = await this.host.getSession(sessionID)
+    this.rememberModel(sessionID, model)
+    return model
+  }
+
+  private rememberModel(sessionID: string, model: ModelRef | undefined): void {
+    this.sessionModels.delete(sessionID)
+    this.sessionModels.set(sessionID, model ? { model } : {})
+    if (this.sessionModels.size > SESSION_MODELS_LIMIT) this.sessionModels.delete(this.sessionModels.keys().next().value!)
+  }
+
+  private async switchModel(sessionID: string, model: ModelRef): Promise<void> {
+    try {
+      await this.host.switchModel(sessionID, model)
+      this.rememberModel(sessionID, model)
+    } catch (cause) {
+      this.sessionModels.delete(sessionID) // unknown now: ask next time
+      throw cause
+    }
   }
 
   /** Enables or disables voice for a session this process reported (mode "session" only). */
@@ -1125,6 +1157,8 @@ export class Spoke {
 
   private async listen(): Promise<void> {
     while (!this.abort.signal.aborted) {
+      // Model changes may have been missed while the stream was down: ask OpenCode again.
+      this.sessionModels.clear()
       try {
         for await (const event of this.host.events(this.abort.signal)) this.observe(event)
       } catch (cause) {
@@ -1139,6 +1173,7 @@ export class Spoke {
   private observe(event: EventLike): void {
     try {
       this.turns.observe(event)
+      this.observeModel(event)
       if (event.type === "form.replied" || event.type === "form.cancelled") {
         const formID = (event.data as Record<string, unknown> | undefined)?.id
         if (typeof formID === "string") {
@@ -1158,6 +1193,18 @@ export class Spoke {
       }
     } catch (cause) {
       console.error("[hub] event handling failed", cause)
+    }
+  }
+
+  /** Keeps the remembered session models current from OpenCode's events. */
+  private observeModel(event: EventLike): void {
+    const data = (event.data ?? {}) as { sessionID?: unknown; model?: unknown }
+    if (typeof data.sessionID !== "string") return
+    if (event.type === "session.deleted") this.sessionModels.delete(data.sessionID)
+    else if (event.type === "session.model.selected") {
+      const model = data.model as Partial<ModelRef> | undefined
+      if (model && typeof model.providerID === "string" && typeof model.id === "string") this.rememberModel(data.sessionID, model as ModelRef)
+      else this.sessionModels.delete(data.sessionID)
     }
   }
 
@@ -1226,6 +1273,9 @@ export class Spoke {
 function limitWorkspaces(workspaces: readonly HerdrWorkspace[]): HerdrWorkspace[] {
   return workspaces.slice(0, 200).map((w) => ({ id: w.id, label: w.label, directories: w.directories.slice(0, 20) }))
 }
+
+/** Sessions whose current model is remembered. */
+const SESSION_MODELS_LIMIT = 500
 
 function sameModel(a: ModelRef, b: ModelRef): boolean {
   return a.providerID === b.providerID && a.id === b.id && (explicitVariant(a) ?? "") === (explicitVariant(b) ?? "")

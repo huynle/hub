@@ -832,6 +832,8 @@ describe("Spoke", () => {
     expect(calls.model.at(-1)).toEqual({ sessionID: "ses_a", model: { providerID: "anthropic", id: "claude-haiku", variant: "fast" } })
     const beforeTurn = calls.model.length
     models.set("ses_a", { providerID: "fallback", id: "voice" })
+    host.push({ type: "session.model.selected", data: { sessionID: "ses_a", model: { providerID: "fallback", id: "voice" } } })
+    await Bun.sleep(10)
     const turn = server.request({ op: "turn", sessionID: "ses_a", text: "push to talk", voiceStyle: true })
     await until(() => calls.prompt.length >= 3)
     expect(calls.model).toHaveLength(beforeTurn + 1)
@@ -869,11 +871,48 @@ describe("Spoke", () => {
     models.set("ses_a", { providerID: "anthropic", id: "claude-opus" })
     await server.request({ op: "setModelPrefs", sessionID: "ses_a", voice: { providerID: "anthropic", modelID: "claude-haiku" } })
     await server.request({ op: "steer", sessionID: "ses_a", text: "hi" })
+    // The user picks a model in the TUI: OpenCode reports it.
     models.set("ses_a", { providerID: "user", id: "choice" })
+    host.push({ type: "session.model.selected", data: { sessionID: "ses_a", model: { providerID: "user", id: "choice" } } })
+    await Bun.sleep(20)
     const switches = calls.model.length
     await server.request({ op: "setModelPrefs", sessionID: "ses_a", voice: null })
     expect(calls.model).toHaveLength(switches)
     expect(models.get("ses_a")).toEqual({ providerID: "user", id: "choice" })
+  })
+
+  test("utterances with a Voice model ask OpenCode for the session's model once, not on every steer", async () => {
+    const { spoke, server, host, calls, models } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    await until(() => lastSessions(server)?.sessions.length === 1)
+    models.set("ses_a", { providerID: "anthropic", id: "claude-opus" })
+    await server.request({ op: "setModelPrefs", sessionID: "ses_a", voice: { providerID: "anthropic", modelID: "claude-haiku" } })
+    await server.request({ op: "steer", sessionID: "ses_a", text: "first" })
+    expect(models.get("ses_a")).toEqual({ providerID: "anthropic", id: "claude-haiku" })
+    const gets = calls.get.filter((id) => id === "ses_a").length
+    await server.request({ op: "steer", sessionID: "ses_a", text: "second" })
+    await server.request({ op: "steer", sessionID: "ses_a", text: "third" })
+    expect(calls.get.filter((id) => id === "ses_a").length).toBe(gets)
+    expect(calls.model).toHaveLength(1)
+    expect(calls.prompt).toHaveLength(3)
+  })
+
+  test("a model change OpenCode reports is applied from the cache: the Voice model is switched back in without asking", async () => {
+    const { spoke, server, host, calls, models } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    await until(() => lastSessions(server)?.sessions.length === 1)
+    models.set("ses_a", { providerID: "anthropic", id: "claude-opus" })
+    await server.request({ op: "setModelPrefs", sessionID: "ses_a", voice: { providerID: "anthropic", modelID: "claude-haiku" } })
+    await server.request({ op: "steer", sessionID: "ses_a", text: "first" })
+    const gets = calls.get.filter((id) => id === "ses_a").length
+    models.set("ses_a", { providerID: "user", id: "choice" })
+    host.push({ type: "session.model.selected", data: { sessionID: "ses_a", model: { providerID: "user", id: "choice" } } })
+    await Bun.sleep(20)
+    await server.request({ op: "steer", sessionID: "ses_a", text: "second" })
+    expect(calls.model.at(-1)).toEqual({ sessionID: "ses_a", model: { providerID: "anthropic", id: "claude-haiku" } })
+    expect(calls.get.filter((id) => id === "ses_a").length).toBe(gets)
   })
 
   test("clearing a Voice override while the session runs restores it at the next turn boundary", async () => {
