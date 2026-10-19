@@ -1,4 +1,4 @@
-// Progress cue output for conversation mode: short Web Audio earcons and fixed phrases spoken through
+// Progress cue output for conversation mode: short Web Audio earcons and short varied phrases spoken through
 // /api/speak. Phrases are prefetched when Voice mode starts and kept in memory and, keyed by the TTS voice
 // and the text, in Cache Storage, so later sessions start with them ready. A phrase that is not ready when
 // its cue fires plays a short tone instead (it never waits for synthesis). Timing decisions live in
@@ -40,7 +40,10 @@ export function applyRate(audio: RateTarget, rate: number): void {
   audio.webkitPreservesPitch = true
 }
 
-export type CueApi = (path: string, init: { method: string; json: { text: string } }) => Promise<Response>
+/** Phrases synthesized at once while prefetching (keeps the TTS provider and the hub from a burst). */
+export const PREFETCH_CONCURRENCY = 2
+
+export type CueApi = (path: string, init: { method: string; json: { text: string }; signal?: AbortSignal }) => Promise<Response>
 
 interface Playable extends RateTarget {
   src: string
@@ -63,6 +66,8 @@ export class CuePlayer {
   private key: Promise<string | undefined> = Promise.resolve(undefined)
   private audio: Playable
   private ctx: AudioContext | undefined
+  /** Cancels prefetching on close(): queued phrases are skipped, in-flight synthesis is aborted. */
+  private loading = new AbortController()
   speaking = false
 
   constructor({ api, speed, onSpeaking, audio }: { api: CueApi; speed?: () => number; onSpeaking?: (speaking: boolean) => void; audio?: unknown }) {
@@ -115,13 +120,18 @@ export class CuePlayer {
   }
 
   /**
-   * Loads every phrase in parallel (call when Voice mode starts). With a voice `key` (TTS provider, model,
+   * Loads every phrase, `PREFETCH_CONCURRENCY` at a time in the given order (call when Voice mode starts). With a voice `key` (TTS provider, model,
    * voice, speed) the audio is read from and stored in Cache Storage, and other voices' entries are dropped.
    * Never rejects: a phrase that fails stays unready (its cue plays the tone) and is tried again next time.
    */
   async prefetch(texts: readonly string[], key?: string | Promise<string | undefined>): Promise<void> {
     this.key = Promise.resolve(key).catch(() => undefined)
-    await Promise.all([this.prune(), ...texts.map((text) => this.phrase(text).catch(() => undefined))])
+    const queue = [...texts]
+    const { signal } = this.loading
+    const worker = async () => {
+      for (let text = queue.shift(); text !== undefined && !signal.aborted; text = queue.shift()) await this.phrase(text).catch(() => undefined)
+    }
+    await Promise.all([this.prune(), ...Array.from({ length: Math.min(PREFETCH_CONCURRENCY, queue.length) }, worker)])
   }
 
   /** True when `text` plays at once (no synthesis needed). */
@@ -141,12 +151,13 @@ export class CuePlayer {
   }
 
   private async load(text: string): Promise<string> {
+    const { signal } = this.loading
     const key = await this.key
     const store = key ? await cueStore() : undefined
     const request = key ? cueURL(key, text) : ""
     let blob = store ? await store.match(request).then((res) => res?.blob(), () => undefined) : undefined
     if (!blob) {
-      blob = await (await this.api("/api/speak", { method: "POST", json: { text } })).blob()
+      blob = await (await this.api("/api/speak", { method: "POST", json: { text }, signal })).blob()
       await store?.put(request, new Response(blob, { headers: { "content-type": blob.type || "audio/mpeg" } })).catch(() => {})
     }
     const url = URL.createObjectURL(blob)
@@ -212,6 +223,9 @@ export class CuePlayer {
 
   close(): void {
     this.stop()
+    // Free the connections: on HTTP/1.1 a long prefetch would hold requests (Voice off, replies) behind it.
+    this.loading.abort()
+    this.loading = new AbortController()
     this.ctx?.close?.().catch(() => {})
     this.ctx = undefined
   }

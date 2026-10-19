@@ -2,7 +2,7 @@
 // voice and text, in Cache Storage for later page loads); playback uses the chosen speed; a phrase that is not
 // ready yet falls back to a short tone instead of waiting for synthesis.
 import { afterEach, describe, expect, test } from "bun:test"
-import { CuePlayer } from "../web/src/core/cues"
+import { CuePlayer, PREFETCH_CONCURRENCY } from "../web/src/core/cues"
 
 class FakeAudio {
   src = ""
@@ -68,25 +68,59 @@ function setup({ fail = false, slow = false } = {}) {
   const audio = new FakeAudio()
   let release = () => {}
   const gate = new Promise<void>((r) => (release = r))
-  const api = async (_path: string, init: { json: { text: string } }) => {
+  const aborted: string[] = []
+  const api = async (_path: string, init: { json: { text: string }; signal?: AbortSignal }) => {
     calls.push(init.json.text)
-    if (slow) await gate
+    if (slow)
+      await new Promise<void>((resolve, reject) => {
+        void gate.then(resolve)
+        init.signal?.addEventListener("abort", () => {
+          aborted.push(init.json.text)
+          reject(new Error("aborted"))
+        })
+      })
     if (fail) throw new Error("tts down")
     return new Response(new Blob([`mp3:${init.json.text}`], { type: "audio/mpeg" }))
   }
   const player = new CuePlayer({ api, speed: () => 1.5, onSpeaking: (on: boolean) => speaking.push(on), audio })
   player.earcon = (name) => void earcons.push(name)
-  return { player, calls, speaking, audio, earcons, release }
+  return { player, calls, speaking, audio, earcons, release, aborted }
 }
 
 const PHRASES = ["Working on it.", "Started a subagent.", "Still working."]
 
 describe("CuePlayer", () => {
-  test("prefetch synthesizes every phrase in parallel, once; later says reuse them", async () => {
+  test("prefetch synthesizes at most PREFETCH_CONCURRENCY (2) phrases at a time, in order, each once", async () => {
+    const { player, calls, release } = setup({ slow: true })
+    const many = [...PHRASES, "One.", "Two.", "Three.", "Four."]
+    const all = player.prefetch(many)
+    await tick()
+    expect(PREFETCH_CONCURRENCY).toBe(2) // leaves the browser's ~6 HTTP/1.1 connections for replies and events
+    expect(calls).toEqual(many.slice(0, PREFETCH_CONCURRENCY))
+    release()
+    await all
+    expect(calls).toEqual(many)
+    expect(many.every((p) => player.ready(p))).toBe(true)
+  })
+
+  test("close() cancels a prefetch: in-flight requests are aborted and queued phrases are not requested", async () => {
+    const { player, calls, release, aborted } = setup({ slow: true })
+    const many = [...PHRASES, "One.", "Two.", "Three.", "Four."]
+    const all = player.prefetch(many)
+    await tick()
+    player.close()
+    release()
+    await all
+    expect(calls).toEqual(many.slice(0, PREFETCH_CONCURRENCY))
+    expect(aborted).toEqual(many.slice(0, PREFETCH_CONCURRENCY))
+    expect(many.some((p) => player.ready(p))).toBe(false)
+  })
+
+  test("prefetch synthesizes the phrases once; later says reuse them", async () => {
     const { player, calls, release } = setup({ slow: true })
     const all = player.prefetch(PHRASES)
     await tick()
-    expect(calls).toEqual(PHRASES) // all requested before any answered
+    expect(calls).toEqual(PHRASES.slice(0, PREFETCH_CONCURRENCY)) // the first ones in flight before any answered
     expect(player.ready("Working on it.")).toBe(false)
     const again = player.prefetch(PHRASES) // already loading: no second request
     release()

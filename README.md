@@ -821,14 +821,17 @@ Pure logic is in `web/src/core/feedback-core.ts` (tested with bun); `web/src/cor
   The home list shows the same "now" text with a spinner for working sessions.
 - **Progress cues** (conversation mode; Settings → Voice → "Progress cues", on by default): a soft
   tone as soon as you stop speaking (the moment the segment goes to transcription; typed text gets it when
-  the agent receives it), then "Working on it." if the session is working and the
-  agent has not spoken within 2.5 s of the end of your speech. "Started a subagent." plays when a subagent starts, unless the agent
-  spoke in the last 3 s. "Still working." plays after 40 s without speech while work continues, and
-  a double tone plays when a subagent finishes. Failed tools are not spoken (they show in the feed). Cues never
+  the agent receives it), then a short acknowledgement ("On it.", "One moment.", "Let me check." …) if the
+  session is working and the agent has not spoken within 2.5 s of the end of your speech. A hand-off phrase
+  ("I'll hand that off.", "Getting a helper on it." …) plays when a subagent starts, unless the agent
+  spoke in the last 3 s. A still-working phrase ("Still on it.", "Almost there." …) plays after 40 s without
+  speech while work continues, and a double tone plays when a subagent finishes. Failed tools are not spoken (they show in the feed). Cues never
   play while you are talking or the agent's speech is playing; they wait, and are dropped once the agent
   speaks. Cues are event-driven: one timer for the next deadline (no polling), re-armed on speech, status and
-  playback changes. The phrases are synthesized in parallel when Voice mode starts and kept in memory and in
-  the browser's Cache Storage (`hub-cues-v1`, keyed by TTS provider, model, voice, speed and server, so a later
+  playback changes. Each cue has several variants (`CUE_VARIANTS` in `web/src/core/feedback-core.ts`), chosen
+  from a shuffle-bag: every variant once before any repeats, never the same phrase twice in a row, and a variant
+  whose audio is already loaded wins. All variants are synthesized, 2 at a time, when Voice mode starts (ending Voice mode
+  cancels what is left) and kept in memory and in the browser's Cache Storage (`hub-cues-v1`, keyed by TTS provider, model, voice, speed and server, so a later
   session starts with them ready and a voice change fetches them again); a ready phrase starts playing at
   once. A phrase that is not ready yet when its cue fires plays a short tone instead.
 - **Presence**: while a session view is open, the phone posts `POST /api/sessions/:id/presence
