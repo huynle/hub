@@ -40,6 +40,12 @@ export const NORMAL_VAD: ProbabilityVadParams = Object.freeze({
   energyMinSpeechMs: VOICE_TIMINGS.minSpeechMs,
 })
 
+/**
+ * The echo guard (stricter thresholds while the agent speaks) stays up this long after playback stops: the
+ * player reports the end before the speaker and the room are quiet (output latency, reverb).
+ */
+export const SPEAKING_TAIL_MS = 400
+
 /** Share of an onset that must be voiced: isolated high frames (typing clicks) never add up to speech. */
 const MIN_VOICED_RATIO = 0.75
 
@@ -164,6 +170,8 @@ export interface VoiceDetectorOptions {
 interface Pending {
   readonly chunk: Float32Array
   readonly energyVoiced: boolean
+  /** The echo guard was up for this chunk. */
+  readonly guarded: boolean
   prob?: number
   energy?: boolean
 }
@@ -192,6 +200,9 @@ export class VoiceDetector {
   private inFlight = 0
   private generation = 0
   private warned = new Set<string>()
+  private speakingOn = false
+  /** Chunks the echo guard stays up after speaking stops. */
+  private tail = 0
 
   constructor({ sampleRate, params = NORMAL_VAD, onEvents, onLevel, warn = (m) => console.warn(m), now = () => performance.now() }: VoiceDetectorOptions) {
     this.resampler = new Resampler(sampleRate)
@@ -226,13 +237,16 @@ export class VoiceDetector {
   }
 
   get speaking(): boolean {
-    return this.vad.speaking
+    return this.speakingOn
   }
 
-  /** True while the agent speaks: higher energy threshold and model probability for a barge-in. */
+  /**
+   * True while the agent (or a cue) speaks: the echo guard raises the energy threshold and the model probability
+   * needed for a barge-in, until SPEAKING_TAIL_MS after it stops.
+   */
   set speaking(on: boolean) {
-    this.vad.speaking = on
-    this.meter.speaking = on
+    if (this.speakingOn && !on) this.tail = Math.ceil(SPEAKING_TAIL_MS / FRAME_MS)
+    this.speakingOn = on
   }
 
   get active(): boolean {
@@ -251,16 +265,19 @@ export class VoiceDetector {
   }
 
   private chunk(chunk: Float32Array): void {
+    const guarded = this.speakingOn || this.tail > 0
+    if (!this.speakingOn && this.tail > 0) this.tail--
+    this.meter.speaking = guarded
     const inSpeech = this.vad.state === "speech"
     const { db, floor, level, voiced } = this.meter.measure(chunk, FRAME_MS, inSpeech)
     this.onLevel?.(level)
-    const entry: Pending = { chunk, energyVoiced: voiced }
+    const entry: Pending = { chunk, energyVoiced: voiced, guarded }
     this.queue.push(entry)
     if (this.model && this.inFlight >= MAX_IN_FLIGHT) this.drop("stalled")
     const model = this.model
     if (!model) {
       entry.energy = true
-    } else if (!inSpeech && db < floor + this.vad.params.gateDb + (this.meter.speaking ? this.meter.speakingBoostDb : 0)) {
+    } else if (!inSpeech && db < floor + this.vad.params.gateDb + (guarded ? this.meter.speakingBoostDb : 0)) {
       entry.prob = 0
       this.stats.skipped++
     } else {
@@ -307,6 +324,7 @@ export class VoiceDetector {
     const events: VadEvent[] = []
     while (this.queue.length && (this.queue[0]!.energy || this.queue[0]!.prob !== undefined)) {
       const entry = this.queue.shift()!
+      this.vad.speaking = entry.guarded
       events.push(...(entry.energy ? this.vad.processEnergy(entry.chunk, entry.energyVoiced) : this.vad.process(entry.chunk, entry.prob!)))
     }
     if (events.length) this.onEvents(events)

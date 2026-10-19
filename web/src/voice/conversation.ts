@@ -5,7 +5,7 @@
 // The pure parts live in core/conversation-core; this file owns the browser APIs (mic, Web Audio, wake lock,
 // media session). Ported from the 0.4 web/conversation.js; behavior unchanged except the mic device choice.
 import { gestureBlocked } from "../core/voice-autostart"
-import { Endpointer, SayAssembler, SpeechQueue, TurnTimer, describeTurn, encodeWav, parseCommand, type TurnMark, type VadEvent } from "../core/conversation-core"
+import { Endpointer, micConstraints, SayAssembler, SpeechQueue, TurnTimer, describeTurn, encodeWav, parseCommand, type TurnMark, type VadEvent } from "../core/conversation-core"
 import { VoiceDetector, type DetectorMode } from "../core/speech-vad"
 import { loadSilero } from "./silero"
 import { AudioClip, canStreamMp3, clipFrom, feed } from "../core/audio-stream"
@@ -82,9 +82,7 @@ export interface ConversationOptions {
 
 type Api = (path: string, init?: ApiInit) => Promise<Response>
 
-export function micConstraints(deviceId?: string): MediaStreamConstraints {
-  return { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, ...(deviceId ? { deviceId: { exact: deviceId } } : {}) } }
-}
+export { micConstraints }
 
 export class Conversation<B = unknown> {
   readonly sessionID: string
@@ -129,6 +127,8 @@ export class Conversation<B = unknown> {
   private wakeLock?: WakeLockSentinel
   private warnedAutoplay = false
   private state: ConversationState | undefined
+  /** A progress cue is playing (its echo must not barge in either). */
+  private cueSpeaking = false
   /** Bumped by start() and stop(); a start that sees another value was cancelled. */
   private attempt = 0
 
@@ -145,6 +145,8 @@ export class Conversation<B = unknown> {
       api: this.api as never,
       speed: this.opts.speed,
       onSpeaking: (on) => {
+        this.cueSpeaking = on
+        this.guardEcho()
         this.scheduler.cueSpeaking(on, Date.now())
         this.cueClock.poke()
       },
@@ -302,7 +304,7 @@ export class Conversation<B = unknown> {
         if (!this.player.paused) this.player.pause()
       },
       onState: (speaking) => {
-        if (this.vad) this.vad.speaking = speaking
+        this.guardEcho()
         this.scheduler.agentSpeaking(speaking, Date.now())
         if (speaking) this.cuePlayer.stop() // the agent's own speech wins over a cue
         this.cueClock.poke()
@@ -312,6 +314,11 @@ export class Conversation<B = unknown> {
         if (error?.name !== "AbortError") this.ui.note(`Could not read the reply aloud: ${error?.message}`, "err")
       },
     })
+  }
+
+  /** The detector's echo guard is up while a reply or a cue plays (and briefly after). */
+  private guardEcho(): void {
+    if (this.vad) this.vad.speaking = !!this.queue?.speaking || this.cueSpeaking
   }
 
   /** One ~20 ms frame from the mic. */

@@ -176,6 +176,16 @@ export function encodeWav(samples: ArrayLike<number>, rate: number): Uint8Array<
   return bytes
 }
 
+/**
+ * The microphone track Voice mode and dictation ask for: the browser's echo cancellation (the reply playing
+ * is subtracted from the mic, so it does not barge in on itself), noise suppression and automatic gain, mono.
+ */
+export function micConstraints(deviceId?: string): MediaStreamConstraints {
+  return {
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1, ...(deviceId ? { deviceId: { exact: deviceId } } : {}) },
+  }
+}
+
 // ---------- turn-taking timings ----------
 
 /**
