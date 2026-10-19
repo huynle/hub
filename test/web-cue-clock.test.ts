@@ -4,7 +4,7 @@ import { CUE_PHRASES, CueClock, CueScheduler, type Cue } from "../web/src/core/f
 
 const speak = (cue: "working" | "subagent" | "still") => [{ type: "speak" as const, cue, text: CUE_PHRASES[cue] }]
 
-function setup({ ready = () => true } = {}) {
+function setup({ ready = () => true }: { ready?: () => boolean } = {}) {
   let now = 0
   let timers: Array<{ at: number; fn: () => void; id: number }> = []
   let next = 1

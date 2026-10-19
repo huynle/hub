@@ -652,9 +652,16 @@ hub sends it `{op: "conversation", on: true}` once. Deleting the session clears 
 SSE (`/api/events`) adds:
 
 - `{type: "conversation", sessionID, on}` when the flag changes.
-- `{type: "say", sessionID, messageID, ordinal, text}` for each `session.text.ended` of a **root** session
-  in conversation mode (subagent text is not spoken); deduped by `(messageID, ordinal)` across
-  processes; blank text is skipped.
+- `{type: "say", sessionID, messageID, ordinal, seq, text}`: **root** text in conversation mode is spoken
+  while it is written. The hub cuts the streamed `session.text.delta`s of each text part (`messageID`,
+  `ordinal`) into sentences (`src/central/say-stream.ts`: sentence ends followed by the next sentence, line
+  breaks, whole fenced code blocks, abbreviations/decimals/file names kept together, runs over 300 chars cut
+  at a comma) and sends one `say` per completed sentence right after its delta, `seq` counting from 0 per text
+  part; `session.text.ended` (authoritative: missed deltas are recovered) flushes the rest. Sentences are
+  raw slices of the text: `/api/speak` makes each one speakable. One process's deltas are used per text part
+  and the end is handled once, so each sentence is sent once; an interrupted or failed run, or conversation
+  mode turning off, drops the unspoken rest. A successful subagent's final message is spoken through its
+  root as before: one `say` per text part without `seq`. Blank text is skipped.
 - `{type: "heard", sessionID, inboxID}` when OpenCode delivers an utterance's inbox item (also when the
   delivery event arrives before the steer result).
 - `{type: "activity", sessionID, rootID, item}` when an activity item is created or changes state, for
@@ -675,7 +682,7 @@ SSE (`/api/events`) adds:
 
 Pushes in conversation mode depend on presence: while the session is watched, "finished" is not sent
 (the phone is open and speaking). When nobody watches, "finished" is sent as usual and each spoken text
-of the root session is pushed as kind `say` (title = session title, body = the text, max 180 chars; at
+of the root session (the whole text part, when it ends) is pushed as kind `say` (title = session title, body = the text, max 180 chars; at
 most one every 10 s per session; on by default, pref `say`). "blocked" is always sent. `/api/transcribe` and `/api/speak` have no rate limit; `/api/speak` accepts up to
 `HUB_MAX_SPEECH_CHARS` per call, so the phone sends sentence-sized chunks.
 
@@ -725,10 +732,13 @@ it again, say "pause listening", or leave the page to turn it off. Leaving the p
   is joined to it. Empty and filler-only transcripts are dropped. Utterances are capped at 60 s.
 - **Commands**: an utterance that is only "stop", "cancel", "never mind", "stop that" or "hold on"
   calls `POST …/interrupt` and stops speech. "Pause listening" turns the mode off.
-- **Speech out**: each SSE `say` is split into sentences. Abbreviations, decimals, file names and
+- **Speech out**: root replies arrive one sentence at a time while they are written (`say` with `seq`);
+  the phone plays them in `seq` order per text part and drops duplicates (`SayAssembler`). A `say` without
+  `seq` (a subagent's result) is split into sentences. Abbreviations, decimals, file names and
   list items are handled, and fenced code becomes "(code omitted)". Each sentence goes to `/api/speak`,
-  one ahead of playback, and plays through one `<audio>` element. Speech that lasts 300 ms or more
-  (barge-in) pauses playback and clears the queue. The transcript shows your utterances with ✓ (sent)
+  up to two ahead of playback, and plays through one `<audio>` element. Speech that lasts 300 ms or more
+  (barge-in) pauses playback, clears the queue and mutes the rest of the replies that were speaking (their
+  later sentences still show in the transcript); a new reply speaks again. The transcript shows your utterances with ✓ (sent)
   and ✓✓ (heard). Agent text is merged with the bubble already streamed from deltas. Subagents
   starting, finishing or failing appear as small notes. Typed text is sent as an utterance while the
   mode is on.

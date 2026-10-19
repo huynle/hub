@@ -512,6 +512,32 @@ async function desktop(browser: Browser): Promise<void> {
     await page.locator(".voice-bar").waitFor({ state: "detached" })
   })
 
+  await check("desktop: Voice mode speaks a streamed reply sentence by sentence, starting before the text ends", async () => {
+    type Entry = { at: number; method: string; path: string; body?: any }
+    const state = async () => (await (await fetch(`${BASE}/mock/log`)).json()) as { log: Entry[]; textEnded: Array<{ messageID: string; at: number }> }
+    await page.goto(`${BASE}/s/ses_mock`)
+    await page.locator(".msg.assistant").first().waitFor()
+    await page.getByRole("button", { name: "Start Voice mode" }).click()
+    await page.locator(".voice-bar .voice-state").getByText(/Listening|Thinking/).waitFor({ timeout: 10_000 })
+    const from = Date.now()
+    const sentences = ["The first sentence is ready.", "Then a much longer second sentence follows, written slowly.", "And a third one ends it."]
+    await mock("/mock/stream", { kind: "text", messageID: "msg_fast", text: sentences.join(" "), every: 120, size: 5 })
+    await page.locator(".msg.assistant", { hasText: "And a third one ends it." }).waitFor({ timeout: 15_000 })
+    let s = await state()
+    for (let i = 0; i < 30 && s.log.filter((e) => e.path === "/api/speak" && e.at >= from && sentences.includes(e.body?.text)).length < 3; i++) {
+      await page.waitForTimeout(200)
+      s = await state()
+    }
+    const speaks = s.log.filter((e) => e.path === "/api/speak" && e.at >= from && sentences.includes(e.body?.text))
+    const ended = s.textEnded.find((e) => e.messageID === "msg_fast")
+    assert(ended, "the streamed text ended")
+    const calls = s.log.filter((e) => e.at >= from && !e.path.endsWith("/presence")).map((e) => `${e.at - from} ${e.method} ${e.path} ${e.body?.text ?? ""}`)
+    assert(JSON.stringify(speaks.map((e) => e.body.text)) === JSON.stringify(sentences), `each sentence spoken once, in order: ${JSON.stringify(speaks.map((e) => e.body?.text))}; calls: ${calls.join(" | ")}`)
+    assert(speaks[0]!.at < ended!.at - 1000, `first sentence synthesized ${ended!.at - speaks[0]!.at} ms before the text ended`)
+    await page.locator(".voice-bar").getByRole("button", { name: "End", exact: true }).click()
+    await page.locator(".voice-bar").waitFor({ state: "detached" })
+  })
+
   await check("desktop: Voice mode is a toggle, one session at a time, with an indicator while viewing another session", async () => {
     const go = (href: string) =>
       page.evaluate((h) => {

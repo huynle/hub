@@ -192,8 +192,8 @@ describe("say events", () => {
     client.send(ended("ses_1", "msg_1", 2, "Done."))
     await collect
     expect(says).toEqual([
-      { type: "say", sessionID: "ses_1", messageID: "msg_1", ordinal: 0, text: "Hello there." },
-      { type: "say", sessionID: "ses_1", messageID: "msg_1", ordinal: 2, text: "Done." },
+      { type: "say", sessionID: "ses_1", messageID: "msg_1", ordinal: 0, seq: 0, text: "Hello there." },
+      { type: "say", sessionID: "ses_1", messageID: "msg_1", ordinal: 2, seq: 0, text: "Done." },
     ])
     await events.cancel()
   })
@@ -313,7 +313,7 @@ describe("say events", () => {
     client.send(ended("ses_root", "msg_root", 0, "Root marker."))
 
     await collect
-    expect(says).toEqual([{ type: "say", sessionID: "ses_root", messageID: "msg_root", ordinal: 0, text: "Root marker." }])
+    expect(says).toEqual([{ type: "say", sessionID: "ses_root", messageID: "msg_root", ordinal: 0, seq: 0, text: "Root marker." }])
     await events.cancel()
   })
 
@@ -346,7 +346,7 @@ describe("say events", () => {
     client.send(ended("ses_root", "msg_root", 0, "Root marker."))
 
     await collect
-    expect(says).toEqual([{ type: "say", sessionID: "ses_root", messageID: "msg_root", ordinal: 0, text: "Root marker." }])
+    expect(says).toEqual([{ type: "say", sessionID: "ses_root", messageID: "msg_root", ordinal: 0, seq: 0, text: "Root marker." }])
     await events.cancel()
   })
 })

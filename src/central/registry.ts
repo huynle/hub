@@ -5,6 +5,7 @@
 import path from "node:path"
 import type { ForwardedEvent, Hello, HerdrWorkspace, ProcessKind, SessionInfo, SpokeMode, TerminalInfo, Terminals } from "../protocol"
 import { StatusBoard, type Blocker, type SessionStatus } from "../status"
+import { SentenceStream } from "./say-stream"
 
 export class BusyError extends Error {
   constructor() {
@@ -50,8 +51,12 @@ export type RegistryMessage =
   /** Reasoning text streamed in a root or subagent session. */
   | { readonly type: "reasoning"; readonly sessionID: string; readonly rootID: string; readonly messageID?: string; readonly delta: string }
   | { readonly type: "conversation"; readonly sessionID: string; readonly on: boolean }
-  /** A finished piece of assistant text in a root session in conversation mode, to be spoken. */
-  | { readonly type: "say"; readonly sessionID: string; readonly messageID: string; readonly ordinal: number; readonly text: string }
+  /**
+   * Assistant text of a root session in conversation mode, to be spoken. Root text is spoken while it streams:
+   * one say per completed sentence, `seq` counting the sentences of the message's text part (`ordinal`) from 0.
+   * A subagent's final result is one say for the whole text part (no `seq`).
+   */
+  | { readonly type: "say"; readonly sessionID: string; readonly messageID: string; readonly ordinal: number; readonly seq?: number; readonly text: string }
   /** An utterance sent from the phone reached the agent. */
   | { readonly type: "heard"; readonly sessionID: string; readonly inboxID: string }
   /** An activity item was created or changed state (sessionID: where it happened; rootID: its root). */
@@ -206,6 +211,17 @@ interface Stream {
 }
 
 /** Latest assistant message of a child run, paired with its successful completion for direct speech. */
+/** A root text part being spoken while it streams (deltas from the first process that streamed it). */
+interface RootSpeech {
+  readonly sessionID: string
+  readonly connID: string
+  readonly stream: SentenceStream
+  seq: number
+}
+
+/** Root text parts being spoken at once (more are dropped oldest first). */
+const ROOT_SPEECH_LIMIT = 100
+
 interface WorkerSpeech {
   readonly rootID: string
   succeeded: boolean
@@ -253,6 +269,8 @@ export class Registry {
   private readonly conversations = new Map<string, string | undefined>()
   /** `messageID ordinal` of texts already sent as say events (several processes forward the same text). */
   private readonly spoken = new Map<string, true>()
+  /** `messageID ordinal` → a root text part being spoken sentence by sentence as it streams. */
+  private readonly rootSpeech = new Map<string, RootSpeech>()
   /** Child session → latest text and completion state, while its root is in conversation mode. */
   private readonly workerSpeech = new Map<string, WorkerSpeech>()
   /** Utterance inboxID → session, until OpenCode reports it delivered. */
@@ -480,7 +498,9 @@ export class Registry {
       const rootID = this.rootOf(sessionID)
       if (rootID) this.stream(sessionID, rootID, event.type === "session.text.delta" ? "delta" : "reasoning", data)
     }
+    if (event.type === "session.text.delta" && sessionID) this.speakDelta(connID, sessionID, data)
     if (event.type === "session.text.ended" && sessionID) this.say(sessionID, data)
+    if ((event.type === "session.execution.interrupted" || event.type === "session.execution.failed") && sessionID) this.dropRootSpeech(sessionID)
     if (event.type === "session.inbox.delivered" && typeof data.inboxID === "string") this.delivered(data.inboxID)
     if (event.type === "session.deleted" && sessionID) this.setConversation(sessionID, false)
   }
@@ -558,12 +578,53 @@ export class Registry {
     this.emit({ type: "heard", sessionID, inboxID })
   }
 
-  private say(sessionID: string, data: Record<string, unknown>): void {
-    if (this.rootOf(sessionID) !== sessionID) return
-    this.emitSay(sessionID, data)
+  /** Root text streaming in conversation mode: each sentence is spoken as soon as it is complete. */
+  private speakDelta(connID: string, sessionID: string, data: Record<string, unknown>): void {
+    if (this.rootOf(sessionID) !== sessionID || !this.conversations.has(sessionID) || !this.boards.has(sessionID)) return
+    const { assistantMessageID: messageID, ordinal, delta } = data
+    if (typeof messageID !== "string" || typeof ordinal !== "number" || typeof delta !== "string") return
+    const key = `${messageID} ${ordinal}`
+    if (this.spoken.has(key)) return
+    let state = this.rootSpeech.get(key)
+    if (!state) remember(this.rootSpeech, key, (state = { sessionID, connID, stream: new SentenceStream(), seq: 0 }), ROOT_SPEECH_LIMIT)
+    // Other processes forward the same deltas: one stream per text part.
+    if (state.connID !== connID) return
+    const sentences = state.stream.push(delta)
+    // The sentence's own text goes out first, so a say never overtakes its bubble.
+    if (sentences.length) this.flushStream(this.streams.get(sessionID), sessionID)
+    for (const text of sentences) this.emitSentence(state, messageID, ordinal, text)
   }
 
-  /** Emits one root-session speech part, deduped across processes. */
+  /** A root text part ended: speaks what the deltas did not (the ended text is authoritative), once. */
+  private say(sessionID: string, data: Record<string, unknown>): void {
+    if (this.rootOf(sessionID) !== sessionID) return
+    const { assistantMessageID: messageID, ordinal, text } = data
+    if (!this.conversations.has(sessionID) || !this.boards.has(sessionID)) return
+    if (typeof messageID !== "string" || typeof ordinal !== "number" || typeof text !== "string") return
+    const key = `${messageID} ${ordinal}`
+    if (this.spoken.has(key)) return
+    remember(this.spoken, key, true)
+    const state = this.rootSpeech.get(key) ?? { sessionID, connID: "", stream: new SentenceStream(), seq: 0 }
+    this.rootSpeech.delete(key)
+    for (const sentence of state.stream.end(text)) this.emitSentence(state, messageID, ordinal, sentence)
+    // Nobody is listening on a phone: push the whole reply so it reaches a locked screen.
+    if (text.trim() && !this.watched(sessionID)) this.alert("say", sessionID, undefined, text)
+  }
+
+  private emitSentence(state: RootSpeech, messageID: string, ordinal: number, text: string): void {
+    this.emit({ type: "say", sessionID: state.sessionID, messageID, ordinal, seq: state.seq++, text })
+  }
+
+  /** The run stopped or conversation mode ended: the rest of its text parts is not spoken. */
+  private dropRootSpeech(sessionID: string): void {
+    for (const [key, state] of this.rootSpeech) {
+      if (state.sessionID !== sessionID) continue
+      this.rootSpeech.delete(key)
+      remember(this.spoken, key, true)
+    }
+  }
+
+  /** Emits one subagent result part through its root, deduped across processes. */
   private emitSay(sessionID: string, data: Record<string, unknown>): void {
     const { assistantMessageID: messageID, ordinal, text } = data
     if (!this.conversations.has(sessionID) || !this.boards.has(sessionID)) return
@@ -957,6 +1018,7 @@ export class Registry {
     else {
       this.conversations.delete(sessionID)
       for (const [childID, state] of this.workerSpeech) if (state.rootID === sessionID) this.clearWorkerSpeech(childID)
+      this.dropRootSpeech(sessionID)
     }
     if (!changed) return
     this.emit({ type: "conversation", sessionID, on })

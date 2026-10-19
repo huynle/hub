@@ -4,7 +4,7 @@
 // The pure parts live in core/conversation-core; this file owns the browser APIs (mic, Web Audio, wake lock,
 // media session). Ported from the 0.4 web/conversation.js; behavior unchanged except the mic device choice.
 import { gestureBlocked } from "../core/voice-autostart"
-import { Endpointer, EnergyVad, SpeechQueue, encodeWav, parseCommand, splitSentences } from "../core/conversation-core"
+import { Endpointer, EnergyVad, SayAssembler, SpeechQueue, encodeWav, parseCommand } from "../core/conversation-core"
 import { CuePlayer } from "../core/cues"
 import { CUE_PHRASES, CueClock, CueScheduler, isWorking, subagentChanges, type StatusEntry } from "../core/feedback-core"
 import type { ApiInit } from "../app/api"
@@ -86,6 +86,8 @@ export class Conversation<B = unknown> {
   private vad?: EnergyVad
   private endpointer?: Endpointer
   private queue?: SpeechQueue<string>
+  /** Orders and dedupes the sentence-by-sentence says; barge-in mutes the replies speaking. */
+  private says = new SayAssembler()
   /** Plays progress phrases right on their deadline (re-armed by `poke()` after anything that may move it). */
   private cueClock: CueClock
   /** When the VAD last ended a segment: "Working on it." counts from the end of the speech that was sent. */
@@ -272,7 +274,7 @@ export class Conversation<B = unknown> {
         this.endpointer!.speechStarted()
         this.scheduler.userTalking(true, Date.now())
         this.cuePlayer.stop()
-        if (this.queue!.speaking) this.queue!.clear() // barge-in: start fires only after VOICE_TIMINGS.minSpeechMs of voice
+        if (this.queue!.speaking) this.hushReplies() // barge-in: start fires only after VOICE_TIMINGS.minSpeechMs of voice
       } else {
         // Instant acknowledgement: the segment goes to transcription, so the user hears it was taken.
         this.speechEndedAt = Date.now()
@@ -309,7 +311,7 @@ export class Conversation<B = unknown> {
       return this.stop()
     }
     if (command === "interrupt") {
-      this.queue?.clear()
+      this.hushReplies()
       this.ui.note(`“${text}” — interrupting.`)
       try {
         await this.api(`${this.path}/interrupt`, { method: "POST", json: {} })
@@ -341,8 +343,14 @@ export class Conversation<B = unknown> {
 
   /** Typed text while Voice mode is on goes the same way as speech. */
   sendTyped(text: string): Promise<void> {
-    this.queue?.clear()
+    this.hushReplies()
     return this.deliver(text, true)
+  }
+
+  /** Stops reading replies aloud, including their sentences still to come. */
+  private hushReplies(): void {
+    this.queue?.clear()
+    this.says.mute()
   }
 
   /** Hub SSE messages for this session. */
@@ -362,11 +370,14 @@ export class Conversation<B = unknown> {
       setTimeout(() => this.refresh(), SENT_LABEL_MS + 50)
     } else if (message.type === "say") {
       if (!this.active) return
+      // Root replies arrive one sentence at a time while they are written (seq); played in order, once.
+      const accepted = this.says.accept(message as { messageID?: string; ordinal?: number; seq?: number; text: string })
+      if (!accepted) return
       this.scheduler.agentSaid(Date.now())
       this.cuePlayer.stop()
       this.cueClock.poke()
-      this.ui.agent(message as { messageID?: string; text: string })
-      this.queue?.enqueue(splitSentences(message.text))
+      this.ui.agent({ messageID: message.messageID, text: accepted.text })
+      this.queue?.enqueue(accepted.sentences)
     } else if (message.type === "conversation" && !message.on && this.active) {
       this.ui.note("Voice mode was turned off.")
       void this.stop({ post: false })
@@ -413,7 +424,7 @@ export class Conversation<B = unknown> {
     if (!this.active || this.paused) return
     this.paused = true
     this.cueClock.stop()
-    this.queue?.clear()
+    this.hushReplies()
     this.cuePlayer.stop()
     this.endpointer?.reset()
     this.vad?.reset()
@@ -475,7 +486,7 @@ export class Conversation<B = unknown> {
   /** Stops reading aloud; resumes listening when muted. */
   hush(): void {
     if (this.paused) return this.resume()
-    this.queue?.clear()
+    this.hushReplies()
     this.cuePlayer.stop()
   }
 

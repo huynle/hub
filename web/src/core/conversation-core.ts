@@ -475,7 +475,10 @@ export interface SpeechQueueOptions<A> {
   readonly onError?: (error: any, text: string) => void
 }
 
-/** Speaks sentences one after another, fetching at most one sentence ahead; `clear` is the barge-in. */
+/** Sentences synthesized ahead of the one playing (or of the one being fetched for playback). */
+const PREFETCH_AHEAD = 2
+
+/** Speaks sentences one after another, fetching up to two sentences ahead; `clear` is the barge-in. */
 export class SpeechQueue<A = unknown> {
   private synth: SpeechQueueOptions<A>["synth"]
   private play: SpeechQueueOptions<A>["play"]
@@ -503,10 +506,9 @@ export class SpeechQueue<A = unknown> {
     else this.prefetch()
   }
 
-  /** While a sentence plays, the next one is fetched; while one is being fetched, so is the one after it. */
+  /** While a sentence plays, the next two are fetched; while one is being fetched, so are the two after it. */
   private prefetch(): void {
-    this.fetch(this.items[0])
-    if (!this.playing) this.fetch(this.items[1])
+    for (const item of this.items.slice(0, this.playing ? PREFETCH_AHEAD : PREFETCH_AHEAD + 1)) this.fetch(item)
   }
 
   clear(): void {
@@ -559,6 +561,68 @@ export class SpeechQueue<A = unknown> {
     if (speaking === this.speaking) return
     this.speaking = speaking
     this.onState?.(speaking)
+  }
+}
+
+// ---------- incremental speech ----------
+
+/** An SSE say: root text comes one sentence at a time (`seq` per message text part); worker results whole. */
+export interface SayInput {
+  readonly messageID?: string
+  readonly ordinal?: number
+  readonly seq?: number
+  readonly text: string
+}
+
+interface SayPart {
+  next: number
+  held: Map<number, string>
+  texts: string[]
+  muted: boolean
+}
+
+/**
+ * Orders and dedupes incremental says. `accept` returns the sentences to speak now (in order, each through
+ * splitSentences so code becomes "(code omitted)") and the text part so far for the transcript bubble, or
+ * undefined for a duplicate or a sentence waiting for an earlier one. `mute` (barge-in) silences the rest of
+ * the replies heard so far; later replies speak normally.
+ */
+export class SayAssembler {
+  private parts = new Map<string, SayPart>()
+  private limit: number
+
+  constructor({ limit = 50 }: { limit?: number } = {}) {
+    this.limit = limit
+  }
+
+  get size(): number {
+    return this.parts.size
+  }
+
+  accept(say: SayInput): { sentences: string[]; text: string } | undefined {
+    const text = String(say.text ?? "")
+    if (typeof say.seq !== "number") return { sentences: splitSentences(text), text }
+    const key = `${say.messageID ?? ""} ${say.ordinal ?? 0}`
+    let part = this.parts.get(key)
+    if (!part) {
+      part = { next: 0, held: new Map(), texts: [], muted: false }
+      this.parts.set(key, part)
+      if (this.parts.size > this.limit) this.parts.delete(this.parts.keys().next().value!)
+    }
+    if (say.seq < part.next || part.held.has(say.seq)) return undefined
+    part.held.set(say.seq, text)
+    const released: string[] = []
+    while (part.held.has(part.next)) {
+      released.push(part.held.get(part.next)!)
+      part.held.delete(part.next++)
+    }
+    if (!released.length) return undefined
+    part.texts.push(...released)
+    return { sentences: part.muted ? [] : released.flatMap((s) => splitSentences(s)), text: part.texts.join(" ") }
+  }
+
+  mute(): void {
+    for (const part of this.parts.values()) part.muted = true
   }
 }
 
