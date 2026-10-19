@@ -626,6 +626,72 @@ export class SayAssembler {
   }
 }
 
+// ---------- turn timing ----------
+
+/** Steps of a Voice turn, in order: the user stops speaking … the reply starts playing. */
+export type TurnMark = "speechEnd" | "transcript" | "accepted" | "firstSay" | "firstAudio"
+export type Turn = Readonly<Partial<Record<TurnMark, number>>>
+
+/**
+ * Times one Voice turn at a time. Speech end and transcript wait for the utterance to be accepted (the latest
+ * segment counts); then the first say and the first reply audio complete it into `last`. Marks out of order
+ * (a subagent's say with no turn waiting) are ignored.
+ */
+export class TurnTimer {
+  private pending: Partial<Record<TurnMark, number>> = {}
+  private turn: Partial<Record<TurnMark, number>> | undefined
+  last: Turn | undefined
+
+  /** Records a step; true when it was recorded. */
+  mark(name: TurnMark, at: number): boolean {
+    switch (name) {
+      case "speechEnd":
+        this.pending = { speechEnd: at }
+        return true
+      case "transcript":
+        if (this.pending.speechEnd === undefined) return false
+        this.pending.transcript = at
+        return true
+      case "accepted":
+        this.turn = { ...this.pending, accepted: at }
+        this.pending = {}
+        return true
+      case "firstSay":
+        if (!this.turn || this.turn.firstSay !== undefined) return false
+        this.turn.firstSay = at
+        return true
+      case "firstAudio":
+        if (this.turn?.firstSay === undefined) return false
+        this.last = { ...this.turn, firstAudio: at }
+        this.turn = undefined
+        return true
+    }
+  }
+}
+
+const seconds = (ms: number) => `${(ms / 1000).toFixed(1)} s`
+
+/** "last turn: 1.8 s to first audio" and the steps (for the Voice bar's tooltip). */
+export function describeTurn(turn: Turn | undefined): { summary: string; detail: string } | undefined {
+  const start = turn?.speechEnd ?? turn?.accepted
+  if (!turn || start === undefined || turn.firstAudio === undefined) return undefined
+  const steps: Array<[TurnMark, string]> = [
+    ["transcript", "transcript"],
+    ["accepted", "accepted"],
+    ["firstSay", "first reply"],
+    ["firstAudio", "audio"],
+  ]
+  const parts: string[] = []
+  let previous = start
+  for (const [mark, label] of steps) {
+    const at = turn[mark]
+    if (at === undefined || (mark === "accepted" && turn.speechEnd === undefined)) continue
+    parts.push(`${label} ${seconds(at - previous)}`)
+    previous = at
+  }
+  return { summary: `last turn: ${seconds(turn.firstAudio - start)} to first audio`, detail: parts.join(" · ") }
+}
+
 // ---------- transcript ----------
 
 const MIN_OVERLAP = 12

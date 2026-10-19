@@ -4,7 +4,7 @@
 // The pure parts live in core/conversation-core; this file owns the browser APIs (mic, Web Audio, wake lock,
 // media session). Ported from the 0.4 web/conversation.js; behavior unchanged except the mic device choice.
 import { gestureBlocked } from "../core/voice-autostart"
-import { Endpointer, EnergyVad, SayAssembler, SpeechQueue, encodeWav, parseCommand } from "../core/conversation-core"
+import { Endpointer, EnergyVad, SayAssembler, SpeechQueue, TurnTimer, describeTurn, encodeWav, parseCommand, type TurnMark } from "../core/conversation-core"
 import { CuePlayer } from "../core/cues"
 import { CUE_PHRASES, CueClock, CueScheduler, isWorking, subagentChanges, type StatusEntry } from "../core/feedback-core"
 import type { ApiInit } from "../app/api"
@@ -41,6 +41,17 @@ export interface ConversationUI<B> {
   agent(message: { messageID?: string; text: string }): void
   note(text: string, kind?: string): void
   ended(): void
+  /** The last turn's timing ("last turn: 1.8 s to first audio" and its steps), after its first audio played. */
+  timing?(turn: { summary: string; detail: string }): void
+}
+
+/** performance.mark names of a turn's steps (visible in the browser's performance tools). */
+const TURN_MARKS: Record<TurnMark, string> = {
+  speechEnd: "hub-voice:speech-end",
+  transcript: "hub-voice:transcript",
+  accepted: "hub-voice:accepted",
+  firstSay: "hub-voice:first-say",
+  firstAudio: "hub-voice:first-audio",
 }
 
 export interface ConversationOptions {
@@ -88,6 +99,7 @@ export class Conversation<B = unknown> {
   private queue?: SpeechQueue<string>
   /** Orders and dedupes the sentence-by-sentence says; barge-in mutes the replies speaking. */
   private says = new SayAssembler()
+  private turns = new TurnTimer()
   /** Plays progress phrases right on their deadline (re-armed by `poke()` after anything that may move it). */
   private cueClock: CueClock
   /** When the VAD last ended a segment: "Working on it." counts from the end of the speech that was sent. */
@@ -278,6 +290,7 @@ export class Conversation<B = unknown> {
       } else {
         // Instant acknowledgement: the segment goes to transcription, so the user hears it was taken.
         this.speechEndedAt = Date.now()
+        this.markTurn("speechEnd")
         this.cuePlayer.play(this.scheduler.speechEnded(this.speechEndedAt))
         const id = this.endpointer!.segmentEnded(event.durationMs)
         void this.transcribe(id, encodeWav(event.samples, this.vad.sampleRate))
@@ -299,6 +312,7 @@ export class Conversation<B = unknown> {
       this.inflight--
     }
     if (!this.active) return
+    if (text.trim()) this.markTurn("transcript")
     this.endpointer?.transcribed(id, text)
     this.refresh()
   }
@@ -326,6 +340,7 @@ export class Conversation<B = unknown> {
     this.cueClock.poke()
     try {
       const { inboxID } = await (await this.api(`${this.path}/utterance`, { method: "POST", json: { text } })).json()
+      this.markTurn("accepted")
       if (this.sent.get(inboxID) === "heard") this.ui.tick(bubble, "heard") // delivery beat the response
       else {
         this.ui.tick(bubble, "sent")
@@ -377,6 +392,7 @@ export class Conversation<B = unknown> {
       this.cuePlayer.stop()
       this.cueClock.poke()
       this.ui.agent({ messageID: message.messageID, text: accepted.text })
+      if (accepted.sentences.length) this.markTurn("firstSay")
       this.queue?.enqueue(accepted.sentences)
     } else if (message.type === "conversation" && !message.on && this.active) {
       this.ui.note("Voice mode was turned off.")
@@ -508,6 +524,7 @@ export class Conversation<B = unknown> {
         this.warnedAutoplay = true
         return
       }
+      this.markTurn("firstAudio")
       await new Promise<void>((resolve) => {
         player.onended = player.onpause = player.onerror = () => resolve()
       })
@@ -515,6 +532,18 @@ export class Conversation<B = unknown> {
       player.onended = player.onpause = player.onerror = null
       URL.revokeObjectURL(url)
     }
+  }
+
+  /** Records a turn step (also as a performance mark); the first audio reports the turn's timing. */
+  private markTurn(name: TurnMark): void {
+    if (!this.turns.mark(name, Date.now())) return
+    try {
+      performance.mark(TURN_MARKS[name])
+    } catch {
+      // no User Timing here
+    }
+    const turn = name === "firstAudio" ? describeTurn(this.turns.last) : undefined
+    if (turn) this.ui.timing?.(turn)
   }
 
   private refresh(): void {

@@ -584,6 +584,7 @@ export function SessionView(props: { id: string }) {
                 onModel={() => setPicker("voice")}
                 notifyHint={voiceNotifyHint()}
                 onAllowNotifications={() => void allowVoiceNotifications()}
+                timing={vs().timing}
               />
             </Show>
             <Show when={voiceNeedsTap()}>

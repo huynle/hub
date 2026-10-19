@@ -301,6 +301,8 @@ export function VoiceBar(props: {
   /** Notifications are not allowed: offer them so Voice mode shows in the notification shade. */
   notifyHint?: boolean
   onAllowNotifications?: () => void
+  /** The last turn's timing, as the state's tooltip. */
+  timing?: { summary: string; detail: string }
 }) {
   const label = () => (props.state === "listening" && props.working ? "Thinking" : VOICE_LABEL[props.state])
   const bars = [0.5, 0.8, 1, 0.7, 0.45]
@@ -309,7 +311,7 @@ export function VoiceBar(props: {
       <div class="wave" aria-hidden="true">
         <For each={bars}>{(k) => <span style={{ transform: `scaleY(${Math.max(0.15, Math.min(1, (props.state === "speaking" ? 0.6 : props.level) * k * 1.6))})` }} />}</For>
       </div>
-      <span class="voice-state" role="status" aria-live="polite">
+      <span class="voice-state" role="status" aria-live="polite" title={props.timing ? `${props.timing.summary}\n${props.timing.detail}` : undefined}>
         {label()}
         <Show when={props.held}>
           <span class="muted"> · “{props.held}…”</span>

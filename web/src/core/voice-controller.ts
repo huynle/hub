@@ -48,6 +48,8 @@ export interface VoiceState {
   readonly held: string
   readonly paused: boolean
   readonly agent?: string
+  /** The last turn's timing: "last turn: 1.8 s to first audio" and its steps. */
+  readonly timing?: { readonly summary: string; readonly detail: string }
   /** The last failure to turn Voice mode on, for the session it was for; `gesture`: the browser waits for a tap. */
   readonly error?: { readonly sessionID: string; readonly message: string; readonly gesture?: boolean }
 }
@@ -109,6 +111,7 @@ export class VoiceController<C extends VoiceConversation = VoiceConversation> {
       state: (voice) => run === this.run && this.set({ ...this.state, voice, paused: voice === "paused" }),
       level: (level) => run === this.run && this.set({ ...this.state, level }),
       held: (held) => run === this.run && this.set({ ...this.state, held }),
+      timing: (timing) => run === this.run && this.set({ ...this.state, timing }),
       user: (text) => this.sinks.get(sessionID)?.user(text) ?? `voice:${++this.bubbles}`,
       tick: (bubble, kind) => this.sinks.get(sessionID)?.tick(bubble, kind),
       agent: (message) => this.sinks.get(sessionID)?.agent(message),
