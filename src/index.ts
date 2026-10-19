@@ -7,7 +7,7 @@ import { Plugin } from "@opencode/plugin"
 import { DEFAULT_SUBAGENT, prepareConfigPath } from "./config"
 import { HubRpc, VoiceRpc } from "./rpc"
 import { checkServer, parseServerInput } from "./setup"
-import { defineVoiceAgent, orchestratorParts } from "./spoke/conversation"
+import { defineVoiceAgent, orchestratorParts, STOP_TOOL, STOP_TOOL_DESCRIPTION } from "./spoke/conversation"
 import { herdrRunner } from "./spoke/herdr"
 import { listServiceSessions } from "./spoke/listing"
 import { ensureLocalHub } from "./spoke/localhub"
@@ -171,11 +171,39 @@ export default Plugin.define({
           conversation: spoke?.inConversation(event.sessionID) ?? false,
           subagent: spoke?.subagent() ?? DEFAULT_SUBAGENT,
           workModel: spoke?.workModelFor(event.sessionID),
+          taskBoard: spoke?.taskBoard(event.sessionID),
         })
         for (const text of parts) event.system.push({ type: "text", text })
       })
     } catch (cause) {
       console.error("[hub] could not register the context hook", cause)
+    }
+
+    try {
+      // The voice agent stops one worker ("cancel the deploy one") without stopping itself or the others.
+      await (ctx as any).tool?.transform?.((editor: any) =>
+        editor.add({
+          name: STOP_TOOL,
+          description: STOP_TOOL_DESCRIPTION,
+          input: {
+            type: "object",
+            properties: {
+              sessionID: { type: "string", description: "The worker's sessionID, from your task board or the subagent tool's result." },
+              all: { type: "boolean", description: "true: stop every worker of yours that is still running." },
+            },
+            additionalProperties: false,
+          },
+          options: { codemode: false },
+          execute: async (value: unknown, context: { sessionID: string }) => {
+            const spoke = membership.active()
+            if (!spoke) return { content: "The hub is not running in this OpenCode process; nothing was stopped." }
+            const { stopped, text } = await spoke.stopWorkers(context.sessionID, (value ?? {}) as Record<string, unknown>)
+            return { content: text, metadata: { stopped } }
+          },
+        }),
+      )
+    } catch (cause) {
+      console.error("[hub] could not register the task stop tool", cause)
     }
 
     const run = async <T>(rpc: { error: (...args: any[]) => any }, action: (spoke: Spoke) => T | Promise<T>) => {

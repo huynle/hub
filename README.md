@@ -298,7 +298,9 @@ work to a background subagent. Routine workers inherit the fast voice model; cod
 architecture and risky work use the configured full work model. Successful workers finish with a short
 speech-ready result that the hub reads directly, without waiting for another voice-agent summary. You
 can keep talking while work runs; related follow-ups continue the active worker and unrelated tasks start
-a fresh one.
+a fresh one. Several independent requests in one breath ("check the deploy and update the changelog") start
+one background worker each, in parallel, in the same turn; each worker gets a short name ("Deploy check") that
+the task board and announcements use.
 
 The phone composer exposes separate **Voice** and **Worker** model controls for each session. Each picker
 lists the connected OpenCode process's available models and variants. Choices are saved per user and
@@ -321,8 +323,26 @@ not persist those potentially sensitive details.
   agent exists, the session keeps its agent and the `context` hook adds the orchestrator prompt instead.
 - The delegate agent (`subagent` in the config) is added per request by the `context` hook, so changing
   it needs no restart.
+- **Task board**: the `context` hook also gives the voice agent (and a conversation on another agent) a live
+  list of the workers it started (`src/spoke/taskboard.ts`, from this process's events): title, sessionID,
+  state (working, blocked with what it waits for, done with its latest text, failed with the reason, stopped)
+  and for how long, at most 8 (live ones first) of at most 200 characters each. So "what's running?" or "how's
+  the deploy going?" needs no tool call. A session without workers gets no board.
+- **Stopping one task by voice**: the plugin adds a tool `hub_task_stop {sessionID} | {all: true}`. The voice
+  agent calls it for "cancel the deploy one" (that worker and whatever runs below it are interrupted, deepest
+  first) or "stop all the workers" (every running worker of the session). It only reaches sessions below the
+  calling session (never the caller itself, its siblings or another session's workers), so the voice agent
+  keeps listening. The phone's stop words ("stop", "cancel", "never mind", "stop that", "hold on") still
+  interrupt the root turn at once.
 - Child text and execution events are paired by the hub. The latest assistant message of a successful
-  child is emitted as root-session speech; failures, interruptions and stale partial results are not.
+  child is emitted as root-session speech; interruptions and stale partial results are not. **Announcements**
+  (hub, `src/central/registry.ts`): while another worker of the session runs or waits, or one was announced in
+  the last minute, a result starts with the task's title ("Deploy check finished: …"); a result the voice agent
+  already said in the last two minutes is not read again. A failed worker is announced once with its reason
+  ("Lint failed: rate limit exceeded."), a worker's permission request or question once per request ("Cleanup
+  needs your permission.", "… has a question."); a stopped worker is not. Announcements are ordinary `say`s
+  without `seq` (`messageID` `announce:failed:<session>`, `announce:permission:<id>`, `announce:form:<id>`),
+  so the phone queues them after the sentence playing and never cuts one off.
 - Server ops: `steer` sends the text with `delivery: "steer"` (metadata `{source: "hub", mode:
   "conversation"}`, or `mode: "remote"` for a session not shared with Voice; 0.5 wrote `source:
   "opencode-hub"` and 0.4 and earlier `source: "opencode-voice"`, and readers accept all three) and returns the inbox ID at once; `interrupt`
@@ -684,7 +704,9 @@ Pushes in conversation mode depend on presence: while the session is watched, "f
 (the phone is open and speaking). When nobody watches, "finished" is sent as usual and each spoken text
 of the root session (the whole text part, when it ends) is pushed as kind `say` (title = session title, body = the text, max 180 chars; at
 most one every 10 s per session; on by default, pref `say`). "blocked" is always sent. `/api/transcribe` and `/api/speak` have no rate limit; `/api/speak` accepts up to
-`HUB_MAX_SPEECH_CHARS` per call, so the phone sends sentence-sized chunks.
+`HUB_MAX_SPEECH_CHARS` per call, so the phone sends sentence-sized chunks. `/api/speak` streams the provider's MP3 through as it
+arrives (chunked; nothing is buffered on the hub, and a phone that cancels aborts the upstream request), so playback
+can start before synthesis ends; provider errors still answer 502 before any audio.
 
 ### Speech settings
 
@@ -736,13 +758,18 @@ it again, say "pause listening", or leave the page to turn it off. Leaving the p
   the phone plays them in `seq` order per text part and drops duplicates (`SayAssembler`). A `say` without
   `seq` (a subagent's result) is split into sentences. Abbreviations, decimals, file names and
   list items are handled, and fenced code becomes "(code omitted)". Each sentence goes to `/api/speak`,
-  up to two ahead of playback, and plays through one `<audio>` element. Speech that lasts 300 ms or more
-  (barge-in) pauses playback, clears the queue and mutes the rest of the replies that were speaking (their
-  later sentences still show in the transcript); a new reply speaks again.
+  up to two ahead of playback, and plays through one `<audio>` element while its MP3 is still downloading:
+  through MediaSource (`audio/mpeg` SourceBuffer; Chrome, Android, Firefox), appending bytes as they arrive
+  (`web/src/core/audio-stream.ts`). Browsers without MP3 in MediaSource (some iOS Safari versions) play each
+  sentence once it has fully downloaded, as before. Prefetched sentences keep downloading while they wait. Speech that lasts 300 ms or more
+  (barge-in) pauses playback, clears the queue and mutes the rest of the replies that were speaking, also a reply still
+  being written whose next sentence has not arrived yet (their later sentences still show in the transcript); a
+  new reply speaks again. Barge-in never interrupts anything: what you say steers the agent, and background
+  workers keep running (only a stop phrase interrupts the agent's turn).
 - **Turn timing**: each turn's steps are `performance.mark`s (`hub-voice:speech-end`, `…:transcript`,
-  `…:accepted`, `…:first-say`, `…:first-audio`; visible in the browser's performance tools), and the Voice bar's
+  `…:accepted`, `…:first-say`, `…:first-byte` (the reply's first audio byte arrived), `…:first-audio` (it plays); visible in the browser's performance tools), and the Voice bar's
   state has the last turn as its tooltip: "last turn: 1.8 s to first audio" with the steps (transcript,
-  accepted, first reply, audio). A typed turn counts from when the hub accepted it. The transcript shows your utterances with ✓ (sent)
+  accepted, first reply, first byte, audio). A typed turn counts from when the hub accepted it. The transcript shows your utterances with ✓ (sent)
   and ✓✓ (heard). Agent text is merged with the bubble already streamed from deltas. Subagents
   starting, finishing or failing appear as small notes. Typed text is sent as an utterance while the
   mode is on.

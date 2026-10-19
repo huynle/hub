@@ -34,6 +34,8 @@ export interface SpeechSettingsStore {
 export interface ScopedSpeech {
   transcribe(audio: Uint8Array, format: string): Promise<string>
   speak(text: string): Promise<Uint8Array<ArrayBuffer>>
+  /** The audio as the provider streams it; `signal` aborts the upstream request (the phone moved on). */
+  speakStream(text: string, signal?: AbortSignal): Promise<ReadableStream<Uint8Array>>
 }
 
 export interface SpeechServiceOptions {
@@ -85,6 +87,7 @@ export class SpeechService {
     return {
       transcribe: (audio, format) => this.transcribe(audio, format, undefined, userID),
       speak: (text) => this.speak(text, undefined, userID),
+      speakStream: (text, signal) => this.speakStream(text, signal, userID),
     }
   }
 
@@ -95,6 +98,11 @@ export class SpeechService {
   speak(text: string, signal?: AbortSignal, userID?: string): Promise<Uint8Array<ArrayBuffer>> {
     const tts = resolveTts(this.options.store.speechSettings(), this.options.defaults, this.userSettings(userID))
     return this.provider("tts", userID).speak(text, tts.speed, signal)
+  }
+
+  speakStream(text: string, signal?: AbortSignal, userID?: string): Promise<ReadableStream<Uint8Array>> {
+    const tts = resolveTts(this.options.store.speechSettings(), this.options.defaults, this.userSettings(userID))
+    return this.provider("tts", userID).speakStream(text, tts.speed, signal)
   }
 
   /**

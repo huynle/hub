@@ -17,7 +17,8 @@
 // Streaming: POST /mock/stream {sessionID?, kind: "text"|"reasoning", messageID, text, every?, size?} emits the text in
 // chunks as SSE delta/reasoning (with rootID ses_mock); ses_mock text in conversation mode is also spoken like the hub
 // does it (a say per completed sentence with seq, the rest when the text ends; GET /mock/log lists `textEnded`
-// times); POST /mock/scenario {say?} plays a scripted run of ses_mock: root
+// times; /api/speak streams a 2 s MP3 in 12 chunks over ~1.2 s, its log entry's `done` says when the last was sent);
+// POST /mock/scenario {say?} plays a scripted run of ses_mock: root
 // reasoning, a shell tool, two subagents (ses_mock_kid, ses_mock_kid2) streaming their output, root reply text (and say
 // events when conversation mode is on), then idle. Status entries of working sessions carry `since`.
 // Multi-user (0.3.0, docs/multi-user.md): POST /mock/auth {mode?: "pairing"|"oidc", as?: userID} switches the auth mode
@@ -66,7 +67,12 @@ const TYPES: Record<string, string> = {
   ".png": "image/png",
 }
 
-type Log = { at: number; method: string; path: string; contentType?: string; bytes?: number; body?: unknown }
+type Log = { at: number; method: string; path: string; contentType?: string; bytes?: number; body?: unknown; done?: number }
+
+/** A 2 s MP3 tone standing in for TTS audio; /api/speak streams it slowly (the log's `done`: when it was all sent). */
+const TONE_MP3 = new Uint8Array(readFileSync(path.join(import.meta.dir, "fixtures", "tone.mp3")))
+const SPEAK_CHUNKS = 12
+const SPEAK_EVERY_MS = 100
 let log: Log[] = []
 let transcripts: string[] = []
 let conversation = false
@@ -1298,7 +1304,32 @@ const server = Bun.serve({
       const body = await json()
       last().body = body
       await Bun.sleep(150)
-      return new Response(toneWav(String(body.text ?? "")), { headers: { "content-type": "audio/wav" } })
+      // Streamed like a real provider: playback can start long before the last byte arrives.
+      const entry = last()
+      const size = Math.ceil(TONE_MP3.length / SPEAK_CHUNKS)
+      let sent = 0
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const audio = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const next = () => {
+            try {
+              controller.enqueue(TONE_MP3.slice(sent, (sent += size)))
+              if (sent < TONE_MP3.length) timer = setTimeout(next, SPEAK_EVERY_MS)
+              else {
+                entry.done = Date.now()
+                controller.close()
+              }
+            } catch {
+              // the phone cancelled (barge-in)
+            }
+          }
+          next()
+        },
+        cancel() {
+          clearTimeout(timer)
+        },
+      })
+      return new Response(audio, { headers: { "content-type": "audio/mpeg" } })
     }
     if (p.startsWith("/api/")) return notFound()
 

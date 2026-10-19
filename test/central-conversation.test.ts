@@ -317,7 +317,7 @@ describe("say events", () => {
     await events.cancel()
   })
 
-  test("does not speak failed, interrupted, root, or non-conversation child completions", async () => {
+  test("does not speak failed, interrupted, root, or non-conversation child completions (a failure is announced instead)", async () => {
     h = harness()
     const client = await spoke(h, {
       sessions: [
@@ -346,7 +346,107 @@ describe("say events", () => {
     client.send(ended("ses_root", "msg_root", 0, "Root marker."))
 
     await collect
-    expect(says).toEqual([{ type: "say", sessionID: "ses_root", messageID: "msg_root", ordinal: 0, seq: 0, text: "Root marker." }])
+    expect(says).toEqual([
+      { type: "say", sessionID: "ses_root", messageID: "announce:failed:ses_failed", ordinal: 0, text: "title ses_failed failed: nope." },
+      { type: "say", sessionID: "ses_root", messageID: "msg_root", ordinal: 0, seq: 0, text: "Root marker." },
+    ])
+    await events.cancel()
+  })
+})
+
+describe("worker announcements", () => {
+  async function conversationTree(children: string[]) {
+    h = harness()
+    const machine = h.store.addMachine("laptop")
+    const sessions = [session("ses_root", { owned: true }), ...children.map((id) => session(id, { parentID: "ses_root" }))]
+    const client = await spoke(h, { machine, sessions })
+    conversationSpoke(client)
+    const other = await spoke(h, { machine, processID: "svc", hello: { kind: "service" }, sessions })
+    conversationSpoke(other)
+    await post("/api/sessions/ses_root/conversation", { on: true })
+    const events = sse(await h.api("/api/events"))
+    const says: any[] = []
+    const until = (done: (m: any) => boolean) =>
+      events.next((m) => {
+        if (m.type === "say") says.push(m)
+        return m.type === "say" && done(m)
+      })
+    return { client, other, events, says, until }
+  }
+
+  test("with several workers, results are prefixed with the task's title, in completion order", async () => {
+    const { client, events, says, until } = await conversationTree(["ses_deploy", "ses_docs"])
+    const collect = until((m) => m.text === "Nothing else changed.")
+    client.send(event("session.execution.started", { sessionID: "ses_deploy" }))
+    client.send(event("session.execution.started", { sessionID: "ses_docs" }))
+    client.send(ended("ses_deploy", "msg_d", 0, "The deploy is green."))
+    client.send(event("session.execution.succeeded", { sessionID: "ses_deploy" }))
+    client.send(ended("ses_docs", "msg_c", 0, "Docs are updated."))
+    client.send(ended("ses_docs", "msg_c", 1, "Nothing else changed."))
+    client.send(event("session.execution.succeeded", { sessionID: "ses_docs" }))
+    await collect
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(says.map((m) => m.text)).toEqual([
+      "title ses_deploy finished: The deploy is green.",
+      "title ses_docs finished: Docs are updated.",
+      "Nothing else changed.",
+    ])
+    expect(says[0]).toMatchObject({ sessionID: "ses_root", messageID: "msg_d", ordinal: 0 })
+    await events.cancel()
+  })
+
+  test("a lone worker's result is read as is", async () => {
+    const { client, events, until } = await conversationTree(["ses_only", "ses_idle"])
+    const collect = until(() => true)
+    client.send(event("session.execution.started", { sessionID: "ses_only" }))
+    client.send(ended("ses_only", "msg_o", 0, "All tests pass."))
+    client.send(event("session.execution.succeeded", { sessionID: "ses_only" }))
+    expect((await collect).text).toBe("All tests pass.")
+    await events.cancel()
+  })
+
+  test("a result the voice agent already said is not read again", async () => {
+    const { client, events, says, until } = await conversationTree(["ses_deploy"])
+    const collect = until((m) => m.text === "Marker.")
+    client.send(event("session.execution.started", { sessionID: "ses_deploy" }))
+    client.send(ended("ses_root", "msg_r", 0, "Good news: the deploy is green!"))
+    client.send(ended("ses_deploy", "msg_d", 0, "The deploy is green."))
+    client.send(event("session.execution.succeeded", { sessionID: "ses_deploy" }))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    client.send(ended("ses_root", "msg_r2", 0, "Marker."))
+    await collect
+    expect(says.map((m) => m.text)).toEqual(["Good news: the deploy is green!", "Marker."])
+    await events.cancel()
+  })
+
+  test("a failed worker is announced once with its reason; a stopped one is not", async () => {
+    const { client, other, events, says, until } = await conversationTree(["ses_lint", "ses_stop"])
+    const collect = until((m) => m.text === "Marker.")
+    client.send(event("session.execution.started", { sessionID: "ses_lint" }))
+    client.send(event("session.execution.failed", { sessionID: "ses_lint", error: { message: "Rate limit exceeded" } }))
+    other.send(event("session.execution.failed", { sessionID: "ses_lint", error: { message: "Rate limit exceeded" } }))
+    client.send(event("session.execution.started", { sessionID: "ses_stop" }))
+    client.send(event("session.execution.interrupted", { sessionID: "ses_stop" }))
+    client.send(ended("ses_root", "msg_r", 0, "Marker."))
+    await collect
+    expect(says.map((m) => m.text)).toEqual(["title ses_lint failed: Rate limit exceeded.", "Marker."])
+    await events.cancel()
+  })
+
+  test("a worker that needs permission or asks a question is announced once per request", async () => {
+    const { client, other, events, says, until } = await conversationTree(["ses_clean"])
+    const collect = until((m) => m.text === "Marker.")
+    const asked = event("permission.asked", { sessionID: "ses_clean", id: "per_1", action: "shell", resources: ["rm -rf dist"] })
+    client.send(asked)
+    other.send(asked)
+    const question = event("form.created", { form: { id: "frm_1", sessionID: "ses_clean", title: "Which branch?", fields: [] } })
+    client.send(question)
+    other.send(question)
+    // The root's own permission is on screen already: not announced.
+    client.send(event("permission.asked", { sessionID: "ses_root", id: "per_root", action: "shell", resources: ["ls"] }))
+    client.send(ended("ses_root", "msg_r", 0, "Marker."))
+    await collect
+    expect(says.map((m) => m.text)).toEqual(["title ses_clean needs your permission.", "title ses_clean has a question.", "Marker."])
     await events.cancel()
   })
 })

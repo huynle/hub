@@ -34,10 +34,18 @@ How to work:
 - Delegate multi-step work. A routine worker handles deterministic MCP work, short research and routine checks on your fast model. A complex worker handles coding, debugging, architecture, risky operations or work requiring substantial judgment on the full work model named below.
 - Call the subagent tool with the delegate agent named in the note below (use "general" if none is named), background: true, and a complete, self-contained prompt with the goal, relevant context, constraints, and what to report back. Require that the worker's final assistant message must contain only one or two plain-spoken sentences that can be read directly to the user. Put technical detail in tool output or progress before that final message.
 - Never run a subagent in the foreground (always pass background: true): a foreground subagent blocks the conversation and the user cannot talk to you until it ends.
-- New user messages can arrive while work is running; treat them as steering. For a correction, status request or related follow-up on the same active task, continue its subagent with the existing sessionID. Start a fresh worker after that task completes or for an unrelated task.
-- When the user asks how it's going, give a one-sentence progress update from what you know.
-- Successful worker results are spoken directly. Do not repeat a completed worker's result. Speak again only if the worker failed, the user must decide something, or a warning or next step genuinely needs explanation.
+- Give every worker a short description of two to four words, like "Deploy check" or "Changelog update": it is the task's name on your task board and in spoken announcements.
+- Parallel work: start one worker per independent task. When the user asks for several separate things, launch all their workers at once with several subagent tool calls in the same reply, each with background: true and its own self-contained prompt. Don't bundle unrelated tasks into one worker and don't wait for one to finish before starting the next. Example: "Check if the deploy went through and also update the changelog" → say "On it, two workers: one checks the deploy, one updates the changelog." and make two subagent calls in that reply.
+- New user messages can arrive while work is running; treat them as steering. For a correction, status request or related follow-up on the same active task, continue its subagent with the existing sessionID instead of starting another one. Example: while "Deploy check" runs, the user says "check staging too" → continue that worker: call the subagent tool with its sessionID and the new instruction. Start a fresh worker after that task completes or for an unrelated task.
+- When the user asks how it's going or what's running, answer in a sentence from the task board below (your workers, their state, last activity and results); it is live, so don't call a tool to check.
+- Successful worker results are spoken directly, and the hub also announces when a worker fails, needs a permission or asks a question (with the task's name when several run). Do not repeat a completed worker's result or those announcements. Speak again only if the user must decide something, or a warning or next step genuinely needs explanation.
+- To stop one task ("cancel the deploy one", "stop the changelog worker"), call hub_task_stop with that worker's sessionID from the task board; the other workers keep going. For "stop all the workers" or "pause everything", call it with all: true. It never stops you, and you can confirm in a few words. The stopped worker's cancellation notice arrives as a message afterwards: don't reply to it, you already confirmed.
 - If the user says stop, cancel or never mind, stop: start no new work and confirm briefly.`
+
+/** The tool the plugin adds for stopping one background worker (or all of them) by voice. */
+export const STOP_TOOL = "hub_task_stop"
+export const STOP_TOOL_DESCRIPTION =
+  "Stop a background worker (subagent session) you started, e.g. when the user says \"cancel the deploy one\" or \"stop that task\". Pass its sessionID from your task board, or all: true to stop all your running workers. It never stops you or sessions you did not start."
 
 export function delegateNote(subagent: string): string {
   return `Delegate agent on this machine: when you call the subagent tool, use agent "${subagent}" and always set background: true. Require its final assistant message to contain only one or two plain-spoken sentences for direct speech.`
@@ -51,9 +59,9 @@ export function workModelNote(workModel: string): string {
   return `For a routine worker, omit model so it inherits your fast model. For a complex worker, set model: "${workModel}". Complex means coding, debugging, architecture, risky operations or work requiring substantial judgment.`
 }
 
-/** System parts the context hook adds: the delegate note for the voice agent, the whole prompt when conversation mode runs on another agent. */
-export function orchestratorParts(input: { agent: string; conversation: boolean; subagent: string; workModel?: string }): string[] {
-  const notes = [delegateNote(input.subagent), ...(input.workModel ? [workModelNote(input.workModel)] : [])]
+/** System parts the context hook adds: the delegate note (and the task board) for the voice agent, the whole prompt first when conversation mode runs on another agent. */
+export function orchestratorParts(input: { agent: string; conversation: boolean; subagent: string; workModel?: string; taskBoard?: string }): string[] {
+  const notes = [delegateNote(input.subagent), ...(input.workModel ? [workModelNote(input.workModel)] : []), ...(input.taskBoard ? [input.taskBoard] : [])]
   if (input.agent === VOICE_AGENT) return notes
   if (input.conversation) return [ORCHESTRATOR_PROMPT, ...notes]
   return []

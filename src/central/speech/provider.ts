@@ -6,6 +6,18 @@ export interface SpeechProvider {
   transcribe(audio: Uint8Array, format: string, signal?: AbortSignal): Promise<string>
   /** MP3 audio. `speed` is optional; providers that reject it get one retry without it. */
   speak(text: string, speed?: number, signal?: AbortSignal): Promise<Uint8Array<ArrayBuffer>>
+  /** The same MP3 as a stream, passed through as the provider sends it (errors are thrown before any byte). */
+  speakStream(text: string, speed?: number, signal?: AbortSignal): Promise<ReadableStream<Uint8Array>>
+}
+
+/** A successful upstream response's body (an empty stream when it has none). */
+export function audioBody(response: Response): ReadableStream<Uint8Array> {
+  return response.body ?? new ReadableStream({ start: (controller) => controller.close() })
+}
+
+/** Reads a whole audio stream into one buffer. */
+export async function collect(stream: ReadableStream<Uint8Array>): Promise<Uint8Array<ArrayBuffer>> {
+  return new Uint8Array(await new Response(stream).arrayBuffer())
 }
 
 /** The speech provider refused or failed a request (or is not configured). Never carries the API key. */

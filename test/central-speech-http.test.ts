@@ -143,6 +143,38 @@ describe("speech follows the settings", () => {
     })
   })
 
+  test("speak streams the provider's audio through as it arrives (no buffering on the hub)", async () => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    reply = () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          async start(controller) {
+            controller.enqueue(new Uint8Array([1, 2]))
+            await held
+            controller.enqueue(new Uint8Array([3]))
+            controller.close()
+          },
+        }),
+        { headers: { "content-type": "audio/mpeg" } },
+      )
+    const res = await Promise.race([
+      h.api("/api/speak", { method: "POST", json: { text: "Streaming." } }),
+      Bun.sleep(1500).then(() => "buffered" as const),
+    ])
+    expect(res).not.toBe("buffered")
+    const spoken = res as Response
+    expect(spoken.status).toBe(200)
+    expect(spoken.headers.get("content-type")).toBe("audio/mpeg")
+    const reader = spoken.body!.getReader()
+    const first = await reader.read()
+    expect([...first.value!]).toEqual([1, 2])
+    release()
+    const rest: number[] = []
+    for (let r = await reader.read(); !r.done; r = await reader.read()) rest.push(...r.value)
+    expect(rest).toEqual([3])
+  })
+
   test("provider errors are 502 and do not reveal the key", async () => {
     await put({ tts: { apiKey: KEY } })
     reply = () => Response.json({ error: { message: "invalid voice" } }, { status: 422 })

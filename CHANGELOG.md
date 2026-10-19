@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- **Voice mode: streaming speech and several tasks at once** (release 2 of 3):
+  - **Replies play while their audio downloads**: `/api/speak` passes the TTS provider's MP3 through as it
+    arrives (nothing is buffered on the hub; a cancelled request aborts the upstream one), and the phone plays
+    each sentence through MediaSource while it is still downloading. Browsers without MP3 in MediaSource (some
+    iOS Safari versions) play each sentence once complete, as before. Prefetching two ahead, barge-in, Voice
+    speed and the cached cue phrases work as before. New turn step `hub-voice:first-byte` (the Voice bar tooltip
+    shows "first byte" between "first reply" and "audio").
+  - **Parallel workers**: the voice agent starts one background worker per independent request, all in the same
+    turn ("check the deploy and update the changelog" → two workers), names each in a few words ("Deploy
+    check"), and keeps sending follow-ups for a running task to the same worker.
+  - **Task board**: every voice turn carries a live list of the agent's workers (title, sessionID, working /
+    blocked on what / done with its result / failed with the reason / stopped, and for how long; at most 8, of at
+    most 200 characters each), so "what's running?" or "how's the deploy going?" is answered without a tool call.
+  - **Stop one task by voice**: new tool `hub_task_stop` ("cancel the deploy one" → that worker and what runs
+    below it; "stop all the workers" → `all: true`). It only reaches workers of the session calling it, never the
+    voice agent itself. The phone's stop words still interrupt the agent's turn at once.
+  - **Announcements**: with several workers in play, a finished worker's result starts with its task's name
+    ("Deploy check finished: …"); a result the voice agent already said is not read again; a failed worker is
+    announced once with its reason, a permission request or question once ("Cleanup needs your permission.").
+    Announcements queue after the sentence playing.
+  - **Barge-in** between two sentences of a reply still being written now also drops the rest of that reply
+    (before, only a reply that was playing went quiet). Barge-in never interrupts the agent or its workers.
+  - **Fix**: Voice mode's progress-cue clock and the endpointer's hold timer called `setTimeout` as a method,
+    which browsers reject ("Illegal invocation"): progress cues could stop working and an unfinished-sounding
+    utterance was never sent after the hold.
+
 - **Faster Voice mode** (release 1 of 3):
   - **Speak while it writes**: the hub cuts a root reply's streamed text into sentences and sends a `say` per
     completed sentence (new `seq`, counted per text part from 0) right after its delta; `session.text.ended`

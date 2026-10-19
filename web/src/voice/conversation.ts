@@ -5,6 +5,7 @@
 // media session). Ported from the 0.4 web/conversation.js; behavior unchanged except the mic device choice.
 import { gestureBlocked } from "../core/voice-autostart"
 import { Endpointer, EnergyVad, SayAssembler, SpeechQueue, TurnTimer, describeTurn, encodeWav, parseCommand, type TurnMark } from "../core/conversation-core"
+import { AudioClip, canStreamMp3, clipFrom, feed } from "../core/audio-stream"
 import { CuePlayer } from "../core/cues"
 import { CUE_PHRASES, CueClock, CueScheduler, isWorking, subagentChanges, type StatusEntry } from "../core/feedback-core"
 import type { ApiInit } from "../app/api"
@@ -51,6 +52,7 @@ const TURN_MARKS: Record<TurnMark, string> = {
   transcript: "hub-voice:transcript",
   accepted: "hub-voice:accepted",
   firstSay: "hub-voice:first-say",
+  firstByte: "hub-voice:first-byte",
   firstAudio: "hub-voice:first-audio",
 }
 
@@ -96,7 +98,9 @@ export class Conversation<B = unknown> {
   private tap?: AudioWorkletNode | ScriptProcessorNode
   private vad?: EnergyVad
   private endpointer?: Endpointer
-  private queue?: SpeechQueue<string>
+  private queue?: SpeechQueue<AudioClip>
+  /** MediaSource plays a sentence while it downloads; without it (some iOS versions) each plays as a whole blob. */
+  private readonly streaming = canStreamMp3(window as never)
   /** Orders and dedupes the sentence-by-sentence says; barge-in mutes the replies speaking. */
   private says = new SayAssembler()
   private turns = new TurnTimer()
@@ -257,9 +261,9 @@ export class Conversation<B = unknown> {
       send: (text) => void this.deliver(text),
       onHeld: (text) => this.ui.held?.(text),
     })
-    this.queue = new SpeechQueue<string>({
+    this.queue = new SpeechQueue<AudioClip>({
       synth: (text, signal) => this.synth(text, signal),
-      play: (url) => this.play(url),
+      play: (clip) => this.play(clip),
       stop: () => {
         if (!this.player.paused) this.player.pause()
       },
@@ -286,7 +290,10 @@ export class Conversation<B = unknown> {
         this.endpointer!.speechStarted()
         this.scheduler.userTalking(true, Date.now())
         this.cuePlayer.stop()
-        if (this.queue!.speaking) this.hushReplies() // barge-in: start fires only after VOICE_TIMINGS.minSpeechMs of voice
+        // Barge-in (start fires only after VOICE_TIMINGS.minSpeechMs of voice): the reply speaking, or one still being
+        // written between two sentences, goes quiet; the utterance then steers the agent. Workers are not touched.
+        if (this.queue!.speaking) this.hushReplies()
+        else this.says.mute()
       } else {
         // Instant acknowledgement: the segment goes to transcription, so the user hears it was taken.
         this.speechEndedAt = Date.now()
@@ -506,15 +513,43 @@ export class Conversation<B = unknown> {
     this.cuePlayer.stop()
   }
 
-  private async synth(text: string, signal: AbortSignal): Promise<string> {
+  /**
+   * Starts downloading a sentence's audio: resolves once the hub answers (the bytes keep arriving into the
+   * clip, also while it waits behind the sentence playing). The barge-in's `signal` cancels the download.
+   */
+  private async synth(text: string, signal: AbortSignal): Promise<AudioClip> {
     const res = await this.api("/api/speak", { method: "POST", json: { text }, signal })
-    return URL.createObjectURL(await res.blob())
+    const clip = clipFrom(res.body, signal)
+    clip.firstByte.then(
+      () => this.markTurn("firstByte"),
+      () => {},
+    )
+    return clip
   }
 
-  private async play(url: string): Promise<void> {
+  /** Plays a clip: through MediaSource as it downloads, else (no MSE for MP3) once complete as a blob. */
+  private async play(clip: AudioClip): Promise<void> {
     const player = this.player
+    const stop = new AbortController()
+    let url: string | undefined
     try {
-      player.src = url
+      if (this.streaming) {
+        await clip.firstByte
+        if (clip.done && !clip.chunks.length) return
+        const source = new MediaSource()
+        url = URL.createObjectURL(source)
+        player.src = url
+        void this.feedSource(source, clip, stop.signal)
+      } else {
+        const chunks = await clip.whole()
+        if (!chunks.length) return
+        url = URL.createObjectURL(new Blob(chunks as BlobPart[], { type: "audio/mpeg" }))
+        player.src = url
+      }
+      // Listen before play() so a very short sentence cannot end unnoticed.
+      const finished = new Promise<void>((resolve) => {
+        player.onended = player.onpause = player.onerror = () => resolve()
+      })
       const played = await player.play().then(
         () => true,
         () => false,
@@ -525,12 +560,38 @@ export class Conversation<B = unknown> {
         return
       }
       this.markTurn("firstAudio")
-      await new Promise<void>((resolve) => {
-        player.onended = player.onpause = player.onerror = () => resolve()
-      })
+      await finished
     } finally {
+      stop.abort()
       player.onended = player.onpause = player.onerror = null
-      URL.revokeObjectURL(url)
+      if (url) URL.revokeObjectURL(url)
+    }
+  }
+
+  /** Appends a clip to a MediaSource as its bytes arrive; a broken download ends the stream with what came. */
+  private async feedSource(source: MediaSource, clip: AudioClip, signal: AbortSignal): Promise<void> {
+    try {
+      if (source.readyState !== "open") await new Promise((resolve) => source.addEventListener("sourceopen", resolve, { once: true }))
+      if (signal.aborted) return
+      const buffer = source.addSourceBuffer("audio/mpeg")
+      const ended = await feed(
+        clip,
+        {
+          append: (chunk) =>
+            new Promise<void>((resolve, reject) => {
+              buffer.addEventListener("updateend", () => resolve(), { once: true })
+              buffer.addEventListener("error", () => reject(new Error("Could not decode the reply audio")), { once: true })
+              buffer.appendBuffer(chunk as BufferSource)
+            }),
+          end: () => {
+            if (source.readyState === "open" && !buffer.updating) source.endOfStream()
+          },
+        },
+        signal,
+      )
+      if (!ended && !signal.aborted && source.readyState === "open" && !buffer.updating) source.endOfStream()
+    } catch {
+      // The element reports the failure (error event) or was stopped.
     }
   }
 

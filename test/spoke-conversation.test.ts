@@ -49,6 +49,39 @@ describe("orchestrator prompt", () => {
     expect(delegateNote("general")).toContain("final assistant message")
   })
 
+  test("launches independent requests as parallel background workers in one turn, with examples", () => {
+    expect(ORCHESTRATOR_PROMPT).toContain("Parallel work")
+    expect(ORCHESTRATOR_PROMPT).toContain("several subagent tool calls in the same reply")
+    expect(ORCHESTRATOR_PROMPT).toContain("one worker per independent task")
+    expect(ORCHESTRATOR_PROMPT).toMatch(/Example: .*two workers/)
+    expect(ORCHESTRATOR_PROMPT).toContain("short description")
+    // Follow-ups still go to the same worker.
+    expect(ORCHESTRATOR_PROMPT).toMatch(/Example: .*continue .*sessionID/)
+  })
+
+  test("keeps the direct path and the routine/complex split", () => {
+    expect(ORCHESTRATOR_PROMPT).toContain("at most two quick, low-risk tool calls")
+    expect(ORCHESTRATOR_PROMPT).toContain("A routine worker")
+    expect(ORCHESTRATOR_PROMPT).toContain("A complex worker")
+    expect(ORCHESTRATOR_PROMPT).toContain("Never run a subagent in the foreground")
+  })
+
+  test("the task board follows the notes for the voice agent and for a conversation on another agent", () => {
+    const board = "Task board: …"
+    expect(orchestratorParts({ agent: VOICE_AGENT, conversation: true, subagent: "general", taskBoard: board })).toEqual([delegateNote("general"), board])
+    expect(orchestratorParts({ agent: "build", conversation: true, subagent: "general", taskBoard: board })).toEqual([ORCHESTRATOR_PROMPT, delegateNote("general"), board])
+    expect(orchestratorParts({ agent: "build", conversation: false, subagent: "general", taskBoard: board })).toEqual([])
+    expect(ORCHESTRATOR_PROMPT).toContain("task board")
+  })
+
+  test("stopping one worker by voice uses hub_task_stop (all: true for every worker)", () => {
+    expect(ORCHESTRATOR_PROMPT).toContain("hub_task_stop")
+    expect(ORCHESTRATOR_PROMPT).toContain("all: true")
+    expect(ORCHESTRATOR_PROMPT).toContain("the other workers keep going")
+    // OpenCode then reports the cancelled worker as a message: confirming twice is noise.
+    expect(ORCHESTRATOR_PROMPT).toContain("cancellation notice")
+  })
+
   test("the voice agent gets only the delegate note; a conversation on another agent gets the full prompt", () => {
     expect(orchestratorParts({ agent: VOICE_AGENT, conversation: true, subagent: "general" })).toEqual([delegateNote("general")])
     expect(orchestratorParts({ agent: VOICE_AGENT, conversation: false, subagent: "x" })).toEqual([delegateNote("x")])

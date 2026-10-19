@@ -380,7 +380,8 @@ export class Endpointer {
   private speaking = false
   private timer: unknown
 
-  constructor({ send, holdMs = VOICE_TIMINGS.holdMs, maxUtteranceMs = 60_000, onHeld, setTimer = setTimeout, clearTimer = clearTimeout }: EndpointerOptions) {
+  constructor({ send, holdMs = VOICE_TIMINGS.holdMs, maxUtteranceMs = 60_000, onHeld, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = (id) => clearTimeout(id) }: EndpointerOptions) {
+    // Wrapped: called as `this.setTimer(…)`, a bare setTimeout throws "Illegal invocation" in browsers.
     this.sendFn = send
     this.holdMs = holdMs
     this.maxUtteranceMs = maxUtteranceMs
@@ -629,7 +630,7 @@ export class SayAssembler {
 // ---------- turn timing ----------
 
 /** Steps of a Voice turn, in order: the user stops speaking … the reply starts playing. */
-export type TurnMark = "speechEnd" | "transcript" | "accepted" | "firstSay" | "firstAudio"
+export type TurnMark = "speechEnd" | "transcript" | "accepted" | "firstSay" | "firstByte" | "firstAudio"
 export type Turn = Readonly<Partial<Record<TurnMark, number>>>
 
 /**
@@ -660,6 +661,10 @@ export class TurnTimer {
         if (!this.turn || this.turn.firstSay !== undefined) return false
         this.turn.firstSay = at
         return true
+      case "firstByte":
+        if (this.turn?.firstSay === undefined || this.turn.firstByte !== undefined) return false
+        this.turn.firstByte = at
+        return true
       case "firstAudio":
         if (this.turn?.firstSay === undefined) return false
         this.last = { ...this.turn, firstAudio: at }
@@ -679,6 +684,7 @@ export function describeTurn(turn: Turn | undefined): { summary: string; detail:
     ["transcript", "transcript"],
     ["accepted", "accepted"],
     ["firstSay", "first reply"],
+    ["firstByte", "first byte"],
     ["firstAudio", "audio"],
   ]
   const parts: string[] = []
