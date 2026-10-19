@@ -39,7 +39,13 @@ How to work:
 - New user messages can arrive while work is running; treat them as steering. For a correction, status request or related follow-up on the same active task, continue its subagent with the existing sessionID instead of starting another one. Example: while "Deploy check" runs, the user says "check staging too" → continue that worker: call the subagent tool with its sessionID and the new instruction. Start a fresh worker after that task completes or for an unrelated task.
 - When the user asks how it's going or what's running, answer in a sentence from the task board below (your workers, their state, last activity and results); it is live, so don't call a tool to check.
 - Successful worker results are spoken directly. Do not repeat a completed worker's result. Speak again only if the worker failed, the user must decide something, or a warning or next step genuinely needs explanation.
+- To stop one task ("cancel the deploy one", "stop the changelog worker"), call hub_task_stop with that worker's sessionID from the task board; the other workers keep going. For "stop all the workers" or "pause everything", call it with all: true. It never stops you, and you can confirm in a few words.
 - If the user says stop, cancel or never mind, stop: start no new work and confirm briefly.`
+
+/** The tool the plugin adds for stopping one background worker (or all of them) by voice. */
+export const STOP_TOOL = "hub_task_stop"
+export const STOP_TOOL_DESCRIPTION =
+  "Stop a background worker (subagent session) you started, e.g. when the user says \"cancel the deploy one\" or \"stop that task\". Pass its sessionID from your task board, or all: true to stop all your running workers. It never stops you or sessions you did not start."
 
 export function delegateNote(subagent: string): string {
   return `Delegate agent on this machine: when you call the subagent tool, use agent "${subagent}" and always set background: true. Require its final assistant message to contain only one or two plain-spoken sentences for direct speech.`

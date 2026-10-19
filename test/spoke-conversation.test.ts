@@ -74,6 +74,12 @@ describe("orchestrator prompt", () => {
     expect(ORCHESTRATOR_PROMPT).toContain("task board")
   })
 
+  test("stopping one worker by voice uses hub_task_stop (all: true for every worker)", () => {
+    expect(ORCHESTRATOR_PROMPT).toContain("hub_task_stop")
+    expect(ORCHESTRATOR_PROMPT).toContain("all: true")
+    expect(ORCHESTRATOR_PROMPT).toContain("the other workers keep going")
+  })
+
   test("the voice agent gets only the delegate note; a conversation on another agent gets the full prompt", () => {
     expect(orchestratorParts({ agent: VOICE_AGENT, conversation: true, subagent: "general" })).toEqual([delegateNote("general")])
     expect(orchestratorParts({ agent: VOICE_AGENT, conversation: false, subagent: "x" })).toEqual([delegateNote("x")])

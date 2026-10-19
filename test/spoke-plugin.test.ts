@@ -15,6 +15,8 @@ function fakeContext(overrides: { hookThrows?: boolean; registerThrows?: boolean
   const queue = new EventQueue<{ type: string; data: Record<string, unknown> }>()
   const hooks: Array<(event: any) => void> = []
   const transforms: Array<(editor: any) => void> = []
+  const tools: Array<{ name: string; description: string; input: unknown; execute: (input: any, context: any) => Promise<any> }> = []
+  const interrupts: string[] = []
   const switches: unknown[] = []
   const sessionAgents = new Map<string, string>()
   let handlers: Record<string, (input: unknown, rpc: unknown) => Promise<unknown>> | undefined
@@ -52,7 +54,16 @@ function fakeContext(overrides: { hookThrows?: boolean; registerThrows?: boolean
         switches.push(input)
         sessionAgents.set(input.sessionID, input.agent)
       },
-      interrupt: async () => ({ interrupted: true }),
+      interrupt: async (input: { sessionID: string }) => {
+        interrupts.push(input.sessionID)
+        return { interrupted: true }
+      },
+    },
+    tool: {
+      transform: async (fn: (editor: any) => void) => {
+        fn({ add: (tool: (typeof tools)[number]) => tools.push(tool) })
+        return { dispose: async () => {} }
+      },
     },
     // Location-scoped like OpenCode's: only requests pending in this instance's location are found.
     permission: {
@@ -76,7 +87,7 @@ function fakeContext(overrides: { hookThrows?: boolean; registerThrows?: boolean
     },
   }
   const rpc = { signal: new AbortController().signal, error: (type: string, message: string, data: unknown) => ({ type, message, data }) }
-  return { ctx, hooks, transforms, switches, rpc, registered, replies, queue, call: (name: string, input: unknown = {}) => handlers![name]!(input, rpc) }
+  return { ctx, hooks, transforms, tools, interrupts, switches, rpc, registered, replies, queue, call: (name: string, input: unknown = {}) => handlers![name]!(input, rpc) }
 }
 
 function tempConfig(config: Partial<ReturnType<typeof defaults>>) {
@@ -272,6 +283,61 @@ describe("plugin setup", () => {
     const plain = { sessionID: "ses_other", agent: "build", system: [] as unknown[] }
     fake.hooks[0]!(plain)
     expect(plain.system).toEqual([])
+  })
+
+  describe("hub_task_stop (the voice agent stops one of its workers)", () => {
+    async function setupWorkers() {
+      tempConfig({ mode: "always" })
+      const fake = fakeContext()
+      cleanups.push((await plugin.setup(fake.ctx as any)) as () => void)
+      const tool = fake.tools.find((t) => t.name === "hub_task_stop")!
+      expect(tool).toBeDefined()
+      expect(tool.description).toContain("background worker")
+      const push = (type: string, data: Record<string, unknown>) => fake.queue.push({ type, data })
+      push("session.created", { sessionID: "ses_w1", parentID: "ses_a", title: "Deploy check" })
+      push("session.execution.started", { sessionID: "ses_w1" })
+      push("session.created", { sessionID: "ses_w1_kid", parentID: "ses_w1", title: "nested" })
+      push("session.execution.started", { sessionID: "ses_w1_kid" })
+      push("session.created", { sessionID: "ses_w2", parentID: "ses_a", title: "Changelog" })
+      push("session.execution.started", { sessionID: "ses_w2" })
+      push("session.created", { sessionID: "ses_x", parentID: "ses_other", title: "Someone else's" })
+      push("session.execution.started", { sessionID: "ses_x" })
+      push("session.execution.started", { sessionID: "ses_a" })
+      await until(() => {
+        const event = { sessionID: "ses_a", agent: "voice", system: [] as Array<{ text: string }> }
+        fake.hooks[0]!(event)
+        return event.system.some((p) => p.text.includes("Changelog"))
+      })
+      const run = (input: unknown, caller = "ses_a") => tool.execute(input, { sessionID: caller, agent: "voice", messageID: "msg", id: "call", signal: new AbortController().signal, progress: async () => {} })
+      return { fake, run }
+    }
+
+    test("stops the named worker and what runs below it, never the calling session", async () => {
+      const { fake, run } = await setupWorkers()
+      const result = await run({ sessionID: "ses_w1" })
+      expect(fake.interrupts).toEqual(["ses_w1_kid", "ses_w1"])
+      expect(JSON.stringify(result)).toContain("Deploy check")
+    })
+
+    test("all: true stops every running worker of the caller only", async () => {
+      const { fake, run } = await setupWorkers()
+      await run({ all: true })
+      expect(new Set(fake.interrupts)).toEqual(new Set(["ses_w1_kid", "ses_w1", "ses_w2"]))
+      expect(fake.interrupts).not.toContain("ses_a")
+      expect(fake.interrupts).not.toContain("ses_x")
+    })
+
+    test("refuses the caller itself, other sessions' workers and unknown IDs", async () => {
+      const { fake, run } = await setupWorkers()
+      for (const sessionID of ["ses_a", "ses_x", "ses_nope"]) {
+        const result = await run({ sessionID })
+        expect(JSON.stringify(result)).toContain("not one of your workers")
+      }
+      // Another session cannot stop ses_a's workers either.
+      expect(JSON.stringify(await run({ sessionID: "ses_w1" }, "ses_other"))).toContain("not one of your workers")
+      expect(JSON.stringify(await run({}))).toContain("sessionID")
+      expect(fake.interrupts).toEqual([])
+    })
   })
 
   test("conversation RPC refuses sessions that are not shared", async () => {

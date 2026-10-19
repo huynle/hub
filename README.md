@@ -328,6 +328,12 @@ not persist those potentially sensitive details.
   state (working, blocked with what it waits for, done with its latest text, failed with the reason, stopped)
   and for how long, at most 8 (live ones first) of at most 200 characters each. So "what's running?" or "how's
   the deploy going?" needs no tool call. A session without workers gets no board.
+- **Stopping one task by voice**: the plugin adds a tool `hub_task_stop {sessionID} | {all: true}`. The voice
+  agent calls it for "cancel the deploy one" (that worker and whatever runs below it are interrupted, deepest
+  first) or "stop all the workers" (every running worker of the session). It only reaches sessions below the
+  calling session (never the caller itself, its siblings or another session's workers), so the voice agent
+  keeps listening. The phone's stop words ("stop", "cancel", "never mind", "stop that", "hold on") still
+  interrupt the root turn at once.
 - Child text and execution events are paired by the hub. The latest assistant message of a successful
   child is emitted as root-session speech; failures, interruptions and stale partial results are not.
 - Server ops: `steer` sends the text with `delivery: "steer"` (metadata `{source: "hub", mode:
