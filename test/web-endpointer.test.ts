@@ -138,3 +138,30 @@ describe("Endpointer", () => {
     expect(e.held).toBe("")
   })
 })
+
+describe("Endpointer default timers", () => {
+  test("hold timers call the global setTimeout unbound (browsers throw Illegal invocation for a method call)", () => {
+    const g = globalThis as any
+    const real = { set: g.setTimeout, clear: g.clearTimeout }
+    let held: (() => void) | undefined
+    g.setTimeout = function (this: unknown, fn: () => void) {
+      if (this !== undefined && this !== globalThis) throw new TypeError("Illegal invocation")
+      held = fn
+      return 1
+    }
+    g.clearTimeout = function (this: unknown) {
+      if (this !== undefined && this !== globalThis) throw new TypeError("Illegal invocation")
+    }
+    try {
+      const sent: string[] = []
+      const e = new Endpointer({ send: (text: string) => sent.push(text) })
+      const id = e.segmentEnded(500)
+      expect(() => e.transcribed(id, "so I was thinking about the")).not.toThrow()
+      held?.()
+      expect(sent).toEqual(["so I was thinking about the"])
+    } finally {
+      g.setTimeout = real.set
+      g.clearTimeout = real.clear
+    }
+  })
+})

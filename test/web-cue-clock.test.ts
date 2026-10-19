@@ -141,3 +141,34 @@ describe("CueClock", () => {
     expect(timers()).toEqual([])
   })
 })
+
+describe("CueClock default timers", () => {
+  test("calls the global setTimeout/clearTimeout unbound (browsers throw Illegal invocation for a method call)", () => {
+    const g = globalThis as any
+    const real = { set: g.setTimeout, clear: g.clearTimeout }
+    const calls: string[] = []
+    // Like the browser's: only callable with the global object (or nothing) as `this`.
+    g.setTimeout = function (this: unknown, fn: () => void, ms: number) {
+      if (this !== undefined && this !== globalThis) throw new TypeError("Illegal invocation")
+      calls.push(`set ${ms}`)
+      return 1
+    }
+    g.clearTimeout = function (this: unknown) {
+      if (this !== undefined && this !== globalThis) throw new TypeError("Illegal invocation")
+      calls.push("clear")
+    }
+    try {
+      const scheduler = new CueScheduler()
+      const clock = new CueClock({ scheduler, play: () => {}, now: () => 0 })
+      scheduler.working(true, 0)
+      scheduler.awaitReply(0)
+      expect(() => clock.poke()).not.toThrow()
+      expect(() => clock.poke()).not.toThrow()
+      expect(calls).toContain("clear")
+      expect(calls.some((c) => c.startsWith("set "))).toBe(true)
+    } finally {
+      g.setTimeout = real.set
+      g.clearTimeout = real.clear
+    }
+  })
+})

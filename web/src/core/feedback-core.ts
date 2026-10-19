@@ -505,7 +505,8 @@ export class CueClock {
   private clearTimer: (id: any) => void
   private timer: unknown
 
-  constructor({ scheduler, play, ready = () => true, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }: CueClockOptions) {
+  // The defaults wrap the globals: called as `this.setTimer(…)`, a bare setTimeout throws "Illegal invocation" in browsers.
+  constructor({ scheduler, play, ready = () => true, now = () => Date.now(), setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = (id) => clearTimeout(id) }: CueClockOptions) {
     this.scheduler = scheduler
     this.playFn = play
     this.ready = ready

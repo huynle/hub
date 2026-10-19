@@ -380,7 +380,8 @@ export class Endpointer {
   private speaking = false
   private timer: unknown
 
-  constructor({ send, holdMs = VOICE_TIMINGS.holdMs, maxUtteranceMs = 60_000, onHeld, setTimer = setTimeout, clearTimer = clearTimeout }: EndpointerOptions) {
+  constructor({ send, holdMs = VOICE_TIMINGS.holdMs, maxUtteranceMs = 60_000, onHeld, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = (id) => clearTimeout(id) }: EndpointerOptions) {
+    // Wrapped: called as `this.setTimer(…)`, a bare setTimeout throws "Illegal invocation" in browsers.
     this.sendFn = send
     this.holdMs = holdMs
     this.maxUtteranceMs = maxUtteranceMs
