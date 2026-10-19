@@ -3,13 +3,16 @@
 // phone (390×844) sizes: home loads, a session opens with its timeline, Send → Steer/Stop → Send, image attachments
 // (attach, remove, attach again, send), Dictate → Send (input cleared, also when the turn's connection drops), a slow turn (202, reply later), the right rail and diff viewer render, a Voice-off session is inspectable, rename (table,
 // sidebar, top bar), archive (menu, Undo, Archived chip, Needs-you exception, bulk, inactive), resizable sidebar/rail, and
-// Voice mode speaking a streamed reply before its text ends (each sentence playing while its MP3 still downloads), with the turn timed (a browser with a silent fake mic). Screenshots go to $SMOKE_SHOTS (default: the OS temp
+// Voice mode speaking a streamed reply before its text ends (each sentence playing while its MP3 still downloads), with the turn timed (a browser with a silent fake mic),
+// and speech detection (fake mics looping background noise: nothing sent, unless the on-device model is blocked; and a spoken request: one utterance, a hallucinated “Thank you.” shown as ignored). Screenshots go to $SMOKE_SHOTS (default: the OS temp
 // dir). Run `npm run build:web && npm run test:e2e`. Chromium: $CHROMIUM_PATH, else Playwright's cache, else PATH.
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { chromium, type Browser, type Page } from "playwright-core"
 import { chromiumPath } from "./chromium"
+import { encodeWav } from "../src/core/conversation-core"
+import { readWav } from "../../test/wav-fixture"
 
 const ROOT = path.join(import.meta.dir, "..", "..")
 const SHOTS = process.env.SMOKE_SHOTS ?? path.join(tmpdir(), "hub-smoke")
@@ -1175,6 +1178,121 @@ async function voiceSpeed(browser: Browser): Promise<void> {
   await context.close()
 }
 
+type LogEntry = { at: number; method: string; path: string; body?: any }
+const mockLog = async () => ((await (await fetch(`${BASE}/mock/log`)).json()) as { log: LogEntry[] }).log
+
+/**
+ * Speech detection on a noisy desk: Chromium's fake microphone loops an 8 s recording of background noise (a fan
+ * burst, typing, clatter, a beep, mains hum). With the on-device model nothing is sent; with the model blocked
+ * (the energy fallback, as before the model) the same noise is taken for speech.
+ */
+async function noiseRejection(browser: Browser): Promise<void> {
+  for (const blocked of [false, true]) {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, permissions: ["microphone"] })
+    if (blocked) await context.route(/\.onnx$/, (route) => route.abort())
+    const page = await context.newPage()
+    current = page
+    const errors: string[] = []
+    page.on("pageerror", (e) => errors.push(e.message))
+    const name = blocked ? "voice noise: without the model (energy fallback) the same noise is taken for speech" : "voice noise: background noise (fan, typing, clatter, beep, hum) sends nothing with the on-device model"
+    await check(name, async () => {
+      await mock("/mock/reset-transcripts")
+      await mock("/mock/transcripts", { texts: ["Thank you.", "Thank you.", "Thank you.", "Thank you.", "Thank you.", "Thank you."] })
+      await page.goto(`${BASE}/s/ses_mock`)
+      await page.locator(".msg.assistant").first().waitFor()
+      await page.getByRole("button", { name: "Start Voice mode" }).click()
+      await page.locator(".voice-bar .voice-state").getByText(/Listening|Thinking/).waitFor({ timeout: 10_000 })
+      if (!blocked) await page.locator('.voice-bar[data-vad="silero"]').waitFor({ timeout: 15_000 })
+      const from = Date.now()
+      await page.waitForTimeout(9000) // the whole noise loop, plus a second
+      const log = (await mockLog()).filter((e) => e.at >= from)
+      const transcribed = log.filter((e) => e.path === "/api/transcribe").length
+      const utterances = log.filter((e) => e.path.endsWith("/utterance"))
+      assert(!utterances.length, `no utterance: ${JSON.stringify(utterances.map((e) => e.body))}`)
+      if (blocked) {
+        assert((await page.locator(".voice-bar").getAttribute("data-vad")) === "energy", "the energy detector runs")
+        assert(transcribed > 0, "the energy detector sends noise to transcription (so the noise is a real test)")
+        // ...and the junk filter still keeps Whisper's "Thank you." from reaching the agent.
+        await page.locator(".voice-bar .voice-ignored").getByText("Thank you.").waitFor({ timeout: 5000 })
+      } else {
+        assert(transcribed === 0, `nothing sent to transcription, got ${transcribed}`)
+        await shot(page, "voice-noise-ignored")
+      }
+      await page.locator(".voice-bar").getByRole("button", { name: "End", exact: true }).click()
+      await page.locator(".voice-bar").waitFor({ state: "detached" })
+      assert(!errors.length, errors.join("; "))
+    })
+    await context.close()
+  }
+}
+
+/**
+ * Speech detection hears speech: the fake microphone loops a spoken request (1 s in, 3 s long, then silence).
+ * The first transcript is a Whisper hallucination ("Thank you."): shown as ignored, not sent; the next is sent.
+ */
+async function speechDetection(browser: Browser): Promise<void> {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, permissions: ["microphone"] })
+  const page = await context.newPage()
+  current = page
+  const errors: string[] = []
+  page.on("pageerror", (e) => errors.push(e.message))
+  await check("voice speech: a spoken request becomes one utterance; a hallucinated “Thank you.” is shown as ignored; model time per chunk", async () => {
+    await mock("/mock/reset-transcripts")
+    await page.goto(`${BASE}/s/ses_mock`)
+    await page.locator(".msg.assistant").first().waitFor()
+    await page.getByRole("button", { name: "Start Voice mode" }).click()
+    await page.locator('.voice-bar[data-vad="silero"]').waitFor({ timeout: 15_000 })
+    await mock("/mock/transcripts", { texts: ["Thank you.", "Can you check whether the build passed on main, please?"] })
+    const from = Date.now()
+    await page.locator(".voice-bar .voice-ignored").getByText("Thank you.").waitFor({ timeout: 12_000 })
+    await shot(page, "voice-ignored")
+    const sent = page.waitForResponse((r) => r.url().endsWith("/utterance"), { timeout: 12_000 })
+    await sent
+    const utterances = (await mockLog()).filter((e) => e.at >= from && e.path.endsWith("/utterance"))
+    assert(utterances.length === 1, `one utterance, got ${JSON.stringify(utterances.map((e) => e.body))}`)
+    assert(utterances[0]!.body?.text === "Can you check whether the build passed on main, please?", `the request: ${JSON.stringify(utterances[0]!.body)}`)
+    const title = (await page.locator(".voice-bar .voice-state").getAttribute("title")) ?? ""
+    const measured = /on-device model \(([\d.]+) ms per 32 ms of audio\)/.exec(title)?.[1]
+    assert(Number(measured) >= 0 && Number(measured) < 16, `model round trip per 32 ms chunk: ${title}`)
+    console.log(`voice speech: Silero round trip ${measured} ms per 32 ms chunk (worker message + inference)`)
+    await page.locator(".voice-bar").getByRole("button", { name: "End", exact: true }).click()
+    await page.locator(".voice-bar").waitFor({ state: "detached" })
+    assert(!errors.length, errors.join("; "))
+  })
+  await context.close()
+}
+
+/** 8 s of background noise for the fake microphone: hum and room tone, a fan burst, typing, clatter, a beep. */
+function noiseWav(file: string): string {
+  const rate = 16_000
+  let seed = 11
+  const rnd = () => {
+    seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648
+    return seed / 2_147_483_648
+  }
+  const out = new Float32Array(rate * 8)
+  for (let i = 0; i < out.length; i++) {
+    const t = i / rate
+    let x = 0.004 * Math.sin(2 * Math.PI * 60 * t) + (rnd() * 2 - 1) * 0.002
+    if (t >= 0.6 && t < 1.6) x += (rnd() * 2 - 1) * 0.15 // a fan switching on
+    if (t >= 2.2 && t < 4.2 && i % Math.round(rate / 7) < 50) x += (rnd() * 2 - 1) * 0.5 * Math.exp(-(i % Math.round(rate / 7)) / 12) // typing
+    if (t >= 4.8 && t < 5.6 && i % 397 < 30) x += (rnd() * 2 - 1) * 0.4 * Math.exp(-(i % 397) / 6) // clatter
+    if (t >= 6.2 && t < 7) x += 0.2 * Math.sin(2 * Math.PI * 1000 * t) // a beep
+    out[i] = x
+  }
+  writeFileSync(file, encodeWav(out, rate))
+  return file
+}
+
+/** The spoken request fixture with 1 s of silence before and 4 s after (8 s, looped by the fake microphone). */
+function speechWav(file: string): string {
+  const speech = readWav(path.join(ROOT, "test", "fixtures", "speech-16k.wav"))
+  const out = new Float32Array(speech.rate * 8)
+  out.set(speech.samples, speech.rate)
+  writeFileSync(file, encodeWav(out, speech.rate))
+  return file
+}
+
 /** A silent 16 kHz mono WAV for Chromium's fake microphone. */
 function silentWav(file: string): string {
   const samples = 16_000 * 2
@@ -1274,6 +1392,8 @@ if (!existsSync(path.join(ROOT, "web", "dist", "index.html"))) {
 const hub = Bun.spawn(["bun", path.join(ROOT, "test", "web-mock-hub.ts"), String(PORT)], { stdout: "ignore", stderr: "inherit" })
 let browser: Browser | undefined
 let quiet: Browser | undefined
+let noisy: Browser | undefined
+let speaking: Browser | undefined
 try {
   for (let i = 0; i < 50; i++) {
     if (await fetch(`${BASE}/api/auth`).then((r) => r.ok, () => false)) break
@@ -1298,12 +1418,21 @@ try {
     args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream", `--use-file-for-fake-audio-capture=${silentWav(path.join(SHOTS, "silence.wav"))}`],
   })
   await voiceSpeed(quiet)
+  await mock("/mock/reset")
+  const fakeMic = (file: string) => ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream", `--use-file-for-fake-audio-capture=${file}`]
+  noisy = await chromium.launch({ executablePath, headless: true, args: fakeMic(noiseWav(path.join(SHOTS, "noise.wav"))) })
+  await noiseRejection(noisy)
+  await mock("/mock/reset")
+  speaking = await chromium.launch({ executablePath, headless: true, args: fakeMic(speechWav(path.join(SHOTS, "speech.wav"))) })
+  await speechDetection(speaking)
 } catch (e) {
   failures++
   results.push(`✗ setup: ${(e as Error).message}`)
 } finally {
   await browser?.close()
   await quiet?.close()
+  await noisy?.close()
+  await speaking?.close()
   hub.kill()
 }
 console.log(results.join("\n"))

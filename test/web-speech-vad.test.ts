@@ -1,6 +1,7 @@
 // Voice mode's ML speech detection: the probability state machine (Silero speech probabilities with hysteresis),
 // the 16 kHz chunker, and the detector that orders async model results, pre-gates on energy and falls back.
 import { describe, expect, test } from "bun:test"
+import { EnergyVad } from "../web/src/core/conversation-core"
 import { NORMAL_VAD, ProbabilityVad, Resampler, SILERO_FRAME, SILERO_RATE, VoiceDetector, type ProbabilityVadParams } from "../web/src/core/speech-vad"
 
 const FRAME_MS = (SILERO_FRAME / SILERO_RATE) * 1000 // 32 ms
@@ -279,5 +280,31 @@ describe("VoiceDetector", () => {
     await tick()
     expect(d.sampleRate).toBe(SILERO_RATE)
     expect(ends[0]!.samples.length).toBe(Math.round((ends[0]!.durationMs * SILERO_RATE) / 1000))
+  })
+})
+
+describe("added latency vs the energy VAD", () => {
+  test("with an instant model, speech starts no later and ends within one 32 ms chunk of the energy VAD", async () => {
+    const rate = 16_000
+    const audio = new Float32Array(rate * 3)
+    for (let i = rate; i < rate * 1.8; i++) audio[i] = 0.3 * Math.sin((2 * Math.PI * 220 * i) / rate)
+    for (let i = 0; i < audio.length; i++) audio[i]! += ((i * 7919) % 13) / 13 / 1000
+    const at = (events: Array<{ type: string; ms: number }>, type: string) => events.find((e) => e.type === type)!.ms
+
+    const energy: Array<{ type: string; ms: number }> = []
+    const vad = new EnergyVad({ sampleRate: rate })
+    for (let i = 0; i + 320 <= audio.length; i += 320) for (const e of vad.process(audio.subarray(i, i + 320)).events) energy.push({ type: e.type, ms: ((i + 320) / rate) * 1000 })
+
+    const silero: Array<{ type: string; ms: number }> = []
+    let pos = 0
+    const d = new VoiceDetector({ sampleRate: rate, onEvents: (e) => e.forEach((x) => silero.push({ type: x.type, ms: (pos / rate) * 1000 })), warn: () => {} })
+    d.classifier = async (chunk) => (Math.sqrt(chunk.reduce((n, x) => n + x * x, 0) / chunk.length) > 0.05 ? 0.95 : 0.01)
+    for (pos = 320; pos <= audio.length; pos += 320) {
+      d.push(audio.subarray(pos - 320, pos))
+      await Promise.resolve()
+      await Promise.resolve()
+    }
+    expect(at(silero, "start")).toBeLessThanOrEqual(at(energy, "start"))
+    expect(Math.abs(at(silero, "end") - at(energy, "end"))).toBeLessThanOrEqual(32)
   })
 })
