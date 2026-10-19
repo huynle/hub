@@ -786,7 +786,10 @@ Pure logic is in `web/src/core/feedback-core.ts` (tested with bun); `web/src/cor
   a double tone plays when a subagent finishes. Failed tools are not spoken (they show in the feed). Cues never
   play while you are talking or the agent's speech is playing; they wait, and are dropped once the agent
   speaks. Cues are event-driven: one timer for the next deadline (no polling), re-armed on speech, status and
-  playback changes. Each phrase is synthesized once per page load and cached in memory.
+  playback changes. The phrases are synthesized in parallel when Voice mode starts and kept in memory and in
+  the browser's Cache Storage (`hub-cues-v1`, keyed by TTS provider, model, voice, speed and server, so a later
+  session starts with them ready and a voice change fetches them again); a ready phrase starts playing at
+  once. A phrase that is not ready yet when its cue fires plays a short tone instead.
 - **Presence**: while a session view is open, the phone posts `POST /api/sessions/:id/presence
   {visible}` on visibility changes and every 30 s while visible, and `{visible:false}` on `pagehide` and
   when leaving the view. The hub uses this to decide when to push.

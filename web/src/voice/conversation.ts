@@ -6,7 +6,7 @@
 import { gestureBlocked } from "../core/voice-autostart"
 import { Endpointer, EnergyVad, SpeechQueue, encodeWav, parseCommand, splitSentences } from "../core/conversation-core"
 import { CuePlayer } from "../core/cues"
-import { CueClock, CueScheduler, isWorking, subagentChanges, type StatusEntry } from "../core/feedback-core"
+import { CUE_PHRASES, CueClock, CueScheduler, isWorking, subagentChanges, type StatusEntry } from "../core/feedback-core"
 import type { ApiInit } from "../app/api"
 
 const SENT_LABEL_MS = 2500
@@ -178,6 +178,7 @@ export class Conversation<B = unknown> {
       return false
     }
     this.active = true
+    this.prefetchCues()
     try {
       await this.listen()
     } catch (e) {
@@ -194,6 +195,23 @@ export class Conversation<B = unknown> {
     this.cueClock.poke()
     this.refresh()
     return true
+  }
+
+  /** Loads the progress phrases now so each plays the moment its cue fires (cached per TTS voice). */
+  private prefetchCues(): void {
+    if (this.opts.cues === false || !this.scheduler.enabled) return
+    void this.cuePlayer.prefetch(Object.values(CUE_PHRASES), this.cueKey())
+  }
+
+  /** The TTS settings that shape cue audio (provider, model, voice, speed, server); undefined if unknown. */
+  private async cueKey(): Promise<string | undefined> {
+    try {
+      const { tts } = (await (await this.api("/api/settings/speech")).json()) as { tts?: Record<string, unknown> }
+      if (!tts?.voice) return undefined
+      return [tts.provider, tts.model, tts.voice, tts.speed ?? "", tts.baseURL ?? ""].join("|")
+    } catch {
+      return undefined
+    }
   }
 
   private async listen(): Promise<void> {
@@ -370,6 +388,7 @@ export class Conversation<B = unknown> {
   setCues(on: boolean): void {
     this.scheduler.enabled = on
     if (!on) this.cuePlayer.stop()
+    else if (this.active) this.prefetchCues()
     this.cueClock.poke()
   }
 
