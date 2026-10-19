@@ -298,7 +298,9 @@ work to a background subagent. Routine workers inherit the fast voice model; cod
 architecture and risky work use the configured full work model. Successful workers finish with a short
 speech-ready result that the hub reads directly, without waiting for another voice-agent summary. You
 can keep talking while work runs; related follow-ups continue the active worker and unrelated tasks start
-a fresh one.
+a fresh one. Several independent requests in one breath ("check the deploy and update the changelog") start
+one background worker each, in parallel, in the same turn; each worker gets a short name ("Deploy check") that
+the task board and announcements use.
 
 The phone composer exposes separate **Voice** and **Worker** model controls for each session. Each picker
 lists the connected OpenCode process's available models and variants. Choices are saved per user and
