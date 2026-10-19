@@ -177,7 +177,8 @@ describe("providers follow the settings", () => {
     await service.transcribe(new Uint8Array([1, 2]), "webm")
     expect(calls[0]!.url).toBe("https://openrouter.ai/api/v1/audio/transcriptions")
     expect(auth(calls[0]!)).toBe(`Bearer ${ENV_KEY}`)
-    expect(JSON.parse(String(calls[0]!.init.body))).toMatchObject({ model: defaults.sttModel, input_audio: { format: "webm" } })
+    expect((calls[0]!.init.body as FormData).get("model")).toBe(defaults.sttModel)
+    expect(((calls[0]!.init.body as FormData).get("file") as File).name).toBe("audio.webm")
 
     service.update({ stt: { provider: "openai-compatible", baseURL: "https://speech.example/v1", model: "whisper-1" } })
     await service.transcribe(new Uint8Array([1, 2]), "webm")

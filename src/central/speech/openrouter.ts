@@ -1,6 +1,6 @@
-// OpenRouter speech-to-text (/audio/transcriptions, JSON with base64 input_audio) and text-to-speech
-// (/audio/speech).
-import { SpeechError, upstreamDetail, withSpeedRetry, type SpeechProvider } from "./provider"
+// OpenRouter speech-to-text (/audio/transcriptions as OpenAI-style multipart: the audio goes up as binary,
+// not as base64 JSON, a third smaller and no encoding) and text-to-speech (/audio/speech).
+import { audioMime, SpeechError, upstreamDetail, withSpeedRetry, type SpeechProvider } from "./provider"
 
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -32,8 +32,12 @@ export class OpenRouter implements SpeechProvider {
 
   async transcribe(audio: Uint8Array, format: string, signal?: AbortSignal): Promise<string> {
     const { sttModel: model, language } = this.options
-    const input_audio = { data: Buffer.from(audio).toString("base64"), format }
-    const response = await this.post("/audio/transcriptions", { model, input_audio, ...(language ? { language } : {}) }, signal)
+    // OpenRouter documents multipart file/model/language (up to 25 MB; an utterance is at most ~2 MB of WAV).
+    const form = new FormData()
+    form.append("file", new File([new Uint8Array(audio)], `audio.${format}`, { type: audioMime(format) }))
+    form.append("model", model)
+    if (language) form.append("language", language)
+    const response = await this.post("/audio/transcriptions", form, signal)
     if (!response.ok) throw await failure("transcription", response)
     const body = (await response.json()) as { text?: unknown }
     return String(body.text ?? "").trim()
@@ -50,6 +54,7 @@ export class OpenRouter implements SpeechProvider {
     return new Uint8Array(await response.arrayBuffer())
   }
 
+  /** POSTs JSON, or a form as multipart (fetch sets its content type with the boundary). */
   private async post(path: string, body: unknown, signal?: AbortSignal): Promise<Response> {
     const key = await this.options.apiKey()
     if (!key) {
@@ -57,10 +62,11 @@ export class OpenRouter implements SpeechProvider {
         "No OpenRouter API key: set one in the speech settings, set OPENROUTER_API_KEY, or connect OpenRouter in OpenCode",
       )
     }
+    const form = body instanceof FormData
     return this.fetch(`${this.baseURL}${path}`, {
       method: "POST",
-      headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-      body: JSON.stringify(body),
+      headers: { authorization: `Bearer ${key}`, ...(form ? {} : { "content-type": "application/json" }) },
+      body: form ? body : JSON.stringify(body),
       signal,
     })
   }

@@ -43,17 +43,16 @@ describe("audioFormat", () => {
 })
 
 describe("OpenRouter.transcribe", () => {
-  test("posts base64 audio to the transcription endpoint", async () => {
+  test("posts the audio as a multipart file to the transcription endpoint", async () => {
     const { fetch, calls } = fakeFetch(() => Response.json({ text: " hello there " }))
     const text = await client(fetch).transcribe(new Uint8Array([1, 2, 3]), "webm")
     expect(text).toBe("hello there")
     expect(calls).toHaveLength(1)
     expect(calls[0]!.url).toBe("https://openrouter.ai/api/v1/audio/transcriptions")
     expect(new Headers(calls[0]!.init.headers).get("authorization")).toBe("Bearer sk-test")
-    expect(JSON.parse(String(calls[0]!.init.body))).toEqual({
-      model: "openai/whisper-1",
-      input_audio: { data: "AQID", format: "webm" },
-    })
+    const form = calls[0]!.init.body as FormData
+    expect(form.get("model")).toBe("openai/whisper-1")
+    expect([...new Uint8Array(await (form.get("file") as File).arrayBuffer())]).toEqual([1, 2, 3])
   })
 
   test("surfaces API errors with status and message", async () => {

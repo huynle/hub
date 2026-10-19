@@ -694,8 +694,8 @@ STT and TTS each use a provider configured from the phone (Settings → Speech) 
 provider than `hub.json`, the file's section is ignored for that direction; when it picks another base
 URL, the file's key is not sent there. Providers:
 
-- `openrouter` (default, base `https://openrouter.ai/api/v1`): STT is JSON with base64 `input_audio`,
-  TTS is `POST /audio/speech`.
+- `openrouter` (default, base `https://openrouter.ai/api/v1`): STT is an OpenAI-style multipart upload
+  (`file`, `model`, `language?`: the audio goes up as binary, not base64 JSON), TTS is `POST /audio/speech`.
 - `openai-compatible` (`baseURL` required: `https://…`, or `http://localhost` / `127.0.0.1` for local
   servers): STT is multipart `POST {baseURL}/audio/transcriptions` (`file`, `model`, `language?`), TTS is
   `POST {baseURL}/audio/speech {model, input, voice, response_format: "mp3", speed?}`. No env key.
