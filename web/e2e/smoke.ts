@@ -790,6 +790,21 @@ async function desktop(browser: Browser): Promise<void> {
     await page.getByPlaceholder("Describe a task or ask a question").waitFor()
   })
 
+  await check("desktop: Settings → Voice → Mic sensitivity: Normal by default, a choice is kept on this device", async () => {
+    await page.evaluate(() => localStorage.removeItem("voice.sensitivity"))
+    await page.goto(`${BASE}/settings#voice`)
+    const group = page.getByRole("radiogroup", { name: "Mic sensitivity" })
+    await group.waitFor()
+    assert((await group.getByRole("radio", { name: "Normal" }).getAttribute("aria-checked")) === "true", "Normal by default")
+    await group.getByRole("radio", { name: "High" }).click()
+    assert((await page.evaluate(() => localStorage.getItem("voice.sensitivity"))) === "high", "stored per device")
+    await page.reload()
+    await group.waitFor()
+    assert((await group.getByRole("radio", { name: "High" }).getAttribute("aria-checked")) === "true", "kept after a reload")
+    await shot(page, "desktop-settings-sensitivity")
+    await group.getByRole("radio", { name: "Normal" }).click()
+  })
+
   await check("desktop: /new picks an environment and a folder, creates there and sends the prompt as the first turn", async () => {
     await mock("/mock/workstation", { on: true })
     await page.evaluate(() => localStorage.removeItem("hub.newSession"))

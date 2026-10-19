@@ -3,6 +3,7 @@
 import { createSignal } from "solid-js"
 import { applyRate } from "../core/cues"
 import { clampSpeed } from "../core/feedback-core"
+import { parseSensitivity, type Sensitivity } from "../core/speech-vad"
 import { api } from "../app/api"
 import { micConstraints } from "./conversation"
 
@@ -10,6 +11,9 @@ const PREF_SPEED = "voice.speed"
 const PREF_CUES = "voice.cues"
 const PREF_BACKGROUND = "voice.background"
 const PREF_MIC = "voice.micDevice"
+const PREF_SENSITIVITY = "voice.sensitivity"
+/** Kept in memory: a running conversation reads it for every mic frame. */
+let sensitivity = parseSensitivity(localStorage.getItem(PREF_SENSITIVITY))
 
 export const voicePrefs = {
   get speed() {
@@ -30,6 +34,14 @@ export const voicePrefs = {
   },
   set background(on: boolean) {
     localStorage.setItem(PREF_BACKGROUND, on ? "1" : "0")
+  },
+  /** Mic sensitivity of Voice mode's speech detection (read live by a running conversation). */
+  get sensitivity(): Sensitivity {
+    return sensitivity
+  },
+  set sensitivity(level: Sensitivity) {
+    sensitivity = parseSensitivity(level)
+    localStorage.setItem(PREF_SENSITIVITY, sensitivity)
   },
 }
 

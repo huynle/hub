@@ -6,7 +6,7 @@
 // media session). Ported from the 0.4 web/conversation.js; behavior unchanged except the mic device choice.
 import { gestureBlocked } from "../core/voice-autostart"
 import { Endpointer, micConstraints, SayAssembler, SpeechQueue, TurnTimer, describeTurn, encodeWav, parseCommand, type TurnMark, type VadEvent } from "../core/conversation-core"
-import { VoiceDetector, type DetectorMode } from "../core/speech-vad"
+import { sensitivityParams, VoiceDetector, type DetectorMode, type Sensitivity } from "../core/speech-vad"
 import { loadSilero } from "./silero"
 import { AudioClip, canStreamMp3, clipFrom, feed } from "../core/audio-stream"
 import { CuePlayer } from "../core/cues"
@@ -78,6 +78,8 @@ export interface ConversationOptions {
   status?: readonly StatusEntry[]
   /** Microphone deviceId ("" or undefined: the default). */
   deviceId?: string
+  /** Mic sensitivity (Settings → Voice), read live: a change applies to the next audio. */
+  sensitivity?: () => Sensitivity
 }
 
 type Api = (path: string, init?: ApiInit) => Promise<Response>
@@ -127,6 +129,8 @@ export class Conversation<B = unknown> {
   private wakeLock?: WakeLockSentinel
   private warnedAutoplay = false
   private state: ConversationState | undefined
+  /** The sensitivity the detector is tuned to. */
+  private sensitivity: Sensitivity = "normal"
   /** A progress cue is playing (its echo must not barge in either). */
   private cueSpeaking = false
   /** Bumped by start() and stop(); a start that sees another value was cancelled. */
@@ -137,7 +141,7 @@ export class Conversation<B = unknown> {
     this.api = api
     this.player = player
     this.ui = ui
-    this.opts = { cues: true, background: false, speed: () => 1, title: () => "OpenCode session", ...options }
+    this.opts = { cues: true, background: false, speed: () => 1, title: () => "OpenCode session", sensitivity: () => "normal", ...options }
     this.lastStatus = options.status
     this.scheduler.enabled = this.opts.cues !== false
     this.scheduler.working(isWorking(options.status), Date.now())
@@ -274,8 +278,10 @@ export class Conversation<B = unknown> {
     this.source.connect(this.tap)
     this.tap.connect(this.sink)
 
+    this.sensitivity = this.opts.sensitivity()
     const detector = (this.vad = new VoiceDetector({
       sampleRate: ctx.sampleRate,
+      params: sensitivityParams(this.sensitivity),
       onEvents: (events) => this.vadEvents(events),
       onLevel: (level) => this.ui.level(level),
     }))
@@ -324,6 +330,11 @@ export class Conversation<B = unknown> {
   /** One ~20 ms frame from the mic. */
   private frame(samples: Float32Array): void {
     if (!this.active || !this.vad || this.paused) return
+    const sensitivity = this.opts.sensitivity()
+    if (sensitivity !== this.sensitivity) {
+      this.sensitivity = sensitivity
+      this.vad.params = sensitivityParams(sensitivity)
+    }
     this.vad.push(samples)
   }
 

@@ -40,6 +40,28 @@ export const NORMAL_VAD: ProbabilityVadParams = Object.freeze({
   energyMinSpeechMs: VOICE_TIMINGS.minSpeechMs,
 })
 
+/** Settings → Voice → Mic sensitivity (per device). */
+export type Sensitivity = "low" | "normal" | "high"
+export const SENSITIVITIES: readonly Sensitivity[] = Object.freeze(["low", "normal", "high"])
+
+/** A stored value as a level; anything unknown is Normal. */
+export function parseSensitivity(value: unknown): Sensitivity {
+  return SENSITIVITIES.includes(value as Sensitivity) ? (value as Sensitivity) : "normal"
+}
+
+const SENSITIVITY_PARAMS: Readonly<Record<Sensitivity, ProbabilityVadParams>> = Object.freeze({
+  // Low: noisy places; only clear, sustained, louder speech counts.
+  low: Object.freeze({ ...NORMAL_VAD, startProb: 0.75, endProb: 0.45, speakingStartProb: 0.92, minSpeechMs: 350, gateDb: 6, energyMarginDb: 13, energyMinSpeechMs: 400 }),
+  normal: NORMAL_VAD,
+  // High: quiet rooms, soft voices, short answers.
+  high: Object.freeze({ ...NORMAL_VAD, startProb: 0.45, endProb: 0.25, speakingStartProb: 0.75, minSpeechMs: 180, gateDb: 0, energyMarginDb: 7, energyMinSpeechMs: 250 }),
+})
+
+/** The detector tuning of a sensitivity level (thresholds, speech to start, energy pre-gate and fallback margins). */
+export function sensitivityParams(level: Sensitivity): ProbabilityVadParams {
+  return SENSITIVITY_PARAMS[parseSensitivity(level)]
+}
+
 /**
  * The echo guard (stricter thresholds while the agent speaks) stays up this long after playback stops: the
  * player reports the end before the speaker and the room are quiet (output latency, reverb).
