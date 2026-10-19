@@ -78,6 +78,8 @@ describe("orchestrator prompt", () => {
     expect(ORCHESTRATOR_PROMPT).toContain("hub_task_stop")
     expect(ORCHESTRATOR_PROMPT).toContain("all: true")
     expect(ORCHESTRATOR_PROMPT).toContain("the other workers keep going")
+    // OpenCode then reports the cancelled worker as a message: confirming twice is noise.
+    expect(ORCHESTRATOR_PROMPT).toContain("cancellation notice")
   })
 
   test("the voice agent gets only the delegate note; a conversation on another agent gets the full prompt", () => {
