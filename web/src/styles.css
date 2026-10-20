@@ -235,7 +235,11 @@ input[type="text"].rename-field { flex: 1; min-width: 0; width: 100%; min-height
 /* ---------- session ---------- */
 .session-layout { display: flex; height: 100%; min-height: 0; }
 .session-main { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; min-height: 0; }
-.scroller { flex: 1; overflow: auto; min-height: 0; }
+/* The session view keeps older pages from moving what is on screen itself (browser anchoring would double it). */
+.scroller { flex: 1; overflow: auto; min-height: 0; overflow-anchor: none; }
+.history-sentinel { height: 1px; }
+.history-edge { display: flex; align-items: center; justify-content: center; gap: 8px; margin: 16px 0 0; text-align: center; }
+.history-edge.error { color: var(--err); }
 .column { max-width: var(--col); margin: 0 auto; padding: 0 20px; }
 .column.narrow { max-width: 560px; padding-top: 40px; }
 .transcript { padding: 24px 0 8px; display: flex; flex-direction: column; gap: 14px; }

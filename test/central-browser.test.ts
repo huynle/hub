@@ -342,6 +342,30 @@ describe("timeline history and details", () => {
     expect((await h.api("/api/sessions/ses_missing/timeline")).status).toBe(404)
     expect((await h.api("/api/sessions/ses_on/timeline?limit=500")).status).toBe(400)
   })
+
+  test("newest-first pages: order=desc and before=<key> reach the spoke; bad input and unknown cursors are 400", async () => {
+    h = harness()
+    const { client } = await machine()
+    const seen = answer(client, (req) => {
+      if (req.op !== "timeline") return undefined
+      if (req.before === "gone:text") return new Error("Invalid timeline cursor")
+      return { items: [{ key: "u9:text", kind: "user", text: "latest" }], older: "u9:text" }
+    })
+    expect(await (await h.api("/api/sessions/ses_on/timeline?limit=80&order=desc")).json()).toEqual({ items: [{ key: "u9:text", kind: "user", text: "latest" }], older: "u9:text" })
+    expect((await h.api("/api/sessions/ses_on/timeline?limit=80&before=u9%3Atext")).status).toBe(200)
+    expect(seen).toEqual([
+      { op: "timeline", sessionID: "ses_on", limit: 80, order: "desc" },
+      { op: "timeline", sessionID: "ses_on", limit: 80, before: "u9:text" },
+    ])
+    expect((await h.api("/api/sessions/ses_on/timeline?order=sideways")).status).toBe(400)
+    expect((await h.api("/api/sessions/ses_on/timeline?before=a&cursor=2")).status).toBe(400)
+    expect((await h.api("/api/sessions/ses_on/timeline?order=desc&cursor=2")).status).toBe(400)
+    expect((await h.api(`/api/sessions/ses_on/timeline?before=${"x".repeat(5000)}`)).status).toBe(400)
+    const gone = await h.api("/api/sessions/ses_on/timeline?before=gone%3Atext")
+    expect(gone.status).toBe(400)
+    expect((await gone.json()).error).toContain("Invalid timeline cursor")
+    expect(seen.length).toBe(3)
+  })
 })
 
 describe("image prompts", () => {

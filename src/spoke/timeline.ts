@@ -52,6 +52,74 @@ export function timelineItems(sessionID: string, messages: readonly unknown[]): 
   return out
 }
 
+/** A newest-first timeline page: rows in chronological order, and the cursor of the rows before them. */
+export interface NewestPage {
+  readonly items: TimelineItem[]
+  /** Pass as `before` for the next older page; absent at the beginning of the conversation. */
+  readonly older?: string
+}
+
+/**
+ * The `limit` rows just before the row keyed `before` (the newest rows without it). The cursor is the key of
+ * the oldest row returned, so it stays valid while new messages arrive (an offset would shift). A page starts
+ * at a message boundary when the message fits in twice the limit; larger messages are split.
+ */
+export function newestPage(items: readonly TimelineItem[], limit: number, before?: string): NewestPage {
+  const end = before === undefined ? items.length : items.findIndex((item) => item.key === before)
+  if (end < 0) throw new Error("Invalid timeline cursor")
+  let start = Math.max(0, end - limit)
+  const cap = Math.max(0, end - limit * 2)
+  while (start > cap && items[start - 1]!.messageID === items[start]!.messageID) start--
+  const page = items.slice(start, end)
+  return { items: page, ...(start > 0 && page.length ? { older: page[0]!.key } : {}) }
+}
+
+/**
+ * Short-lived per-session timeline rows, so paging through a history reads OpenCode's whole history once rather
+ * than once per page. Entries expire after `ttlMs` and are dropped when the session changes (invalidate).
+ */
+export class TimelineCache {
+  private readonly entries = new Map<string, { items: TimelineItem[]; at: number }>()
+  /** Bumped on invalidation: a load started before it is not stored. */
+  private readonly generations = new Map<string, number>()
+  private readonly ttlMs: number
+  private readonly max: number
+  private readonly now: () => number
+
+  constructor(options: { ttlMs?: number; max?: number; now?: () => number } = {}) {
+    this.ttlMs = options.ttlMs ?? 30_000
+    this.max = options.max ?? 20
+    this.now = options.now ?? Date.now
+  }
+
+  get size(): number {
+    return this.entries.size
+  }
+
+  /** The cached rows of `sessionID`, else (or with `fresh`) loaded and cached. */
+  async get(sessionID: string, load: () => Promise<TimelineItem[]>, fresh = false): Promise<TimelineItem[]> {
+    const cached = this.entries.get(sessionID)
+    if (!fresh && cached && this.now() - cached.at < this.ttlMs) {
+      this.entries.delete(sessionID)
+      this.entries.set(sessionID, cached)
+      return cached.items
+    }
+    const generation = this.generations.get(sessionID) ?? 0
+    const items = await load()
+    if ((this.generations.get(sessionID) ?? 0) !== generation) return items
+    this.entries.delete(sessionID)
+    this.entries.set(sessionID, { items, at: this.now() })
+    while (this.entries.size > this.max) this.entries.delete(this.entries.keys().next().value!)
+    return items
+  }
+
+  invalidate(sessionID: string): void {
+    this.entries.delete(sessionID)
+    if (this.generations.size > 1000) this.generations.clear()
+    this.generations.set(sessionID, (this.generations.get(sessionID) ?? 0) + 1)
+  }
+}
+
 /** Attachment metadata (never the bytes) of a user message's files. */
 function userFiles(raw: unknown): TimelineFile[] {
   if (!Array.isArray(raw)) return []

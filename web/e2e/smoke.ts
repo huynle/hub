@@ -4,7 +4,7 @@
 // (attach, remove, attach again, send), Dictate → Send (input cleared, also when the turn's connection drops), a slow turn (202, reply later), the right rail and diff viewer render, a Voice-off session is inspectable, rename (table,
 // sidebar, top bar), archive (menu, Undo, Archived chip, Needs-you exception, bulk, inactive), resizable sidebar/rail, and
 // Voice mode speaking a streamed reply before its text ends (each sentence playing while its MP3 still downloads), with the turn timed (a browser with a silent fake mic), Voice mode with the screen off (the phone muting/ending the mic or suspending audio: paused in the Voice bar and the notification, listening again on unlock),
-// rich Markdown (tables, task lists, highlighted code, copy) and the text size (Settings, pinch, ctrl+wheel, kept after reload, phone at 1.8),
+// progressive history (newest page first, older pages while scrolling up, anchored, Retry), rich Markdown (tables, task lists, highlighted code, copy) and the text size (Settings, pinch, ctrl+wheel, kept after reload, phone at 1.8),
 // and speech detection (fake mics looping background noise: nothing sent, unless the on-device model is blocked; and a spoken request: one utterance, a hallucinated “Thank you.” shown as ignored). Screenshots go to $SMOKE_SHOTS (default: the OS temp
 // dir). Run `npm run build:web && npm run test:e2e`. Chromium: $CHROMIUM_PATH, else Playwright's cache, else PATH.
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
@@ -22,6 +22,8 @@ const BASE = `http://127.0.0.1:${PORT}`
 
 let failures = 0
 const results: string[] = []
+/** Measurements printed after the results (not checks). */
+const measured: string[] = []
 /** The page under test; a failed check leaves a screenshot of it (failed-<n>.png). */
 let current: Page | undefined
 async function check(name: string, run: () => Promise<void>): Promise<void> {
@@ -1502,6 +1504,114 @@ async function phone(browser: Browser): Promise<void> {
 }
 
 /** Rich Markdown (session "Benchmark harness": RICH_MARKDOWN in the mock hub) and the text size: Settings, pinch, persistence. */
+/** Progressive history (POST /mock/big): newest page first, older pages while scrolling up, anchored. */
+async function progressiveHistory(browser: Browser): Promise<void> {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+  const page = await context.newPage()
+  current = page
+  const errors: string[] = []
+  page.on("pageerror", (e) => errors.push(e.message))
+  const timelineCalls = async () => ((await (await fetch(`${BASE}/mock/log`)).json()) as { log: Array<{ path: string; query?: string }> }).log.filter((e) => e.path === "/api/sessions/ses_big/timeline")
+  let bytes = 0
+  page.on("response", (r) => {
+    if (r.url().includes("/ses_big/timeline")) void r.body().then((b) => (bytes += b.length), () => undefined)
+  })
+  const scroller = page.locator(".scroller")
+  const atBottom = () => scroller.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight < 4)
+  /** The first conversation row in view and its offset from the scroller's top. */
+  const firstVisible = () =>
+    scroller.evaluate((el) => {
+      const top = el.getBoundingClientRect().top
+      const rows = Array.from(el.querySelectorAll<HTMLElement>(".transcript > [data-key]"))
+      const row = rows.find((r) => r.getBoundingClientRect().bottom > top + 1)!
+      return { key: row.dataset.key!, offset: row.getBoundingClientRect().top - top }
+    })
+  const offsetOf = (key: string) => scroller.evaluate((el, k) => el.querySelector<HTMLElement>(`[data-key="${CSS.escape(k)}"]`)!.getBoundingClientRect().top - el.getBoundingClientRect().top, key)
+  await mock("/mock/big", { on: true, delayMs: 300 })
+
+  await check("history: a long session opens on its newest rows with one request, stuck to the bottom", async () => {
+    const started = Date.now()
+    await page.goto(`${BASE}/s/ses_big`)
+    await page.getByText("Answer 899.").waitFor()
+    const ms = Date.now() - started
+    await page.waitForTimeout(300)
+    const calls = await timelineCalls()
+    assert(calls.length === 1, `one timeline request, got ${calls.map((c) => c.query).join(" ")}`)
+    assert(calls[0]!.query?.includes("order=desc"), `newest-first request: ${calls[0]!.query}`)
+    assert(await atBottom(), "at the bottom")
+    assert(!(await page.getByText("Question 0:").count()), "older rows not loaded yet")
+    measured.push(`history: newest rows shown after ${ms} ms, ${bytes} bytes of timeline`)
+    await shot(page, "history-open")
+  })
+
+  await check("history: scrolling up loads older pages in place, then shows the beginning", async () => {
+    const anchor = await firstVisible()
+    await scroller.evaluate((el) => (el.scrollTop = 0))
+    await page.locator(".history-edge", { hasText: "Loading earlier" }).waitFor()
+    const loadingAnchor = await firstVisible()
+    await page.waitForFunction(() => !document.querySelector(".history-edge.loading"))
+    const calls = await timelineCalls()
+    assert(calls.length === 2 && calls[1]!.query?.includes("before="), `older page asked: ${calls.map((c) => c.query).join(" ")}`)
+    // What was on screen stays where it was (the rows above it are new).
+    const moved = Math.abs((await offsetOf(loadingAnchor.key)) - loadingAnchor.offset)
+    assert(moved <= 2, `anchored row moved ${moved}px (${loadingAnchor.key}; first anchor ${anchor.key})`)
+    assert(!(await atBottom()), "not thrown to the bottom")
+    await shot(page, "history-older")
+    for (let i = 0; i < 40 && !(await page.getByText("Beginning of conversation").count()); i++) {
+      await scroller.evaluate((el) => (el.scrollTop = 0))
+      await page.waitForTimeout(150)
+      await page.waitForFunction(() => !document.querySelector(".history-edge.loading"))
+    }
+    await page.getByText("Beginning of conversation").waitFor()
+    await page.getByText("Question 0: what about step 0?").waitFor()
+    const all = await timelineCalls()
+    const keys = await page.locator(".transcript > [data-key]").evaluateAll((els) => els.map((e) => (e as HTMLElement).dataset.key))
+    assert(new Set(keys).size === keys.length, "no duplicate rows")
+    const users = await page.locator(".msg.user").count()
+    assert(users === 450, `every question shown once, got ${users}`)
+    measured.push(`history: whole history in ${all.length} requests, ${bytes} bytes`)
+  })
+
+  await check("history: a live reply appends at the bottom (and does not pull the reader down)", async () => {
+    await scroller.evaluate((el) => (el.scrollTop = 0))
+    await mock("/mock/emit", { type: "delta", sessionID: "ses_big", rootID: "ses_big", messageID: "msg_live_1", text: "Live while reading old history." })
+    await page.getByText("Live while reading old history.").waitFor()
+    assert((await scroller.evaluate((el) => el.scrollTop)) < 50, "reader stays at the top")
+    const last = await page.locator(".transcript > [data-key]").last().textContent()
+    assert(last?.includes("Live while reading old history."), `live row last: ${last}`)
+    await scroller.evaluate((el) => (el.scrollTop = el.scrollHeight))
+    await page.waitForTimeout(100)
+    await mock("/mock/emit", { type: "delta", sessionID: "ses_big", rootID: "ses_big", messageID: "msg_live_2", text: "Second live reply." })
+    await page.getByText("Second live reply.").waitFor()
+    await page.waitForTimeout(100)
+    assert(await atBottom(), "at the bottom: follows the new reply")
+  })
+
+  await check("history: a failed older page shows Retry, which loads it", async () => {
+    await mock("/mock/big", { failOlder: true, delayMs: 0 })
+    await page.reload()
+    await page.getByText("Answer 899.").waitFor()
+    await scroller.evaluate((el) => (el.scrollTop = 0))
+    const retry = page.locator(".history-edge.error").getByRole("button", { name: "Retry" })
+    await retry.waitFor()
+    await mock("/mock/big", { failOlder: false })
+    await retry.click()
+    await page.waitForFunction(() => !document.querySelector(".history-edge.error, .history-edge.loading"))
+    assert((await page.locator(".msg.user").count()) > 40, "older page shown after Retry")
+    await shot(page, "history-retry")
+  })
+
+  await check("history: more than 2000 rows still opens on the newest ones", async () => {
+    await mock("/mock/reset")
+    await mock("/mock/big", { on: true, messages: 2400 })
+    await page.goto(`${BASE}/s/ses_big`)
+    await page.getByText("Answer 2399.").waitFor()
+    assert(await atBottom(), "at the bottom")
+    assert(!errors.length, `page errors: ${errors.join("; ")}`)
+  })
+  await context.close()
+}
+
 async function markdownAndTextSize(browser: Browser): Promise<void> {
   const RICH = "/s/ses_52"
   const transcriptPx = (page: Page) => page.locator(".msg.assistant").last().evaluate((el) => parseFloat(getComputedStyle(el).fontSize))
@@ -1661,6 +1771,8 @@ try {
   await mock("/mock/reset")
   await markdownAndTextSize(browser)
   await mock("/mock/reset")
+  await progressiveHistory(browser)
+  await mock("/mock/reset")
   await notifications(browser)
   await mock("/mock/reset")
   await tapToStart(browser)
@@ -1691,5 +1803,6 @@ try {
   hub.kill()
 }
 console.log(results.join("\n"))
+if (measured.length) console.log(`\nMeasured:\n${measured.map((m) => `  ${m}`).join("\n")}`)
 console.log(`\n${results.length - failures}/${results.length} checks passed · screenshots in ${SHOTS}`)
 process.exit(failures ? 1 : 0)

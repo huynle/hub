@@ -85,9 +85,23 @@ export class Timeline {
   private items = new Map<string, TimelineRow>()
   private subagents = new Map<string, Subagent>()
   private details = new Map<string, unknown>()
+  /** Display order among rows of the same time: new rows count up, rows of older pages count down. */
+  private order = new Map<string, number>()
+  private newest = 0
+  private oldest = 0
+  /** Keys of rows that came from history pages (dropped by forgetHistory). */
+  private history = new Set<string>()
 
-  load(items: readonly TimelineInput[] | undefined): void {
-    for (const item of items ?? []) {
+  /** History rows; `older`: a page from before the rows already loaded (they go first). */
+  load(items: readonly TimelineInput[] | undefined, options: { older?: boolean } = {}): void {
+    const list = (items ?? []).filter((item) => item && typeof item.key === "string") as Array<TimelineInput & { key: string }>
+    if (options.older) {
+      const fresh = list.filter((item) => !this.order.has(item.key))
+      fresh.forEach((item, index) => this.order.set(item.key, this.oldest - fresh.length + index))
+      this.oldest -= fresh.length
+    }
+    for (const item of list) this.history.add(item.key)
+    for (const item of list) {
       // A stored thought replaces the row its live deltas built; the streamed text stays when the provider
       // stored none (many keep only an encrypted signature).
       const liveKey = item?.kind === "reasoning" && typeof item.messageID === "string" ? reasoningKey(item.messageID) : undefined
@@ -128,7 +142,22 @@ export class Timeline {
 
   upsert(item: TimelineInput): void {
     if (!item || typeof item.key !== "string") return
+    if (!this.order.has(item.key)) this.order.set(item.key, ++this.newest)
     this.items.set(item.key, { ...(this.items.get(item.key) ?? {}), ...item } as TimelineRow)
+  }
+
+  /** Whether `key` came from a history page. */
+  fromHistory(key: string): boolean {
+    return this.history.has(key)
+  }
+
+  /** Drops every row loaded from history pages (to start over from the newest page); local and live rows stay. */
+  forgetHistory(): void {
+    for (const key of this.history) {
+      this.items.delete(key)
+      this.order.delete(key)
+    }
+    this.history.clear()
   }
 
   /** The current row of `key`, if any. */
@@ -183,16 +212,18 @@ export class Timeline {
         children.set(item.sessionID, list)
       } else root.push(row)
     }
-    const groups = root.map((row) => ({ at: row.at ?? 0, rows: [row] }))
+    const seq = (key: string) => this.order.get(key) ?? 0
+    const groups = root.map((row) => ({ at: row.at ?? 0, seq: seq(row.key), rows: [row] }))
     for (const sub of this.subagents.values()) {
       groups.push({
         at: sub.at ?? 0,
+        seq: Number.MAX_SAFE_INTEGER,
         rows: [
           { key: `sub:${sub.id}`, kind: "subagent", label: sub.title || sub.id, state: sub.state, sessionID: sub.id, depth: 0 },
-          ...(children.get(sub.id) ?? []).sort((a, b) => (a.at ?? 0) - (b.at ?? 0)),
+          ...(children.get(sub.id) ?? []).sort((a, b) => (a.at ?? 0) - (b.at ?? 0) || seq(a.key) - seq(b.key)),
         ],
       })
     }
-    return groups.sort((a, b) => a.at - b.at).flatMap((group) => group.rows)
+    return groups.sort((a, b) => a.at - b.at || a.seq - b.seq).flatMap((group) => group.rows)
   }
 }

@@ -974,6 +974,46 @@ describe("Spoke", () => {
     expect(detail.result).toEqual({ detail: { name: "read", state: { status: "completed", input: { filePath: "/work/a.ts" }, content: [{ type: "text", text: "FULL OUTPUT" }] }, time: { created: 4, completed: 6 } } })
     expect((await server.request({ op: "timelinePart", sessionID: "ses_a", messageID: "other", partID: "1" })).ok).toBe(false)
   })
+
+  test("newest-first pages walk back by key, stay stable as messages arrive, and read OpenCode once while paging", async () => {
+    const { spoke, server, host, messages } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    await until(() => lastSessions(server)?.sessions.length === 1)
+    let reads = 0
+    const read = host.context.bind(host)
+    host.context = async (sessionID) => {
+      reads++
+      return read(sessionID)
+    }
+    const conversation = (n: number) => Array.from({ length: n }, (_, i) => (i % 2 ? { id: `a${i}`, type: "assistant", content: [{ type: "text", text: `answer ${i}` }] } : { id: `u${i}`, type: "user", text: `question ${i}` }))
+    messages.set("ses_a", conversation(10))
+    const first = (await server.request({ op: "timeline", sessionID: "ses_a", limit: 4, order: "desc" })).result as any
+    expect(first.items.map((x: any) => x.key)).toEqual(["u6:text", "a7:0", "u8:text", "a9:0"])
+    expect(first.older).toBe("u6:text")
+    expect(first.cursor).toBeUndefined()
+    // New messages arrive (in OpenCode) before the older page is asked for: the cursor still points at the same place.
+    messages.set("ses_a", conversation(14))
+    const second = (await server.request({ op: "timeline", sessionID: "ses_a", limit: 4, before: first.older })).result as any
+    expect(second.items.map((x: any) => x.key)).toEqual(["u2:text", "a3:0", "u4:text", "a5:0"])
+    const third = (await server.request({ op: "timeline", sessionID: "ses_a", limit: 4, before: second.older })).result as any
+    expect(third.items.map((x: any) => x.key)).toEqual(["u0:text", "a1:0"])
+    expect(third.older).toBeUndefined()
+    // The first page read OpenCode; the older pages came from the short-lived cache.
+    expect(reads).toBe(1)
+    // A change of the session drops the cache: the next older page reads again.
+    host.push({ type: "session.text.ended", data: { sessionID: "ses_a", messageID: "a13" } })
+    await Bun.sleep(20)
+    await server.request({ op: "timeline", sessionID: "ses_a", limit: 4, before: "u4:text" })
+    expect(reads).toBe(2)
+    // A new first page always reads OpenCode (it shows the newest rows).
+    const fresh = (await server.request({ op: "timeline", sessionID: "ses_a", limit: 2, order: "desc" })).result as any
+    expect(fresh.items.map((x: any) => x.key)).toEqual(["u12:text", "a13:0"])
+    expect(reads).toBe(3)
+    const bad = await server.request({ op: "timeline", sessionID: "ses_a", limit: 4, before: "gone:text" })
+    expect(bad.ok).toBe(false)
+    expect((bad as any).error).toContain("Invalid timeline cursor")
+  })
 })
 
 // ---------- image attachments ----------
