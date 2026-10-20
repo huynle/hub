@@ -128,6 +128,14 @@ export class VoiceController<C extends VoiceConversation = VoiceConversation> {
           gesture = kind === "gesture"
           return
         }
+        // The mic stopped and only a tap brings it back (e.g. after the screen was off): Voice mode ends and the
+        // view offers Tap to start.
+        if (kind === "gesture" && run === this.run && this.state.phase === "on") {
+          const stopped = this.stop()
+          const after = this.run
+          void stopped.then(() => after === this.run && this.set({ ...OFF, error: { sessionID, message: text, gesture: true } }))
+          return
+        }
         const sink = this.sinks.get(sessionID)
         if (sink) sink.note(text, kind)
         else this.deps.notify(text, kind)

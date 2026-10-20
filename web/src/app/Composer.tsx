@@ -286,6 +286,7 @@ const VOICE_LABEL: Record<ConversationState, string> = {
   sent: "Thinking",
   speaking: "Speaking",
   paused: "Muted",
+  suspended: "Paused — mic stopped by the phone (screen off). Unlock to resume.",
   off: "Off",
 }
 

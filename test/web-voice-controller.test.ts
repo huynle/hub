@@ -122,6 +122,24 @@ describe("VoiceController", () => {
     expect(h.notes.at(-1)).toEqual(["Voice mode was turned off.", undefined])
   })
 
+  test("Voice mode on, the mic comes back only after a tap: Voice mode ends with a gesture error (Tap to start)", async () => {
+    const h = harness()
+    await h.controller.start("A")
+    expect(h.controller.state.phase).toBe("on")
+    h.convs[0]!.ui.note("Tap to start Voice mode", "gesture")
+    await Bun.sleep(0)
+    expect(h.convs[0]!.stopped).toBe(1)
+    expect(h.controller.state).toMatchObject({ phase: "off", error: { sessionID: "A", message: "Tap to start Voice mode", gesture: true } })
+    expect(h.controller.needsTap("A")).toBe(true)
+  })
+
+  test("the phone stopping the mic shows as suspended (not muted)", async () => {
+    const h = harness()
+    await h.controller.start("A")
+    h.convs[0]!.ui.state("suspended")
+    expect(h.controller.state).toMatchObject({ phase: "on", voice: "suspended", paused: false })
+  })
+
   test("a start the browser blocked until a tap keeps a gesture error: the view offers Tap to start", async () => {
     const h = harness({ autoStart: false })
     const a = h.controller.start("A")

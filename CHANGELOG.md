@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Voice mode tells the truth with the screen off**: Android Chrome usually stops the microphone when the
+  screen turns off, while the "Voice mode on · listening" notification stayed. Voice mode now notices (no
+  audio frames for 1.5 s, the mic track muted or ended, the AudioContext suspended) and says so: the Voice
+  bar shows "Paused — mic stopped by the phone (screen off). Unlock to resume.", the notification turns into
+  "Voice mode paused · unlock to talk" (End and Open kept; updated at once), the lock-screen controls show
+  paused and a short falling tone plays. On unlock it resumes the audio, asks for the microphone again if
+  needed (or offers "Tap to start Voice mode"), retries with backoff and plays a rising tone; it says
+  "listening" only once audio arrives. While hidden it keeps trying (audio resume, silent loop). The Settings
+  text for "Keep listening when the screen is off" now says it is best effort.
 - **Smoother live connection**:
   - **Resume instead of reload**: every SSE message carries an id; a console that reconnects (phone unlocked,
     app switched back, network blip) sends `Last-Event-ID` (or `?last=`) and the hub replays what it missed from

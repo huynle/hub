@@ -894,11 +894,19 @@ Pure logic is in `web/src/core/feedback-core.ts` (tested with bun); `web/src/cor
   Screen Wake Lock keeps the screen on while listening. On: no wake lock. The mic and VAD keep running
   when the page is hidden. A silent looping audio element plays to make suspension less likely. **This is best-effort:** whether
   listening survives a locked screen depends on Android Chrome (battery saver, OS version), and iOS
-  suspends it. The OpenCode session keeps running on the laptop either way. When the phone is not
-  listening, turn on the `say` notification to get replies as push notifications.
+  suspends it. Android Chrome usually stops the microphone when the screen turns off (the track is muted
+  or ended, the AudioContext suspended, no audio frames). Voice mode watches for that: no frames for 1.5 s,
+  a muted/ended track or a suspended AudioContext → the Voice bar says "Paused — mic stopped by the phone
+  (screen off). Unlock to resume.", the notification becomes "Voice mode paused · unlock to talk", the lock
+  screen controls show paused and a short falling tone plays. While hidden it keeps nudging the audio
+  (resume every 3 s, the silent loop); it says "listening" again only once audio frames arrive. On unlock
+  (visible, `pageshow`, focus, track unmute) it resumes the AudioContext, asks for the microphone again if
+  the track ended (or shows "Tap to start Voice mode" when that needs a tap), retries with backoff while
+  visible, and plays a rising tone. The OpenCode session keeps running on the laptop either way. When the
+  phone is not listening, turn on the `say` notification to get replies as push notifications.
 - **"Voice mode on" notification**: while Voice mode is on, the page shows a silent, persistent system
   notification through the service worker (tag `voice-mode`): "<session title> · listening" (thinking,
-  speaking, muted; updated at most every 3 s) with **End** and **Open**. End reaches the page (which ends
+  speaking, muted; updated at most every 3 s, at once when the phone stops or gives back the microphone) with **End** and **Open**. End reaches the page (which ends
   Voice mode); with no page open, the service worker turns conversation mode off at the hub itself with the
   device cookie. It closes when Voice mode ends or the page goes away. It needs notification permission:
   without it the Voice bar shows **Allow notifications**. The Media Session shows "Voice mode on" with the

@@ -3,7 +3,7 @@
 // phone (390×844) sizes: home loads, a session opens with its timeline, Send → Steer/Stop → Send, image attachments
 // (attach, remove, attach again, send), Dictate → Send (input cleared, also when the turn's connection drops), a slow turn (202, reply later), the right rail and diff viewer render, a Voice-off session is inspectable, rename (table,
 // sidebar, top bar), archive (menu, Undo, Archived chip, Needs-you exception, bulk, inactive), resizable sidebar/rail, and
-// Voice mode speaking a streamed reply before its text ends (each sentence playing while its MP3 still downloads), with the turn timed (a browser with a silent fake mic),
+// Voice mode speaking a streamed reply before its text ends (each sentence playing while its MP3 still downloads), with the turn timed (a browser with a silent fake mic), Voice mode with the screen off (the phone muting/ending the mic or suspending audio: paused in the Voice bar and the notification, listening again on unlock),
 // rich Markdown (tables, task lists, highlighted code, copy) and the text size (Settings, pinch, ctrl+wheel, kept after reload, phone at 1.8),
 // and speech detection (fake mics looping background noise: nothing sent, unless the on-device model is blocked; and a spoken request: one utterance, a hallucinated “Thank you.” shown as ignored). Screenshots go to $SMOKE_SHOTS (default: the OS temp
 // dir). Run `npm run build:web && npm run test:e2e`. Chromium: $CHROMIUM_PATH, else Playwright's cache, else PATH.
@@ -1083,6 +1083,113 @@ const GESTURE_POLICY = `(() => {
 })()`
 
 /**
+ * Test hooks for Voice mode with the screen off: notification permission granted (fake), every notification the
+ * page shows recorded (window.__shown), every microphone stream and AudioContext kept (window.__streams /
+ * __contexts) so a check can mute or end the track or suspend the audio like Android Chrome does, and a settable
+ * page visibility (window.__setVisible).
+ */
+const SCREEN_OFF_HOOKS = `(() => {
+  localStorage.setItem("fake-push:permission", "granted")
+  window.__shown = []
+  ServiceWorkerRegistration.prototype.showNotification = async function (title, options) {
+    window.__shown.push({ title, body: options?.body, actions: (options?.actions ?? []).map((a) => a.title) })
+  }
+  window.__streams = []
+  const gum = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices)
+  navigator.mediaDevices.getUserMedia = async (c) => {
+    const stream = await gum(c)
+    window.__streams.push(stream)
+    return stream
+  }
+  window.__contexts = []
+  const Ctx = window.AudioContext
+  window.AudioContext = class extends Ctx {
+    constructor(...args) {
+      super(...args)
+      window.__contexts.push(this)
+    }
+  }
+  let visible = "visible"
+  Object.defineProperty(document, "visibilityState", { get: () => visible, configurable: true })
+  Object.defineProperty(document, "hidden", { get: () => visible === "hidden", configurable: true })
+  window.__setVisible = (on) => {
+    visible = on ? "visible" : "hidden"
+    document.dispatchEvent(new Event("visibilitychange"))
+  }
+})()`
+
+/** Android Chrome stops the mic with the screen off: Voice mode says paused (bar + notification), and resumes on unlock. */
+async function voiceScreenOff(browser: Browser): Promise<void> {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, permissions: ["microphone"] })
+  await context.addInitScript(FAKE_PUSH)
+  await context.addInitScript(SCREEN_OFF_HOOKS)
+  const page = await context.newPage()
+  current = page
+  const errors: string[] = []
+  page.on("pageerror", (e) => errors.push(e.message))
+  const PAUSED = "Paused — mic stopped by the phone (screen off). Unlock to resume."
+  const state = page.locator(".voice-bar .voice-state")
+  const lastShown = () => page.evaluate(() => (window as any).__shown.at(-1) as { title: string; body: string; actions: string[] } | undefined)
+  const waitShown = (title: string) => page.waitForFunction((t) => (window as any).__shown.at(-1)?.title === t, title, { timeout: 5000 })
+  await check("voice screen off: the phone muting the mic → Voice bar and notification say paused; unlock → listening", async () => {
+    await page.goto(`${BASE}/s/ses_mock`)
+    await page.locator(".msg.assistant").first().waitFor()
+    await page.getByRole("button", { name: "Start Voice mode" }).click()
+    await state.getByText(/Listening|Thinking/).waitFor({ timeout: 10_000 })
+    await waitShown("Voice mode on")
+    // Screen off: hidden, then the browser mutes the microphone track.
+    await page.evaluate(() => {
+      const w = window as any
+      w.__setVisible(false)
+      w.__streams.at(-1).getAudioTracks()[0].dispatchEvent(new Event("mute"))
+    })
+    await state.getByText(PAUSED).waitFor({ timeout: 5000 })
+    await waitShown("Voice mode paused · unlock to talk")
+    const paused = await lastShown()
+    assert(JSON.stringify(paused?.actions) === JSON.stringify(["End", "Open"]), `End/Open kept: ${JSON.stringify(paused)}`)
+    assert(paused?.body === "Mock session · paused", `body: ${paused?.body}`)
+    await shot(page, "voice-screen-off-paused")
+    // Unlock: visible again, the track unmutes, frames flow → listening.
+    await page.evaluate(() => {
+      const w = window as any
+      w.__setVisible(true)
+      w.__streams.at(-1).getAudioTracks()[0].dispatchEvent(new Event("unmute"))
+    })
+    await state.getByText(/Listening|Thinking/).waitFor({ timeout: 5000 })
+    await waitShown("Voice mode on")
+  })
+
+  await check("voice screen off: audio suspended while hidden → paused; visible → resumed and listening", async () => {
+    await page.evaluate(async () => {
+      const w = window as any
+      w.__setVisible(false)
+      await w.__contexts.at(-1).suspend()
+    })
+    await state.getByText(PAUSED).waitFor({ timeout: 2500 })
+    await waitShown("Voice mode paused · unlock to talk")
+    await page.evaluate(() => (window as any).__setVisible(true))
+    await state.getByText(/Listening|Thinking/).waitFor({ timeout: 5000 })
+    await waitShown("Voice mode on")
+  })
+
+  await check("voice screen off: the mic track ended → on screen the mic is requested again and listening resumes", async () => {
+    const before = await page.evaluate(() => (window as any).__streams.length as number)
+    await page.evaluate(() => {
+      const track = (window as any).__streams.at(-1).getAudioTracks()[0] as MediaStreamTrack
+      track.stop()
+      track.dispatchEvent(new Event("ended"))
+    })
+    await page.waitForFunction((n) => (window as any).__streams.length > n, before, { timeout: 5000 })
+    await state.getByText(/Listening|Thinking/).waitFor({ timeout: 5000 })
+    assert(await page.evaluate(() => (window as any).__streams.at(-1).getAudioTracks()[0].readyState === "live"), "a live new track")
+    await page.locator(".voice-bar").getByRole("button", { name: "End", exact: true }).click()
+    await page.locator(".voice-bar").waitFor({ state: "detached" })
+  })
+  await check("voice screen off: no page errors", async () => assert(!errors.length, errors.join("; ")))
+  await context.close()
+}
+
+/**
  * Speak while it writes, timed: a browser whose fake microphone is silent (the default fake device beeps, which the
  * VAD can take for speech and barge in on the reply).
  */
@@ -1564,6 +1671,8 @@ try {
     args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream", `--use-file-for-fake-audio-capture=${silentWav(path.join(SHOTS, "silence.wav"))}`],
   })
   await voiceSpeed(quiet)
+  await mock("/mock/reset")
+  await voiceScreenOff(quiet)
   await mock("/mock/reset")
   const fakeMic = (file: string) => ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream", `--use-file-for-fake-audio-capture=${file}`]
   noisy = await chromium.launch({ executablePath, headless: true, args: fakeMic(noiseWav(path.join(SHOTS, "noise.wav"))) })

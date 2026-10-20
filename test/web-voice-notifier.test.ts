@@ -104,6 +104,10 @@ describe("voiceNotification", () => {
     expect(voiceNotification("ses_a", "API server", "paused").body).toBe("API server · muted")
     expect(voiceNotification("ses_a", "API server", "starting").body).toBe("API server · starting")
   })
+
+  test("the phone stopped the mic (screen off): says paused, not listening", () => {
+    expect(voiceNotification("ses_a", "API server", "suspended")).toEqual({ sessionID: "ses_a", title: "Voice mode paused · unlock to talk", body: "API server · paused" })
+  })
 })
 
 describe("VoiceNotifier", () => {
@@ -170,6 +174,24 @@ describe("VoiceNotifier", () => {
     expect(t.shown.at(-1)!.body).toBe("API server · listening")
     await t.controller.stop()
     expect(t.notifier.needsPermission()).toBe(false)
+  })
+
+  test("the mic stopping (screen off) and coming back update the notification at once, not after the interval", async () => {
+    const t = setup()
+    await t.controller.start("ses_a")
+    const ui = t.convs[0]!.ui
+    ui.state("speaking")
+    t.advance(VOICE_NOTIFY_INTERVAL_MS)
+    const count = t.shown.length
+    // Timers barely run in a hidden page: the paused state cannot wait for one.
+    t.advance(10)
+    ui.state("suspended")
+    expect(t.shown.length).toBe(count + 1)
+    expect(t.shown.at(-1)).toEqual({ sessionID: "ses_a", title: "Voice mode paused · unlock to talk", body: "API server · paused" })
+    t.advance(10)
+    ui.state("listening")
+    expect(t.shown.length).toBe(count + 2)
+    expect(t.shown.at(-1)).toEqual({ sessionID: "ses_a", title: "Voice mode on", body: "API server · listening" })
   })
 
   test("dispose closes the notification (page unload)", async () => {

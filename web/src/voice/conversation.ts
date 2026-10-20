@@ -11,6 +11,7 @@ import { junkTranscript } from "../core/junk-transcript"
 import { loadSilero } from "./silero"
 import { AudioClip, canStreamMp3, clipFrom, feed } from "../core/audio-stream"
 import { CuePlayer } from "../core/cues"
+import { MicLiveness, recoveryDelay, type LossReason } from "../core/mic-liveness"
 import { CueClock, CuePicker, cueTexts, CueScheduler, isWorking, subagentChanges, type StatusEntry } from "../core/feedback-core"
 import type { ApiInit } from "../app/api"
 
@@ -27,6 +28,10 @@ const SILENCE_SECONDS = 2
 export const TAP_TO_START = "Tap to start Voice mode"
 const GESTURE_ERROR = "GestureRequired"
 const RESUME_WAIT_MS = 500
+/** How often listening is checked (frames still arriving?). */
+const MIC_CHECK_MS = 500
+/** While hidden and not listening: how often to ask the audio graph to resume (best effort, screen off). */
+const HIDDEN_RESUME_MS = 3000
 
 const userActivated = () => (navigator as Navigator & { userActivation?: { hasBeenActive: boolean } }).userActivation?.hasBeenActive ?? true
 
@@ -38,7 +43,8 @@ async function micPermission(): Promise<"granted" | "denied" | "prompt" | "unkno
   }
 }
 
-export type ConversationState = "starting" | "listening" | "hearing" | "transcribing" | "sent" | "speaking" | "paused" | "off"
+/** `paused`: muted by the user; `suspended`: the phone stopped the microphone (screen off), not listening. */
+export type ConversationState = "starting" | "listening" | "hearing" | "transcribing" | "sent" | "speaking" | "paused" | "suspended" | "off"
 export type Tick = "sent" | "heard" | "failed"
 
 export interface ConversationUI<B> {
@@ -112,6 +118,14 @@ export class Conversation<B = unknown> {
   private scheduler = new CueScheduler({ pick: (cue) => this.cuePicker.pick(cue) })
   private cuePlayer: CuePlayer
   private onVisibility: () => void
+  /** Is the microphone really heard? The phone stops it with the screen off (muted track, suspended audio, no frames). */
+  private liveness = new MicLiveness({ onChange: (live, reason) => this.livenessChanged(live, reason) })
+  private micTimer: ReturnType<typeof setInterval> | undefined
+  private recoverTimer: ReturnType<typeof setTimeout> | undefined
+  private recoverAttempt = 0
+  private recovering = false
+  private lastResumeTry = 0
+  private track?: MediaStreamTrack
   private stream?: MediaStream
   private ctx?: AudioContext
   private source?: MediaStreamAudioSourceNode
@@ -163,9 +177,30 @@ export class Conversation<B = unknown> {
     })
     this.cueClock = new CueClock({ scheduler: this.scheduler, play: (cues) => this.cuePlayer.play(cues), ready: () => this.active && !this.paused })
     this.onVisibility = () => {
-      if (document.visibilityState === "visible" && this.active && !this.opts.background) void this.lockScreen()
+      const visible = document.visibilityState === "visible"
+      this.liveness.visibility(visible, Date.now())
+      if (!this.active) return
+      if (!visible) {
+        // Best effort with the screen off: keep the silent loop going (Android may pause it with the page).
+        if (this.opts.background && !this.paused) this.silence?.play().catch(() => {})
+        return
+      }
+      if (!this.opts.background) void this.lockScreen()
+      this.recover()
     }
   }
+
+  /** Back on screen (bfcache, focus): bring the microphone back if the phone stopped it. */
+  private onWake = (): void => {
+    if (this.active && document.visibilityState === "visible") this.recover()
+  }
+
+  private onTrackMute = (): void => this.liveness.muted(true, Date.now())
+  private onTrackUnmute = (): void => {
+    this.liveness.muted(false, Date.now())
+    this.recover()
+  }
+  private onTrackEnded = (): void => this.liveness.ended(Date.now())
 
   private get path(): string {
     return `/api/sessions/${encodeURIComponent(this.sessionID)}`
@@ -237,7 +272,11 @@ export class Conversation<B = unknown> {
     if (cancelled()) return false
     if (this.opts.background) this.mediaSession()
     else void this.lockScreen()
+    this.liveness.visibility(document.visibilityState !== "hidden", Date.now())
     document.addEventListener("visibilitychange", this.onVisibility)
+    window.addEventListener?.("pageshow", this.onWake)
+    window.addEventListener?.("focus", this.onWake)
+    this.micTimer = setInterval(() => this.checkMic(), MIC_CHECK_MS)
     this.cueClock.poke()
     this.refresh()
     return true
@@ -267,6 +306,9 @@ export class Conversation<B = unknown> {
     // Without a tap the browser keeps the context suspended (autoplay policy): nothing would be heard.
     await Promise.race([ctx.resume().catch(() => {}), new Promise((r) => setTimeout(r, RESUME_WAIT_MS))])
     if (gestureBlocked({ audioState: ctx.state, activated: userActivated() })) throw Object.assign(new Error(TAP_TO_START), { name: GESTURE_ERROR })
+    this.liveness.start(Date.now())
+    ctx.onstatechange = () => this.liveness.audio(ctx.state, Date.now())
+    this.watchTrack(this.stream!)
     this.source = ctx.createMediaStreamSource(this.stream!)
     this.sink = ctx.createGain()
     this.sink.gain.value = 0 // keeps the tap pulled by the graph without making a sound
@@ -335,7 +377,9 @@ export class Conversation<B = unknown> {
 
   /** One ~20 ms frame from the mic. */
   private frame(samples: Float32Array): void {
-    if (!this.active || !this.vad || this.paused) return
+    if (!this.active) return
+    this.liveness.frame(Date.now())
+    if (!this.vad || this.paused || !this.liveness.live) return
     const sensitivity = this.opts.sensitivity()
     if (sensitivity !== this.sensitivity) {
       this.sensitivity = sensitivity
@@ -347,7 +391,7 @@ export class Conversation<B = unknown> {
   /** Speech starts and ends from the detector (in stream order; possibly after the frame, when the model answers). */
   private vadEvents(events: readonly VadEvent[]): void {
     const vad = this.vad
-    if (!this.active || !vad || this.paused) return
+    if (!this.active || !vad || this.paused || !this.liveness.live) return
     for (const event of events) {
       if (event.type === "start") {
         this.endpointer!.speechStarted()
@@ -552,7 +596,122 @@ export class Conversation<B = unknown> {
    * conversation only reports whether it plays.
    */
   private mediaSession(): void {
-    if (navigator.mediaSession) navigator.mediaSession.playbackState = this.paused ? "paused" : "playing"
+    if (navigator.mediaSession) navigator.mediaSession.playbackState = this.paused || !this.liveness.live ? "paused" : "playing"
+  }
+
+  /** Follows the microphone track's mute / unmute / ended (the phone stopping it with the screen off). */
+  private watchTrack(stream: MediaStream): void {
+    this.unwatchTrack()
+    const track = stream.getAudioTracks?.()[0]
+    if (!track?.addEventListener) return
+    this.track = track
+    track.addEventListener("mute", this.onTrackMute)
+    track.addEventListener("unmute", this.onTrackUnmute)
+    track.addEventListener("ended", this.onTrackEnded)
+    if (track.muted) this.liveness.muted(true, Date.now())
+    if (track.readyState === "ended") this.liveness.ended(Date.now())
+  }
+
+  private unwatchTrack(): void {
+    const track = this.track
+    this.track = undefined
+    if (!track?.removeEventListener) return
+    track.removeEventListener("mute", this.onTrackMute)
+    track.removeEventListener("unmute", this.onTrackUnmute)
+    track.removeEventListener("ended", this.onTrackEnded)
+  }
+
+  /** Periodic: frames still arriving? While hidden and not listening, nudge the audio graph now and then. */
+  private checkMic(): void {
+    if (!this.active) return
+    const now = Date.now()
+    this.liveness.tick(now)
+    if (this.liveness.live || document.visibilityState === "visible" || now - this.lastResumeTry < HIDDEN_RESUME_MS) return
+    this.lastResumeTry = now
+    if (this.ctx && this.ctx.state !== "running") this.ctx.resume().catch(() => {})
+    if (this.opts.background && !this.paused) this.silence?.play().catch(() => {})
+  }
+
+  /** Listening stopped (tell the user plainly, a falling tone) or came back (a rising tone). */
+  private livenessChanged(live: boolean, _reason?: LossReason): void {
+    if (!this.active) return
+    if (live) {
+      clearTimeout(this.recoverTimer)
+      this.recoverTimer = undefined
+      this.recoverAttempt = 0
+      this.cuePlayer.earcon("resumed")
+      this.cueClock.poke()
+    } else {
+      // Half-heard speech is dropped; utterances already being transcribed still go out.
+      this.vad?.reset()
+      this.ui.level(0)
+      this.cuePlayer.earcon("paused")
+      this.lastResumeTry = Date.now() // hidden: the first nudge comes after HIDDEN_RESUME_MS
+      if (this.liveness.wantsRecovery) this.scheduleRecover()
+    }
+    if (this.opts.background) this.mediaSession()
+    this.refresh()
+  }
+
+  /** Tries again later while the page is visible and listening has not come back (backoff up to 8 s). */
+  private scheduleRecover(): void {
+    if (this.recoverTimer !== undefined || !this.active) return
+    this.recoverTimer = setTimeout(() => {
+      this.recoverTimer = undefined
+      this.recover()
+    }, recoveryDelay(this.recoverAttempt++))
+  }
+
+  /** Brings listening back: resumes the audio graph, asks for the microphone again if its track ended. */
+  private recover(): void {
+    if (!this.active || this.liveness.live || this.recovering) return
+    clearTimeout(this.recoverTimer)
+    this.recoverTimer = undefined
+    this.recovering = true
+    void this.tryRecover().finally(() => {
+      this.recovering = false
+      if (this.active && this.liveness.wantsRecovery) this.scheduleRecover()
+    })
+  }
+
+  private async tryRecover(): Promise<void> {
+    this.cuePlayer.unlock()
+    const ctx = this.ctx
+    const resumed = ctx && ctx.state !== "running" ? ctx.resume().catch(() => {}) : undefined
+    if (this.opts.background && !this.paused) this.silence?.play().catch(() => {})
+    if (this.liveness.needsMic || this.track?.readyState === "ended") await this.reacquire()
+    else if (resumed) await Promise.race([resumed, new Promise((r) => setTimeout(r, RESUME_WAIT_MS))])
+    // Listening is back only once frames arrive (MicLiveness).
+  }
+
+  /** The track ended: a new one from getUserMedia, wired into the same audio graph. */
+  private async reacquire(): Promise<void> {
+    let stream: MediaStream
+    try {
+      stream = await navigator.mediaDevices.getUserMedia(micConstraints(this.opts.deviceId))
+    } catch (e) {
+      if (!this.active) return
+      const err = e as Error
+      // Only a tap brings the microphone back: Voice mode ends and the view offers "Tap to start Voice mode".
+      if (gestureBlocked({ error: err.name, micPermission: await micPermission(), activated: userActivated() })) this.ui.note(TAP_TO_START, "gesture")
+      return
+    }
+    if (!this.active || !this.ctx || !this.tap) {
+      stream.getTracks().forEach((t) => t.stop())
+      return
+    }
+    this.release()
+    this.stream = stream
+    if (this.paused) stream.getAudioTracks().forEach((t) => (t.enabled = false))
+    try {
+      this.source?.disconnect()
+    } catch {
+      // already disconnected
+    }
+    this.source = this.ctx.createMediaStreamSource(stream)
+    this.source.connect(this.tap)
+    this.liveness.replaced(Date.now())
+    this.watchTrack(stream)
   }
 
   private clearMediaSession(): void {
@@ -686,7 +845,9 @@ export class Conversation<B = unknown> {
     if (!this.active) return
     const state: ConversationState = this.paused
       ? "paused"
-      : this.queue?.speaking
+      : !this.liveness.live
+        ? "suspended"
+        : this.queue?.speaking
         ? "speaking"
         : this.vad?.active
           ? "hearing"
@@ -712,6 +873,7 @@ export class Conversation<B = unknown> {
   }
 
   private release(): void {
+    this.unwatchTrack()
     this.stream?.getTracks().forEach((t) => t.stop())
     this.stream = undefined
   }
@@ -724,6 +886,13 @@ export class Conversation<B = unknown> {
     this.paused = false
     this.state = undefined
     document.removeEventListener("visibilitychange", this.onVisibility)
+    window.removeEventListener?.("pageshow", this.onWake)
+    window.removeEventListener?.("focus", this.onWake)
+    clearInterval(this.micTimer)
+    clearTimeout(this.recoverTimer)
+    this.micTimer = this.recoverTimer = undefined
+    this.recoverAttempt = 0
+    if (this.ctx) this.ctx.onstatechange = null
     this.cueClock.stop()
     this.cuePlayer.close()
     this.stopSilence()
