@@ -7,6 +7,7 @@
 // the Archived chip, except one that needs you, which also shows under Needs you so a question is never missed.
 import { RANK, fold, matches, type SessionState } from "../core/browser-core"
 import { groupKey, hiddenBy, roots, toRow, type ViewMachine, type ViewPrefs, type ViewRow } from "../core/view-core"
+import { retryText, runningJobs } from "../core/jobs-core"
 
 export type Source = "herdr" | "tui" | "background"
 
@@ -23,6 +24,10 @@ export interface SessionRow extends ViewRow {
   readonly unread: boolean
   /** Sidebar/open-group key (`herdr:<id>` or the project folder). */
   readonly group: string
+  /** Running shells and terminals in the tree (background jobs). */
+  readonly jobs: number
+  /** The tree is retrying a model request ("Retrying (attempt 2): Rate limited"). */
+  readonly retry?: string
 }
 
 /** Every root session of every machine, newest first. */
@@ -36,6 +41,7 @@ export function sessionRows(machines: readonly ViewMachine[] | undefined, prefs:
       const row = toRow(s, machine, pinned)
       const source: Source = row.open ? (row.terminal?.source === "herdr" ? "herdr" : "tui") : "background"
       const read = reads[row.id]
+      const retry = row.state === "working" ? retryText(s.status) : undefined
       out.push({
         ...row,
         machineName: machine.name,
@@ -46,6 +52,8 @@ export function sessionRows(machines: readonly ViewMachine[] | undefined, prefs:
         archived: archived.has(row.id),
         unread: read !== undefined && row.updated > read,
         group: groupKey(s),
+        jobs: runningJobs(s.status),
+        ...(retry ? { retry } : {}),
       })
     }
   }

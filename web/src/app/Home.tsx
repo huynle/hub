@@ -8,6 +8,7 @@ import { isPhone } from "./layout"
 import { RenameTitle } from "./Rename"
 import { navigate, sessionHref } from "./router"
 import { speechSetup } from "../core/feedback-core"
+import { jobsBadge } from "../core/jobs-core"
 import { Dialog, Icon, Menu, SOURCE_LABEL, STATE_LABEL, StatusIcon, VoiceDot, ago, now } from "./ui"
 import { voiceState } from "./voice"
 
@@ -19,10 +20,14 @@ export function currentActivity(r: SessionRow): string {
   const blocker = r.blockers[0]
   if (r.state === "blocked" && blocker) return `${blocker.kind === "permission" ? "Permission" : "Question"}: ${blocker.summary}`
   if (r.state !== "working") return ""
+  if (r.retry) return r.retry
   const feed = live.has(r.id) ? live.feed(r.id) : undefined
   const pulse = feed?.pulse()
-  if (pulse?.busy && pulse.label !== "Working") return pulse.label
-  return feed?.now() ?? r.nowText ?? "Working"
+  const jobs = r.jobs ? ` · ${jobsBadge(r.jobs)}` : ""
+  if (pulse?.busy && pulse.label !== "Working") return pulse.label + jobs
+  const doing = feed?.now() ?? r.nowText
+  if (doing) return doing + jobs
+  return r.jobs ? `Background: ${jobsBadge(r.jobs)}` : "Working"
 }
 
 const COLUMNS: Array<[SortKey, string]> = [
@@ -253,6 +258,11 @@ function SessionTable(props: {
               <td class="col-status">
                 <StatusIcon state={r.state} />
                 <span class="sr-only">{STATE_LABEL[r.state]}</span>
+                <Show when={r.jobs}>
+                  <span class="jobs-badge" title={jobsBadge(r.jobs)} aria-label={jobsBadge(r.jobs)}>
+                    {r.jobs}
+                  </span>
+                </Show>
               </td>
               <td class="col-title">
                 <Show when={voiceLive(r, voiceState())}>

@@ -1,5 +1,6 @@
 // One session: top bar, transcript (history + live), permission/question cards, Voice bar, composer, right rail
 // and diff viewer. Works whether Voice is on or off; Voice mode turns Voice on first when needed.
+import { jobsBadge, retryText, runningJobs } from "../core/jobs-core"
 import { For, Show, batch, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack } from "solid-js"
 import { blockersOf } from "../core/browser-core"
 import { reconcileSay, statusNotes, type StatusLike } from "../core/conversation-core"
@@ -473,7 +474,9 @@ export function SessionView(props: { id: string }) {
     const p = pulse()
     if (!running() || !p?.busy) return undefined
     tick()
-    return `${p.label}${p.since ? ` · ${formatElapsed(Date.now() - p.since)}` : ""}`
+    const retrying = retryText(status(), id)
+    const jobs = runningJobs(status())
+    return `${retrying ?? p.label}${p.since ? ` · ${formatElapsed(Date.now() - p.since)}` : ""}${jobs ? ` · ${jobsBadge(jobs)}` : ""}`
   }
   const metaLeft = () => {
     const s = found()?.session

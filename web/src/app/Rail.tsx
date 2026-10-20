@@ -7,7 +7,8 @@ import { hub } from "./hub"
 import { parsePatch } from "../lib/diff"
 import type { Found } from "../lib/store"
 import { enc, getJSON, sessionPath } from "./api"
-import { Icon, IconButton, SOURCE_LABEL, basename } from "./ui"
+import { Icon, IconButton, SOURCE_LABEL, basename, now } from "./ui"
+import { jobLabel, retryText, treeJobs } from "../core/jobs-core"
 
 export interface Summary {
   directory: string
@@ -59,6 +60,9 @@ export function Rail(props: {
 }) {
   const s = () => props.found?.session
   const source = () => (s()?.open ? (s()?.terminal?.source === "herdr" ? "herdr" : "tui") : "background")
+  const jobs = () => treeJobs(s()?.status, now())
+  const running = () => jobs().filter((j) => j.status === "running").length
+  const retry = () => (s()?.state === "working" || s()?.status?.some((x) => x.state === "working") ? retryText(s()?.status, s()?.id) : undefined)
   const connectors = () => {
     const mcp = props.summary?.mcp
     return mcp?.length ? `Connectors · ${mcp.filter((m) => m.status === "connected").length} connected` : "Connectors"
@@ -93,6 +97,25 @@ export function Rail(props: {
           )}
         </Show>
       </Card>
+      <Show when={jobs().length || retry()}>
+        <Card id="jobs" title={`Jobs${running() ? ` · ${running()} running` : ""}`} label="Background jobs">
+          <Show when={retry()}>{(text) => <p class="small retry-note">{text()}</p>}</Show>
+          <ul class="job-list">
+            <For each={jobs()}>
+              {(job) => (
+                <li class={`job ${job.status}`} title={job.command ?? job.id}>
+                  <span class={`job-dot ${job.status === "running" ? "on" : job.exit ? "bad" : ""}`} aria-hidden="true" />
+                  <span class="job-command mono">{job.command ?? job.id}</span>
+                  <span class="muted small">
+                    {jobLabel(job, now())}
+                    {job.sessionID !== s()?.id && job.sessionTitle ? ` · ${job.sessionTitle}` : ""}
+                  </span>
+                </li>
+              )}
+            </For>
+          </ul>
+        </Card>
+      </Show>
       <Card id="context" title="Context">
         <Show when={props.summary?.context} fallback={<p class="muted small">{props.loading ? "Loading…" : "No usage reported yet."}</p>}>
           {(c) => (
