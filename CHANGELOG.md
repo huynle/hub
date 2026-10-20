@@ -29,6 +29,25 @@
     and a **Jobs** card in the rail (command, running time, exit code for a minute after it ends).
   - **Seeding**: on connect, after a hub reconnect and after OpenCode's event stream comes back, the spoke asks
     its own server what runs (`session.active`, `shell.list`) so sessions already running show as working.
+- **Nicer replies**: the console renders more of the Markdown agents write, still as elements (never raw HTML;
+  HTML in a reply shows as text):
+  - **GFM tables** (column alignment, formatting in cells, scrolling sideways on narrow screens), **nested lists**
+    (by indentation, numbered and bulleted mixed), **task lists** (disabled checkboxes), list items with several
+    paragraphs or a code block, headings, lists and code **inside quotes**, **setext headings**, `~~strike~~`,
+    `==highlight==`, **autolinks** (bare http(s) URLs and `<url>`), line breaks (a single newline in a paragraph
+    is a break, as agents write), backslash escapes, and images as a link named by their alt text (never loaded).
+  - **Code blocks**: language label, **Copy** (with "Copied"), **Wrap** toggle (else long lines scroll), and
+    syntax highlighting for TypeScript/JavaScript/TSX, JSON, bash/sh, Python, Go, Rust, YAML, diff (added and
+    removed lines colored), SQL, CSS, HTML/XML and Markdown: a small built-in tokenizer loaded with the first
+    code block (3.3 KB gzipped chunk; the main chunk grew 5.7 KB gzipped).
+  - **While a reply streams**, the block being written closes what it opened (`**bold` shows bold, a table
+    header alone is a table, a link whose address is still arriving shows its label), and blocks update in place
+    instead of being rebuilt.
+- **Text size and pinch-to-zoom**: all console text sizes follow one `--font-scale` (80–180%). Set it in
+  **Settings → Appearance → Text size** (with Reset), or **pinch** the conversation or the session list: two
+  fingers on a phone, a trackpad pinch on desktop (ctrl+wheel, Safari gesture events). The pinch only changes the
+  text there; elsewhere (and ⌘+/⌘−) the browser zooms as before. Kept per device and applied before the first
+  paint. On touch screens text fields are at least 16 px, so iOS no longer zooms in when one gets focus.
 
 - **Voice mode hears you, not the room**:
   - **On-device speech detection**: Silero VAD v5 (MIT) runs in the browser through onnxruntime-web (MIT; wasm,

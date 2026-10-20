@@ -694,6 +694,45 @@ const PATCH = [
   "   const timeline = new Timeline()",
 ].join("\n")
 
+/** A reply using everything the console renders (session "Benchmark harness"; e2e and screenshots). */
+export const RICH_MARKDOWN = [
+  "## Benchmark results",
+  "",
+  "Ran the harness on **3 engines**; ==pgvector is fastest== below 1M rows. ~~FAISS on CPU~~ was dropped.",
+  "Raw data: https://example.com/bench/run-42 (CSV).",
+  "",
+  "| Engine | p50 (ms) | p99 (ms) | Recall@10 |",
+  "|:-------|---------:|---------:|:---------:|",
+  "| pgvector | 4.1 | 11.8 | 0.97 |",
+  "| Qdrant | 5.3 | 14.2 | **0.98** |",
+  "| `sqlite-vec` | 9.7 | 31.0 | 0.95 |",
+  "",
+  "### Next steps",
+  "",
+  "1. Tune the index",
+  "   - `lists = 100` for pgvector",
+  "   - [ ] try HNSW",
+  "   - [x] warm the cache",
+  "2. Re-run with 10M rows",
+  "",
+  "> **Note:** numbers are from one machine.",
+  "> - noisy neighbours possible",
+  "",
+  "```ts",
+  "// Run one query and time it",
+  "export async function timeQuery(db: Db, vector: number[]): Promise<number> {",
+  "  const t0 = performance.now()",
+  '  await db.query("SELECT id FROM items ORDER BY embedding <-> $1 LIMIT 10", [vector])',
+  "  return performance.now() - t0",
+  "}",
+  "```",
+  "",
+  "```diff",
+  "-const LISTS = 50",
+  "+const LISTS = 100",
+  "```",
+].join("\n")
+
 /** History of a session: a user request, reasoning, a run of tools (one failed), a reply, a subagent. */
 function timelineOf(id: string, title: string) {
   const t0 = Date.now() - 20 * 60_000
@@ -705,6 +744,7 @@ function timelineOf(id: string, title: string) {
     { key: `${m(2)}:2`, messageID: m(2), partID: "2", sessionID: id, kind: "tool", name: "bash", state: "failed", at: t0 + 15_000, completed: t0 + 21_000 },
     { key: `${m(2)}:3`, messageID: m(2), partID: "3", sessionID: id, kind: "tool", name: "edit", state: "done", at: t0 + 22_000, completed: t0 + 22_500 },
     { key: `${m(2)}:4`, messageID: m(2), partID: "4", sessionID: id, kind: "assistant", text: "I fixed the ranking in **filterPicker** and re-ran the suite:\n\n- `bun test test/web-picker.test.ts` → 8 pass\n- no other failures\n\n```ts\nranked.sort((a, b) => a.rank - b.rank || a.index - b.index)\n```\nAnything else?", at: t0 + 30_000 },
+    ...(title === "Benchmark harness" ? [{ key: `${m(2)}:5`, messageID: m(2), partID: "5", sessionID: id, kind: "assistant", text: RICH_MARKDOWN, at: t0 + 30_500 }] : []),
     // Claude-style reasoning: only an encrypted signature is stored, no readable text.
     { key: `${m(3)}:0`, messageID: m(3), partID: "0", sessionID: id, kind: "reasoning", text: "", state: "done", at: t0 + 31_000, completed: t0 + 33_000 },
   ]

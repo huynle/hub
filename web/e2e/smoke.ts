@@ -4,6 +4,7 @@
 // (attach, remove, attach again, send), Dictate → Send (input cleared, also when the turn's connection drops), a slow turn (202, reply later), the right rail and diff viewer render, a Voice-off session is inspectable, rename (table,
 // sidebar, top bar), archive (menu, Undo, Archived chip, Needs-you exception, bulk, inactive), resizable sidebar/rail, and
 // Voice mode speaking a streamed reply before its text ends (each sentence playing while its MP3 still downloads), with the turn timed (a browser with a silent fake mic),
+// rich Markdown (tables, task lists, highlighted code, copy) and the text size (Settings, pinch, ctrl+wheel, kept after reload, phone at 1.8),
 // and speech detection (fake mics looping background noise: nothing sent, unless the on-device model is blocked; and a spoken request: one utterance, a hallucinated “Thank you.” shown as ignored). Screenshots go to $SMOKE_SHOTS (default: the OS temp
 // dir). Run `npm run build:web && npm run test:e2e`. Chromium: $CHROMIUM_PATH, else Playwright's cache, else PATH.
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
@@ -1393,6 +1394,140 @@ async function phone(browser: Browser): Promise<void> {
   await context.close()
 }
 
+/** Rich Markdown (session "Benchmark harness": RICH_MARKDOWN in the mock hub) and the text size: Settings, pinch, persistence. */
+async function markdownAndTextSize(browser: Browser): Promise<void> {
+  const RICH = "/s/ses_52"
+  const transcriptPx = (page: Page) => page.locator(".msg.assistant").last().evaluate((el) => parseFloat(getComputedStyle(el).fontSize))
+  const scaleOf = (page: Page) => page.evaluate(() => Number(getComputedStyle(document.documentElement).getPropertyValue("--font-scale") || 1))
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, permissions: ["clipboard-read", "clipboard-write"] })
+  const page = await context.newPage()
+  current = page
+  const errors: string[] = []
+  page.on("pageerror", (e) => errors.push(e.message))
+
+  await check("markdown: table, task list, highlight, strike, autolink, highlighted code with copy", async () => {
+    await page.goto(`${BASE}${RICH}`)
+    const md = page.locator(".msg.assistant").last()
+    await md.locator("table").waitFor()
+    assert((await md.locator("th").count()) === 4, "4 header cells")
+    assert((await md.locator("tbody tr").count()) === 3, "3 rows")
+    assert((await md.locator("th").nth(1).evaluate((el) => getComputedStyle(el).textAlign)) === "right", "right-aligned column")
+    assert((await md.locator("li.task input[type=checkbox][disabled]").count()) === 2, "two task checkboxes, disabled")
+    assert((await md.locator("li.task input:checked").count()) === 1, "one done")
+    assert((await md.locator("mark").textContent()) === "pgvector is fastest", "==highlight==")
+    assert((await md.locator("del").textContent()) === "FAISS on CPU", "~~strike~~")
+    assert((await md.locator('a[href="https://example.com/bench/run-42"]').count()) === 1, "bare URL autolinked")
+    assert((await md.locator("ol > li > ul").count()) === 1, "nested list")
+    assert((await md.locator("blockquote ul").count()) === 1, "list inside a quote")
+    await md.locator(".tok-keyword").first().waitFor()
+    assert((await md.locator(".code-block .tok-del").textContent()) === "-const LISTS = 50", "diff colored")
+    await md.getByRole("button", { name: "Copy ts code" }).click()
+    await md.getByRole("button", { name: "Copied" }).waitFor()
+    const copied = await page.evaluate(() => navigator.clipboard.readText())
+    assert(copied.startsWith("// Run one query and time it\nexport async function timeQuery"), `clipboard: ${copied.slice(0, 40)}`)
+    const overflow = await page.locator(".scroller").evaluate((el) => el.scrollWidth - el.clientWidth)
+    assert(overflow <= 0, `no horizontal overflow in the transcript (${overflow}px)`)
+    await md.locator("table").scrollIntoViewIfNeeded()
+    await shot(page, "markdown-desktop")
+  })
+
+  await check("text size: Settings → Appearance slider scales the transcript; Reset", async () => {
+    const base = await transcriptPx(page)
+    assert(Math.abs(base - 14) < 0.5, `default transcript size 14px: ${base}`)
+    await page.goto(`${BASE}/settings#appearance`)
+    const slider = page.getByRole("slider", { name: "Text size" })
+    await slider.fill("1.4")
+    await page.locator("output[for=text-size]").getByText("140%").waitFor()
+    await page.goto(`${BASE}${RICH}`)
+    await page.locator(".msg.assistant").last().waitFor()
+    const big = await transcriptPx(page)
+    assert(Math.abs(big - 14 * 1.4) < 0.5, `scaled transcript: ${big}`)
+    await page.goto(`${BASE}/settings#appearance`)
+    await page.getByRole("button", { name: "Reset text size" }).click()
+    await page.locator("output[for=text-size]").getByText("100%").waitFor()
+    assert((await page.evaluate(() => localStorage.getItem("hub.fontScale"))) === null, "default not stored")
+  })
+
+  await check("text size: ctrl+wheel (trackpad pinch) on the transcript, not elsewhere", async () => {
+    await page.goto(`${BASE}${RICH}`)
+    await page.locator(".msg.assistant").last().waitFor()
+    const prevented = await page.locator(".scroller").evaluate((el) => {
+      const e = new WheelEvent("wheel", { ctrlKey: true, deltaY: -30, bubbles: true, cancelable: true })
+      el.dispatchEvent(e)
+      return e.defaultPrevented
+    })
+    assert(prevented, "page zoom prevented in the transcript")
+    assert((await scaleOf(page)) > 1.2, `grew: ${await scaleOf(page)}`)
+    const outside = await page.locator(".topbar").evaluate((el) => {
+      const e = new WheelEvent("wheel", { ctrlKey: true, deltaY: -30, bubbles: true, cancelable: true })
+      el.dispatchEvent(e)
+      return e.defaultPrevented
+    })
+    assert(!outside, "browser zoom left alone outside the transcript")
+    await page.waitForFunction(() => localStorage.getItem("hub.fontScale") !== null)
+    await page.evaluate(() => localStorage.removeItem("hub.fontScale"))
+  })
+  await check("markdown + text size: no page errors (desktop)", async () => assert(!errors.length, errors.join("; ")))
+  await context.close()
+
+  const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 })
+  const p = await phone.newPage()
+  current = p
+  p.on("pageerror", (e) => errors.push(e.message))
+  await check("phone: a two-finger pinch on the transcript scales the text and persists after reload", async () => {
+    await p.goto(`${BASE}${RICH}`)
+    await p.locator(".msg.assistant").last().waitFor()
+    const before = await transcriptPx(p)
+    await p.locator(".scroller").evaluate(async (el) => {
+      const r = el.getBoundingClientRect()
+      const cx = r.left + r.width / 2
+      const cy = r.top + r.height / 2
+      const fire = (type: string, id: number, x: number) =>
+        el.dispatchEvent(new PointerEvent(type, { pointerId: id, pointerType: "touch", isPrimary: id === 1, clientX: x, clientY: cy, bubbles: true, cancelable: true }))
+      fire("pointerdown", 1, cx - 50)
+      fire("pointerdown", 2, cx + 50)
+      for (let d = 50; d <= 70; d += 5) {
+        fire("pointermove", 1, cx - d)
+        fire("pointermove", 2, cx + d)
+        await new Promise((r) => requestAnimationFrame(r))
+      }
+      fire("pointerup", 1, cx - 70)
+      fire("pointerup", 2, cx + 70)
+    })
+    const after = await transcriptPx(p)
+    assert(Math.abs(after - before * 1.4) < 0.6, `pinch 100→140 px apart: ${before} → ${after}`)
+    assert((await p.evaluate(() => localStorage.getItem("hub.fontScale"))) === "1.4", "stored")
+    await p.reload()
+    await p.locator(".msg.assistant").last().waitFor()
+    assert(Math.abs((await transcriptPx(p)) - before * 1.4) < 0.6, "kept after reload")
+    await p.locator(".md table").scrollIntoViewIfNeeded()
+    await shot(p, "markdown-phone-1.4")
+  })
+  await check("phone: layout holds at the largest text size (1.8); inputs are ≥ 16px", async () => {
+    await p.evaluate(() => localStorage.setItem("hub.fontScale", "1.8"))
+    await p.reload()
+    await p.locator(".msg.assistant").last().waitFor()
+    assert(Math.abs((await transcriptPx(p)) - 14 * 1.8) < 0.6, "1.8 applied before the app")
+    const wide = await p.evaluate(() => document.documentElement.scrollWidth)
+    assert(wide <= 390, `no page-wide horizontal scroll: ${wide}`)
+    const composer = await p.getByLabel("Message").boundingBox()
+    assert(composer && composer.x >= 0 && composer.x + composer.width <= 390 && composer.y + composer.height <= 844, `composer on screen: ${JSON.stringify(composer)}`)
+    const topbar = await p.locator(".topbar").boundingBox()
+    assert(topbar && topbar.width <= 390, "top bar fits")
+    const table = await p.locator(".md .table-wrap").evaluate((el) => ({ scroll: el.scrollWidth > el.clientWidth, right: el.getBoundingClientRect().right }))
+    assert(table.right <= 390, `table scrolls inside its box: ${JSON.stringify(table)}`)
+    const inputPx = await p.getByLabel("Message").evaluate((el) => parseFloat(getComputedStyle(el).fontSize))
+    assert(inputPx >= 16, `composer ≥ 16px: ${inputPx}`)
+    await shot(p, "markdown-phone-1.8")
+    await p.evaluate(() => localStorage.setItem("hub.fontScale", "0.8"))
+    await p.reload()
+    await p.locator(".msg.assistant").last().waitFor()
+    assert((await p.getByLabel("Message").evaluate((el) => parseFloat(getComputedStyle(el).fontSize))) >= 16, "still ≥ 16px at 0.8")
+  })
+  await check("phone: markdown + text size: no page errors", async () => assert(!errors.length, errors.join("; ")))
+  await phone.close()
+}
+
 mkdirSync(SHOTS, { recursive: true })
 if (!existsSync(path.join(ROOT, "web", "dist", "index.html"))) {
   console.error("web/dist is missing: run `npm run build:web` first")
@@ -1416,6 +1551,8 @@ try {
   await desktop(browser)
   await mock("/mock/reset")
   await phone(browser)
+  await mock("/mock/reset")
+  await markdownAndTextSize(browser)
   await mock("/mock/reset")
   await notifications(browser)
   await mock("/mock/reset")

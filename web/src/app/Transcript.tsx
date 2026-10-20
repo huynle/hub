@@ -68,7 +68,7 @@ export function Transcript(props: { sessionID: string; blocks: Block[]; ticks: R
             <Match when={b.type === "assistant" && b}>
               {(a) => (
                 <div class={`msg assistant${a().live ? " live" : ""}`} data-key={a().key}>
-                  <Markdown text={a().text} />
+                  <Markdown text={a().text} streaming={a().live} />
                 </div>
               )}
             </Match>

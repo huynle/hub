@@ -27,9 +27,12 @@ import { SpeechSettingsPanel } from "./SpeechSettings"
 import { toast } from "./toast"
 import { IconButton, ago, now, plural } from "./ui"
 import { voicePrefs } from "../voice/audio"
+import { FONT_SCALE_DEFAULT, FONT_SCALE_MAX, FONT_SCALE_MIN, FONT_SCALE_STEP, formatScale } from "../core/font-scale"
+import { setTextScale, textScale } from "./text-size"
 
 const SECTIONS: Array<[string, string]> = [
   ["account", "Account"],
+  ["appearance", "Appearance"],
   ["notifications", "Notifications"],
   ["voice", "Voice"],
   ["speech", "Speech"],
@@ -73,6 +76,7 @@ export function Settings() {
         </nav>
         <div class="settings-content">
           <AccountSection />
+          <AppearanceSection />
           <NotificationsSection />
           <VoiceSection />
           <Section id="speech" title="Speech">
@@ -281,6 +285,33 @@ function NotificationsSection() {
           </p>
         </Show>
       </Show>
+    </Section>
+  )
+}
+
+function AppearanceSection() {
+  return (
+    <Section id="appearance" title="Appearance">
+      <ul class="switches">
+        <li class="speed">
+          <label for="text-size">Text size</label>
+          <input
+            id="text-size"
+            type="range"
+            min={FONT_SCALE_MIN}
+            max={FONT_SCALE_MAX}
+            step={FONT_SCALE_STEP}
+            value={textScale()}
+            aria-valuetext={formatScale(textScale())}
+            onInput={(e) => setTextScale(Number(e.currentTarget.value))}
+          />
+          <output for="text-size">{formatScale(textScale())}</output>
+          <button type="button" class="btn small" aria-label="Reset text size" disabled={textScale() === FONT_SCALE_DEFAULT} onClick={() => setTextScale(FONT_SCALE_DEFAULT)}>
+            Reset
+          </button>
+        </li>
+      </ul>
+      <p class="small muted">On this device. Pinch the conversation or the session list to change it too (a trackpad pinch works on desktop).</p>
     </Section>
   )
 }
