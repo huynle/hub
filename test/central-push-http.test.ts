@@ -58,7 +58,7 @@ describe("push API", () => {
     }
     const ok = await h.api("/api/push/subscribe", { method: "POST", json })
     expect(ok.status).toBe(200)
-    expect(await ok.json()).toEqual({ prefs: { handoff: true, question: true, permission: true, finished: true, failed: false, say: true } })
+    expect(await ok.json()).toEqual({ prefs: { handoff: true, question: true, permission: true, finished: true, failed: false, say: true, activity: false } })
     await h.api("/api/push/subscribe", { method: "POST", json: { subscription: subscription() } })
     await h.api("/api/push/subscribe", { method: "POST", json: { subscription: subscription(2) } })
     expect(h.store.pushSubscriptions().map((s) => s.endpoint)).toEqual([subscription().endpoint, subscription(2).endpoint])
@@ -82,17 +82,26 @@ describe("push API", () => {
     pushHarness()
     expect((await h.api("/api/push/prefs", { cookie: null })).status).toBe(401)
     expect(await (await h.api("/api/push/prefs")).json()).toEqual({
-      prefs: { handoff: true, question: true, permission: true, finished: false, failed: false, say: true },
+      prefs: { handoff: true, question: true, permission: true, finished: false, failed: false, say: true, activity: false },
       quietHours: null,
+      activityMinutes: 5,
       muted: [],
       subscriptions: 0,
     })
     expect((await h.api("/api/push/prefs", { method: "PUT", json: { finished: true }, origin: null })).status).toBe(403)
     const put = await h.api("/api/push/prefs", { method: "PUT", json: { finished: true, question: "nope", extra: 1 } })
-    expect(await put.json()).toMatchObject({ prefs: { handoff: true, question: true, permission: true, finished: true, failed: false, say: true } })
+    expect(await put.json()).toMatchObject({ prefs: { handoff: true, question: true, permission: true, finished: true, failed: false, say: true, activity: false } })
     expect((await (await h.api("/api/push/prefs")).json()) as any).toMatchObject({ prefs: { finished: true } })
     // 0.5.0 clients send `blocked`: it sets both questions and permissions.
     expect(await (await h.api("/api/push/prefs", { method: "PUT", json: { blocked: false } })).json()).toMatchObject({ prefs: { question: false, permission: false } })
+  })
+
+  test("activity updates: the toggle and the interval (1–60 whole minutes) per device", async () => {
+    pushHarness()
+    const put = (json: unknown) => h.api("/api/push/prefs", { method: "PUT", json })
+    expect(await (await put({ activity: true, activityMinutes: 2 })).json()).toMatchObject({ prefs: { activity: true }, activityMinutes: 2 })
+    for (const bad of [0, 61, 1.5, "5"]) expect((await put({ activityMinutes: bad })).status).toBe(400)
+    expect(((await (await h.api("/api/push/prefs")).json()) as any).activityMinutes).toBe(2)
   })
 
   test("quiet hours: set with a time zone, validated, cleared with null", async () => {

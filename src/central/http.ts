@@ -19,7 +19,7 @@ import { BusyError, Registry } from "./registry"
 import { audioFormat, SpeechError } from "./speech/provider"
 import { SpeechService } from "./speech/service"
 import { RequestTimeoutError, RequestTooLargeError, SpokeError, SpokeHub, type Notifier, type SpokeSocketData } from "./spoke-ws"
-import { LOCAL_USER, PUSH_PREF_KEYS, quietHoursInput, Store, VIEW_PREF_KEYS, type DeviceRecord, type LegacyPushPrefs, type PushPrefs, type UserRecord, type ViewPrefs } from "./store"
+import { ACTIVITY_INTERVAL_MAX, ACTIVITY_INTERVAL_MIN, LOCAL_USER, PUSH_PREF_KEYS, quietHoursInput, Store, VIEW_PREF_KEYS, type DeviceRecord, type LegacyPushPrefs, type PushPrefs, type UserRecord, type ViewPrefs } from "./store"
 
 export interface Speech {
   transcribe(audio: Uint8Array, format: string): Promise<string>
@@ -339,6 +339,8 @@ export function startCentral(options: CentralOptions): Central {
   registry.subscribeAlerts((alert) => {
     // Push goes to the session owner's devices only; an alert without an owner goes nowhere.
     if (!alert.owner) return
+    // Activity updates are collected and throttled per device by the push layer.
+    if (alert.kind === "activity") return push.activity(alert)
     const extra = alert.requestID ? { requestID: alert.requestID } : undefined
     notifier.notify(alert.kind, alert.sessionID, alert.title, alert.detail, alert.text, alert.owner, extra).catch((cause) => {
       console.error("[hub] push notification failed:", cause instanceof Error ? cause.message : cause)
@@ -352,6 +354,7 @@ export function startCentral(options: CentralOptions): Central {
       {
         prefs: store.pushPrefs(deviceID),
         quietHours: store.quietHours(deviceID) ?? null,
+        activityMinutes: store.activityMinutes(deviceID),
         muted: store.mutedSessions(userID),
         subscriptions: mine.length,
         ...(endpoint ? { subscribed: mine.some((s) => s.endpoint === endpoint) } : {}),
@@ -619,6 +622,13 @@ export function startCentral(options: CentralOptions): Central {
         const quiet = input.quietHours === null ? null : quietHoursInput(input.quietHours)
         if (quiet === undefined) return error(400, "quietHours must be {start: \"HH:MM\", end: \"HH:MM\", timeZone} or null")
         store.setQuietHours(device.id, quiet)
+      }
+      if ("activityMinutes" in input) {
+        const minutes = input.activityMinutes
+        if (typeof minutes !== "number" || !Number.isInteger(minutes) || minutes < ACTIVITY_INTERVAL_MIN || minutes > ACTIVITY_INTERVAL_MAX) {
+          return error(400, `activityMinutes must be a whole number of minutes from ${ACTIVITY_INTERVAL_MIN} to ${ACTIVITY_INTERVAL_MAX}`)
+        }
+        store.setActivityMinutes(device.id, minutes)
       }
       const prefs = prefsInput(input)
       if (prefs) store.setPushPrefs(device.id, prefs)

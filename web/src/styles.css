@@ -515,3 +515,4 @@ button.link { background: none; border: 0; padding: 0; color: var(--accent, #fab
 .job-dot.on { background: var(--accent); }
 .job-dot.bad { background: var(--warn); }
 .retry-note { color: var(--warn); margin: 0 0 6px; }
+.activity-hint { font-size: 13px; padding: 8px 10px; margin: 6px 0 10px; border: 1px solid var(--accent); border-radius: var(--r); background: color-mix(in srgb, var(--accent) 10%, transparent); }

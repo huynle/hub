@@ -6,6 +6,11 @@ import path from "node:path"
 import type { ForwardedEvent, Hello, HerdrWorkspace, ProcessKind, SessionInfo, SpokeMode, TerminalInfo, Terminals } from "../protocol"
 import { StatusBoard, type Blocker, type SessionStatus } from "../status"
 import { SentenceStream } from "./say-stream"
+import type { ActivityStep } from "./push"
+
+export { ACTIVITY_INTERVAL_MINUTES } from "./store"
+/** A tool call that took at least this long is named in activity updates (shorter ones are only counted). */
+export const LONG_TOOL_MS = 30_000
 
 export class BusyError extends Error {
   constructor() {
@@ -108,7 +113,8 @@ const spokenForm = (text: string) =>
 
 /** Push-worthy transitions of a root session. Kept off the SSE stream. */
 export interface Alert {
-  readonly kind: "blocked" | "finished" | "say"
+  /** activity: a step of interest for activity updates (`step`); the push layer collects and throttles them. */
+  readonly kind: "blocked" | "finished" | "say" | "activity"
   /** Root session of the tree the event happened in. */
   readonly sessionID: string
   /** Root session title. */
@@ -120,6 +126,7 @@ export interface Alert {
   readonly requestID?: string
   /** Tenant (user ID) that owns the session; push goes to this user's devices only. */
   readonly owner?: string
+  readonly step?: ActivityStep
 }
 
 /** Machine ID → tenant (owning user ID). Every machine belongs to exactly one tenant. */
@@ -511,7 +518,9 @@ export class Registry {
     }
 
     if (sessionID) this.trackRun(event.type, sessionID)
+    const before = sessionID ? this.status(sessionID)?.find((s) => s.id === sessionID) : undefined
     this.observeBoards(event, tenant)
+    if (sessionID) this.activitySteps(event.type, sessionID, data, before)
     if (sessionID) this.observeActivity(event, sessionID, data)
     if (sessionID) this.observeWorkerSpeech(event.type, sessionID, data)
     if (sessionID) this.observeWorkerBlockers(event.type, sessionID, data)
@@ -1067,6 +1076,10 @@ export class Registry {
         if (!existing || existing.state !== "running") return
         const failed = event.type === "session.tool.failed"
         const error = failed ? (text(data.error) ?? "failed") : undefined
+        const took = at - existing.at
+        const name = existing.summary ?? existing.tool ?? "tool"
+        if (took >= LONG_TOOL_MS) this.step(rootID, "long", `${name} ${failed ? "failed" : "done"} (${Math.round(took / 1000)}s)`)
+        else this.step(rootID, "tool", name)
         return this.replace(rootID, existing, { ...existing, state: failed ? "failed" : "done", ...(error ? { error } : {}), at })
       }
       case "session.reasoning.started":
@@ -1086,6 +1099,42 @@ export class Registry {
       case "session.execution.interrupted":
         return this.closeThinking(rootID, sessionID)
     }
+  }
+
+  /**
+   * Steps of interest for activity updates: a subagent starting or ending, a background job ending (with how), the
+   * root's run ending. `before` is the session's status entry before the event (several processes forward the
+   * same events: only actual changes count). Tool calls are reported from observeActivity.
+   */
+  private activitySteps(type: string, sessionID: string, data: Record<string, unknown>, before: LiveStatus | undefined): void {
+    const rootID = this.rootOf(sessionID)
+    if (!rootID || !before) return
+    const child = rootID !== sessionID
+    const title = before.title?.trim() || "A subagent"
+    if (type === "session.execution.started" && child && before.state !== "working") return this.step(rootID, "subagent", `${title} started`)
+    if (type.startsWith("session.execution.") && type !== "session.execution.started") {
+      const ended = { succeeded: "finished", failed: "failed", interrupted: "stopped" }[type.slice("session.execution.".length)]
+      if (!ended || before.state !== "working") return
+      if (child) return this.step(rootID, "subagent", `${title} ${ended}`)
+      return this.step(rootID, "idle", ended === "finished" ? "Finished" : ended === "failed" ? "Failed" : "Stopped")
+    }
+    if (type === "shell.exited" || type === "session.shell.ended" || type === "pty.exited") {
+      const job = before.jobs?.find((j) => j.id === data.id)
+      if (!job || job.status !== "running") return
+      const exit = typeof data.exit === "number" ? data.exit : undefined
+      const how = data.status === "killed" ? "was killed" : data.status === "timeout" ? "timed out" : exit !== undefined ? `exited ${exit}` : "exited"
+      return this.step(rootID, "job", `${job.command ?? (job.kind === "pty" ? "terminal" : "shell")} ${how}`)
+    }
+  }
+
+  /** Reports an activity step of a root session (not while a device shows it). */
+  private step(rootID: string, kind: ActivityStep["kind"], text: string): void {
+    if (this.watched(rootID)) return
+    const board = this.boards.get(rootID)
+    if (!board) return
+    const owner = this.sessionTenant(rootID)
+    const alert: Alert = { kind: "activity", sessionID: rootID, title: board.get(rootID)?.title ?? rootID, step: { kind, text } }
+    for (const listener of this.alertListeners) listener(owner ? { ...alert, owner } : alert)
   }
 
   /** Thinking also ends when something else happens in the same session (older spokes send no reasoning.ended). */

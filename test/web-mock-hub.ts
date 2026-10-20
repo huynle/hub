@@ -243,8 +243,9 @@ const mockSession = () => ({
   open: true,
   terminal: { source: "herdr", workspaceID: "w_gen", workspace: "general", title: "Mock session", status: herdrStatus(status[0]?.state ?? "idle") },
 })
-let pushPrefs: Record<string, boolean> = { handoff: true, question: true, permission: true, finished: false, failed: false, say: false }
+let pushPrefs: Record<string, boolean> = { handoff: true, question: true, permission: true, finished: false, failed: false, say: false, activity: false }
 let quietHours: { start: string; end: string; timeZone: string } | null = null
+let activityMinutes = 5
 /** Push subscription endpoints the fake hub holds for this device; tests fake PushManager in the page. */
 let pushEndpoints: string[] = []
 let mutedSessions: string[] = []
@@ -526,7 +527,18 @@ function sse(request: Request, user: MockUser): Response {
       const client = { send, user }
       send(catalog(user))
       clients.add(client)
-      cleanup = () => clients.delete(client)
+      // Like the hub: a named heartbeat every 20 s (the console reopens a stream silent for 45 s).
+      const heartbeat = setInterval(() => {
+        try {
+          controller.enqueue(encoder.encode("event: ping\ndata: 0\n\n"))
+        } catch {
+          cleanup()
+        }
+      }, 20_000)
+      cleanup = () => {
+        clearInterval(heartbeat)
+        clients.delete(client)
+      }
       request.signal.addEventListener("abort", () => cleanup(), { once: true })
     },
     cancel: () => cleanup(),
@@ -951,7 +963,7 @@ const server = Bun.serve({
       emitCatalog()
       return Response.json({ mode: authMode, as: loginAs })
     }
-    if (p === "/mock/log") return Response.json({ log, textEnded, transcripts, conversation, pushPrefs, quietHours, pushEndpoints, mutedSessions, pushTests, speech, keys, users, audit, enrollments, userSpeech: Object.fromEntries(userSpeech), viewPrefs: Object.fromEntries(viewPrefs), herdr })
+    if (p === "/mock/log") return Response.json({ log, textEnded, transcripts, conversation, pushPrefs, quietHours, activityMinutes, pushEndpoints, mutedSessions, pushTests, speech, keys, users, audit, enrollments, userSpeech: Object.fromEntries(userSpeech), viewPrefs: Object.fromEntries(viewPrefs), herdr })
     if (p === "/mock/reset" && m === "POST") {
       scenarioRun++
       slowTurnMs = undefined
@@ -975,8 +987,9 @@ const server = Bun.serve({
       userSpeech = new Map()
       speech = seedSpeech()
       keys = { stt: "sk-or-v1-mock-stt-1234", tts: undefined }
-      pushPrefs = { handoff: true, question: true, permission: true, finished: false, failed: false, say: false }
+      pushPrefs = { handoff: true, question: true, permission: true, finished: false, failed: false, say: false, activity: false }
       quietHours = null
+      activityMinutes = 5
       pushEndpoints = []
       mutedSessions = []
       pushTests = 0
@@ -1202,6 +1215,7 @@ const server = Bun.serve({
     const pushView = (endpoint?: string | null) => ({
       prefs: pushPrefs,
       quietHours,
+      activityMinutes,
       muted: mutedSessions,
       subscriptions: pushEndpoints.length,
       ...(endpoint ? { subscribed: pushEndpoints.includes(endpoint) } : {}),
@@ -1212,6 +1226,7 @@ const server = Bun.serve({
       last().body = body
       for (const [k, v] of Object.entries(body)) if (k in pushPrefs && typeof v === "boolean") pushPrefs[k] = v
       if ("quietHours" in body) quietHours = body.quietHours
+      if (typeof body.activityMinutes === "number") activityMinutes = body.activityMinutes
       return Response.json(pushView())
     }
     if (p === "/api/push/key" && m === "GET") return Response.json({ publicKey: "BNbxGYNMhEIi9zrneh7mqV4oUanjLUK3m-mYZBc62frMKrEoMk88r3Lk596T0ck9xlT-hA0ITRxIFxeuybYCcQ8" })

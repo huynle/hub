@@ -20,7 +20,7 @@ import { SENSITIVITIES, type Sensitivity } from "../core/speech-vad"
 import { api, enc, errorText, getJSON } from "./api"
 import { enrollments, ensureMe, hub, loadEnrollments, me, setMe, stopEvents } from "./hub"
 import { isPhone, toggleSidebar } from "./layout"
-import { describeTestResult, localTimeZone, NOTIFY_TOGGLES, notifyStatus, type QuietHours } from "../core/notify-core"
+import { ACTIVITY_MINUTES, describeTestResult, localTimeZone, NOTIFY_TOGGLES, notifyStatus, type QuietHours } from "../core/notify-core"
 import { currentSubscription, disableNotifications, enableNotifications, mutedSessions, notifyEnv, pushRevision, sendTestNotification, type PushPrefsView } from "./push"
 import { location$, navigate } from "./router"
 import { SpeechSettingsPanel } from "./SpeechSettings"
@@ -135,6 +135,8 @@ function NotificationsSection() {
   const [testResult, setTestResult] = createSignal<{ ok: boolean; text: string } | undefined>()
   const [prefs, setPrefs] = createSignal<Record<string, boolean> | undefined>()
   const [quiet, setQuiet] = createSignal<QuietHours | null>(null)
+  const [minutes, setMinutes] = createSignal<number | undefined>()
+  const currentMinutes = () => minutes() ?? view()?.activityMinutes ?? 5
   const status = () => (info() ? notifyStatus(info()!.env) : undefined)
   // The hub's prefs come with the status; later edits replace them.
   const view = () => info()?.view
@@ -158,6 +160,7 @@ function NotificationsSection() {
       const res = (await (await api("/api/push/prefs", { method: "PUT", json: change })).json()) as PushPrefsView
       setPrefs(res.prefs)
       setQuiet(res.quietHours ?? null)
+      if (res.activityMinutes !== undefined) setMinutes(res.activityMinutes)
     } catch (e) {
       toast(errorText(e), "err")
     }
@@ -212,6 +215,12 @@ function NotificationsSection() {
         <Show when={status() && status()!.state !== "on"}>
           <p class="small warn">These apply once this device is subscribed.</p>
         </Show>
+        <Show when={"activity" in currentPrefs()! && !currentPrefs()!.activity}>
+          <p class="activity-hint" data-activity-hint>
+            <strong>Know what happens with the screen off:</strong> turn on <em>Activity updates</em> below for one quiet, self-replacing notification
+            per session (subagents, long tools, scripts that end, the session going idle).
+          </p>
+        </Show>
         <ul class="switches">
           <For each={NOTIFY_TOGGLES}>
             {([key, label]) => (
@@ -223,6 +232,25 @@ function NotificationsSection() {
               </li>
             )}
           </For>
+          <Show when={"activity" in currentPrefs()!}>
+            <li>
+              <label class="switch">
+                <span>Activity updates (subagents, long tools, scripts ending, idle)</span>
+                <input type="checkbox" data-pref="activity" checked={!!currentPrefs()!.activity} onChange={(e) => void save({ activity: e.currentTarget.checked })} />
+              </label>
+              <Show when={currentPrefs()!.activity}>
+                <div class="quiet-hours">
+                  <label>
+                    At most one per session every{" "}
+                    <select data-activity-minutes value={String(currentMinutes())} onChange={(e) => void save({ activityMinutes: Number(e.currentTarget.value) })}>
+                      <For each={ACTIVITY_MINUTES}>{(m) => <option value={String(m)}>{m === 1 ? "minute" : `${m} minutes`}</option>}</For>
+                    </select>
+                  </label>
+                  <span class="small muted">Collapses into one notification per session; respects quiet hours and muted sessions.</span>
+                </div>
+              </Show>
+            </li>
+          </Show>
           <li>
             <label class="switch">
               <span>Quiet hours</span>

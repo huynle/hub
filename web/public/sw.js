@@ -62,7 +62,8 @@ self.addEventListener("push", (event) => {
       await self.registration.showNotification(data.title || "Hub", {
         body,
         tag: `${sessionID}:${kind}`,
-        renotify: kind !== "finished",
+        // A finished run or an activity digest replaces the previous one quietly (same tag, no new alert).
+        renotify: kind !== "finished" && kind !== "activity",
         requireInteraction: STICKY.has(kind),
         vibrate: VIBRATE[kind] || [100],
         icon: "/icon-192.png",

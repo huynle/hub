@@ -75,6 +75,9 @@ export function describeTestResult(result: PushTestAnswer): { ok: boolean; text:
 
 export type NotifyToggle = "question" | "permission" | "failed" | "finished" | "handoff" | "say"
 
+/** Choices for the activity update interval (minutes). */
+export const ACTIVITY_MINUTES = [1, 2, 5, 10, 15, 30, 60] as const
+
 export const NOTIFY_TOGGLES: ReadonlyArray<readonly [NotifyToggle, string]> = [
   ["question", "A session asks a question"],
   ["permission", "A session needs permission"],
