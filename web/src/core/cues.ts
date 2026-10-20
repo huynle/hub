@@ -10,6 +10,10 @@ const EARCONS = {
   done: [{ freq: 660, ms: 70 }, { gap: 50 }, { freq: 990, ms: 70 }],
   /** Stands in for a phrase that is not synthesized yet. */
   pending: [{ freq: 587, ms: 110 }],
+  /** Listening stopped (the phone took the microphone away): descending. */
+  paused: [{ freq: 784, ms: 90 }, { gap: 40 }, { freq: 523, ms: 160 }],
+  /** Listening again: ascending. */
+  resumed: [{ freq: 523, ms: 90 }, { gap: 40 }, { freq: 784, ms: 120 }],
 } satisfies Record<string, Array<{ freq?: number; ms?: number; gap?: number }>>
 export type EarconName = keyof typeof EARCONS
 

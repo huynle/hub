@@ -8,6 +8,8 @@ import type { VoiceController, VoiceConversation } from "./voice-controller"
 /** Fewest milliseconds between two updates of the notification. */
 export const VOICE_NOTIFY_INTERVAL_MS = 3000
 export const VOICE_NOTIFICATION_TITLE = "Voice mode on"
+/** The phone stopped the microphone (screen off): said plainly instead of "listening". */
+export const VOICE_SUSPENDED_TITLE = "Voice mode paused · unlock to talk"
 
 export interface VoiceNotificationContent {
   readonly sessionID: string
@@ -41,12 +43,13 @@ const STATE_WORDS: Record<ConversationState, string> = {
   sent: "thinking",
   speaking: "speaking",
   paused: "muted",
+  suspended: "paused",
   off: "off",
 }
 
 export const voiceNotification = (sessionID: string, title: string, state: ConversationState): VoiceNotificationContent => ({
   sessionID,
-  title: VOICE_NOTIFICATION_TITLE,
+  title: state === "suspended" ? VOICE_SUSPENDED_TITLE : VOICE_NOTIFICATION_TITLE,
   body: `${title} · ${STATE_WORDS[state] ?? state}`,
 })
 
@@ -95,7 +98,9 @@ export class VoiceNotifier<C extends VoiceConversation = VoiceConversation> {
     if (!this.surface.allowed()) return
     const next = voiceNotification(sessionID, title, state.voice)
     if (this.shown && this.shown.sessionID === next.sessionID && this.shown.body === next.body) return this.cancel()
-    const wait = this.shown?.sessionID === sessionID ? this.shownAt + VOICE_NOTIFY_INTERVAL_MS - this.now() : 0
+    // Listening stopping or coming back shows at once: a hidden page's timers may not run for minutes.
+    const urgent = next.title !== this.shown?.title
+    const wait = this.shown?.sessionID === sessionID && !urgent ? this.shownAt + VOICE_NOTIFY_INTERVAL_MS - this.now() : 0
     if (wait <= 0) return this.show(next)
     if (this.timer === undefined) {
       this.timer = this.setTimer(() => {
