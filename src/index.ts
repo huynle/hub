@@ -6,6 +6,7 @@ import { hostname } from "node:os"
 import { Plugin } from "@opencode/plugin"
 import { DEFAULT_SUBAGENT, prepareConfigPath } from "./config"
 import { HubRpc, VoiceRpc } from "./rpc"
+import { jobFromInfo, type JobInfo } from "./protocol"
 import { checkServer, parseServerInput } from "./setup"
 import { defineVoiceAgent, orchestratorParts, STOP_TOOL, STOP_TOOL_DESCRIPTION } from "./spoke/conversation"
 import { herdrRunner } from "./spoke/herdr"
@@ -70,6 +71,33 @@ async function replyForm(kind: "service" | "standalone", action: FormAction): Pr
   }
 }
 
+/**
+ * What runs now on this process's own server: session.active (sessions with a run in progress) and the running
+ * shells of the given directories (shell.list, per location) that belong to a session. Empty when the server
+ * cannot be reached.
+ */
+async function activity(kind: "service" | "standalone", directories: readonly string[]) {
+  const client = await ownClient(kind).catch(() => undefined)
+  if (!client) return { active: [], jobs: [] }
+  const active = unwrap<Record<string, unknown>>(await client.session.active(), (v) => v && typeof v === "object" && !("data" in v))
+  const jobs: Array<JobInfo & { sessionID: string }> = []
+  const seen = new Set<string>()
+  for (const directory of directories) {
+    try {
+      const list = unwrap<unknown[]>(await client.shell.list({ location: { directory } }), Array.isArray)
+      for (const raw of Array.isArray(list) ? list : []) {
+        const job = jobFromInfo(raw, "shell")
+        if (!job?.sessionID || job.status !== "running" || seen.has(job.id)) continue
+        seen.add(job.id)
+        jobs.push(job as JobInfo & { sessionID: string })
+      }
+    } catch {
+      // a location this server does not serve
+    }
+  }
+  return { active: Object.keys(active ?? {}), jobs }
+}
+
 /** Plugin API results may arrive bare or wrapped as { location, data }. */
 function unwrap<T>(value: unknown, isBare: (v: any) => boolean): T {
   const v = value as any
@@ -119,6 +147,7 @@ function hostFrom(ctx: Context, locations: () => PermissionLocation[], kind: "se
       return list?.find((a) => a.mode !== "subagent" && !a.hidden)?.id
     },
     listRecent,
+    activity: (directories) => activity(kind, directories),
     createSession: async ({ directory, title }) =>
       unwrap<{ id: string }>(await session.create({ location: { directory }, ...(title ? { title } : {}) }), (v) => typeof v.id === "string"),
     ...(mcp?.list ? { mcpList: async (directory: string) => unwrap<ReadonlyArray<unknown>>(await mcp.list({ location: { directory } }), Array.isArray) } : {}),

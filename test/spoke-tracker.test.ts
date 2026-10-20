@@ -354,3 +354,13 @@ describe("running detection: session status, shells and ptys", () => {
     }
   })
 })
+
+describe("running detection: run end", () => {
+  test("execution end clears a seeded busy status", () => {
+    const tracker = new SessionTracker()
+    tracker.observe(created("ses_a"), T0)
+    tracker.seed("ses_a", { status: "busy", jobs: [] })
+    tracker.observe(ev("session.execution.interrupted", { sessionID: "ses_a" }), T0)
+    expect(tracker.active()).toEqual([])
+  })
+})

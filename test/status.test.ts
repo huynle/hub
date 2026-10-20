@@ -171,3 +171,12 @@ describe("StatusBoard: session status, retries and background jobs", () => {
     expect(board.get("ses_root")?.jobs).toBeUndefined()
   })
 })
+
+describe("StatusBoard: a seeded busy session goes idle when its run ends", () => {
+  test("execution end clears busy/retry (OpenCode v2 sends no idle status)", () => {
+    const board = new StatusBoard("ses_root", "Main")
+    board.observe(ev("session.seed", { sessionID: "ses_root", status: { type: "busy" }, jobs: [] }))
+    board.observe(ev("session.execution.succeeded", { sessionID: "ses_root" }))
+    expect(board.get("ses_root")?.state).toBe("idle")
+  })
+})

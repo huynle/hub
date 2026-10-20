@@ -177,10 +177,10 @@ export class StatusBoard {
         })
       case "session.execution.succeeded":
       case "session.execution.interrupted":
-        return this.update(data.sessionID, (entry) => (entry.running = false))
+        return this.update(data.sessionID, (entry) => endRun(entry))
       case "session.execution.failed":
         return this.update(data.sessionID, (entry) => {
-          entry.running = false
+          endRun(entry)
           entry.error = String(data.error?.message ?? "failed")
         })
       case "permission.asked":
@@ -292,6 +292,13 @@ function upsertJob(entry: Entry, job: JobInfo): void {
   const endedJobs = rest.filter((j) => j.status !== "running").slice(-ENDED_JOBS_KEPT)
   const keep = new Set([...running.slice(-JOBS_MAX), ...endedJobs])
   entry.jobs = rest.filter((j) => keep.has(j))
+}
+
+/** A run ended: OpenCode v2 sends no idle status, so a busy or retrying status (e.g. seeded) ends with it. */
+function endRun(entry: Entry): void {
+  entry.running = false
+  entry.busy = false
+  entry.retry = undefined
 }
 
 function setStatus(entry: Entry, status: any): void {

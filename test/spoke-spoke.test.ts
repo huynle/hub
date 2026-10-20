@@ -1204,3 +1204,61 @@ describe("open sessions (0.4)", () => {
     expect((unknown.result as any).warning).toMatch(/w99|workspace/i)
   })
 })
+
+describe("running detection: forwarding and seeding", () => {
+  const shellInfo = (id: string, sessionID: string) => ({ id, status: "running", command: "sleep 60", cwd: "/w", shell: "bash", file: "/tmp/out", metadata: { sessionID, background: true }, time: { started: 100 } })
+
+  test("shell events go out compact, and an exit without a sessionID is attributed to the shell's session", async () => {
+    const { spoke, server, host } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    host.push({ type: "shell.created", data: { info: shellInfo("sh_1", "ses_a") } })
+    host.push({ type: "shell.exited", data: { id: "sh_1", status: "exited", exit: 0 } })
+    host.push({ type: "session.status", data: { sessionID: "ses_a", status: { type: "busy" } } })
+    await until(() => forwarded(server).some((e) => e.type === "session.status"))
+    const jobs = forwarded(server).filter((e) => e.type.startsWith("shell."))
+    expect(jobs.map((e) => e.data)).toEqual([
+      { sessionID: "ses_a", id: "sh_1", kind: "shell", command: "sleep 60", status: "running", background: true, at: 100 },
+      { sessionID: "ses_a", id: "sh_1", kind: "shell", status: "exited", exit: 0, at: expect.any(Number) },
+    ])
+    expect(JSON.stringify(forwarded(server))).not.toContain("/tmp/out")
+  })
+
+  test("seeds running sessions and their running shells when connected, and again after reconnecting", async () => {
+    let calls = 0
+    const { spoke, server, host } = setup({ mode: "always", token: "tok" }, {
+      options: {},
+    })
+    ;(host as any).activity = async () => {
+      calls++
+      return { active: ["ses_a"], jobs: [{ sessionID: "ses_a", id: "sh_9", kind: "shell", command: "make", status: "running", started: 50 }] }
+    }
+    host.push(created("ses_a"))
+    host.push(created("ses_b"))
+    await until(() => spoke.status().connection === "connected")
+    await until(() => forwarded(server).some((e) => e.type === "session.seed"), 3000)
+    const seed = forwarded(server).find((e) => e.type === "session.seed")!
+    expect(seed.data).toEqual({ sessionID: "ses_a", status: { type: "busy" }, jobs: [{ id: "sh_9", kind: "shell", command: "make", status: "running", started: 50 }] })
+    // A later exit of the seeded shell is attributed to its session.
+    host.push({ type: "shell.exited", data: { id: "sh_9", status: "exited", exit: 0 } })
+    await until(() => forwarded(server).some((e) => e.type === "shell.exited"))
+    expect(forwarded(server).find((e) => e.type === "shell.exited")!.data.sessionID).toBe("ses_a")
+    // Reconnect: seeds again.
+    const before = forwarded(server).filter((e) => e.type === "session.seed").length
+    server.sockets.at(-1)!.close()
+    await until(() => forwarded(server).filter((e) => e.type === "session.seed").length > before, 3000)
+    expect(calls).toBeGreaterThanOrEqual(2)
+  })
+
+  test("a session the tracker thought busy is seeded idle when OpenCode no longer lists it as active", async () => {
+    let active: string[] = ["ses_a"]
+    const { spoke, server, host } = setup({ mode: "always", token: "tok" })
+    ;(host as any).activity = async () => ({ active, jobs: [] })
+    host.push(created("ses_a"))
+    await until(() => spoke.status().connection === "connected")
+    await until(() => forwarded(server).some((e) => e.type === "session.seed"))
+    active = []
+    server.sockets.at(-1)!.close()
+    await until(() => forwarded(server).some((e) => e.type === "session.seed" && e.data.status.type === "idle"), 3000)
+  })
+})

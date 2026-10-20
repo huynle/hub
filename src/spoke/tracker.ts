@@ -198,6 +198,18 @@ export class SessionTracker {
     return [...roots]
   }
 
+  /** Sessions OpenCode reported busy or retrying, or with a running shell or terminal (not their roots). */
+  working(): string[] {
+    const jobs = [...this.jobs.values()].filter((j) => j.running).map((j) => j.sessionID)
+    return [...new Set([...this.busy, ...jobs])]
+  }
+
+  /** Directories of known sessions (where to list shells), most recently updated first. */
+  directories(max: number): string[] {
+    const sorted = [...this.entries.values()].filter((e) => e.directory.startsWith("/")).sort((a, b) => b.updated - a.updated)
+    return [...new Set(sorted.map((e) => e.directory))].slice(0, max)
+  }
+
   /** The session a shell or terminal belongs to, while known. */
   jobSession(jobID: string): string | undefined {
     return this.jobs.get(jobID)?.sessionID
@@ -237,7 +249,11 @@ export class SessionTracker {
     const data = record(event.data)
     const sessionID = eventSessionID(event)
     if (event.type === "session.execution.started" && sessionID) this.running.add(sessionID)
-    else if (RUN_END.has(event.type) && sessionID) this.running.delete(sessionID)
+    else if (RUN_END.has(event.type) && sessionID) {
+      this.running.delete(sessionID)
+      // OpenCode v2 sends no idle status: a run's end ends a busy status (seeded or reported) too.
+      this.busy.delete(sessionID)
+    }
     else if (event.type === "permission.asked" && sessionID && typeof data.id === "string") this.waiting.set(`per ${data.id}`, sessionID)
     else if (event.type === "permission.replied" && typeof data.requestID === "string") this.waiting.delete(`per ${data.requestID}`)
     else if (event.type === "form.created" && sessionID && typeof record(data.form).id === "string") this.waiting.set(`frm ${record(data.form).id}`, sessionID)
