@@ -646,6 +646,7 @@ export class Conversation<B = unknown> {
       this.vad?.reset()
       this.ui.level(0)
       this.cuePlayer.earcon("paused")
+      this.lastResumeTry = Date.now() // hidden: the first nudge comes after HIDDEN_RESUME_MS
       if (this.liveness.wantsRecovery) this.scheduleRecover()
     }
     if (this.opts.background) this.mediaSession()

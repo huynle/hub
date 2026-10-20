@@ -380,7 +380,7 @@ function VoiceSection() {
             <span>Keep listening when the screen is off</span>
             <input type="checkbox" checked={voicePrefs.background} onChange={(e) => (voicePrefs.background = e.currentTarget.checked)} />
           </label>
-          <p class="small muted">Off: the screen stays on while listening. On: lock-screen controls and best-effort listening with the screen off (Android Chrome). Applies the next time Voice mode starts.</p>
+          <p class="small muted">Off: the screen stays on while listening. On: lock-screen controls and listening with the screen off. Best effort. Android Chrome usually stops the microphone when the screen turns off; Hub shows when listening is paused and resumes when you unlock. Applies the next time Voice mode starts.</p>
         </li>
       </ul>
     </Section>
