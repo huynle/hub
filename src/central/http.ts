@@ -726,7 +726,27 @@ export function startCentral(options: CentralOptions): Central {
       if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 200)) return error(400, "limit must be 1–200")
       const cursor = url.searchParams.get("cursor") ?? undefined
       if (cursor && cursor.length > 4096) return error(400, "cursor is too long")
-      return Response.json(await spokes.request(ownerOf(params.session!), { op: "timeline", sessionID: params.session!, ...(limit ? { limit } : {}), ...(cursor ? { cursor } : {}) }), { headers: NO_STORE })
+      // Newest-first mode: order=desc for the newest page, before=<older cursor> for the page before it.
+      const order = url.searchParams.get("order") ?? undefined
+      if (order !== undefined && order !== "asc" && order !== "desc") return error(400, "order must be asc or desc")
+      const before = url.searchParams.get("before") || undefined
+      if (before && before.length > 4096) return error(400, "before is too long")
+      if (cursor && (before || order === "desc")) return error(400, "cursor cannot be combined with before or order=desc")
+      try {
+        const page = await spokes.request(ownerOf(params.session!), {
+          op: "timeline",
+          sessionID: params.session!,
+          ...(limit ? { limit } : {}),
+          ...(cursor ? { cursor } : {}),
+          ...(order ? { order } : {}),
+          ...(before ? { before } : {}),
+        })
+        return Response.json(page, { headers: NO_STORE })
+      } catch (cause) {
+        // The row the cursor names is gone (history reverted or compacted): the console starts over.
+        if (cause instanceof SpokeError && cause.message.includes("Invalid timeline cursor")) return error(400, "Invalid timeline cursor")
+        throw cause
+      }
     }),
     route("GET", "/api/sessions/:session/timeline/messages/:message/parts/:part", "session", async ({ params }) =>
       Response.json(await spokes.request(ownerOf(params.session!), { op: "timelinePart", sessionID: params.session!, messageID: params.message!, partID: params.part! }), { headers: NO_STORE })),

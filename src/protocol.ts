@@ -56,9 +56,15 @@ export interface AvailableModel {
   readonly variants: readonly string[]
 }
 
+/**
+ * A timeline page. Forward mode (`cursor`): oldest rows first, `cursor` for the next newer page. Newest-first
+ * mode (`order: "desc"` or `before`): the newest rows (before `before`) in chronological order, `older` for the
+ * page before them. Both cursors are opaque.
+ */
 export interface TimelinePage {
   readonly items: readonly unknown[]
   readonly cursor?: string
+  readonly older?: string
 }
 
 export interface SessionInfo {
@@ -258,7 +264,7 @@ export type ServerRequest =
   | { readonly op: "models"; readonly sessionID: string }
   | { readonly op: "modelPrefs"; readonly sessionID: string }
   | { readonly op: "setModelPrefs"; readonly sessionID: string; readonly voice?: ModelSelection | null; readonly worker?: ModelSelection | null }
-  | { readonly op: "timeline"; readonly sessionID: string; readonly limit?: number; readonly cursor?: string }
+  | { readonly op: "timeline"; readonly sessionID: string; readonly limit?: number; readonly cursor?: string; readonly order?: "asc" | "desc"; readonly before?: string }
   | { readonly op: "timelinePart"; readonly sessionID: string; readonly messageID: string; readonly partID: string }
   /** One image attached to a user message (its position in the message's files). */
   | { readonly op: "timelineFile"; readonly sessionID: string; readonly messageID: string; readonly index: number }
@@ -524,7 +530,11 @@ function isServerRequest(v: unknown): v is ServerRequest {
       return (
         nonEmpty(v.sessionID) &&
         (v.limit === undefined || (Number.isInteger(v.limit) && Number(v.limit) >= 1 && Number(v.limit) <= 200)) &&
-        (v.cursor === undefined || (str(v.cursor) && v.cursor.length <= 4096))
+        (v.cursor === undefined || (str(v.cursor) && v.cursor.length <= 4096)) &&
+        (v.order === undefined || v.order === "asc" || v.order === "desc") &&
+        (v.before === undefined || (nonEmpty(v.before) && v.before.length <= 4096)) &&
+        // Newest-first paging (order desc, before) does not mix with the forward cursor.
+        (v.cursor === undefined || (v.before === undefined && v.order !== "desc"))
       )
     case "timelinePart":
       return nonEmpty(v.sessionID) && nonEmpty(v.messageID) && v.messageID.length <= 300 && nonEmpty(v.partID) && v.partID.length <= 300

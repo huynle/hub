@@ -23,7 +23,7 @@ import {
 } from "../protocol"
 import { extractReply } from "../reply"
 import { TurnTracker } from "../turns"
-import { boundedTimelinePart, timelineFile, timelineItems } from "./timeline"
+import { TimelineCache, boundedTimelinePart, newestPage, timelineFile, timelineItems } from "./timeline"
 import { SpokeConnection, type Backoff, type ConnectionState } from "./client"
 import { PROMPT_SOURCE, VOICE_AGENT } from "./conversation"
 import { pollEnrollment, startEnrollment } from "./enroll"
@@ -244,6 +244,8 @@ export class Spoke {
   /** The background workers each session started (the voice agent's task board). */
   private readonly tasks = new TaskBoard()
   private readonly turns = new TurnTracker()
+  /** Timeline rows of sessions being paged through (30 s, dropped on any event of the session). */
+  private readonly timelines = new TimelineCache()
   private readonly voiceTurns = new Map<string, number>()
   private readonly running = new Set<string>()
   private readonly infoTried = new Map<string, number>()
@@ -893,7 +895,10 @@ export class Spoke {
         return this.modelPrefsResult(req.sessionID)
       }
       case "timeline": {
-        const items = timelineItems(req.sessionID, await this.host.context(req.sessionID))
+        // A first page reads OpenCode (it shows the newest state); following pages reuse those rows briefly.
+        const first = req.cursor === undefined && req.before === undefined
+        const items = await this.timelines.get(req.sessionID, async () => timelineItems(req.sessionID, await this.host.context(req.sessionID)), first)
+        if (req.before !== undefined || req.order === "desc") return newestPage(items, req.limit ?? 50, req.before) satisfies ResultFor["timeline"]
         const offset = req.cursor === undefined ? 0 : Number(req.cursor)
         if (!Number.isInteger(offset) || offset < 0) throw new Error("Invalid timeline cursor")
         const page = items.slice(offset, offset + (req.limit ?? 50))
@@ -1229,6 +1234,8 @@ export class Spoke {
 
   private observe(event: EventLike): void {
     try {
+      const sessionID = (event.data as Record<string, unknown> | undefined)?.sessionID
+      if (typeof sessionID === "string") this.timelines.invalidate(sessionID)
       this.turns.observe(event)
       this.observeModel(event)
       if (event.type === "form.replied" || event.type === "form.cancelled") {
