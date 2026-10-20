@@ -239,3 +239,41 @@ describe("prompt images", () => {
     expect(parseServerMessage(r({ op: "timelineFile", sessionID: "s", messageID: "", index: 0 }))).toBeUndefined()
   })
 })
+
+describe("job and status compaction", () => {
+  const { compactActivity } = require("../src/protocol")
+  const info = { id: "sh_1", status: "running", command: "bun run build && " + "x".repeat(500), cwd: "/w", shell: "bash", file: "/tmp/f", pid: 9, metadata: { sessionID: "ses_1", background: true }, time: { started: 1000 } }
+
+  test("session.status keeps the type and a short retry reason", () => {
+    expect(compactActivity({ type: "session.status", data: { sessionID: "s", status: { type: "busy" } } })).toEqual({ type: "session.status", data: { sessionID: "s", status: { type: "busy" } } })
+    const retry = compactActivity({ type: "session.status", data: { sessionID: "s", status: { type: "retry", attempt: 3, message: "m".repeat(400), next: 9, action: { link: "x" } } } })
+    expect(retry.data.status).toEqual({ type: "retry", attempt: 3, message: "m".repeat(199) + "…" })
+  })
+
+  test("shell.created becomes {sessionID, id, kind, command ≤ 200, status, at, background}", () => {
+    const out = compactActivity({ type: "shell.created", data: { info } })
+    expect(out.data).toEqual({ sessionID: "ses_1", id: "sh_1", kind: "shell", command: expect.any(String), status: "running", at: 1000, background: true })
+    expect(out.data.command.length).toBe(200)
+    expect(JSON.stringify(out)).not.toContain("/tmp/f")
+  })
+
+  test("exits carry status and exit code; the session comes from the lookup; output is dropped", () => {
+    const sessionOf = (id: string) => (id === "sh_1" || id === "pty_1" ? "ses_1" : undefined)
+    expect(compactActivity({ type: "shell.exited", data: { id: "sh_1", status: "exited", exit: 2 } }, sessionOf, 5000).data).toEqual({ sessionID: "ses_1", id: "sh_1", kind: "shell", status: "exited", exit: 2, at: 5000 })
+    expect(compactActivity({ type: "shell.deleted", data: { id: "sh_1" } }, sessionOf).data).toEqual({ sessionID: "ses_1", id: "sh_1", kind: "shell" })
+    const ended = compactActivity({ type: "session.shell.ended", data: { sessionID: "ses_1", shell: { ...info, status: "killed", time: { started: 1, completed: 7 } }, output: { output: "SECRET" } } })
+    expect(ended.data).toEqual({ sessionID: "ses_1", id: "sh_1", kind: "shell", status: "killed", at: 7 })
+    expect(compactActivity({ type: "pty.exited", data: { id: "pty_1", exitCode: 0 } }, sessionOf, 9).data).toEqual({ sessionID: "ses_1", id: "pty_1", kind: "pty", status: "exited", exit: 0, at: 9 })
+    expect(compactActivity({ type: "pty.created", data: { info: { id: "pty_1", title: "t", command: "htop", args: ["-d", "5"], cwd: "/", status: "running", pid: 1, sessionID: "ses_1" } } }, undefined, 3).data).toEqual({ sessionID: "ses_1", id: "pty_1", kind: "pty", command: "htop -d 5", status: "running", at: 3 })
+  })
+
+  test("job events without a known session are dropped", () => {
+    expect(compactActivity({ type: "shell.exited", data: { id: "nope", status: "exited" } }, () => undefined)).toBeUndefined()
+    expect(compactActivity({ type: "pty.created", data: { info: { id: "p", command: "sh", args: [], status: "running" } } })).toBeUndefined()
+  })
+
+  test("status, job and seed events pass the spoke-message check", () => {
+    const ev = (type: string) => JSON.stringify({ t: "event", event: { type, data: { sessionID: "ses_1" } } })
+    for (const t of ["session.status", "shell.created", "shell.exited", "shell.deleted", "session.shell.started", "session.shell.ended", "pty.created", "pty.updated", "pty.exited", "pty.deleted", "session.seed"]) expect(parseSpokeMessage(ev(t))).toBeDefined()
+  })
+})

@@ -1,7 +1,7 @@
 // Sessions this OpenCode process knows about, built from the events it sees, plus which of them
 // are exposed to the central server (by mode). Pure: time is passed in.
 import type { Mode } from "../config"
-import { FORWARDED_EVENTS, type SessionInfo, type TerminalInfo } from "../protocol"
+import { compactActivity, FORWARDED_EVENTS, type JobInfo, type SessionInfo, type TerminalInfo } from "../protocol"
 
 /** A session is "owned" by this process while it viewed or ran it within this window. */
 export const OWNED_WINDOW_MS = 30 * 60 * 1000
@@ -58,6 +58,9 @@ export function eventSessionID(event: EventLike): string | undefined {
   return undefined
 }
 
+/** Shells and terminals remembered (for the session of their exit). */
+const JOBS_KNOWN = 1000
+
 const RUN_END = new Set(["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"])
 
 export class SessionTracker {
@@ -66,6 +69,10 @@ export class SessionTracker {
   private readonly running = new Set<string>()
   /** Pending permission or form ID → its session. */
   private readonly waiting = new Map<string, string>()
+  /** Sessions OpenCode reports busy or retrying (session.status). */
+  private readonly busy = new Set<string>()
+  /** Shell or terminal ID → its session, while known (running or exited, until deleted). */
+  private readonly jobs = new Map<string, { sessionID: string; running: boolean }>()
 
   /** Applies an event seen in this process. Returns true when the snapshot may have changed. */
   observe(event: EventLike, now: number): boolean {
@@ -94,6 +101,8 @@ export class SessionTracker {
       }
       case "session.deleted":
         this.running.delete(id)
+        this.busy.delete(id)
+        for (const [jobID, job] of this.jobs) if (job.sessionID === id) this.jobs.delete(jobID)
         for (const [key, sessionID] of this.waiting) if (sessionID === id) this.waiting.delete(key)
         return this.entries.delete(id)
       default: {
@@ -178,14 +187,53 @@ export class SessionTracker {
     return true
   }
 
-  /** Root sessions with a run in progress or a pending permission or form somewhere in their tree. */
+  /**
+   * Root sessions with a run in progress, a busy or retrying status, a running shell or terminal, or a pending
+   * permission or form somewhere in their tree.
+   */
   active(): string[] {
     const roots = new Set<string>()
-    for (const id of [...this.running, ...this.waiting.values()]) roots.add(this.rootOf(id))
+    const jobs = [...this.jobs.values()].filter((j) => j.running).map((j) => j.sessionID)
+    for (const id of [...this.running, ...this.busy, ...jobs, ...this.waiting.values()]) roots.add(this.rootOf(id))
     return [...roots]
   }
 
+  /** The session a shell or terminal belongs to, while known. */
+  jobSession(jobID: string): string | undefined {
+    return this.jobs.get(jobID)?.sessionID
+  }
+
+  /** Replaces a session's status and running jobs with a snapshot (fetched at startup or after a reconnect). */
+  seed(sessionID: string, snapshot: { readonly status: "idle" | "busy" | "retry"; readonly jobs: readonly JobInfo[] }): void {
+    if (snapshot.status === "idle") this.busy.delete(sessionID)
+    else this.busy.add(sessionID)
+    for (const [jobID, job] of this.jobs) if (job.sessionID === sessionID && job.running) this.jobs.delete(jobID)
+    for (const job of snapshot.jobs) this.setJob(job.id, sessionID, job.status === "running")
+  }
+
+  /** Session status and shells/terminals (compacted so the session of an exit is resolved). */
+  private trackJobs(event: EventLike): void {
+    if (event.type !== "session.status" && !event.type.startsWith("shell.") && !event.type.startsWith("pty.") && !event.type.startsWith("session.shell.")) return
+    const compact = compactActivity({ type: event.type, data: record(event.data) }, (id) => this.jobSession(id))
+    if (!compact) return
+    const data = compact.data as Record<string, any>
+    const sessionID = data.sessionID as string
+    if (compact.type === "session.status") {
+      if (data.status.type === "idle") this.busy.delete(sessionID)
+      else this.busy.add(sessionID)
+    } else if (compact.type.endsWith(".deleted")) this.jobs.delete(data.id)
+    else if (typeof data.id === "string" && typeof data.status === "string") this.setJob(data.id, sessionID, data.status === "running")
+  }
+
+  /** Remembers a job, keeping at most JOBS_KNOWN (oldest dropped). */
+  private setJob(id: string, sessionID: string, running: boolean): void {
+    this.jobs.delete(id)
+    this.jobs.set(id, { sessionID, running })
+    if (this.jobs.size > JOBS_KNOWN) this.jobs.delete(this.jobs.keys().next().value!)
+  }
+
   private trackActive(event: EventLike): void {
+    this.trackJobs(event)
     const data = record(event.data)
     const sessionID = eventSessionID(event)
     if (event.type === "session.execution.started" && sessionID) this.running.add(sessionID)

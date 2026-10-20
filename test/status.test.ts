@@ -99,3 +99,75 @@ describe("StatusBoard", () => {
     expect(board.get("ses_child")).toBeUndefined()
   })
 })
+
+describe("StatusBoard: session status, retries and background jobs", () => {
+  const shell = (id: string, sessionID: string, status = "running", extra: Record<string, unknown> = {}) => ({ sessionID, id, kind: "shell", command: "sleep 60", status, at: 1000, ...extra })
+
+  test("session.status busy is working, idle is idle again", () => {
+    const board = new StatusBoard("ses_root", "Main")
+    expect(board.observe(ev("session.status", { sessionID: "ses_root", status: { type: "busy" } }))).toBe(true)
+    expect(board.get("ses_root")?.state).toBe("working")
+    board.observe(ev("session.status", { sessionID: "ses_root", status: { type: "idle" } }))
+    expect(board.get("ses_root")?.state).toBe("idle")
+  })
+
+  test("retry is working, carries the attempt and reason, and clears on the next status", () => {
+    const board = new StatusBoard("ses_root", "Main")
+    board.observe(ev("session.status", { sessionID: "ses_root", status: { type: "retry", attempt: 2, message: "Rate limited" } }))
+    expect(board.get("ses_root")).toMatchObject({ state: "working", retry: { attempt: 2, message: "Rate limited" }, detail: "Retrying: Rate limited" })
+    board.observe(ev("session.status", { sessionID: "ses_root", status: { type: "busy" } }))
+    expect(board.get("ses_root")?.retry).toBeUndefined()
+    expect(board.get("ses_root")?.detail).toBeUndefined()
+  })
+
+  test("a running background shell keeps the session working after its run ended", () => {
+    const board = new StatusBoard("ses_root", "Main")
+    board.observe(ev("session.execution.started", { sessionID: "ses_root" }))
+    board.observe(ev("shell.created", shell("sh_1", "ses_root")))
+    board.observe(ev("session.execution.succeeded", { sessionID: "ses_root" }))
+    expect(board.get("ses_root")).toMatchObject({ state: "working", jobs: [{ id: "sh_1", kind: "shell", command: "sleep 60", status: "running", started: 1000 }] })
+  })
+
+  test("an exited shell stops counting as work but stays listed with its exit code; deleted drops it", () => {
+    const board = new StatusBoard("ses_root", "Main")
+    board.observe(ev("shell.created", shell("sh_1", "ses_root")))
+    expect(board.observe(ev("shell.exited", { sessionID: "ses_root", id: "sh_1", status: "exited", exit: 0, at: 5000 }))).toBe(true)
+    expect(board.get("ses_root")).toMatchObject({ state: "idle", jobs: [{ id: "sh_1", status: "exited", exit: 0, ended: 5000 }] })
+    board.observe(ev("shell.deleted", { sessionID: "ses_root", id: "sh_1" }))
+    expect(board.get("ses_root")?.jobs).toBeUndefined()
+  })
+
+  test("session.shell.started/ended and pty events track jobs of subagent sessions too", () => {
+    const board = new StatusBoard("ses_root", "Main")
+    board.observe(ev("session.created", { sessionID: "ses_child", parentID: "ses_root", title: "build" }))
+    board.observe(ev("session.shell.started", shell("sh_2", "ses_child")))
+    board.observe(ev("pty.created", { ...shell("pty_1", "ses_root"), kind: "pty", command: "htop" }))
+    expect(board.get("ses_child")?.state).toBe("working")
+    expect(board.get("ses_root")?.jobs?.[0]).toMatchObject({ id: "pty_1", kind: "pty", command: "htop" })
+    board.observe(ev("session.shell.ended", { sessionID: "ses_child", id: "sh_2", status: "killed", at: 2000 }))
+    board.observe(ev("pty.exited", { sessionID: "ses_root", id: "pty_1", status: "exited", exit: 1, at: 3000 }))
+    expect(board.get("ses_child")).toMatchObject({ state: "idle", jobs: [{ id: "sh_2", status: "killed" }] })
+    expect(board.get("ses_root")).toMatchObject({ state: "idle", jobs: [{ id: "pty_1", status: "exited", exit: 1 }] })
+  })
+
+  test("keeps at most a few finished jobs per session, the newest", () => {
+    const board = new StatusBoard("ses_root", "Main")
+    for (let i = 0; i < 12; i++) {
+      board.observe(ev("shell.created", shell(`sh_${i}`, "ses_root")))
+      board.observe(ev("shell.exited", { sessionID: "ses_root", id: `sh_${i}`, status: "exited", exit: 0, at: 2000 + i }))
+    }
+    const jobs = board.get("ses_root")!.jobs!
+    expect(jobs.length).toBe(5)
+    expect(jobs.at(-1)!.id).toBe("sh_11")
+  })
+
+  test("seed sets status and running jobs from a snapshot (spoke startup), replacing earlier running jobs", () => {
+    const board = new StatusBoard("ses_root", "Main")
+    board.observe(ev("shell.created", shell("old", "ses_root")))
+    expect(board.observe(ev("session.seed", { sessionID: "ses_root", status: { type: "busy" }, jobs: [{ id: "sh_9", kind: "shell", command: "make", status: "running", started: 50 }] }))).toBe(true)
+    expect(board.get("ses_root")).toMatchObject({ state: "working", jobs: [{ id: "sh_9", command: "make" }] })
+    board.observe(ev("session.seed", { sessionID: "ses_root", status: { type: "idle" }, jobs: [] }))
+    expect(board.get("ses_root")).toMatchObject({ state: "idle" })
+    expect(board.get("ses_root")?.jobs).toBeUndefined()
+  })
+})

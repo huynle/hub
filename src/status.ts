@@ -1,4 +1,5 @@
 // Live status of a voice session and the subagent sessions it spawns, built from OpenCode events.
+import type { JobInfo } from "./protocol"
 
 export type SessionState = "idle" | "working" | "blocked" | "error"
 
@@ -112,15 +113,28 @@ export interface SessionStatus {
   readonly state: SessionState
   readonly detail?: string
   readonly blockers: ReadonlyArray<Blocker>
+  /** OpenCode is retrying the model request (state stays "working"). */
+  readonly retry?: { readonly attempt?: number; readonly message?: string }
+  /** Shells and terminals of the session: running ones, then the last few that ended (oldest first). */
+  readonly jobs?: readonly JobInfo[]
 }
+
+/** Ended jobs kept per session (shown briefly with their exit code). */
+export const ENDED_JOBS_KEPT = 5
+/** Jobs kept per session at most (running ones beyond it are dropped oldest first). */
+const JOBS_MAX = 50
 
 interface Entry {
   id: string
   parentID?: string
   title: string
   running: boolean
+  /** session.status: busy or retry (OpenCode's own view of the session). */
+  busy: boolean
+  retry?: { attempt?: number; message?: string }
   error?: string
   blockers: Blocker[]
+  jobs: JobInfo[]
 }
 
 interface EventLike {
@@ -132,7 +146,7 @@ export class StatusBoard {
   private readonly sessions = new Map<string, Entry>()
 
   constructor(rootID: string, title: string) {
-    this.sessions.set(rootID, { id: rootID, title, running: false, blockers: [] })
+    this.sessions.set(rootID, { id: rootID, title, running: false, busy: false, blockers: [], jobs: [] })
   }
 
   /** Applies an event. Returns true when the visible status changed. */
@@ -146,7 +160,9 @@ export class StatusBoard {
           parentID: data.parentID,
           title: data.title ?? data.agent ?? data.slug ?? "subagent",
           running: false,
+          busy: false,
           blockers: [],
+          jobs: [],
         })
         return true
       }
@@ -186,6 +202,30 @@ export class StatusBoard {
       case "form.replied":
       case "form.cancelled":
         return this.unblock(data.sessionID, data.id)
+      case "session.status":
+        return this.update(data.sessionID, (entry) => setStatus(entry, data.status))
+      case "session.seed":
+        return this.update(data.sessionID, (entry) => {
+          setStatus(entry, data.status)
+          entry.jobs = entry.jobs.filter((job) => job.status !== "running")
+          for (const job of Array.isArray(data.jobs) ? data.jobs : []) if (isJob(job)) upsertJob(entry, job)
+        })
+      case "shell.created":
+      case "session.shell.started":
+      case "pty.created":
+      case "pty.updated":
+      case "shell.exited":
+      case "session.shell.ended":
+      case "pty.exited":
+        return this.update(data.sessionID, (entry) => {
+          const job = jobOf(data, entry.jobs.find((j) => j.id === data.id))
+          if (job) upsertJob(entry, job)
+        })
+      case "shell.deleted":
+      case "pty.deleted":
+        return this.update(data.sessionID, (entry) => {
+          entry.jobs = entry.jobs.filter((job) => job.id !== data.id)
+        })
       default:
         return false
     }
@@ -218,15 +258,68 @@ export class StatusBoard {
   }
 }
 
+const JOB_STATUSES = new Set(["running", "exited", "timeout", "killed"])
+
+function isJob(v: any): v is JobInfo {
+  return typeof v?.id === "string" && v.id && (v.kind === "shell" || v.kind === "pty") && JOB_STATUSES.has(v.status)
+}
+
+/** A job event's data (compact, see compactActivity) merged over what is known of the job. */
+function jobOf(data: Record<string, any>, known: JobInfo | undefined): JobInfo | undefined {
+  if (typeof data.id !== "string" || !JOB_STATUSES.has(data.status)) return undefined
+  const kind = data.kind === "pty" ? "pty" : "shell"
+  const ended = data.status !== "running"
+  const at = num(data.at)
+  const command = text(data.command, 200) ?? known?.command
+  const exit = num(data.exit) ?? (ended ? known?.exit : undefined)
+  const started = known?.started ?? (!ended ? at : undefined)
+  return {
+    id: data.id,
+    kind,
+    ...(command ? { command } : {}),
+    status: data.status,
+    ...(exit !== undefined ? { exit } : {}),
+    ...(data.background === true || known?.background ? { background: true as const } : {}),
+    ...(started !== undefined ? { started } : {}),
+    ...(ended && at !== undefined ? { ended: at } : {}),
+  }
+}
+
+function upsertJob(entry: Entry, job: JobInfo): void {
+  const rest = entry.jobs.filter((j) => j.id !== job.id)
+  rest.push({ ...job })
+  const running = rest.filter((j) => j.status === "running")
+  const endedJobs = rest.filter((j) => j.status !== "running").slice(-ENDED_JOBS_KEPT)
+  const keep = new Set([...running.slice(-JOBS_MAX), ...endedJobs])
+  entry.jobs = rest.filter((j) => keep.has(j))
+}
+
+function setStatus(entry: Entry, status: any): void {
+  const type = status?.type
+  if (type !== "idle" && type !== "busy" && type !== "retry") return
+  entry.busy = type !== "idle"
+  if (type === "retry") {
+    const attempt = num(status.attempt)
+    const message = text(status.message, 200)
+    entry.retry = { ...(attempt !== undefined ? { attempt } : {}), ...(message ? { message } : {}) }
+  } else entry.retry = undefined
+  if (type === "busy") entry.error = undefined
+}
+
 function view(entry: Entry): SessionStatus {
+  const working = entry.running || entry.busy || entry.jobs.some((job) => job.status === "running")
   const state: SessionState =
-    entry.blockers.length > 0 ? "blocked" : entry.error ? "error" : entry.running ? "working" : "idle"
+    entry.blockers.length > 0 ? "blocked" : entry.error && !working ? "error" : working ? "working" : "idle"
+  const retry = entry.retry && state === "working" ? entry.retry : undefined
+  const detail = state === "error" ? entry.error : retry ? (retry.message ? `Retrying: ${retry.message}` : "Retrying") : undefined
   return {
     id: entry.id,
     ...(entry.parentID ? { parentID: entry.parentID } : {}),
     title: entry.title,
     state,
-    ...(entry.error && state === "error" ? { detail: entry.error } : {}),
+    ...(detail ? { detail } : {}),
     blockers: entry.blockers.map((blocker) => structuredClone(blocker)),
+    ...(retry ? { retry: { ...retry } } : {}),
+    ...(entry.jobs.length ? { jobs: entry.jobs.map((job) => ({ ...job })) } : {}),
   }
 }
