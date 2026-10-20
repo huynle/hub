@@ -127,6 +127,13 @@ export function SessionView(props: { id: string }) {
   // ---------- live messages ----------
   let lastStatus: readonly StatusLike[] | undefined = untrack(() => status() as readonly StatusLike[] | undefined)
   const unsubscribe = onMessage((m) => {
+    // The hub could not replay what this page missed while away: refetch the conversation and status.
+    if (m.type === "resync") {
+      void loadTimeline()
+      void loadBacklog()
+      void loadSummary()
+      return
+    }
     const rootID = typeof m.rootID === "string" ? m.rootID : m.sessionID
     if (m.type === "activity" && mine(rootID, m.sessionID) && m.item && m.item.kind !== "thinking") {
       // Tool steps; thinking shows up through streamed reasoning.
