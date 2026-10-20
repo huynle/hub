@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **Sessions open on their newest messages, and older ones load while you scroll up**: the console used to load
+  a conversation oldest first, 200 rows at a time and at most 2000 rows, before showing anything, so a long
+  session opened slowly and could miss its newest messages. It now asks for the newest 80 rows (one request),
+  shows them at the bottom, and loads the page before them as you get near the top ("Loading earlier
+  messages…", then "Beginning of conversation"; a failed page offers Retry). What is on screen stays in place
+  while older rows are added above it, and live replies still arrive at the bottom. Measured on a mock session
+  with ~1000 rows: 1 request and 13.7 KB instead of 6 requests and 178 KB, and only 80 rows rendered at first.
+  - API: `GET /api/sessions/:id/timeline?limit=N&order=desc` returns the newest rows with an `older` cursor;
+    `?before=<older>` returns the page before it. Cursors are row keys, so they stay valid while new messages
+    arrive. The forward `?cursor=` mode is unchanged. Consoles talking to older spokes fall back to loading the
+    whole history as before.
+  - The spoke reads OpenCode's history once per first page and serves the following pages from a short-lived
+    per-session cache (30 s, dropped on any event of the session), instead of reading the whole history again
+    for every page.
+  - After a reconnect that missed events, the console reloads the newest page. It keeps the older pages already
+    loaded when the new page overlaps them; otherwise it starts over from the newest page.
+
 - **Voice mode tells the truth with the screen off**: Android Chrome usually stops the microphone when the
   screen turns off, while the "Voice mode on · listening" notification stayed. Voice mode now notices (no
   audio frames for 1.5 s, the mic track muted or ended, the AudioContext suspended) and says so: the Voice
