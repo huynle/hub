@@ -10,6 +10,13 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Hub" />
     <title>Hub</title>
+    <script>
+      // Text size before the first paint (web/src/core/font-scale.ts, key "hub.fontScale", 0.8–1.8).
+      try {
+        var s = parseFloat(localStorage.getItem("hub.fontScale"))
+        if (s >= 0.8 && s <= 1.8) document.documentElement.style.setProperty("--font-scale", String(s))
+      } catch (e) {}
+    </script>
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48" />
     <link rel="icon" href="/icon.svg" type="image/svg+xml" />

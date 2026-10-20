@@ -15,6 +15,7 @@ import { VoicePill } from "./VoicePill"
 import { Sidebar } from "./Sidebar"
 import { currentToast, dismissToast } from "./toast"
 import { IconButton } from "./ui"
+import { installPinchZoom } from "./text-size"
 
 export function App() {
   const [error, setError] = createSignal("")
@@ -48,6 +49,8 @@ export function App() {
     const r = route()
     dictation.viewing(r.name === "session" ? r.id : undefined)
   })
+  // Pinch on the transcript or the sessions list: text size, not page zoom.
+  onMount(() => onCleanup(installPinchZoom()))
   onMount(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "b") {
