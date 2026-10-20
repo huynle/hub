@@ -48,13 +48,20 @@
 // answers 502) sets the title and emits a catalog.
 // POST /mock/hold-turns {on} keeps a ses_mock turn working until it is stopped (or the hold is lifted), so a test
 // can steer and stop it without racing the turn's timer.
+// Progressive history: GET …/timeline pages like the spoke (src/spoke/timeline.ts newestPage: ?order=desc for the
+// newest page, ?before=<older> for the page before; ?cursor= forward pages as before). POST /mock/big {on, messages?,
+// delayMs?, failOlder?, append?} lists "Long history" (ses_big, in /home/user/research) whose timeline has about
+// 1000 rows (`messages` messages, default 900); older pages wait `delayMs` and answer 502 while `failOlder`;
+// `append` adds that many messages at the end. The log keeps each request's query string.
+// MOCK_WEB_DIST serves another built console instead of web/dist (to measure an older build).
 import { existsSync, readFileSync, statSync } from "node:fs"
 import path from "node:path"
 import { SentenceStream } from "../src/central/say-stream"
+import { newestPage } from "../src/spoke/timeline"
 import { speechModelList } from "../src/central/speech/models"
 import gatewayModels from "./fixtures/openai-compatible-gateway-models.json"
 
-const WEB = path.join(import.meta.dir, "..", "web", "dist")
+const WEB = path.resolve(process.env.MOCK_WEB_DIST ?? path.join(import.meta.dir, "..", "web", "dist"))
 const PORT = Number(process.argv[2] ?? 4311)
 const SESSION = "ses_mock"
 const TYPES: Record<string, string> = {
@@ -69,7 +76,7 @@ const TYPES: Record<string, string> = {
   ".onnx": "application/octet-stream",
 }
 
-type Log = { at: number; method: string; path: string; contentType?: string; bytes?: number; body?: unknown; done?: number }
+type Log = { at: number; method: string; path: string; query?: string; contentType?: string; bytes?: number; body?: unknown; done?: number }
 
 /** A 2 s MP3 tone standing in for TTS audio; /api/speak streams it slowly (the log's `done`: when it was all sent). */
 const TONE_MP3 = new Uint8Array(readFileSync(path.join(import.meta.dir, "fixtures", "tone.mp3")))
@@ -750,6 +757,43 @@ function timelineOf(id: string, title: string) {
   ]
 }
 
+/** The long history of ses_big (POST /mock/big). */
+const BIG = "ses_big"
+let big = { on: false, messages: 900, delayMs: 0, failOlder: false, rows: [] as Array<Record<string, unknown>> }
+function bigRows(from: number, count: number) {
+  const t0 = Date.now() - 30 * 86_400_000
+  const out: Array<Record<string, unknown>> = []
+  for (let i = from; i < from + count; i++) {
+    const id = `msg_big_${i}`
+    const at = t0 + i * 60_000
+    if (i % 2 === 0) out.push({ key: `${id}:text`, messageID: id, sessionID: BIG, kind: "user", text: `Question ${i}: what about step ${i}?`, at })
+    else {
+      if (i % 6 === 1) out.push({ key: `${id}:0`, messageID: id, partID: "0", sessionID: BIG, kind: "tool", name: "bash", state: "done", at, completed: at + 2000 })
+      out.push({ key: `${id}:1`, messageID: id, partID: "1", sessionID: BIG, kind: "assistant", text: `Answer ${i}.\n\nStep ${i} is done; the next one follows.`, at: at + 3000 })
+    }
+  }
+  return out
+}
+const bigFixture = (): Fixture => ({ id: BIG, title: "Long history", directory: "/home/user/research", project: "/home/user/research", projectName: "research", updated: Date.now() - 60 * 60_000, exposed: true, state: "idle", blockers: [] })
+
+/** A timeline answer like the spoke's: newest-first pages (order=desc, before) or forward pages (cursor). */
+async function timelinePage(rows: ReadonlyArray<Record<string, unknown>>, url: URL, older = { delayMs: 0, fail: false }): Promise<Response> {
+  const limit = Number(url.searchParams.get("limit") ?? 50)
+  const before = url.searchParams.get("before") || undefined
+  if (before || url.searchParams.get("order") === "desc") {
+    if (before && older.delayMs) await sleep(older.delayMs)
+    if (before && older.fail) return Response.json({ error: "OpenCode did not answer" }, { status: 502 })
+    try {
+      return Response.json(newestPage(rows as never, limit, before))
+    } catch (e) {
+      return Response.json({ error: (e as Error).message }, { status: 400 })
+    }
+  }
+  const offset = Number(url.searchParams.get("cursor") ?? 0)
+  const items = rows.slice(offset, offset + limit)
+  return Response.json({ items, ...(offset + items.length < rows.length ? { cursor: String(offset + items.length) } : {}) })
+}
+
 function treeState(id: string): string {
   if (id === SESSION) return status.some((x) => x.state === "blocked") ? "blocked" : status.some((x) => x.state === "working") ? "working" : "idle"
   return sessions.find((x) => x.id === id)?.state ?? "idle"
@@ -812,7 +856,8 @@ async function consoleRoute(request: Request, url: URL, user: MockUser): Promise
         return new Response(Buffer.from(PIXEL_PNG, "base64"), { headers: { "content-type": "image/png", "cache-control": "private, no-store" } })
       }
       if (match[3]) return Response.json({ detail: { name: "bash", state: { status: "error", input: { command: "bun test" }, error: "1 test failed" }, time: { start: Date.now() - 60_000, end: Date.now() - 54_000 } } })
-      return Response.json({ items: timelineOf(id, fixture.title) })
+      if (id === BIG) return timelinePage(big.rows, url, { delayMs: big.delayMs, fail: big.failOlder })
+      return timelinePage(timelineOf(id, fixture.title), url)
     case "model-prefs":
       if (m === "PUT") {
         const change = await body()
@@ -910,7 +955,7 @@ const server = Bun.serve({
     let match0: RegExpExecArray | null
     // This request's own log entry (concurrent requests must not record into each other's).
     const entry: (typeof log)[number] | undefined =
-      p.startsWith("/api/") && p !== "/api/events" ? { at: Date.now(), method: m, path: p, contentType: request.headers.get("content-type") ?? undefined } : undefined
+      p.startsWith("/api/") && p !== "/api/events" ? { at: Date.now(), method: m, path: p, ...(url.search ? { query: url.search } : {}), contentType: request.headers.get("content-type") ?? undefined } : undefined
     if (entry) log.push(entry)
     const last = () => entry ?? log[log.length - 1]!
 
@@ -921,6 +966,22 @@ const server = Bun.serve({
     if (p === "/mock/transcripts" && m === "POST") {
       transcripts.push(...((await json()).texts ?? []))
       return Response.json({ queued: transcripts.length })
+    }
+    if (p === "/mock/big" && m === "POST") {
+      const body = await json()
+      if (typeof body.messages === "number") big.messages = body.messages
+      if (typeof body.delayMs === "number") big.delayMs = body.delayMs
+      if (typeof body.failOlder === "boolean") big.failOlder = body.failOlder
+      if (body.on === true && !sessions.some((x) => x.id === BIG)) {
+        big.rows = bigRows(0, big.messages)
+        sessions.push(bigFixture())
+        emitCatalog()
+      }
+      if (typeof body.append === "number") {
+        const count = new Set(big.rows.map((r) => r.messageID)).size
+        big.rows.push(...bigRows(count, body.append))
+      }
+      return Response.json({ rows: big.rows.length })
     }
     if (p === "/mock/emit" && m === "POST") {
       emit(await json())
@@ -1006,6 +1067,7 @@ const server = Bun.serve({
     if (p === "/mock/log") return Response.json({ log, textEnded, transcripts, conversation, pushPrefs, quietHours, activityMinutes, pushEndpoints, mutedSessions, pushTests, speech, keys, users, audit, enrollments, userSpeech: Object.fromEntries(userSpeech), viewPrefs: Object.fromEntries(viewPrefs), herdr })
     if (p === "/mock/reset" && m === "POST") {
       scenarioRun++
+      big = { on: false, messages: 900, delayMs: 0, failOlder: false, rows: [] }
       slowTurnMs = undefined
       log = []
       transcripts = []

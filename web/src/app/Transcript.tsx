@@ -76,7 +76,7 @@ export function Transcript(props: { sessionID: string; blocks: Block[]; ticks: R
             <Match when={b.type === "tools" && b}>{(t) => <Tools block={t()} sessionID={props.sessionID} onDetail={props.onDetail} expanded={props.expanded} onToggle={props.onToggle} />}</Match>
             <Match when={b.type === "subagent" && b}>
               {(s) => (
-                <a class={`subagent ${s().state}`} href={sessionHref(s().sessionID)}>
+                <a class={`subagent ${s().state}`} href={sessionHref(s().sessionID)} data-key={s().key}>
                   <span class="sub-mark" aria-hidden="true">
                     {s().state === "working" ? <span class="spinner" /> : "◆"}
                   </span>
@@ -100,7 +100,7 @@ function Thought(props: { block: Extract<Block, { type: "thought" }> } & Expansi
   const setOpen = (on: boolean) => props.onToggle(props.block.key, on)
   const view = () => thoughtView(props.block)
   return (
-    <div class="fold thought">
+    <div class="fold thought" data-key={props.block.key}>
       <button type="button" class="fold-head" aria-expanded={open()} onClick={() => setOpen(!open())}>
         <Show when={props.block.running}>
           <span class="spinner small" />
@@ -125,7 +125,7 @@ function Tools(props: { block: Extract<Block, { type: "tools" }>; sessionID: str
     return `Used ${n()} tool${n() === 1 ? "" : "s"}${b.failed ? ` (${b.failed} failed)` : ""}`
   }
   return (
-    <div class={`fold tools${props.block.failed ? " has-failed" : ""}`}>
+    <div class={`fold tools${props.block.failed ? " has-failed" : ""}`} data-key={props.block.key}>
       <button type="button" class="fold-head" aria-expanded={open()} onClick={() => setOpen(!open())}>
         <Show when={props.block.running}>
           <span class="spinner small" />

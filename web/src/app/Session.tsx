@@ -1,11 +1,12 @@
 // One session: top bar, transcript (history + live), permission/question cards, Voice bar, composer, right rail
 // and diff viewer. Works whether Voice is on or off; Voice mode turns Voice on first when needed.
 import { jobsBadge, retryText, runningJobs } from "../core/jobs-core"
-import { For, Show, batch, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack } from "solid-js"
+import { For, Match, Show, Switch, batch, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack } from "solid-js"
 import { blockersOf } from "../core/browser-core"
 import { reconcileSay, statusNotes, type StatusLike } from "../core/conversation-core"
 import { speechSetup, type StatusEntry } from "../core/feedback-core"
 import { Timeline } from "../core/timeline-core"
+import { HistoryPager, type PageQuery } from "../core/history-core"
 import { composerReducer, composerView, confirmDelivery, initialComposer, turnAnswer, turnOutcomeNote, type ComposerAction, type TurnResultLike } from "../lib/composer"
 import { subtree, treeRunning } from "../lib/store"
 import { transcriptBlocks, type Block } from "../lib/transcript"
@@ -33,6 +34,8 @@ import { formatElapsed } from "../core/feedback-core"
 import { takeVoiceParam } from "../core/voice-autostart"
 
 const PRESENCE_MS = 30_000
+/** Timeline rows per history page: the newest page opens the session, older ones load while scrolling up. */
+const HISTORY_PAGE = 80
 const SUMMARY_THROTTLE_MS = 2000
 
 /** The session a ?voice=1 link asked to start Voice mode in, until its view starts it. */
@@ -94,16 +97,61 @@ export function SessionView(props: { id: string }) {
   const toEnd = () => requestAnimationFrame(() => scroller && (scroller.scrollTop = scroller.scrollHeight))
   createEffect(on(blocks, () => stick && toEnd()))
 
+  // ---------- history pages ----------
+  const [historyRev, setHistoryRev] = createSignal(0)
+  const pageQuery = (q: PageQuery) => new URLSearchParams(Object.entries(q).flatMap(([k, v]) => (v === undefined ? [] : [[k, String(v)]]))).toString()
+  const pager = new HistoryPager(timeline, (q) => getJSON(`${sessionPath(id)}/timeline?${pageQuery(q)}`), {
+    limit: HISTORY_PAGE,
+    onChange: () => {
+      keepInView(() => batch(() => {
+        setHistoryRev((n) => n + 1)
+        bump()
+      }))
+      // Still near the top after a page (short pages, tall screens): the observer looks again.
+      if (pager.state === "idle") watchTop()
+    },
+  })
+  const history = () => (historyRev(), { state: pager.state, error: pager.error })
+  /**
+   * Applies a change above what is on screen without moving it: the first row in view keeps its offset (rows
+   * prepended above it push the scroll position down by their height). At the bottom, the view stays stuck there.
+   */
+  function keepInView(change: () => void) {
+    const el = scroller
+    if (!el || stick) return change()
+    const top = el.getBoundingClientRect().top
+    const rows = Array.from(el.querySelectorAll<HTMLElement>(".transcript > [data-key]"))
+    const row = rows.find((r) => r.getBoundingClientRect().bottom > top + 1)
+    const key = row?.dataset.key
+    const before = row ? row.getBoundingClientRect().top : 0
+    change()
+    if (!key) return
+    const same = Array.from(el.querySelectorAll<HTMLElement>(".transcript > [data-key]")).find((r) => r.dataset.key === key)
+    if (same) el.scrollTop += same.getBoundingClientRect().top - before
+  }
+  let topObserver: IntersectionObserver | undefined
+  let sentinel: HTMLDivElement | undefined
+  /** Watches the top of the transcript: within ~1.5 screens of it, the next older page loads. */
+  function watchTop() {
+    if (!sentinel || !scroller || typeof IntersectionObserver === "undefined") return
+    topObserver ??= new IntersectionObserver((entries) => entries.some((e) => e.isIntersecting) && void pager.older(), {
+      root: scroller,
+      rootMargin: `${Math.round(window.innerHeight * 1.5)}px 0px 0px 0px`,
+    })
+    // Observing again reports the current state, so a sentinel still in range loads the next page.
+    topObserver.unobserve(sentinel)
+    topObserver.observe(sentinel)
+  }
+  onCleanup(() => topObserver?.disconnect())
+  /** The sentinel appears once the newest page shows: watch it after the view has scrolled to the bottom. */
+  const setSentinel = (el: HTMLDivElement) => {
+    sentinel = el
+    requestAnimationFrame(() => requestAnimationFrame(watchTop))
+  }
+
   async function loadTimeline() {
     try {
-      let cursor: string | undefined
-      let pages = 0
-      do {
-        const page = await getJSON(`${sessionPath(id)}/timeline?limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`)
-        timeline.load(page.items)
-        cursor = page.cursor
-        pages++
-      } while (cursor && pages < 10)
+      await pager.first()
       setLoaded(true)
       bump()
       toEnd()
@@ -130,7 +178,9 @@ export function SessionView(props: { id: string }) {
   const unsubscribe = onMessage((m) => {
     // The hub could not replay what this page missed while away: refetch the conversation and status.
     if (m.type === "resync") {
-      void loadTimeline()
+      // The newest page again, merged with the older pages already shown (or, after a gap, instead of them).
+      if (loaded()) void pager.resync().catch((e) => note(`Could not refresh the conversation: ${errorText(e)}`, "err"))
+      else void loadTimeline()
       void loadBacklog()
       void loadSummary()
       return
@@ -551,6 +601,25 @@ export function SessionView(props: { id: string }) {
             <Show when={!notFound()} fallback={<NotFound />}>
               <Show when={loaded()} fallback={<p class="muted pad">Loading conversation…</p>}>
                 <Show when={blocks().length || notes().length} fallback={<p class="muted pad empty-session">No messages yet. Type below, or start Voice mode.</p>}>
+                  <div ref={setSentinel} class="history-sentinel" aria-hidden="true" />
+                  <Switch>
+                    <Match when={history().state === "loading"}>
+                      <p class="history-edge loading muted small" role="status">
+                        <span class="spinner small" /> Loading earlier messages…
+                      </p>
+                    </Match>
+                    <Match when={history().state === "done" && blocks().length}>
+                      <p class="history-edge muted small">Beginning of conversation</p>
+                    </Match>
+                    <Match when={history().state === "error"}>
+                      <p class="history-edge error small" role="alert">
+                        Couldn't load earlier messages: {history().error}{" "}
+                        <button type="button" class="btn small" onClick={() => void pager.retry()}>
+                          Retry
+                        </button>
+                      </p>
+                    </Match>
+                  </Switch>
                   <Transcript
                     sessionID={id}
                     blocks={blocks()}
