@@ -21,7 +21,13 @@ Formerly **opencode-voice** and, briefly, **opencode-hub**
   run while the session is busy), stop a whole session tree, answer permissions, switch models, and
   start new sessions, from the phone.
 - **Notifications**: web push when a session asks a question, needs permission, fails or finishes, with
-  per-device toggles, quiet hours and per-session mute.
+  per-device toggles, quiet hours and per-session mute; opt-in **Activity updates** (one quiet, self-replacing
+  notification per session) to follow subagents, long tools and scripts with the screen off.
+- **Live without waste**: the console's stream resumes where it left off after a lock or app switch (event
+  ids + replay), pauses while the page is hidden, and carries streamed text only for the session on screen.
+- **Running detection**: a session counts as working while OpenCode reports it busy or retrying, or while a
+  shell or terminal it started still runs (e.g. a background `sleep 60 &` or build script), also when it was
+  already running before the plugin started.
 - **Voice** (optional feature, `/voice`): dictation and a hands-free conversation mode with a voice agent
   that answers in short spoken sentences on a fast model and hands real work to background subagents.
   Bring your own speech: OpenRouter or any OpenAI-compatible STT/TTS service (including self-hosted).
@@ -196,8 +202,9 @@ conversation mode and utterances (403 `not_exposed` for sessions not shared with
 | `GET /api/sessions/:id/summary` | context usage, todos, MCP status (at most 100 servers), branch and working-tree change stats (each part optional). `changes` lists at most 500 files, most-changed first, with `totalFiles` and `truncated`; its `additions`/`deletions` cover every file |
 | `GET /api/sessions/:id/diff?file=` | one file's patch, on demand (capped at 400 KB as JSON, then `truncated: true`); never stored in the hub |
 | `POST /api/sessions/:id/read` · `GET /api/reads` | per-user read marks, synced to your other devices |
-| `GET /api/push/prefs?endpoint=` | `{prefs, quietHours, muted, subscriptions, subscribed?}`: this device's toggles (`handoff, question, permission, finished, failed, say`) and quiet hours, the user's muted sessions, how many subscriptions the hub holds for this device, and whether it holds `endpoint` |
-| `PUT /api/push/prefs {toggles…, quietHours?}` | boolean toggles (a 0.5.0 `blocked` sets question and permission); `quietHours` `{start: "HH:MM", end: "HH:MM", timeZone}` or `null` (400 when invalid) |
+| `GET /api/events?lite=1&session=<id>&last=<id>` | the live stream (SSE). Every message has an `id:`; reconnecting with `Last-Event-ID` (EventSource does it) or `?last=` replays what was missed when the hub still has it (last 2000 events or 5 minutes per user; one fresh `catalog` stands for any catalog changes), else sends the catalog then `{type: "resync"}` (the page refetches what it shows). Ids are `<epoch>.<n>`; a hub restart starts a new epoch. `lite=1` leaves out `delta`/`reasoning` except of `session`'s tree (status, activity, catalog, turns and the rest still come). Heartbeat: `event: ping` every 20 s |
+| `GET /api/push/prefs?endpoint=` | `{prefs, quietHours, activityMinutes, muted, subscriptions, subscribed?}`: this device's toggles (`handoff, question, permission, finished, failed, say, activity`), activity update interval and quiet hours, the user's muted sessions, how many subscriptions the hub holds for this device, and whether it holds `endpoint` |
+| `PUT /api/push/prefs {toggles…, quietHours?, activityMinutes?}` | boolean toggles (a 0.5.0 `blocked` sets question and permission); `quietHours` `{start: "HH:MM", end: "HH:MM", timeZone}` or `null`; `activityMinutes` a whole number 1–60 (400 when invalid) |
 | `POST /api/push/subscribe {subscription, prefs?, oldEndpoint?}` · `POST /api/push/unsubscribe {endpoint}` | this device's subscriptions; `oldEndpoint` is dropped (rotated subscription). The endpoint must be https on a public hostname that resolves only to public addresses (no loopback, private, link-local, CGNAT or ULA hosts, no `localhost`/`*.local`/`*.internal`), else 400 |
 | `POST /api/push/test` | a test notification to the caller's device only: `{sent, failed: [{host, status?}], subscriptions}`; 429 with `retry-after` within 10 s of the last one |
 | `PUT /api/push/mute {sessionID, muted}` | mutes or unmutes a session's notifications for the user: `{muted}` |
@@ -208,6 +215,13 @@ The plugin is a thin client ("spoke") of the hub. Every OpenCode process that lo
 it opens **one** outbound WebSocket (`/spoke/ws`, protocol in `src/protocol.ts`), lists the sessions it
 knows, forwards their events, and runs turns, stops and permission replies on the hub's request.
 The web app, speech and phones live on the hub.
+
+Besides the session, tool and permission events, a spoke forwards `session.status` (busy/retry/idle) and the
+shells and terminals sessions start (`session.shell.started/ended`, `shell.created/exited/deleted`,
+`pty.created/updated/exited/deleted`) in compact form: id, session, command (≤ 200 characters), status and exit
+code; never output, files or environment. When it connects (and again after its hub connection or OpenCode
+event stream comes back) it asks its own server what runs now (`session.active` and `shell.list`) and sends a
+`session.seed` event per running session, so a session that was already running shows as working at once.
 
 | Entry | File | Role |
 |---|---|---|
@@ -508,6 +522,16 @@ zone) hold everything except hand-offs; **Mute notifications** in a session's �
 for you on every device (hand-offs still come through). At most one per session and kind every 30 s
 (Voice replies: 10 s); expired subscriptions (404/410) are pruned.
 
+**Activity updates** (pref `activity`, off by default on every device; Settings → Notifications shows a hint
+until it is on): to know what happens without keeping the screen on. Steps of interest in a session tree — a
+subagent started or ended, a tool that took 30 s or more, a background shell or terminal that ended (with its
+exit code: "bun run build exited 0", "was killed", "timed out"), the session going idle — become one
+notification per session, tagged per session so each replaces the last quietly (no new sound, normal
+urgency, 5-minute TTL). The first step after a quiet spell goes out at once; later ones are collected until the
+device's interval ends (Settings: 1–60 minutes, default 5) and sent together ("3 tools · explore finished ·
+Finished"). Short tools are only counted. Quiet hours and muted sessions apply; nothing is sent while a
+device shows the session.
+
 - **Status per device**: Settings → Notifications shows the browser permission, whether the service worker
   is registered and whether this hub holds this browser's subscription. "Allowed, but this device is not
   subscribed on this hub" means nothing will arrive (typical after the hub moved to a new address): **Enable
@@ -670,6 +694,13 @@ owns a session in conversation mode, and was not told yet (it reconnected or too
 hub sends it `{op: "conversation", on: true}` once. Deleting the session clears the flag.
 
 SSE (`/api/events`) adds:
+
+- Each session's status tree entry may carry `jobs` (`[{id, kind: "shell" | "pty", command?, status:
+  "running" | "exited" | "timeout" | "killed", exit?, background?, started?, ended?}]`: running ones plus the
+  last 5 that ended) and `retry` (`{attempt?, message?}`, with `detail` "Retrying: …"). A session is
+  `working` while its run, a busy/retry `session.status` or a running job lasts. The console shows a job count
+  next to the status (table, sidebar), "Retrying …" or "· 1 job" in the session header, and a **Jobs** card in
+  the rail (command, running time, exit code for a minute after it ends).
 
 - `{type: "conversation", sessionID, on}` when the flag changes.
 - `{type: "say", sessionID, messageID, ordinal, seq, text}`: **root** text in conversation mode is spoken
@@ -1114,6 +1145,10 @@ publish before trusted publishing can take over (see the comment in `release.yml
 - Listening with the phone screen off depends on the browser (best-effort on Android Chrome; not
   possible on iOS). Replies and alerts still arrive as push notifications.
 - The voice agent registers as a visible primary agent (`voice`) in OpenCode's agent list.
+- A catalog change still sends every machine's full catalog to each stream (about 1 KB per few sessions); the
+  replay buffer is in memory (a hub restart means a full catalog + `resync`).
+- Running shells are seeded from the spoke's own server (`shell.list` for the 20 most recent session
+  directories); shells in other directories show up once they emit an event.
 
 ## License
 

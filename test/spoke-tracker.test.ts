@@ -295,3 +295,72 @@ describe("0.4 session view", () => {
     expect(browserSessions({ mode: "always", sessions: [] }, t, T0, { max: 2, terminal }).map((s) => s.id)).toEqual(["ses_0", "ses_5"])
   })
 })
+
+describe("running detection: session status, shells and ptys", () => {
+  const info = (id: string, sessionID: string, status = "running") => ({ id, status, command: "sleep 60", cwd: "/w", shell: "bash", file: "/tmp/x", metadata: { sessionID, background: true }, time: { started: T0 } })
+
+  test("a busy or retrying session.status counts as active until idle", () => {
+    const tracker = new SessionTracker()
+    tracker.observe(created("ses_a"), T0)
+    tracker.observe(ev("session.status", { sessionID: "ses_a", status: { type: "busy" } }), T0)
+    expect(tracker.active()).toEqual(["ses_a"])
+    tracker.observe(ev("session.status", { sessionID: "ses_a", status: { type: "retry", attempt: 1, message: "x", next: 1 } }), T0)
+    expect(tracker.active()).toEqual(["ses_a"])
+    tracker.observe(ev("session.status", { sessionID: "ses_a", status: { type: "idle" } }), T0)
+    expect(tracker.active()).toEqual([])
+  })
+
+  test("a running shell of a subagent keeps its root active; shell.exited (no sessionID) ends it", () => {
+    const tracker = new SessionTracker()
+    tracker.observe(created("ses_a"), T0)
+    tracker.observe(created("ses_kid", { parentID: "ses_a" }), T0)
+    tracker.observe(ev("shell.created", { info: info("sh_1", "ses_kid") }), T0)
+    expect(tracker.active()).toEqual(["ses_a"])
+    expect(tracker.jobSession("sh_1")).toBe("ses_kid")
+    tracker.observe(ev("shell.exited", { id: "sh_1", status: "exited", exit: 0 }), T0)
+    expect(tracker.active()).toEqual([])
+  })
+
+  test("session.shell.started/ended and persistent ptys are tracked by session", () => {
+    const tracker = new SessionTracker()
+    tracker.observe(created("ses_a"), T0)
+    tracker.observe(ev("session.shell.started", { sessionID: "ses_a", shell: info("sh_2", "ses_a") }), T0)
+    expect(tracker.active()).toEqual(["ses_a"])
+    tracker.observe(ev("session.shell.ended", { sessionID: "ses_a", shell: { ...info("sh_2", "ses_a"), status: "exited", exit: 0 }, output: { output: "" } }), T0)
+    expect(tracker.active()).toEqual([])
+    tracker.observe(ev("pty.created", { info: { id: "pty_1", title: "t", command: "htop", args: [], cwd: "/", status: "running", pid: 1, sessionID: "ses_a" } }), T0)
+    expect(tracker.active()).toEqual(["ses_a"])
+    tracker.observe(ev("pty.exited", { id: "pty_1", exitCode: 0 }), T0)
+    expect(tracker.active()).toEqual([])
+  })
+
+  test("seed replaces a session's status and running jobs (snapshot at startup)", () => {
+    const tracker = new SessionTracker()
+    tracker.observe(created("ses_a"), T0)
+    tracker.observe(ev("shell.created", { info: info("sh_old", "ses_a") }), T0)
+    tracker.seed("ses_a", { status: "idle", jobs: [] })
+    expect(tracker.active()).toEqual([])
+    tracker.seed("ses_a", { status: "busy", jobs: [{ id: "sh_9", kind: "shell", command: "make", status: "running" }] })
+    expect(tracker.active()).toEqual(["ses_a"])
+    expect(tracker.jobSession("sh_9")).toBe("ses_a")
+  })
+
+  test("job events are forwarded once a session is resolved", () => {
+    const tracker = new SessionTracker()
+    tracker.observe(created("ses_a"), T0)
+    const config = { mode: "always" as const, sessions: [] }
+    for (const type of ["session.status", "shell.created", "shell.exited", "shell.deleted", "session.shell.started", "session.shell.ended", "pty.created", "pty.updated", "pty.exited", "pty.deleted", "session.seed"]) {
+      expect(shouldForward(config, tracker, ev(type, { sessionID: "ses_a" }))).toBe(true)
+    }
+  })
+})
+
+describe("running detection: run end", () => {
+  test("execution end clears a seeded busy status", () => {
+    const tracker = new SessionTracker()
+    tracker.observe(created("ses_a"), T0)
+    tracker.seed("ses_a", { status: "busy", jobs: [] })
+    tracker.observe(ev("session.execution.interrupted", { sessionID: "ses_a" }), T0)
+    expect(tracker.active()).toEqual([])
+  })
+})

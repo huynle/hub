@@ -185,6 +185,8 @@ export function sse(response: Response) {
         while ((index = buffer.indexOf("\n\n")) >= 0) {
           const chunk = buffer.slice(0, index)
           buffer = buffer.slice(index + 2)
+          // Heartbeats (`event: ping`) are not messages.
+          if (chunk.split("\n").some((line) => line.startsWith("event: "))) continue
           const data = chunk
             .split("\n")
             .filter((line) => line.startsWith("data: "))

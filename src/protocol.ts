@@ -145,7 +145,46 @@ export const FORWARDED_EVENTS: ReadonlySet<string> = new Set([
   "form.created",
   "form.replied",
   "form.cancelled",
+  // Running detection (compact form, see compactActivity): OpenCode's session status (busy/retry/idle) and the
+  // shells and terminals a session started, with the command (≤ JOB_COMMAND_MAX), status and exit code only.
+  "session.status",
+  "session.shell.started",
+  "session.shell.ended",
+  "shell.created",
+  "shell.exited",
+  "shell.deleted",
+  "pty.created",
+  "pty.updated",
+  "pty.exited",
+  "pty.deleted",
+  // Hub-defined: a session's status and running jobs as the spoke found them (startup, stream reconnect).
+  "session.seed",
 ])
+
+/** Longest job command forwarded. */
+export const JOB_COMMAND_MAX = 200
+/** Longest retry reason forwarded. */
+export const RETRY_MESSAGE_MAX = 200
+/** Most running jobs one seed event carries. */
+export const SEED_JOBS_MAX = 20
+
+export type JobKind = "shell" | "pty"
+export type JobStatus = "running" | "exited" | "timeout" | "killed"
+
+/** A shell or terminal a session started, as forwarded (no output, no environment). */
+export interface JobInfo {
+  readonly id: string
+  readonly kind: JobKind
+  readonly command?: string
+  readonly status: JobStatus
+  readonly exit?: number
+  readonly background?: true
+  readonly started?: number
+  readonly ended?: number
+}
+
+/** OpenCode's session status, compact. */
+export type CompactSessionStatus = { readonly type: "idle" | "busy" } | { readonly type: "retry"; readonly attempt?: number; readonly message?: string }
 
 // ---------- spoke → server ----------
 
@@ -627,8 +666,9 @@ export function summarizeToolInput(input: unknown): string {
  * Reduces activity events to what the activity feed needs. Returns the event unchanged when it is
  * not an activity event, or undefined when it should be dropped.
  */
-export function compactActivity(event: ForwardedEvent): ForwardedEvent | undefined {
+export function compactActivity(event: ForwardedEvent, sessionOf?: (jobID: string) => string | undefined, now: number = Date.now()): ForwardedEvent | undefined {
   const d = event.data
+  if (JOB_EVENTS.has(event.type) || event.type === "session.status") return compactJob(event, sessionOf, now)
   const base = { sessionID: d.sessionID, assistantMessageID: d.assistantMessageID, id: d.id }
   switch (event.type) {
     case "session.tool.input.started":
@@ -652,4 +692,84 @@ export function compactActivity(event: ForwardedEvent): ForwardedEvent | undefin
     default:
       return event
   }
+}
+
+const JOB_EVENTS = new Set(["session.shell.started", "session.shell.ended", "shell.created", "shell.exited", "shell.deleted", "pty.created", "pty.updated", "pty.exited", "pty.deleted"])
+const JOB_STATUSES = new Set<string>(["running", "exited", "timeout", "killed"])
+
+function clipText(value: unknown, max: number): string | undefined {
+  if (typeof value !== "string") return undefined
+  const line = value.replace(/\s+/g, " ").trim()
+  if (!line) return undefined
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line
+}
+
+const finite = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined)
+
+/** OpenCode's SessionStatus reduced to its type and (retry) attempt and short reason. */
+export function compactStatus(raw: unknown): CompactSessionStatus | undefined {
+  const status = raw as Record<string, unknown> | null
+  if (!status || typeof status !== "object") return undefined
+  if (status.type === "idle" || status.type === "busy") return { type: status.type }
+  if (status.type !== "retry") return undefined
+  const attempt = finite(status.attempt)
+  const message = clipText(status.message, RETRY_MESSAGE_MAX)
+  return { type: "retry", ...(attempt !== undefined ? { attempt } : {}), ...(message ? { message } : {}) }
+}
+
+/** A ShellInfo or Pty (OpenCode) as a JobInfo. */
+export function jobFromInfo(raw: unknown, kind: JobKind): (JobInfo & { sessionID?: string }) | undefined {
+  const info = raw as Record<string, any> | null
+  if (!info || typeof info !== "object" || typeof info.id !== "string" || !info.id) return undefined
+  const status: JobStatus = JOB_STATUSES.has(info.status) ? info.status : "running"
+  const commandLine = kind === "pty" ? [info.command, ...(Array.isArray(info.args) ? info.args : [])].filter((x) => typeof x === "string" && x).join(" ") || info.title : info.command
+  const command = clipText(commandLine, JOB_COMMAND_MAX)
+  const exit = finite(kind === "pty" ? info.exitCode : info.exit)
+  const sessionID = typeof info.sessionID === "string" ? info.sessionID : typeof info.metadata?.sessionID === "string" ? info.metadata.sessionID : undefined
+  const started = finite(info.time?.started)
+  const ended = finite(info.time?.completed)
+  return {
+    ...(sessionID ? { sessionID } : {}),
+    id: info.id,
+    kind,
+    ...(command ? { command } : {}),
+    status,
+    ...(exit !== undefined ? { exit } : {}),
+    ...(info.metadata?.background === true ? { background: true as const } : {}),
+    ...(started !== undefined ? { started } : {}),
+    ...(ended !== undefined ? { ended } : {}),
+  }
+}
+
+function compactJob(event: ForwardedEvent, sessionOf: ((jobID: string) => string | undefined) | undefined, now: number): ForwardedEvent | undefined {
+  const d = event.data as Record<string, any>
+  const type = event.type
+  if (type === "session.status") {
+    const status = compactStatus(d.status)
+    return typeof d.sessionID === "string" && status ? { type, data: { sessionID: d.sessionID, status } } : undefined
+  }
+  const kind: JobKind = type.startsWith("pty.") ? "pty" : "shell"
+  const session = (id: unknown, own?: unknown) => (typeof own === "string" && own ? own : typeof id === "string" ? sessionOf?.(id) : undefined)
+  let data: Record<string, unknown> | undefined
+  if (type === "shell.created" || type === "session.shell.started" || type === "pty.created" || type === "pty.updated") {
+    const job = jobFromInfo(type === "session.shell.started" ? d.shell : d.info, kind)
+    if (!job) return undefined
+    const sessionID = session(job.id, type === "session.shell.started" ? d.sessionID : job.sessionID)
+    const { started, ended: _ended, sessionID: _session, ...rest } = job
+    data = sessionID ? { sessionID, ...rest, at: started ?? now } : undefined
+  } else if (type === "session.shell.ended") {
+    const job = jobFromInfo(d.shell, "shell")
+    if (!job) return undefined
+    const sessionID = session(job.id, d.sessionID)
+    data = sessionID ? { sessionID, id: job.id, kind, status: job.status === "running" ? "exited" : job.status, ...(job.exit !== undefined ? { exit: job.exit } : {}), at: job.ended ?? now } : undefined
+  } else if (type === "shell.exited" || type === "pty.exited") {
+    const sessionID = session(d.id, d.sessionID)
+    const exit = finite(kind === "pty" ? d.exitCode : d.exit)
+    const status = kind === "pty" ? "exited" : JOB_STATUSES.has(d.status) && d.status !== "running" ? d.status : "exited"
+    data = sessionID ? { sessionID, id: d.id, kind, status, ...(exit !== undefined ? { exit } : {}), at: now } : undefined
+  } else {
+    const sessionID = session(d.id, d.sessionID)
+    data = sessionID && typeof d.id === "string" ? { sessionID, id: d.id, kind } : undefined
+  }
+  return data ? { type, data } : undefined
 }

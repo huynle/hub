@@ -9,6 +9,7 @@ import type { SpeechReadyView } from "../core/feedback-core"
 import { migratePins, normalizePrefs, PendingTitles, renameTitle, retitle, setPrefs, type PrefList, type ViewPrefs } from "../core/view-core"
 import { sessionRows, stableRows, type SessionRow } from "../lib/sessions"
 import { LiveFeeds, applyMessage, findSession, initialHub, type HubState } from "../lib/store"
+import { StreamKeeper, type StreamScope } from "../core/stream-core"
 import { api, enc, errorText, getJSON, HttpError, sessionPath, setUnauthorized } from "./api"
 import { navigate, route } from "./router"
 import { toast } from "./toast"
@@ -78,25 +79,83 @@ export async function loadAuth(): Promise<AuthInfo | null> {
 }
 
 // ---------- events ----------
+// One EventSource, kept by a StreamKeeper (core/stream-core.ts): paused while the page is hidden (unless Voice
+// mode runs), resumed with the last event id (the hub replays what was missed), reopened when no message or
+// heartbeat came for a while, lite (no streamed text) except for the session on screen.
 
 let source: EventSource | undefined
 let retry: ReturnType<typeof setTimeout> | undefined
 let backoff = 1000
+let keepOpen = () => false
+/** Shown in the top bar: reconnecting after a pause or drop, then "Updated" for a moment. */
+export const [syncNote, setSyncNote] = createSignal<"" | "reconnecting" | "updated">("")
+let noteTimer: ReturnType<typeof setTimeout> | undefined
+let resuming = false
 
-export function startEvents(): void {
-  if (source) return
+const keeper = new StreamKeeper({
+  setTimer: (fn, ms) => setTimeout(fn, ms),
+  clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+  open: (url) => openSource(url),
+  close: () => closeSource(),
+  keepOpen: () => keepOpen(),
+})
+
+/** Voice mode keeps the stream open while hidden (its replies come over it). */
+export function keepStreamOpen(fn: () => boolean): void {
+  keepOpen = fn
+}
+
+/** What the stream carries: streamed text only for `session` unless `full`. */
+export function setStreamScope(scope: StreamScope): void {
+  keeper.setScope(scope)
+}
+
+let lifecycle = false
+function watchLifecycle(): void {
+  if (lifecycle) return
+  lifecycle = true
+  document.addEventListener("visibilitychange", () => (document.visibilityState === "hidden" ? keeper.hidden() : keeper.visible()))
+  // Back from the bfcache (iOS app switch, back button): the old stream is gone.
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted && keeper.state !== "stopped") keeper.reopen()
+  })
+  window.addEventListener("online", () => keeper.state === "open" && hub.connection === "down" && keeper.reopen())
+}
+
+export function startEvents(scope: StreamScope = { lite: false }): void {
+  if (keeper.state !== "stopped") return
+  watchLifecycle()
+  keeper.start(scope)
+  if (document.visibilityState === "hidden") keeper.hidden()
+}
+
+function closeSource(): void {
   clearTimeout(retry)
+  source?.close()
+  source = undefined
+  if (keeper.state === "paused") setHub("connection", "paused")
+}
+
+function openSource(url: string): void {
+  clearTimeout(retry)
+  source?.close()
+  const wasLive = hub.connection === "live" || hub.connection === "paused" || hub.connection === "down"
+  resuming = wasLive
+  if (wasLive) showNote("reconnecting")
   setHub("connection", "connecting")
-  const es = new EventSource("/api/events", { withCredentials: true })
+  const es = new EventSource(url, { withCredentials: true })
   source = es
   es.onopen = () => {
     backoff = 1000
     setHub("connection", "live")
+    if (resuming) showNote("updated", 2000)
+    resuming = false
     void loadViewPrefs()
     void loadReads()
     void loadEnrollments()
   }
   es.onerror = async () => {
+    if (source !== es) return
     setHub("connection", "down")
     // EventSource hides the status code: check whether the device was revoked.
     const res = await fetch("/api/me", { credentials: "same-origin" }).catch(() => undefined)
@@ -106,13 +165,16 @@ export function startEvents(): void {
       toPair()
       return
     }
+    // The browser retries by itself (with Last-Event-ID) unless it gave up.
     if (es.readyState === EventSource.CLOSED && source === es) {
       source = undefined
-      retry = setTimeout(startEvents, backoff)
+      retry = setTimeout(() => keeper.state === "open" && keeper.reopen(), backoff)
       backoff = Math.min(30_000, backoff * 2)
     }
   }
+  es.addEventListener("ping", () => keeper.received())
   es.onmessage = (event) => {
+    keeper.received(event.lastEventId || undefined)
     let message: Record<string, any>
     try {
       message = JSON.parse(event.data)
@@ -123,7 +185,14 @@ export function startEvents(): void {
   }
 }
 
+function showNote(note: "reconnecting" | "updated", ms?: number): void {
+  clearTimeout(noteTimer)
+  setSyncNote(note)
+  if (ms) noteTimer = setTimeout(() => setSyncNote(""), ms)
+}
+
 export function stopEvents(): void {
+  keeper.stop()
   source?.close()
   source = undefined
   clearTimeout(retry)
@@ -149,6 +218,12 @@ export function dispatch(message: Record<string, any>): void {
     }
     if (live.apply(message) !== undefined) setLiveRev((n) => n + 1)
     if (message.type === "enrollment") void loadEnrollments()
+    // The hub could not replay what this page missed: refresh what is not in the catalog.
+    if (message.type === "resync") {
+      void loadReads()
+      void reloadPrefs()
+      void loadEnrollments()
+    }
     if (message.type === "handoff" && !(route().name === "session" && (route() as { id: string }).id === message.sessionID)) {
       const s = lookup(message.sessionID)
       toast(`Handed off: ${s?.session.title || message.sessionID}`, "", { label: "Open", run: () => navigate(`/s/${enc(message.sessionID)}`) })

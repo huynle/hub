@@ -1036,6 +1036,15 @@ async function notifications(browser: Browser): Promise<void> {
     assert(quiet?.start === "22:00" && quiet.end === "07:00" && !!quiet.timeZone, `quiet hours saved with a time zone: ${JSON.stringify(quiet)}`)
   })
 
+  await check("notifications: Activity updates are off by default with a hint; on, the interval saves", async () => {
+    await page.locator("#notifications [data-activity-hint]").waitFor()
+    await page.locator('#notifications input[data-pref="activity"]').check()
+    await page.waitForFunction(async () => (await (await fetch("/mock/log")).json()).pushPrefs.activity === true)
+    await page.locator("#notifications [data-activity-hint]").waitFor({ state: "detached" })
+    await page.locator("#notifications select[data-activity-minutes]").selectOption("10")
+    await page.waitForFunction(async () => (await (await fetch("/mock/log")).json()).activityMinutes === 10)
+  })
+
   await check("notifications: the hub lost the subscription (new origin) → re-subscribed on load", async () => {
     await mock("/mock/push", { endpoints: [] })
     await page.reload()

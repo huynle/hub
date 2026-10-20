@@ -9,6 +9,7 @@ import { enrollments, me, rows } from "./hub"
 import { HubMark } from "./HubMark"
 import { route, sessionHref } from "./router"
 import { Icon, IconButton, Menu, StatusIcon, VoiceDot } from "./ui"
+import { jobsBadge } from "../core/jobs-core"
 import { voiceState } from "./voice"
 
 const GROUP_KEY = "hub.sidebar.groupBy"
@@ -142,6 +143,11 @@ function SideRow(props: { row: SessionRow; active: boolean; onPick: () => void }
           <VoiceDot />
         </Show>
         <span class="side-title">{r().title}</span>
+        <Show when={r().jobs}>
+          <span class="jobs-badge" title={jobsBadge(r().jobs)} aria-label={jobsBadge(r().jobs)}>
+            {r().jobs}
+          </span>
+        </Show>
         <Show when={r().unread}>
           <span class="unread-dot" role="img" aria-label="Unread" />
         </Show>

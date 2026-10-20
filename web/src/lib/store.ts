@@ -4,7 +4,8 @@
 import { ActivityFeed, type ActivityItem, type StatusEntry } from "../core/feedback-core"
 import { normalizePrefs, type ViewMachine, type ViewPrefs, type ViewProcess, type ViewSession } from "../core/view-core"
 
-export type Connection = "connecting" | "live" | "down"
+/** paused: closed on purpose while the page is hidden (resumes when shown). */
+export type Connection = "connecting" | "live" | "down" | "paused"
 
 export interface HubState {
   machines: ViewMachine[] | undefined

@@ -6,6 +6,9 @@ import { readConfig, setSession, withServer, writeConfig, type Mode, type VoiceC
 import { isLoopbackURL } from "../loopback"
 import {
   compactActivity,
+  FORWARDED_EVENTS,
+  SEED_JOBS_MAX,
+  type JobInfo,
   type HerdrWorkspace,
   type FormAnswer,
   type PermissionDecision,
@@ -100,6 +103,12 @@ export interface SpokeHost {
   hasAgent(id: string): Promise<boolean>
   /** The agent a session without an explicit selection runs with. */
   defaultAgent(): Promise<string | undefined>
+  /**
+   * What runs right now, from this process's own OpenCode server: sessions with a run in progress
+   * (session.active) and running shells in the given directories (shell.list). Used to show sessions that
+   * were already running when this process started, or while its event stream was down.
+   */
+  activity?(directories: readonly string[]): Promise<{ readonly active: readonly string[]; readonly jobs: ReadonlyArray<JobInfo & { readonly sessionID: string }> }>
   /**
    * Recent root sessions from the local service with their workspace (service processes only): those in
    * the history window (`days`, at most `max`), plus `include` (always listed: open, running, ...).
@@ -256,6 +265,8 @@ export class Spoke {
   private intervals: Array<ReturnType<typeof setInterval>> = []
   private enrollment?: { state: EnrollmentState; abort: AbortController }
   private started = false
+  /** A seedActivity call is in flight. */
+  private seeding = false
   /** Sessions shown by OpenCode TUIs (voice.presence). */
   private readonly presenceBook = new PresenceBook()
   /** Form replies waiting for a TUI to carry them out (when the plugin cannot reach its own server). */
@@ -702,6 +713,7 @@ export class Spoke {
       onWelcome: () => {
         this.sendSnapshot()
         this.sendTerminals(true)
+        void this.seedActivity()
       },
       onState: (state, error) => {
         if (state === "revoked") console.error("[hub] this machine was revoked by the hub")
@@ -1203,6 +1215,8 @@ export class Spoke {
       // Model changes may have been missed while the stream was down: ask OpenCode again.
       this.sessionModels.clear()
       try {
+        // Events may have been missed while the stream was down (or before it opened): ask what runs now.
+        if (this.connection?.state === "connected") void this.seedActivity()
         for await (const event of this.host.events(this.abort.signal)) this.observe(event)
       } catch (cause) {
         if (this.abort.signal.aborted) return
@@ -1230,10 +1244,11 @@ export class Spoke {
         this.scheduleSeed()
       }
       void this.fetchInfo()
-      if (this.connection?.state === "connected" && shouldForward(this.config, this.tracker, event)) {
-        // Activity events go out compact: tool inputs become a short summary, outputs are dropped.
-        const compact = compactActivity({ type: event.type, data: (event.data ?? {}) as Record<string, unknown> })
-        if (compact) this.connection.send({ t: "event", event: compact })
+      if (this.connection?.state === "connected" && FORWARDED_EVENTS.has(event.type)) {
+        // Activity events go out compact: tool inputs become a short summary, outputs are dropped; job exits
+        // get their session from the job.
+        const compact = compactActivity({ type: event.type, data: (event.data ?? {}) as Record<string, unknown> }, (id) => this.tracker.jobSession(id))
+        if (compact && shouldForward(this.config, this.tracker, compact)) this.connection.send({ t: "event", event: compact })
       }
     } catch (cause) {
       console.error("[hub] event handling failed", cause)
@@ -1271,6 +1286,40 @@ export class Spoke {
       } catch {
         // retried after INFO_RETRY_MS
       }
+    }
+  }
+
+  /**
+   * Sends each running (or formerly running) session's current status and running jobs as a session.seed event,
+   * from the host's snapshot. Sessions the tracker thought working that are not active any more are seeded idle.
+   */
+  private async seedActivity(): Promise<void> {
+    const activity = this.host.activity
+    if (!activity || this.seeding) return
+    this.seeding = true
+    try {
+      const snapshot = await activity.call(this.host, this.tracker.directories(SEED_DIRECTORIES))
+      const active = new Set(snapshot.active)
+      const ids = new Set([...snapshot.active, ...snapshot.jobs.map((j) => j.sessionID), ...this.tracker.working()])
+      const now = Date.now()
+      for (const id of ids) {
+        if (active.has(id)) this.tracker.ensure(id, now)
+        if (!this.tracker.has(id)) continue
+        const jobs = snapshot.jobs
+          .filter((j) => j.sessionID === id && j.status === "running")
+          .slice(0, SEED_JOBS_MAX)
+          .map(({ sessionID: _, ...job }) => job)
+        const status = active.has(id) ? "busy" : "idle"
+        this.tracker.seed(id, { status, jobs })
+        const event = { type: "session.seed", data: { sessionID: id, status: { type: status }, jobs } }
+        if (this.connection?.state === "connected" && shouldForward(this.config, this.tracker, event)) this.connection.send({ t: "event", event })
+      }
+      void this.fetchInfo()
+      this.scheduleSnapshot()
+    } catch (cause) {
+      console.error("[hub] could not read running sessions", errorText(cause))
+    } finally {
+      this.seeding = false
     }
   }
 
@@ -1312,6 +1361,9 @@ export class Spoke {
     this.intervals.push(interval)
   }
 }
+
+/** Directories whose shells are listed when seeding. */
+const SEED_DIRECTORIES = 20
 
 /** Keeps the terminals frame within the protocol's limits. */
 function limitWorkspaces(workspaces: readonly HerdrWorkspace[]): HerdrWorkspace[] {

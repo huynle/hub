@@ -500,3 +500,19 @@ button.link { background: none; border: 0; padding: 0; color: var(--accent, #fab
 .crumb:hover { color: var(--text); }
 .crumb-chev { width: 12px; height: 12px; transform: rotate(180deg); }
 .crumb-sep { margin: 0 4px; }
+
+/* Live stream state after a pause or drop: "Reconnecting…", then "Updated" for a moment. */
+.sync-note { position: absolute; top: 6px; left: 50%; transform: translateX(-50%); z-index: 30; pointer-events: none; font-size: 12px; padding: 2px 10px; border-radius: 999px; background: var(--side); color: var(--muted, var(--faint)); border: 1px solid var(--line); }
+.sync-note.updated { color: var(--accent); }
+
+/* Background jobs: a count next to a session's status, and the rail's Jobs card. */
+.jobs-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px; padding: 0 4px; margin-left: 4px; border-radius: 8px; font-size: 10.5px; line-height: 1; background: var(--line); color: var(--text); flex: none; }
+.job-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.job { display: grid; grid-template-columns: auto 1fr; column-gap: 8px; align-items: center; }
+.job .muted { grid-column: 2; }
+.job-command { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.job-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
+.job-dot.on { background: var(--accent); }
+.job-dot.bad { background: var(--warn); }
+.retry-note { color: var(--warn); margin: 0 0 6px; }
+.activity-hint { font-size: 13px; padding: 8px 10px; margin: 6px 0 10px; border: 1px solid var(--accent); border-radius: var(--r); background: color-mix(in srgb, var(--accent) 10%, transparent); }

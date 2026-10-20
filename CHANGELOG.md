@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+- **Smoother live connection**:
+  - **Resume instead of reload**: every SSE message carries an id; a console that reconnects (phone unlocked,
+    app switched back, network blip) sends `Last-Event-ID` (or `?last=`) and the hub replays what it missed from
+    a per-user buffer (last 2000 events or 5 minutes, one fresh catalog for any catalog changes). When the gap
+    is not covered (hub restarted, too long away) it sends the catalog and a `resync` marker, and the open
+    session refetches its conversation, status and details.
+  - **No bandwidth while you are not looking**: a page hidden for 30 s closes its stream (Voice mode keeps it
+    open); showing it again (or coming back from the back/forward cache) reopens it at once with the last id. A
+    stream silent for 45 s (no message, no heartbeat) is reopened. Heartbeats are now `event: ping`.
+  - **Lite streams**: the console asks for `?lite=1&session=<id>`: streamed text and reasoning only for the
+    session on screen (everything for Voice mode). Measured on an idle hub: ~50 bytes/min after the first
+    catalog; a busy session over a minute: 9.3 KB full vs 7.4 KB lite (the rest is catalogs, status and activity).
+  - The top bar shows "Reconnecting…" and then "Updated" for a moment instead of a reload.
+- **Activity updates** (opt-in push, per device; Settings → Notifications shows a hint until it is on): one
+  quiet, self-replacing notification per session with what happened — subagents started/finished, tools of
+  30 s or more, background shells and terminals that ended (with exit code), the session going idle — at most
+  one per session per interval (1–60 minutes, default 5; "3 tools · explore finished · Finished"). Quiet
+  hours and muted sessions apply; nothing while a device shows the session.
+- **Running detection**:
+  - Sessions running a script are working: the spoke forwards OpenCode's `session.status` (busy/retry/idle) and
+    the shells and terminals sessions start (compact: id, session, command ≤ 200 chars, status, exit code). A
+    session works while its run, a busy or retrying status, or a running shell/terminal lasts.
+  - **Retrying** shows with its reason ("Retrying (attempt 2): Rate limited").
+  - **Background jobs**: a count next to the status in the table and sidebar, "· 1 job" in the session header,
+    and a **Jobs** card in the rail (command, running time, exit code for a minute after it ends).
+  - **Seeding**: on connect, after a hub reconnect and after OpenCode's event stream comes back, the spoke asks
+    its own server what runs (`session.active`, `shell.list`) so sessions already running show as working.
+
 - **Voice mode hears you, not the room**:
   - **On-device speech detection**: Silero VAD v5 (MIT) runs in the browser through onnxruntime-web (MIT; wasm,
     single-threaded, in a Web Worker) on 16 kHz, 32 ms chunks: speech starts at probability ≥ 0.6 for 250 ms and

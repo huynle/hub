@@ -278,3 +278,20 @@ describe("sidebarSections", () => {
     expect(shape(sidebarSections(rows, { query: "B open", groupBy: "project", sortBy: "recent" }))).toEqual([["Results", ["open2"]]])
   })
 })
+
+describe("sessionRows: background jobs and retries", () => {
+  test("rows count running jobs of the tree and carry the retry reason while working", () => {
+    const status = [
+      { id: "a", state: "working", retry: { attempt: 1, message: "Overloaded" }, jobs: [{ id: "sh_1", kind: "shell", command: "sleep 60", status: "running" }] },
+      { id: "kid", parentID: "a", state: "idle", jobs: [{ id: "sh_2", kind: "shell", status: "running" }, { id: "sh_3", kind: "shell", status: "exited", exit: 0 }] },
+    ]
+    const rows = sessionRows([machine("m1", [session("a", { status } as any), session("b")])], normalizePrefs({}), {})
+    const a = rows.find((r) => r.id === "a")!
+    expect(a.jobs).toBe(2)
+    expect(a.retry).toBe("Retrying (attempt 1): Overloaded")
+    expect(a.running).toBe(true)
+    const b = rows.find((r) => r.id === "b")!
+    expect(b.jobs).toBe(0)
+    expect(b.retry).toBeUndefined()
+  })
+})

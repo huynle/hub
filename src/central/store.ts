@@ -86,9 +86,11 @@ export interface PushPrefs {
   failed: boolean
   /** Conversation mode replies while no device is watching the session. */
   say: boolean
+  /** Activity updates: a collapsing digest per session (subagents, long tools, jobs ending, idle), at most one per interval. */
+  activity: boolean
 }
 
-export const PUSH_PREF_KEYS = ["handoff", "question", "permission", "finished", "failed", "say"] as const satisfies readonly (keyof PushPrefs)[]
+export const PUSH_PREF_KEYS = ["handoff", "question", "permission", "finished", "failed", "say", "activity"] as const satisfies readonly (keyof PushPrefs)[]
 
 /** Defaults as in 0.5.0: hand-offs and anything blocking on, finished (which covered failures) off. */
 export const DEFAULT_PUSH_PREFS: Readonly<PushPrefs> = Object.freeze({
@@ -98,7 +100,14 @@ export const DEFAULT_PUSH_PREFS: Readonly<PushPrefs> = Object.freeze({
   finished: false,
   failed: false,
   say: true,
+  // Opt-in per device (Settings → Notifications → Activity updates).
+  activity: false,
 })
+
+/** Default and allowed range of a device's activity update interval, in minutes. */
+export const ACTIVITY_INTERVAL_MINUTES = 5
+export const ACTIVITY_INTERVAL_MIN = 1
+export const ACTIVITY_INTERVAL_MAX = 60
 
 /** 0.5.0's prefs: one toggle for questions and permissions, one for every finished run. */
 export interface LegacyPushPrefs {
@@ -159,6 +168,8 @@ export interface DeviceRecord {
   lastSeen: number
   pushPrefs?: Partial<PushPrefs> & LegacyPushPrefs
   quietHours?: QuietHours
+  /** Minutes between two activity updates of one session (ACTIVITY_INTERVAL_MINUTES when absent). */
+  activityMinutes?: number
   ownerID: string
 }
 
@@ -406,6 +417,20 @@ export class Store {
     device.pushPrefs = next
     this.save()
     return { ...next }
+  }
+
+  /** Minutes between two activity updates of one session on this device. */
+  activityMinutes(deviceID: string): number {
+    return this.state.devices.find((d) => d.id === deviceID)?.activityMinutes ?? ACTIVITY_INTERVAL_MINUTES
+  }
+
+  /** Sets a device's activity update interval (clamped to 1–60 whole minutes). */
+  setActivityMinutes(deviceID: string, minutes: number): number {
+    const device = this.state.devices.find((d) => d.id === deviceID)
+    if (!device) return ACTIVITY_INTERVAL_MINUTES
+    device.activityMinutes = Math.min(ACTIVITY_INTERVAL_MAX, Math.max(ACTIVITY_INTERVAL_MIN, Math.round(minutes)))
+    this.save()
+    return device.activityMinutes
   }
 
   quietHours(deviceID: string): QuietHours | undefined {

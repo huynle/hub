@@ -14,11 +14,12 @@ import { emailAllowed, type CentralConfig } from "./config"
 import { authPage, cookieValue, deviceName, OIDC_COOKIE, OidcClient, OidcError } from "./oidc"
 import { Push, type PushSender } from "./push"
 import { pushEndpointProblem, resolveHost as systemResolveHost, type ResolveHost } from "./push-target"
+import { EventLog } from "./events-log"
 import { BusyError, Registry } from "./registry"
 import { audioFormat, SpeechError } from "./speech/provider"
 import { SpeechService } from "./speech/service"
 import { RequestTimeoutError, RequestTooLargeError, SpokeError, SpokeHub, type Notifier, type SpokeSocketData } from "./spoke-ws"
-import { LOCAL_USER, PUSH_PREF_KEYS, quietHoursInput, Store, VIEW_PREF_KEYS, type DeviceRecord, type LegacyPushPrefs, type PushPrefs, type UserRecord, type ViewPrefs } from "./store"
+import { ACTIVITY_INTERVAL_MAX, ACTIVITY_INTERVAL_MIN, LOCAL_USER, PUSH_PREF_KEYS, quietHoursInput, Store, VIEW_PREF_KEYS, type DeviceRecord, type LegacyPushPrefs, type PushPrefs, type UserRecord, type ViewPrefs } from "./store"
 
 export interface Speech {
   transcribe(audio: Uint8Array, format: string): Promise<string>
@@ -75,9 +76,17 @@ type Message = { type: string; [key: string]: unknown }
 interface Listener {
   readonly userID: string
   readonly deviceID: string
-  send(message: Message): void
+  /** Leaves out streamed text and reasoning (except of `session`'s tree). */
+  readonly lite: boolean
+  /** The session the page shows: its tree's text and reasoning stream even when lite. */
+  readonly session?: string
+  /** Sends a message; `id` is its event id (EventSource's lastEventId). */
+  send(message: Message, id?: string): void
   close(): void
 }
+
+/** Messages a lite stream leaves out (unless they are of the listener's session tree). */
+const STREAMED = new Set(["delta", "reasoning"])
 
 /** Who may call a route: anyone, any signed-in user, admins, or the owner of the :session / :machine in the path. */
 export type Access = "public" | "user" | "admin" | "session" | "machine"
@@ -204,6 +213,7 @@ const error = (status: number, message: string, code?: string) =>
 
 export function startCentral(options: CentralOptions): Central {
   const { config } = options
+  const heartbeatMs = options.timing?.heartbeatMs ?? SSE_HEARTBEAT_MS
   const web: WebAssets = options.web ?? diskAssets(options.webDir ?? path.join(import.meta.dir, "..", "..", "web", "dist"))
   const now = options.now ?? Date.now
   const store = Store.open(config.stateDir, now, { mode: config.auth.mode })
@@ -213,6 +223,25 @@ export function startCentral(options: CentralOptions): Central {
   const notifier = options.notifier ?? push
   /** SSE subscribers, one user each. */
   const listeners = new Set<Listener>()
+  /** Recent messages per user, replayed to a stream that reconnects with Last-Event-ID. */
+  const eventLog = new EventLog()
+  /** Whether a listener wants a message (lite streams skip other sessions' streamed text). */
+  const wants = (listener: Listener, message: Message): boolean => {
+    if (!listener.lite || !STREAMED.has(message.type)) return true
+    if (!listener.session) return false
+    const root = registry.status(listener.session)?.[0]?.id ?? listener.session
+    return message.sessionID === listener.session || message.rootID === root || message.sessionID === root
+  }
+  /** Logs a message for one user and sends it to their streams (except `exceptDevice`'s). */
+  const toUser = (userID: string, message: Message, exceptDevice?: string) => {
+    // A catalog is logged as a marker: a replay sends one fresh catalog for any number of them.
+    const id = eventLog.append(userID, message.type === "catalog" ? { type: "catalog" } : message, exceptDevice)
+    for (const listener of [...listeners]) {
+      if (listener.userID !== userID || listener.deviceID === exceptDevice) continue
+      if (message.type === "catalog") listener.send({ type: "catalog", machines: machines(userID) }, id)
+      else if (wants(listener, message)) listener.send(message, id)
+    }
+  }
   /**
    * Sends to SSE subscribers: catalog to everyone (each gets their own machines), `admins` messages to
    * admins only, anything else only to `tenant` (the session's owner). Streams of users who were
@@ -221,14 +250,16 @@ export function startCentral(options: CentralOptions): Central {
   const broadcast = (message: Message, audience: { tenant?: string; admins?: true } = {}) => {
     for (const listener of [...listeners]) {
       const user = store.user(listener.userID)
-      if (!user || user.disabled) {
-        listener.close()
-        continue
-      }
-      if (message.type === "catalog") listener.send({ type: "catalog", machines: machines(user.id) })
+      if (!user || user.disabled) listener.close()
+    }
+    const users = new Set([...eventLog.users(), ...[...listeners].map((l) => l.userID)])
+    for (const userID of users) {
+      const user = store.user(userID)
+      if (!user || user.disabled) continue
+      if (message.type === "catalog") toUser(userID, message)
       else if (audience.admins) {
-        if (user.role === "admin") listener.send(message)
-      } else if (audience.tenant !== undefined && audience.tenant === user.id) listener.send(message)
+        if (user.role === "admin") toUser(userID, message)
+      } else if (audience.tenant !== undefined && audience.tenant === userID) toUser(userID, message)
     }
   }
   const speechSettings = new SpeechService({
@@ -308,6 +339,8 @@ export function startCentral(options: CentralOptions): Central {
   registry.subscribeAlerts((alert) => {
     // Push goes to the session owner's devices only; an alert without an owner goes nowhere.
     if (!alert.owner) return
+    // Activity updates are collected and throttled per device by the push layer.
+    if (alert.kind === "activity") return push.activity(alert)
     const extra = alert.requestID ? { requestID: alert.requestID } : undefined
     notifier.notify(alert.kind, alert.sessionID, alert.title, alert.detail, alert.text, alert.owner, extra).catch((cause) => {
       console.error("[hub] push notification failed:", cause instanceof Error ? cause.message : cause)
@@ -321,6 +354,7 @@ export function startCentral(options: CentralOptions): Central {
       {
         prefs: store.pushPrefs(deviceID),
         quietHours: store.quietHours(deviceID) ?? null,
+        activityMinutes: store.activityMinutes(deviceID),
         muted: store.mutedSessions(userID),
         subscriptions: mine.length,
         ...(endpoint ? { subscribed: mine.some((s) => s.endpoint === endpoint) } : {}),
@@ -514,18 +548,21 @@ export function startCentral(options: CentralOptions): Central {
       }),
     ),
     route("GET", "/api/machines", "user", ({ user }) => Response.json({ machines: machines(user.id) })),
-    route("GET", "/api/events", "user", ({ request, server, user, device }) => {
+    route("GET", "/api/events", "user", ({ request, server, user, device, url }) => {
       server.timeout(request, 0)
-      return events(request.signal, user.id, device.id)
+      const session = url.searchParams.get("session")
+      return events(request.signal, user.id, device.id, {
+        lastID: request.headers.get("last-event-id") ?? url.searchParams.get("last") ?? undefined,
+        lite: url.searchParams.get("lite") === "1",
+        ...(session && session.length <= 300 && registry.owns(user.id, session) ? { session } : {}),
+      })
     }),
     // The phone's session view (hidden/pinned sessions and workspaces), per user, synced to their other devices.
     route("GET", "/api/prefs/view", "user", ({ user }) => Response.json({ prefs: store.viewPrefs(user.id) }, { headers: NO_STORE })),
     route("PUT", "/api/prefs/view", "user", async ({ request, user, device }) => {
       const prefs = store.setViewPrefs(user.id, viewPrefsInput(await request.json()))
       // The user's other devices only: never another user, and not the device that made the change.
-      for (const listener of [...listeners]) {
-        if (listener.userID === user.id && listener.deviceID !== device.id) listener.send({ type: "prefs", prefs })
-      }
+      toUser(user.id, { type: "prefs", prefs }, device.id)
       return Response.json({ prefs }, { headers: NO_STORE })
     }),
     route("GET", "/api/reads", "user", ({ user }) => Response.json({ reads: store.reads(user.id) }, { headers: NO_STORE })),
@@ -585,6 +622,13 @@ export function startCentral(options: CentralOptions): Central {
         const quiet = input.quietHours === null ? null : quietHoursInput(input.quietHours)
         if (quiet === undefined) return error(400, "quietHours must be {start: \"HH:MM\", end: \"HH:MM\", timeZone} or null")
         store.setQuietHours(device.id, quiet)
+      }
+      if ("activityMinutes" in input) {
+        const minutes = input.activityMinutes
+        if (typeof minutes !== "number" || !Number.isInteger(minutes) || minutes < ACTIVITY_INTERVAL_MIN || minutes > ACTIVITY_INTERVAL_MAX) {
+          return error(400, `activityMinutes must be a whole number of minutes from ${ACTIVITY_INTERVAL_MIN} to ${ACTIVITY_INTERVAL_MAX}`)
+        }
+        store.setActivityMinutes(device.id, minutes)
       }
       const prefs = prefsInput(input)
       if (prefs) store.setPushPrefs(device.id, prefs)
@@ -705,9 +749,7 @@ export function startCentral(options: CentralOptions): Central {
     }),
     route("POST", "/api/sessions/:session/read", "session", ({ params, user, device }) => {
       const reads = store.markRead(user.id, params.session!, Date.now())
-      for (const listener of [...listeners]) {
-        if (listener.userID === user.id && listener.deviceID !== device.id) listener.send({ type: "reads", reads })
-      }
+      toUser(user.id, { type: "reads", reads }, device.id)
       return Response.json({ reads }, { headers: NO_STORE })
     }),
 
@@ -1109,7 +1151,12 @@ export function startCentral(options: CentralOptions): Central {
     return Response.json({ text: await speech.transcribe(audio, format) })
   }
 
-  function events(signal: AbortSignal, userID: string, deviceID: string): Response {
+  /**
+   * The live stream. Every message has an id; with `lastID` (Last-Event-ID or ?last=) the hub replays what came
+   * after it when its log still covers the gap (one fresh catalog if catalogs changed meanwhile), else it starts
+   * over: the catalog, then a `resync` marker so the page refetches what it shows. Heartbeats are `ping` events.
+   */
+  function events(signal: AbortSignal, userID: string, deviceID: string, options: { lastID?: string; lite: boolean; session?: string }): Response {
     const encoder = new TextEncoder()
     let cleanup = () => {}
     const stream = new ReadableStream<Uint8Array>({
@@ -1124,7 +1171,9 @@ export function startCentral(options: CentralOptions): Central {
         const listener: Listener = {
           userID,
           deviceID,
-          send: (message) => write(`data: ${JSON.stringify(message)}\n\n`),
+          lite: options.lite,
+          ...(options.session ? { session: options.session } : {}),
+          send: (message, id) => write(`${id ? `id: ${id}\n` : ""}data: ${JSON.stringify(message)}\n\n`),
           close: () => {
             cleanup()
             try {
@@ -1132,9 +1181,23 @@ export function startCentral(options: CentralOptions): Central {
             } catch {}
           },
         }
-        listener.send({ type: "catalog", machines: machines(userID) })
+        eventLog.open(userID)
+        const missed = options.lastID ? eventLog.since(userID, options.lastID) : undefined
+        if (missed) {
+          let catalog = false
+          for (const { id, message, exceptDevice } of missed) {
+            if (exceptDevice === deviceID) continue
+            if (message.type === "catalog") catalog = true
+            else if (wants(listener, message)) listener.send(message, id)
+          }
+          if (catalog) listener.send({ type: "catalog", machines: machines(userID) }, eventLog.latest(userID))
+        } else {
+          listener.send({ type: "catalog", machines: machines(userID) }, eventLog.latest(userID))
+          if (options.lastID) listener.send({ type: "resync" }, eventLog.latest(userID))
+        }
         listeners.add(listener)
-        const heartbeat = setInterval(() => write(": ping\n\n"), SSE_HEARTBEAT_MS)
+        // A named event (not a comment) so the page sees it and can tell a live stream from a dead one.
+        const heartbeat = setInterval(() => write("event: ping\ndata: 0\n\n"), heartbeatMs)
         cleanup = () => {
           clearInterval(heartbeat)
           listeners.delete(listener)

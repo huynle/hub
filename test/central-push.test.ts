@@ -67,7 +67,7 @@ describe("subscriptions and prefs", () => {
 
   test("prefs default to hand-offs, questions, permissions and say; are per device and persist", () => {
     const a = store.addDevice("a").device
-    const defaults = { handoff: true, question: true, permission: true, finished: false, failed: false, say: true }
+    const defaults = { handoff: true, question: true, permission: true, finished: false, failed: false, say: true, activity: false }
     expect(store.pushPrefs(a.id)).toEqual(defaults)
     expect(DEFAULT_PUSH_PREFS).toEqual(defaults)
     store.setPushPrefs(a.id, { finished: true })
@@ -83,8 +83,8 @@ describe("subscriptions and prefs", () => {
     raw.devices.find((d) => d.id === b.id)!.pushPrefs = { handoff: false, blocked: true, finished: false, say: true } as any
     writeFileSync(path.join(dir, "state.json"), JSON.stringify(raw))
     const reopened = Store.open(dir)
-    expect(reopened.pushPrefs(a.id)).toEqual({ handoff: true, question: false, permission: false, finished: true, failed: true, say: false })
-    expect(reopened.pushPrefs(b.id)).toEqual({ handoff: false, question: true, permission: true, finished: false, failed: false, say: true })
+    expect(reopened.pushPrefs(a.id)).toEqual({ handoff: true, question: false, permission: false, finished: true, failed: true, say: false, activity: false })
+    expect(reopened.pushPrefs(b.id)).toEqual({ handoff: false, question: true, permission: true, finished: false, failed: false, say: true, activity: false })
     // Migrated on open and written back without the legacy key.
     expect(JSON.parse(readFileSync(path.join(dir, "state.json"), "utf8")).devices.find((d: any) => d.id === a.id).pushPrefs.blocked).toBeUndefined()
   })

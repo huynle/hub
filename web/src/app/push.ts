@@ -24,6 +24,8 @@ const sameKey = (a: ArrayBuffer | null | undefined, b: Uint8Array) => {
 export interface PushPrefsView {
   prefs: Record<string, boolean>
   quietHours: QuietHours | null
+  /** Minutes between two activity updates of one session (hubs since 0.7). */
+  activityMinutes?: number
   muted: string[]
   subscriptions: number
   subscribed?: boolean

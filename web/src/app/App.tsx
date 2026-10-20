@@ -2,7 +2,7 @@
 import { Match, Show, Switch, createEffect, createSignal, on, onCleanup, onMount } from "solid-js"
 import { Approve, Pair } from "./Entry"
 import { Home } from "./Home"
-import { ensureMe, hub, loadSpeechReady, me, startEvents } from "./hub"
+import { ensureMe, hub, keepStreamOpen, loadSpeechReady, me, setStreamScope, startEvents, syncNote } from "./hub"
 import { drawerOpen, isPhone, setDrawerOpen, shownWidths, sidebarCollapsed, toggleSidebar } from "./layout"
 import { PanelHandle } from "./PanelHandle"
 import { NewSession } from "./NewSession"
@@ -16,14 +16,22 @@ import { Sidebar } from "./Sidebar"
 import { currentToast, dismissToast } from "./toast"
 import { IconButton } from "./ui"
 
+/** Streamed text only for the session on screen, unless Voice mode runs (it follows its session anywhere). */
+const streamScope = () => {
+  const r = route()
+  return { lite: voiceState().phase === "off", ...(r.name === "session" ? { session: (r as { id: string }).id } : {}) }
+}
+
 export function App() {
+  keepStreamOpen(() => voiceState().phase !== "off")
+  createEffect(() => setStreamScope(streamScope()))
   const [error, setError] = createSignal("")
   const [ready, setReady] = createSignal(false)
   const boot = async () => {
     setError("")
     try {
       if (!(await ensureMe())) return
-      startEvents()
+      startEvents(streamScope())
       void loadSpeechReady()
       void syncPush()
       setReady(true)
@@ -112,6 +120,11 @@ export function App() {
               <Show when={hub.connection === "down"}>
                 <div class="conn-banner" role="status">
                   Reconnecting to the hub…
+                </div>
+              </Show>
+              <Show when={hub.connection !== "down" && syncNote()}>
+                <div class={`sync-note ${syncNote()}`} role="status" aria-live="polite">
+                  {syncNote() === "reconnecting" ? "Reconnecting…" : "Updated"}
                 </div>
               </Show>
               <Switch>
