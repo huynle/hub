@@ -18,6 +18,11 @@ export const KEEP_SILENCE_MS = 80
 const SILENCE_DB = -50
 /** Never gain a cue up by more than this (a near-silent clip is noise, not speech). */
 const MAX_GAIN_DB = 20
+/** Peaks above the ceiling are limited by at most this much (beyond it the gain is capped instead). */
+const MAX_LIMIT_DB = 9
+/** Limiter look-ahead (the gain is down before a peak arrives) and release. */
+const LOOKAHEAD_MS = 2
+const RELEASE_MS = 60
 
 const BLOCK_S = 0.4
 const STEP_S = 0.1
@@ -120,6 +125,33 @@ export function trimSilence(samples: Float32Array, rate: number): Float32Array {
   return start === 0 && end === samples.length ? samples : samples.slice(start, end)
 }
 
+/**
+ * A look-ahead peak limiter: returns `samples × gain` with every sample at or below `ceiling` (linear), the
+ * gain reduction ramping smoothly around the peaks (no clipping distortion on plosives).
+ */
+function limit(samples: Float32Array, rate: number, gain: number, ceiling: number): Float32Array {
+  const n = samples.length
+  const need = new Float32Array(n)
+  let over = false
+  for (let i = 0; i < n; i++) {
+    const y = Math.abs(samples[i]! * gain)
+    need[i] = y > ceiling ? ceiling / y : 1
+    if (y > ceiling) over = true
+  }
+  const out = new Float32Array(n)
+  if (over) {
+    // Backward pass: the gain falls during the look-ahead before a peak; forward pass: it recovers after.
+    const attack = Math.exp(-1 / Math.max(1, (LOOKAHEAD_MS / 1000) * rate))
+    const release = Math.exp(-1 / Math.max(1, (RELEASE_MS / 1000) * rate))
+    let env = 1
+    for (let i = n - 1; i >= 0; i--) need[i] = env = Math.min(need[i]!, 1 - (1 - env) * attack)
+    env = 1
+    for (let i = 0; i < n; i++) need[i] = env = Math.min(need[i]!, 1 - (1 - env) * release)
+  }
+  for (let i = 0; i < n; i++) out[i] = samples[i]! * gain * need[i]!
+  return out
+}
+
 export interface NormalizedCue {
   samples: Float32Array
   /** Gain applied, in dB. */
@@ -128,15 +160,24 @@ export interface NormalizedCue {
   loudness: number
 }
 
-/** Trims a cue's silence and gains it to `target` LUFS, keeping the peak at or below `CEILING_DB`. */
+/**
+ * Trims a cue's silence and gains it to `target` LUFS. Peaks that would pass `CEILING_DB` are limited (by up
+ * to `MAX_LIMIT_DB`; beyond that the gain is capped), and the gain is corrected for what limiting took off.
+ */
 export function normalizeCue(input: Float32Array, rate: number, target: number): NormalizedCue {
   const trimmed = trimSilence(input, rate)
   const measured = loudness(trimmed, rate)
   if (!Number.isFinite(measured)) return { samples: trimmed, gainDb: 0, loudness: measured }
-  const gainDb = Math.min(target - measured, CEILING_DB - peakDb(trimmed), MAX_GAIN_DB)
-  const gain = 10 ** (gainDb / 20)
-  const samples = new Float32Array(trimmed.length)
-  for (let i = 0; i < trimmed.length; i++) samples[i] = trimmed[i]! * gain
+  const ceiling = 10 ** (CEILING_DB / 20)
+  const maxGainDb = Math.min(MAX_GAIN_DB, CEILING_DB - peakDb(trimmed) + MAX_LIMIT_DB)
+  let gainDb = Math.min(target - measured, maxGainDb)
+  let samples = limit(trimmed, rate, 10 ** (gainDb / 20), ceiling)
+  for (let pass = 0; pass < 3; pass++) {
+    const short = target - loudness(samples, rate)
+    if (short < 0.1 || gainDb >= maxGainDb) break
+    gainDb = Math.min(gainDb + short, maxGainDb)
+    samples = limit(trimmed, rate, 10 ** (gainDb / 20), ceiling)
+  }
   return { samples, gainDb, loudness: measured }
 }
 

@@ -105,6 +105,17 @@ describe("normalizeCue", () => {
     expect(peakDb(samples)).toBeLessThanOrEqual(CEILING_DB + 1e-6)
   })
 
+  test("a peaky clip still reaches the target: its peaks are limited to −1 dBFS instead of capping the gain", () => {
+    // Real cue: "Let me see." measured −23.1 LUFS with a −0.4 dBFS peak (a plosive).
+    const clip = sine(0.05, 2)
+    for (let i = 0; i < 4; i++) for (let j = 0; j < 24; j++) clip[Math.round(RATE * (0.3 + i * 0.4)) + j] = 0.95 * (j % 2 ? -1 : 1)
+    expect(loudness(clip, RATE)).toBeLessThan(-21) // needs > 2 dB more…
+    expect(peakDb(clip)).toBeGreaterThan(-1) // …but has no headroom
+    const { samples } = normalizeCue(clip, RATE, -19)
+    expect(peakDb(samples)).toBeLessThanOrEqual(CEILING_DB + 1e-6)
+    expect(loudness(samples, RATE)).toBeCloseTo(-19, 0)
+  })
+
   test("trims long silence and leaves silence ungained", () => {
     const { samples, gainDb } = normalizeCue(concat(new Float32Array(RATE), sine(0.1, 1), new Float32Array(RATE)), RATE, -20)
     expect(samples.length).toBeLessThan(RATE * 1.2)
