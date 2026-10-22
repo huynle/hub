@@ -48,6 +48,7 @@ export const voicePrefs = {
 /** The one audio element for replies and previews. */
 export const player = new Audio()
 player.preload = "none"
+player.volume = 1 // progress cues play at the same volume (web/src/core/cues.ts)
 applyRate(player, voicePrefs.speed)
 
 /** Browsers (iOS especially) only allow playback started from a gesture: prime the player during the tap. */
