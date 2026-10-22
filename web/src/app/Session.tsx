@@ -13,7 +13,7 @@ import { transcriptBlocks, type Block } from "../lib/transcript"
 import { createStore } from "solid-js/store"
 import { unlockAudio } from "../voice/audio"
 import { sessionMenu, setRenaming } from "./actions"
-import { RenameTitle } from "./Rename"
+import { Naming, RenameTitle } from "./Rename"
 import { api, errorText, getJSON, HttpError, NetworkError, sessionPath } from "./api"
 import { prepareImage } from "./attach"
 import { takeFirstTurn } from "./first-turn"
@@ -549,6 +549,7 @@ export function SessionView(props: { id: string }) {
                       </button>
                     </h1>
                   </RenameTitle>
+                  <Naming id={r().id} />
                   <Menu label="Session actions" class="icon-btn small" items={() => sessionMenu(r(), { open: false, place: "topbar" })} />
                 </>
               )}

@@ -2,7 +2,7 @@
 // Headless smoke test of the built console against the mock hub (test/web-mock-hub.ts), at desktop (1440×900) and
 // phone (390×844) sizes: home loads, a session opens with its timeline, Send → Steer/Stop → Send, image attachments
 // (attach, remove, attach again, send), Dictate → Send (input cleared, also when the turn's connection drops), a slow turn (202, reply later), the right rail and diff viewer render, a Voice-off session is inspectable, rename (table,
-// sidebar, top bar), archive (menu, Undo, Archived chip, Needs-you exception, bulk, inactive), resizable sidebar/rail, and
+// sidebar, top bar), Auto-name (menu, ✨, Naming…, errors), archive (menu, Undo, Archived chip, Needs-you exception, bulk, inactive), resizable sidebar/rail, and
 // Voice mode speaking a streamed reply before its text ends (each sentence playing while its MP3 still downloads), with the turn timed (a browser with a silent fake mic), Voice mode with the screen off (the phone muting/ending the mic or suspending audio: paused in the Voice bar and the notification, listening again on unlock),
 // progressive history (newest page first, older pages while scrolling up, anchored, Retry), timeline order (subagents
 // where they were spawned, live rows in arrival order and after a reload), rich Markdown (tables, task lists, highlighted code, copy) and the text size (Settings, pinch, ctrl+wheel, kept after reload, phone at 1.8),
@@ -165,6 +165,56 @@ async function desktop(browser: Browser): Promise<void> {
     assert(JSON.stringify(await sent()) === JSON.stringify(["Top bar title", "Top bar title, again", current]), `renames sent: ${JSON.stringify(await sent())}`)
     assert(stored === current, `hub title restored: ${stored}`)
     await page.locator(".topbar .title").getByText(current, { exact: true }).waitFor()
+  })
+
+  await check("desktop: Auto-name from the ⋯ menu and the rename field's ✨ button (Naming…, toasts, errors)", async () => {
+    let stage = "menu"
+    try {
+    await page.goto(`${BASE}/`)
+    const row = (title: string) => page.locator(".sessions-table tbody tr", { has: page.getByRole("link", { name: title, exact: true }) })
+    const toast = (text: string | RegExp) => page.locator(".toast").filter({ hasText: text })
+    await row("Resize images faster").getByRole("button", { name: "More actions for Resize images faster" }).click()
+    await page.getByRole("menuitem", { name: "Auto-name" }).click()
+    await row("Resize images faster").getByRole("status").filter({ hasText: "Naming…" }).waitFor()
+    await row("Named by OpenCode").waitFor()
+    await toast("Renamed to “Named by OpenCode”").waitFor()
+    assert(!(await page.locator(".sessions-table").getByText("Naming…").count()), "Naming… gone after the answer")
+    assert((await renames()).at(-1)?.body?.auto === true, `auto-name sent: ${JSON.stringify((await renames()).at(-1))}`)
+    stage = "same"
+    // OpenCode keeping the title.
+    await mock("/mock/auto-name", { mode: "same" })
+    await row("Search ranking").getByRole("button", { name: "More actions for Search ranking" }).click()
+    await page.getByRole("menuitem", { name: "Auto-name" }).click()
+    await toast("OpenCode kept the title").waitFor()
+    stage = "outdated"
+    // An older spoke: a clear error, the title stays.
+    await mock("/mock/auto-name", { mode: "outdated" })
+    await row("Search ranking").getByRole("button", { name: "More actions for Search ranking" }).click()
+    await page.getByRole("menuitem", { name: "Auto-name" }).click()
+    await toast("Could not auto-name: Update the Hub plugin to use Auto-name").waitFor()
+    await row("Search ranking").waitFor()
+    stage = "field"
+    // From the inline rename field: ✨ (OpenCode still generating: Naming… until the catalog's title changes).
+    await mock("/mock/auto-name", { mode: "pending", title: "Faster image resizing" })
+    await row("Named by OpenCode").getByRole("button", { name: "More actions for Named by OpenCode" }).click()
+    await page.getByRole("menuitem", { name: "Rename…" }).click()
+    const field = page.locator(".sessions-table").getByRole("textbox", { name: "Session title" })
+    await field.waitFor()
+    const sentBefore = (await renames()).length
+    await page.locator(".sessions-table").getByRole("button", { name: "Auto-name" }).click()
+    assert(!(await field.count()), "field closes on Auto-name")
+    await row("Named by OpenCode").getByRole("status").filter({ hasText: "Naming…" }).waitFor()
+    await toast(/still naming/).waitFor()
+    await row("Faster image resizing").waitFor()
+    await toast("Renamed to “Faster image resizing”").waitFor()
+    await page.locator(".sessions-table").getByText("Naming…").waitFor({ state: "detached" })
+    const sent = (await renames()).slice(sentBefore)
+    assert(sent.length === 1 && sent[0]?.body?.auto === true, `only the auto-name was sent (the blur did not save): ${JSON.stringify(sent.map((e) => e.body))}`)
+    await mock("/mock/auto-name", { mode: "rename", title: "Named by OpenCode" })
+    await shot(page, "desktop-auto-name")
+    } catch (e) {
+      throw new Error(`${stage}: ${(e as Error).message}`)
+    }
   })
 
   const prefPuts = async () => (await apiLog()).filter((e) => e.method === "PUT" && e.path === "/api/prefs/view")

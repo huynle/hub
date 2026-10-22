@@ -1,7 +1,7 @@
 // The ⋯ menu of a session (sidebar rows, table rows, the session title menu), and inline renaming.
 import { createSignal } from "solid-js"
 import type { SessionRow } from "../lib/sessions"
-import { changePref, changePrefs, setVoice, stopTree } from "./hub"
+import { autoNameSession, autoNaming, changePref, changePrefs, setVoice, stopTree } from "./hub"
 import { mutedSessions, setSessionMuted } from "./push"
 import { navigate, sessionHref } from "./router"
 import type { MenuEntry } from "./ui"
@@ -28,6 +28,7 @@ export function sessionMenu(r: SessionRow, { open = true, place }: { open?: bool
   return [
     ...(open ? [{ label: "Open", run: () => navigate(sessionHref(r.id)) }] : []),
     ...(place ? [{ label: "Rename…", run: () => setRenaming({ id: r.id, place }) }] : []),
+    { label: autoNaming(r.id) ? "Naming…" : "Auto-name", run: () => void autoNameSession(r.id), disabled: autoNaming(r.id) },
     { label: r.pinned ? "Unpin" : "Pin", run: () => changePref("pinnedSessions", r.id, !r.pinned) },
     { label: r.archived ? "Unarchive" : "Archive", run: () => archiveSessions([r], !r.archived) },
     ...(r.running ? [{ label: "Stop", run: () => void stopTree(r.id), danger: true }] : []),

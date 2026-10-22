@@ -406,6 +406,61 @@ export async function renameSession(id: string, raw: string): Promise<boolean> {
   }
 }
 
+/** Sessions OpenCode is naming right now (Auto-name), shown as "Naming…" next to their title. */
+const [autoNamingIDs, setAutoNamingIDs] = createSignal<ReadonlySet<string>>(new Set())
+export const autoNaming = (id: string) => autoNamingIDs().has(id)
+const setNaming = (id: string, on: boolean) =>
+  setAutoNamingIDs((current) => {
+    const next = new Set(current)
+    if (on) next.add(id)
+    else next.delete(id)
+    return next
+  })
+/** How long a "pending" Auto-name keeps showing "Naming…" while waiting for the catalog's new title. */
+const AUTO_NAME_PENDING_MS = 60_000
+
+/**
+ * Auto-name (POST …/rename {auto: true}): OpenCode regenerates the title with its title agent. Shows "Naming…"
+ * until the hub answers (or, while OpenCode is still generating, until the catalog's title changes), then a toast.
+ */
+export async function autoNameSession(id: string): Promise<void> {
+  if (autoNaming(id)) return
+  const before = lookup(id)?.session.title
+  setNaming(id, true)
+  let waiting = false
+  try {
+    const res = await api(`${sessionPath(id)}/rename`, { method: "POST", json: { auto: true } })
+    const body = (await res.json().catch(() => undefined)) as { title?: unknown; unchanged?: unknown; pending?: unknown } | undefined
+    if (body?.pending) {
+      waiting = true
+      toast("OpenCode is still naming it; the title changes when it's ready")
+      const until = Date.now() + AUTO_NAME_PENDING_MS
+      const poll = () => {
+        const now = lookup(id)?.session.title
+        if (now !== undefined && now !== before) {
+          setNaming(id, false)
+          toast(`Renamed to “${now}”`)
+        } else if (Date.now() >= until) setNaming(id, false)
+        else setTimeout(poll, 500)
+      }
+      setTimeout(poll, 500)
+      return
+    }
+    const title = typeof body?.title === "string" ? body.title : undefined
+    if (body?.unchanged || !title || title === before) {
+      toast("OpenCode kept the title")
+      return
+    }
+    pendingTitles.set(id, title, Date.now())
+    setHub(produce((s) => void retitle(s.machines, id, title)))
+    toast(`Renamed to “${title}”`)
+  } catch (e) {
+    toast(`Could not auto-name: ${errorText(e)}`, "err")
+  } finally {
+    if (!waiting) setNaming(id, false)
+  }
+}
+
 /** POST …/stop: interrupts the whole tree. */
 export async function stopTree(id: string): Promise<void> {
   try {

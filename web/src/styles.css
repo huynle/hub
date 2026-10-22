@@ -179,6 +179,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
 /* Inline rename field: takes the title's place. */
 input[type="text"].rename-field { flex: 1; min-width: 0; width: 100%; min-height: 26px; padding: 2px 6px; font: inherit; color: var(--text); }
 .topbar input.rename-field.title { max-width: 520px; }
+.rename-wrap { display: inline-flex; align-items: center; gap: 4px; flex: 1; min-width: 0; width: 100%; max-width: 100%; vertical-align: middle; }
+.topbar .rename-wrap { max-width: 560px; }
+.auto-name-btn { flex: none; font-size: 14px; line-height: 1; }
+.naming { display: inline-flex; align-items: center; gap: 4px; flex: none; margin-left: 6px; white-space: nowrap; font-weight: normal; }
 .chip-server { display: inline-flex; align-items: center; gap: 4px; font-size: 0.75rem; color: var(--muted); border: 1px solid var(--line); border-radius: 13px; padding: 2px 10px; max-width: 260px; overflow: hidden; white-space: nowrap; }
 .chip-server .icon { width: 12px; height: 12px; margin-left: 6px; }
 .btn.changes { font-family: var(--mono); }
