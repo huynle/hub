@@ -1013,7 +1013,8 @@ async function notifications(browser: Browser): Promise<void> {
   const page = await context.newPage()
   const errors: string[] = []
   page.on("pageerror", (e) => errors.push(e.message))
-  const hubLog = async () => (await (await fetch(`${BASE}/mock/log`)).json()) as { pushEndpoints: string[]; pushTests: number; mutedSessions: string[]; quietHours: unknown; pushPrefs: Record<string, boolean> }
+  const hubLog = async () =>
+    (await (await fetch(`${BASE}/mock/log`)).json()) as { pushEndpoints: string[]; pushTests: number; pushTestKinds: string[]; mutedSessions: string[]; quietHours: unknown; pushPrefs: Record<string, boolean> }
   const state = page.locator("#notifications .notify-status")
 
   await check("notifications: not subscribed → enable → subscribed; test button calls the route", async () => {
@@ -1031,16 +1032,36 @@ async function notifications(browser: Browser): Promise<void> {
     await shot(page, "notifications-on")
   })
 
+  await check("notifications: kinds grouped with descriptions, a summary of what you get, a test of a chosen kind", async () => {
+    const groups = await page.locator("#notifications [data-notify-group] h4").allTextContents()
+    assert(groups.join("|") === "Needs you|Session|Subagents|Scripts and tools|Voice|Activity digest", `groups: ${groups.join("|")}`)
+    const summary = page.locator("#notifications [data-notify-summary]")
+    assert((await summary.textContent())?.trim() === "You'll get: Question, Needs permission, All done, Failed, Hand-off.", `summary: ${await summary.textContent()}`)
+    assert((await page.locator('#notifications input[data-pref="turn"]').isChecked()) === false, "every-turn notifications are off by default")
+    await page.locator("#notifications .switch").filter({ hasText: "Each subagent that fails" }).waitFor()
+    await page.locator('#notifications input[data-pref="subagentFailed"]').check()
+    await page.waitForFunction(async () => (await (await fetch("/mock/log")).json()).pushPrefs.subagentFailed === true)
+    await summary.getByText("Subagent failed").waitFor()
+    await page.locator("#notifications select[data-test-kind]").selectOption("done")
+    await page.getByRole("button", { name: "Send test notification" }).click()
+    await page.waitForFunction(async () => (await (await fetch("/mock/log")).json()).pushTestKinds.at(-1) === "done")
+    assert((await hubLog()).pushTestKinds.join(",") === ",done", `test kinds: ${(await hubLog()).pushTestKinds.join(",")}`)
+    await shot(page, "notifications-kinds")
+  })
+
   await check("notifications: toggles and quiet hours save; failed is its own toggle", async () => {
     await page.locator('#notifications input[data-pref="failed"]').check()
     await page.waitForFunction(async () => (await (await fetch("/mock/log")).json()).pushPrefs.failed === true)
-    await page.locator("#notifications .switch").filter({ hasText: "Quiet hours" }).locator("input").check()
+    await page.locator("#notifications .switch").filter({ hasText: /^Quiet hours$/ }).locator("input").check()
     await page.locator("#notifications .quiet-hours").waitFor()
     const quiet = (await hubLog()).quietHours as { start: string; end: string; timeZone: string } | null
     assert(quiet?.start === "22:00" && quiet.end === "07:00" && !!quiet.timeZone, `quiet hours saved with a time zone: ${JSON.stringify(quiet)}`)
   })
 
-  await check("notifications: Activity updates are off by default with a hint; on, the interval saves", async () => {
+  await check("notifications: with All done and the digest off a hint offers them; the digest's interval saves", async () => {
+    assert((await page.locator("#notifications [data-activity-hint]").count()) === 0, "no hint while All done is on")
+    await page.locator('#notifications input[data-pref="done"]').uncheck()
+    await page.waitForFunction(async () => (await (await fetch("/mock/log")).json()).pushPrefs.done === false)
     await page.locator("#notifications [data-activity-hint]").waitFor()
     await page.locator('#notifications input[data-pref="activity"]').check()
     await page.waitForFunction(async () => (await (await fetch("/mock/log")).json()).pushPrefs.activity === true)
@@ -1065,6 +1086,16 @@ async function notifications(browser: Browser): Promise<void> {
     await page.getByRole("button", { name: "Session actions" }).click()
     await page.getByRole("menuitem", { name: "Unmute notifications" }).click()
     await page.waitForFunction(async () => (await (await fetch("/mock/log")).json()).mutedSessions.length === 0)
+  })
+
+  await check("notifications: on a phone the kinds fit the screen (no sideways scrolling)", async () => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto(`${BASE}/settings#notifications`)
+    await page.locator('#notifications input[data-pref="jobFailed"]').waitFor()
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+    assert(overflow <= 0, `page scrolls sideways by ${overflow}px`)
+    await page.locator('#notifications [data-notify-group="Scripts and tools"]').scrollIntoViewIfNeeded()
+    await shot(page, "notifications-phone")
   })
 
   await check("notifications: no page errors", async () => assert(!errors.length, errors.join("; ")))

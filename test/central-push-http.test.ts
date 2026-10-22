@@ -44,7 +44,7 @@ describe("push API", () => {
 
   test("subscribe requires cookie and same Origin; validates; dedupes; applies prefs", async () => {
     pushHarness()
-    const json = { subscription: subscription(), prefs: { finished: true } }
+    const json = { subscription: subscription(), prefs: { turn: true, finished: false } }
     expect((await h.api("/api/push/subscribe", { method: "POST", json, cookie: null })).status).toBe(401)
     expect((await h.api("/api/push/subscribe", { method: "POST", json, origin: null })).status).toBe(403)
     expect((await h.api("/api/push/subscribe", { method: "POST", json, origin: "https://evil.example" })).status).toBe(403)
@@ -58,7 +58,8 @@ describe("push API", () => {
     }
     const ok = await h.api("/api/push/subscribe", { method: "POST", json })
     expect(ok.status).toBe(200)
-    expect(await ok.json()).toEqual({ prefs: { handoff: true, question: true, permission: true, finished: true, failed: false, say: true, activity: false } })
+    // The old "finished" key still works: it is all done now.
+    expect(await ok.json()).toEqual({ prefs: { handoff: true, question: true, permission: true, done: false, failed: true, turn: true, stopped: false, retry: false, subagentDone: false, subagentFailed: false, jobDone: false, jobFailed: false, longTool: false, say: true, activity: false } })
     await h.api("/api/push/subscribe", { method: "POST", json: { subscription: subscription() } })
     await h.api("/api/push/subscribe", { method: "POST", json: { subscription: subscription(2) } })
     expect(h.store.pushSubscriptions().map((s) => s.endpoint)).toEqual([subscription().endpoint, subscription(2).endpoint])
@@ -82,16 +83,18 @@ describe("push API", () => {
     pushHarness()
     expect((await h.api("/api/push/prefs", { cookie: null })).status).toBe(401)
     expect(await (await h.api("/api/push/prefs")).json()).toEqual({
-      prefs: { handoff: true, question: true, permission: true, finished: false, failed: false, say: true, activity: false },
+      prefs: { handoff: true, question: true, permission: true, done: true, failed: true, turn: false, stopped: false, retry: false, subagentDone: false, subagentFailed: false, jobDone: false, jobFailed: false, longTool: false, say: true, activity: false },
       quietHours: null,
       activityMinutes: 5,
       muted: [],
       subscriptions: 0,
     })
-    expect((await h.api("/api/push/prefs", { method: "PUT", json: { finished: true }, origin: null })).status).toBe(403)
-    const put = await h.api("/api/push/prefs", { method: "PUT", json: { finished: true, question: "nope", extra: 1 } })
-    expect(await put.json()).toMatchObject({ prefs: { handoff: true, question: true, permission: true, finished: true, failed: false, say: true, activity: false } })
-    expect((await (await h.api("/api/push/prefs")).json()) as any).toMatchObject({ prefs: { finished: true } })
+    expect((await h.api("/api/push/prefs", { method: "PUT", json: { turn: true }, origin: null })).status).toBe(403)
+    const put = await h.api("/api/push/prefs", { method: "PUT", json: { subagentDone: true, jobFailed: true, question: "nope", extra: 1 } })
+    expect(await put.json()).toMatchObject({ prefs: { handoff: true, question: true, permission: true, done: true, failed: true, turn: false, stopped: false, retry: false, subagentDone: true, subagentFailed: false, jobDone: false, jobFailed: true, longTool: false, say: true, activity: false } })
+    expect((await (await h.api("/api/push/prefs")).json()) as any).toMatchObject({ prefs: { subagentDone: true, jobFailed: true } })
+    // Clients up to 0.7 send `finished`: it sets all done (no longer every turn).
+    expect(await (await h.api("/api/push/prefs", { method: "PUT", json: { finished: false } })).json()).toMatchObject({ prefs: { done: false, turn: false } })
     // 0.5.0 clients send `blocked`: it sets both questions and permissions.
     expect(await (await h.api("/api/push/prefs", { method: "PUT", json: { blocked: false } })).json()).toMatchObject({ prefs: { question: false, permission: false } })
   })
@@ -202,6 +205,15 @@ describe("push API", () => {
     expect(sent.map((s) => s.endpoint)).toEqual([subscription().endpoint, subscription(3).endpoint])
   })
 
+  test("a test of a chosen kind looks like it; an unknown kind is refused", async () => {
+    const sent = pushHarness()
+    await h.api("/api/push/subscribe", { method: "POST", json: { subscription: subscription() } })
+    expect((await h.api("/api/push/test", { method: "POST", json: { kind: "nope" } })).status).toBe(400)
+    const res = await h.api("/api/push/test", { method: "POST", json: { kind: "subagentDone" } })
+    expect(await res.json()).toEqual({ sent: 1, failed: [], subscriptions: 1 })
+    expect(sent[0]!.payload).toMatchObject({ kind: "subagentDone", title: "Test session · Subagent explore finished", test: true })
+  })
+
   test("a failed test push reports the push service status", async () => {
     pushHarness({ [subscription(4).endpoint]: 403 })
     await h.api("/api/push/subscribe", { method: "POST", json: { subscription: subscription(4) } })
@@ -226,7 +238,7 @@ describe("notifications", () => {
     expect(sent[0]!.payload).toEqual({
       kind: "handoff",
       sessionID: "ses_1",
-      title: "api-server",
+      title: "api-server · Hand-off",
       body: expect.any(String),
     })
     const deviceToken = h.cookie.split("=")[1]!
@@ -244,25 +256,27 @@ describe("notifications", () => {
       event: { type: "permission.asked", data: { sessionID: "ses_1", id: "per_1", action: "bash", resources: ["secret cmd"] } },
     })
     await waitFor(() => sent.length === 1)
-    expect(sent[0]!.payload).toMatchObject({ kind: "permission", sessionID: "ses_1", title: "api-server needs permission", requestID: "per_1" })
+    expect(sent[0]!.payload).toMatchObject({ kind: "permission", sessionID: "ses_1", title: "api-server · Needs permission", requestID: "per_1" })
     expect(sent[0]!.raw).not.toContain("secret cmd")
   })
 
-  test("'finished' only when enabled and not for a turn started from the voice page", async () => {
+  test("'turn' only when enabled and not for a turn started from the voice page", async () => {
     const sent = pushHarness()
-    await h.api("/api/push/subscribe", { method: "POST", json: { subscription: subscription(), prefs: { finished: true } } })
+    await h.api("/api/push/subscribe", { method: "POST", json: { subscription: subscription(), prefs: { turn: true } } })
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true, title: "build" })] })
     client.ws.addEventListener("message", (event) => {
       const frame = JSON.parse(String(event.data))
       if (frame.t !== "req" || frame.req.op !== "turn") return
+      client.send({ t: "event", event: { type: "session.execution.started", data: { sessionID: "ses_1" } } })
       client.send({ t: "event", event: { type: "session.execution.succeeded", data: { sessionID: "ses_1" } } })
       client.send({ t: "res", id: frame.id, ok: true, result: { outcome: "succeeded", reply: "done" } })
     })
     expect((await h.api("/api/sessions/ses_1/turn", { method: "POST", json: { text: "go" } })).status).toBe(200)
     await Bun.sleep(50)
     expect(sent).toEqual([])
+    client.send({ t: "event", event: { type: "session.execution.started", data: { sessionID: "ses_1" } } })
     client.send({ t: "event", event: { type: "session.execution.succeeded", data: { sessionID: "ses_1" } } })
     await waitFor(() => sent.length === 1)
-    expect(sent[0]!.payload).toMatchObject({ kind: "finished", sessionID: "ses_1", title: "build finished" })
+    expect(sent[0]!.payload).toMatchObject({ kind: "turn", sessionID: "ses_1", title: "build · Turn finished" })
   })
 })

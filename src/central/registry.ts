@@ -5,8 +5,9 @@
 import path from "node:path"
 import type { ForwardedEvent, Hello, HerdrWorkspace, ProcessKind, SessionInfo, SpokeMode, TerminalInfo, Terminals } from "../protocol"
 import { StatusBoard, type Blocker, type SessionStatus } from "../status"
+import { DoneWatch } from "./done"
 import { SentenceStream } from "./say-stream"
-import type { ActivityStep } from "./push"
+import type { ActivityStep, NotificationKind } from "./push"
 
 export { ACTIVITY_INTERVAL_MINUTES } from "./store"
 /** A tool call that took at least this long is named in activity updates (shorter ones are only counted). */
@@ -115,21 +116,33 @@ const spokenForm = (text: string) =>
 
 /** Push-worthy transitions of a root session. Kept off the SSE stream. */
 export interface Alert {
-  /** activity: a step of interest for activity updates (`step`); the push layer collects and throttles them. */
-  readonly kind: "blocked" | "finished" | "say" | "activity"
+  /**
+   * The notification kind (docs/notifications.md); activity: a step of interest for activity updates (`step`), the
+   * push layer collects and throttles them.
+   */
+  readonly kind: NotificationKind | "activity"
   /** Root session of the tree the event happened in. */
   readonly sessionID: string
   /** Root session title. */
   readonly title: string
-  readonly detail?: "permission" | "form" | "succeeded" | "failed"
-  /** say: the spoken text. */
+  /** The body: the spoken text (say), a reason (failed, stopped, retry), a command (scripts), the parent session. */
   readonly text?: string
-  /** blocked permission: the request ID. */
+  /** permission: the request ID. */
   readonly requestID?: string
+  /** What it is about, for the title: a subagent's title, a job's outcome ("exited 1"), a duration ("45s"). */
+  readonly subject?: string
+  /** Identity of the thing that ended (subagent session, job, tool call): one notification each, whatever the cooldown. */
+  readonly key?: string
   /** Tenant (user ID) that owns the session; push goes to this user's devices only. */
   readonly owner?: string
   readonly step?: ActivityStep
 }
+
+/** Notifications that reach a session even while some device shows it. */
+const ALWAYS_ALERT: ReadonlySet<NotificationKind> = new Set(["handoff", "question", "permission", "say"])
+
+/** Interruptions worth a "stopped" notification (a user stop or a newer turn superseding it are not). */
+const STOP_REASONS: Readonly<Record<string, string>> = { shutdown: "OpenCode shut down", inactivity: "Stopped after inactivity" }
 
 /** Machine ID → tenant (owning user ID). Every machine belongs to exactly one tenant. */
 export type TenantOf = (machineID: string) => string | undefined
@@ -318,13 +331,16 @@ export class Registry {
   /** Machine → its latest terminals frame and the connection that sent it. */
   private readonly machineTerminals = new Map<string, { connID: string; terminals: MachineTerminals; key: string }>()
   private seq = 0
+  private readonly doneWatch: DoneWatch
 
   constructor(
     private readonly now: () => number = Date.now,
     private readonly timers: Timers = realTimers,
     /** Single tenant unless given (pairing mode, tests). */
     private readonly tenantOf: TenantOf = () => "",
-  ) {}
+  ) {
+    this.doneWatch = new DoneWatch(timers, (rootID) => this.settledTree(rootID), (rootID) => this.alert("done", rootID))
+  }
 
   /**
    * Listens to registry messages. `tenant` is the user that owns the message's session (undefined for
@@ -488,7 +504,7 @@ export class Registry {
         return
       }
       this.permissions.set(data.id, { connIDs: [connID], sessionID })
-      this.alert("blocked", sessionID, "permission", undefined, data.id)
+      this.alert("permission", sessionID, { requestID: data.id })
     }
     if (event.type === "form.created" && sessionID) {
       const formID = (data.form as Record<string, unknown> | undefined)?.id
@@ -500,17 +516,8 @@ export class Registry {
       if (typeof formID === "string" && !this.alertedForms.has(formID)) {
         this.alertedForms.add(formID)
         if (this.alertedForms.size > 1000) this.alertedForms.delete(this.alertedForms.values().next().value!)
-        this.alert("blocked", sessionID, "form")
+        this.alert("question", sessionID)
       }
-    }
-    if (
-      (event.type === "session.execution.succeeded" || event.type === "session.execution.failed") &&
-      sessionID &&
-      this.boards.has(sessionID) &&
-      !this.active.has(sessionID) &&
-      !(this.conversations.has(sessionID) && this.watched(sessionID))
-    ) {
-      this.alert("finished", sessionID, event.type.endsWith("succeeded") ? "succeeded" : "failed")
     }
     if (event.type === "permission.replied" && typeof data.requestID === "string") {
       this.permissions.delete(data.requestID)
@@ -523,6 +530,7 @@ export class Registry {
     const before = sessionID ? this.status(sessionID)?.find((s) => s.id === sessionID) : undefined
     this.observeBoards(event, tenant)
     if (sessionID) this.activitySteps(event.type, sessionID, data, before)
+    if (sessionID) this.notifications(event.type, sessionID, data, before)
     if (sessionID) this.observeActivity(event, sessionID, data)
     if (sessionID) this.observeWorkerSpeech(event.type, sessionID, data)
     if (sessionID) this.observeWorkerBlockers(event.type, sessionID, data)
@@ -642,7 +650,7 @@ export class Registry {
     this.rootSpeech.delete(key)
     for (const sentence of state.stream.end(text)) this.emitSentence(state, messageID, ordinal, sentence)
     // Nobody is listening on a phone: push the whole reply so it reaches a locked screen.
-    if (text.trim() && !this.watched(sessionID)) this.alert("say", sessionID, undefined, text)
+    if (text.trim() && !this.watched(sessionID)) this.alert("say", sessionID, { text })
   }
 
   private emitSentence(state: RootSpeech, messageID: string, ordinal: number, text: string): void {
@@ -669,7 +677,7 @@ export class Registry {
     remember(this.spoken, key, true)
     this.emit({ type: "say", sessionID, messageID, ordinal, text })
     // Nobody is listening on a phone: push the reply so it reaches a locked screen.
-    if (!this.watched(sessionID)) this.alert("say", sessionID, undefined, text)
+    if (!this.watched(sessionID)) this.alert("say", sessionID, { text })
   }
 
   /** Records root speech for `alreadyHeard`, keeping the last few minutes. */
@@ -706,7 +714,7 @@ export class Registry {
   private announce(rootID: string, messageID: string, text: string, push: boolean): void {
     remember(this.lastAnnounced, rootID, this.now(), ACTIVITY_ROOTS)
     this.emit({ type: "say", sessionID: rootID, messageID, ordinal: 0, text })
-    if (push && !this.watched(rootID)) this.alert("say", rootID, undefined, text)
+    if (push && !this.watched(rootID)) this.alert("say", rootID, { text })
   }
 
   /** The conversation root of a worker session, if it is one. */
@@ -1087,8 +1095,11 @@ export class Registry {
         const childSessionID = existing.childSessionID ?? text(data.childSessionID)
         const took = at - existing.at
         const name = existing.summary ?? existing.tool ?? "tool"
-        if (took >= LONG_TOOL_MS) this.step(rootID, "long", `${name} ${failed ? "failed" : "done"} (${Math.round(took / 1000)}s)`)
-        else this.step(rootID, "tool", name)
+        if (took >= LONG_TOOL_MS) {
+          this.step(rootID, "long", `${name} ${failed ? "failed" : "done"} (${Math.round(took / 1000)}s)`)
+          // A subagent's tool call ends with the subagent (its own kinds).
+          if (!childSessionID) this.alert("longTool", rootID, { subject: `${Math.round(took / 1000)}s`, text: `${name} ${failed ? "failed" : "done"}`, key: existing.id })
+        } else this.step(rootID, "tool", name)
         return this.replace(rootID, existing, { ...existing, state: failed ? "failed" : "done", ...(error ? { error } : {}), ...(childSessionID ? { childSessionID } : {}), at })
       }
       case "session.reasoning.started":
@@ -1134,6 +1145,60 @@ export class Registry {
       const how = data.status === "killed" ? "was killed" : data.status === "timeout" ? "timed out" : exit !== undefined ? `exited ${exit}` : "exited"
       return this.step(rootID, "job", `${job.command ?? (job.kind === "pty" ? "terminal" : "shell")} ${how}`)
     }
+  }
+
+  /**
+   * Notifications from run, subagent, job and status events (docs/notifications.md). `before` is the session's status
+   * entry before the event: several processes forward the same events, so subagent and job notifications need an
+   * actual change; root outcomes are deduped by the push cooldown.
+   */
+  private notifications(type: string, sessionID: string, data: Record<string, unknown>, before: LiveStatus | undefined): void {
+    const rootID = this.rootOf(sessionID)
+    if (!rootID) return
+    const root = rootID === sessionID
+    const wasRunning = before?.state === "working" || before?.state === "blocked"
+    if (type === "session.execution.started") return this.doneWatch.started(rootID, root)
+    if (type === "session.text.delta" || type === "session.reasoning.delta") return
+    const ended = type === "session.execution.succeeded" ? "succeeded" : type === "session.execution.failed" ? "failed" : type === "session.execution.interrupted" ? "interrupted" : undefined
+    const reason = (data.error as { message?: unknown } | undefined)?.message
+    const error = typeof reason === "string" && reason.trim() ? reason : undefined
+    if (ended && root) {
+      this.doneWatch.rootEnded(rootID, ended, wasRunning)
+      if (ended === "succeeded" && wasRunning && !this.active.has(rootID)) this.alert("turn", rootID)
+      if (ended === "failed") this.alert("failed", rootID, error ? { text: error } : {})
+      const stopped = ended === "interrupted" ? STOP_REASONS[String(data.reason)] : undefined
+      if (stopped) this.alert("stopped", rootID, { text: stopped })
+      return
+    }
+    this.doneWatch.poke(rootID)
+    if (ended && wasRunning && ended !== "interrupted") {
+      const subject = before!.title?.trim() || "subagent"
+      const parent = (before!.parentID && this.status(rootID)?.find((s) => s.id === before!.parentID)?.title?.trim()) || "the session"
+      if (ended === "succeeded") this.alert("subagentDone", rootID, { subject, text: `In ${parent}`, key: sessionID })
+      else this.alert("subagentFailed", rootID, { subject, text: error ?? `In ${parent}`, key: sessionID })
+      return
+    }
+    if (type === "session.status" && root && !before?.retry) {
+      const retry = this.status(rootID)?.find((s) => s.id === rootID)?.retry
+      if (retry) this.alert("retry", rootID, { text: [retry.attempt !== undefined ? `Attempt ${retry.attempt}` : "", retry.message ?? ""].filter(Boolean).join(": ") || "Retrying" })
+      return
+    }
+    if (type === "shell.exited" || type === "session.shell.ended" || type === "pty.exited") {
+      const job = before?.jobs?.find((j) => j.id === data.id)
+      if (!job || job.status !== "running") return
+      const exit = typeof data.exit === "number" ? data.exit : undefined
+      const how = data.status === "killed" ? "was killed" : data.status === "timeout" ? "timed out" : exit !== undefined ? `exited ${exit}` : "exited"
+      const failed = data.status === "killed" || data.status === "timeout" || (exit !== undefined && exit !== 0)
+      this.alert(failed ? "jobFailed" : "jobDone", rootID, { subject: how, text: job.command ?? (job.kind === "pty" ? "terminal" : "shell"), key: job.id })
+    }
+  }
+
+  /** Fires when a root's tree stayed settled after its run (DoneWatch). */
+  private settledTree(rootID: string): boolean {
+    const board = this.boards.get(rootID)
+    if (!board?.settled()) return false
+    for (const id of this.active.keys()) if ((this.rootOf(id) ?? id) === rootID) return false
+    return true
   }
 
   /** Reports an activity step of a root session (not while a device shows it). */
@@ -1288,6 +1353,7 @@ export class Registry {
       if (this.active.get(sessionID) !== turn) return // already released, or cancelled and taken by a newer turn
       this.active.delete(sessionID)
       this.emit({ type: "catalog" })
+      this.doneWatch.poke(this.rootOf(sessionID) ?? sessionID)
     }
   }
 
@@ -1333,7 +1399,11 @@ export class Registry {
       }
     }
 
-    for (const id of this.boards.keys()) if (!reported.has(id) || rootOf(id) !== id) this.boards.delete(id)
+    for (const id of this.boards.keys()) {
+      if (reported.has(id) && rootOf(id) === id) continue
+      this.boards.delete(id)
+      this.doneWatch.forget(id)
+    }
 
     const children: SessionInfo[] = []
     for (const s of reported.values()) {
@@ -1366,17 +1436,23 @@ export class Registry {
     }
   }
 
-  private alert(kind: Alert["kind"], sessionID: string, detail: Alert["detail"], text?: string, requestID?: string): void {
+  /**
+   * Raises a notification for the root of `sessionID`'s tree. Only hand-offs, questions and permissions reach a
+   * session some device shows (spoken replies check that themselves: the watching device speaks them).
+   */
+  private alert(kind: NotificationKind, sessionID: string, fields: { text?: string; requestID?: string; subject?: string; key?: string } = {}): void {
     const entry = [...this.boards].find(([, board]) => board.get(sessionID))
     if (!entry) return
     const [rootID, board] = entry
+    if (!ALWAYS_ALERT.has(kind) && this.watched(rootID)) return
     const alert: Alert = {
       kind,
       sessionID: rootID,
       title: board.get(rootID)?.title ?? rootID,
-      ...(detail ? { detail } : {}),
-      ...(text !== undefined ? { text } : {}),
-      ...(requestID !== undefined ? { requestID } : {}),
+      ...(fields.subject !== undefined ? { subject: fields.subject } : {}),
+      ...(fields.text !== undefined ? { text: fields.text } : {}),
+      ...(fields.requestID !== undefined ? { requestID: fields.requestID } : {}),
+      ...(fields.key !== undefined ? { key: fields.key } : {}),
     }
     const owner = this.sessionTenant(rootID)
     for (const listener of this.alertListeners) listener(owner ? { ...alert, owner } : alert)

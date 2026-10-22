@@ -72,7 +72,9 @@ export interface MachineRecord {
   ownerID: string
 }
 
-/** Which notifications a device wants. */
+/**
+ * Which notifications a device wants: one toggle per kind (see docs/notifications.md for what triggers each).
+ */
 export interface PushPrefs {
   /** A session sent to the phone from the terminal. */
   handoff: boolean
@@ -80,25 +82,65 @@ export interface PushPrefs {
   question: boolean
   /** A session waits for a permission. */
   permission: boolean
-  /** A root session's run succeeded. */
-  finished: boolean
-  /** A root session's run failed. */
+  /** All done: a root session and its whole tree settled (nothing runs or waits), once per run. */
+  done: boolean
+  /** A root session's run failed (provider or tool error; not a user stop). */
   failed: boolean
+  /** Every root turn finished (0.7's "finished": noisy with background subagents). */
+  turn: boolean
+  /** A root run stopped without the user asking (shutdown, inactivity). */
+  stopped: boolean
+  /** The provider is retrying a root session's request (once per retry streak). */
+  retry: boolean
+  /** A subagent session finished. */
+  subagentDone: boolean
+  /** A subagent session failed. */
+  subagentFailed: boolean
+  /** A shell job or terminal exited 0. */
+  jobDone: boolean
+  /** A shell job or terminal exited non-zero, was killed or timed out. */
+  jobFailed: boolean
+  /** A tool call that ran at least 30 s ended (subagent calls excluded). */
+  longTool: boolean
   /** Conversation mode replies while no device is watching the session. */
   say: boolean
   /** Activity updates: a collapsing digest per session (subagents, long tools, jobs ending, idle), at most one per interval. */
   activity: boolean
 }
 
-export const PUSH_PREF_KEYS = ["handoff", "question", "permission", "finished", "failed", "say", "activity"] as const satisfies readonly (keyof PushPrefs)[]
+export const PUSH_PREF_KEYS = [
+  "handoff",
+  "question",
+  "permission",
+  "done",
+  "failed",
+  "turn",
+  "stopped",
+  "retry",
+  "subagentDone",
+  "subagentFailed",
+  "jobDone",
+  "jobFailed",
+  "longTool",
+  "say",
+  "activity",
+] as const satisfies readonly (keyof PushPrefs)[]
 
-/** Defaults as in 0.5.0: hand-offs and anything blocking on, finished (which covered failures) off. */
+/** Defaults: anything that needs you, all done, failed, hand-offs and spoken replies; the finer kinds are opt-in. */
 export const DEFAULT_PUSH_PREFS: Readonly<PushPrefs> = Object.freeze({
   handoff: true,
   question: true,
   permission: true,
-  finished: false,
-  failed: false,
+  done: true,
+  failed: true,
+  turn: false,
+  stopped: false,
+  retry: false,
+  subagentDone: false,
+  subagentFailed: false,
+  jobDone: false,
+  jobFailed: false,
+  longTool: false,
   say: true,
   // Opt-in per device (Settings → Notifications → Activity updates).
   activity: false,
@@ -109,9 +151,13 @@ export const ACTIVITY_INTERVAL_MINUTES = 5
 export const ACTIVITY_INTERVAL_MIN = 1
 export const ACTIVITY_INTERVAL_MAX = 60
 
-/** 0.5.0's prefs: one toggle for questions and permissions, one for every finished run. */
+/**
+ * Older prefs: 0.5.0's one toggle for questions and permissions (`blocked`), and up to 0.7 `finished` (every root
+ * turn, which fired while background subagents still ran); it now means all done (`done`).
+ */
 export interface LegacyPushPrefs {
   blocked?: boolean
+  finished?: boolean
 }
 
 /** A device's quiet hours: local "HH:MM" times in an IANA time zone; start > end spans midnight. */
@@ -146,7 +192,7 @@ export function quietHoursInput(value: unknown): QuietHours | undefined {
 /** Most sessions a user can mute (oldest are forgotten first). */
 export const MUTED_SESSIONS_LIMIT = 500
 
-/** Current prefs from a stored (possibly 0.5.0) record. */
+/** Current prefs from a stored (possibly 0.5.0 or 0.7) record. */
 function normalizePushPrefs(stored: (Partial<PushPrefs> & LegacyPushPrefs) | undefined): PushPrefs {
   const out: PushPrefs = { ...DEFAULT_PUSH_PREFS }
   if (!stored) return out
@@ -156,9 +202,13 @@ function normalizePushPrefs(stored: (Partial<PushPrefs> & LegacyPushPrefs) | und
     // 0.5.0's "finished" covered failed runs too.
     if (typeof stored.finished === "boolean" && typeof stored.failed !== "boolean") out.failed = stored.finished
   }
+  if (typeof stored.finished === "boolean" && typeof stored.done !== "boolean") out.done = stored.finished
   for (const key of PUSH_PREF_KEYS) if (typeof stored[key] === "boolean") out[key] = stored[key]
   return out
 }
+
+/** True when stored prefs use a legacy key (rewritten on open). */
+const legacyPushPrefs = (stored: object | undefined): boolean => !!stored && ("blocked" in stored || "finished" in stored)
 
 export interface DeviceRecord {
   id: string
@@ -407,12 +457,13 @@ export class Store {
     return normalizePushPrefs(device?.pushPrefs)
   }
 
-  /** Applies the boolean toggles given; a legacy `blocked` sets question and permission. */
+  /** Applies the boolean toggles given; a legacy `blocked` sets question and permission, a legacy `finished` all done. */
   setPushPrefs(deviceID: string, prefs: Partial<PushPrefs> & LegacyPushPrefs): PushPrefs {
     const device = this.state.devices.find((d) => d.id === deviceID)
     if (!device) return { ...DEFAULT_PUSH_PREFS }
     const next = this.pushPrefs(deviceID)
     if (typeof prefs.blocked === "boolean") next.question = next.permission = prefs.blocked
+    if (typeof prefs.finished === "boolean") next.done = prefs.finished
     for (const key of PUSH_PREF_KEYS) if (typeof prefs[key] === "boolean") next[key] = prefs[key]
     device.pushPrefs = next
     this.save()
@@ -671,8 +722,8 @@ function migrate(state: StateData, t: number, options: StoreOptions): void {
   for (const record of [...state.machines, ...state.devices]) {
     if (typeof record.ownerID !== "string" || !record.ownerID) record.ownerID = LOCAL_USER
   }
-  // 0.5.0 push prefs ({handoff, blocked, finished, say}) → the split toggles.
+  // 0.5.0 ({handoff, blocked, finished, say}) and 0.7 (finished = every turn) push prefs → the current toggles.
   for (const device of state.devices) {
-    if (device.pushPrefs && "blocked" in device.pushPrefs) device.pushPrefs = normalizePushPrefs(device.pushPrefs)
+    if (legacyPushPrefs(device.pushPrefs)) device.pushPrefs = normalizePushPrefs(device.pushPrefs)
   }
 }

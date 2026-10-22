@@ -1,22 +1,46 @@
-// Web push (VAPID) for paired devices: hand-offs from the terminal, questions, permissions, finished and
-// failed runs, and (conversation mode, nobody watching) what the agent said. Payloads carry only {kind,
-// sessionID, title, body, requestID?}: no tokens, no transcript beyond one spoken text, shortened. Each device picks the kinds it wants, may set quiet hours, and users mute sessions.
+// Web push (VAPID) for paired devices, one toggle per notification kind (docs/notifications.md): hand-offs, questions,
+// permissions, all done, failed / stopped / retrying runs, every turn, subagents, scripts, long tools, spoken replies
+// and the activity digest. Payloads carry only {kind, sessionID, title, body, requestID?, test?}: no tokens, no
+// transcript beyond one spoken text or a short reason, shortened. Each device picks the kinds it wants, may set quiet
+// hours, and users mute sessions.
 import webpush from "web-push"
 import { type PushPrefs, type PushTarget, type QuietHours, type Store } from "./store"
 
 export { DEFAULT_PUSH_PREFS, type PushPrefs } from "./store"
 
-/** What happened, as the registry and the spoke socket report it. */
-export type PushKind = "handoff" | "blocked" | "finished" | "say" | "activity"
-/** What a blocked or finished notification is about. */
-export type PushDetail = "permission" | "form" | "succeeded" | "failed"
-/** The precise notification kind; one per device toggle. */
+/** The notification kind; one per device toggle. */
 export type NotificationKind = keyof PushPrefs
+
+/** Short label of each kind, shown in the title after the session name (and in Settings). */
+export const NOTIFICATION_LABELS: Readonly<Record<NotificationKind, string>> = Object.freeze({
+  handoff: "Hand-off",
+  question: "Question",
+  permission: "Needs permission",
+  done: "All done",
+  failed: "Failed",
+  turn: "Turn finished",
+  stopped: "Stopped",
+  retry: "Retrying",
+  subagentDone: "Subagent finished",
+  subagentFailed: "Subagent failed",
+  jobDone: "Script finished",
+  jobFailed: "Script failed",
+  longTool: "Long tool finished",
+  say: "Spoken reply",
+  activity: "Activity",
+})
+
+/** True for a known notification kind (API input). */
+export const isNotificationKind = (value: unknown): value is NotificationKind => typeof value === "string" && Object.hasOwn(NOTIFICATION_LABELS, value)
 
 /** Extra facts for one notification. */
 export interface PushExtra {
   /** permission: the request ID, so the notification can answer it. */
   readonly requestID?: string
+  /** What the notification is about, for the title: a subagent's title, a job's outcome ("exited 1"), a duration. */
+  readonly subject?: string
+  /** Identity of what ended (subagent session, job, tool call): the cooldown is per session, kind and key. Not sent. */
+  readonly key?: string
 }
 
 export interface PushPayload {
@@ -25,18 +49,8 @@ export interface PushPayload {
   readonly title: string
   readonly body: string
   readonly requestID?: string
-}
-
-/** The device toggle that decides an alert. */
-export function pushKindFor(kind: PushKind, detail?: PushDetail): NotificationKind {
-  switch (kind) {
-    case "blocked":
-      return detail === "form" ? "question" : "permission"
-    case "finished":
-      return detail === "failed" ? "failed" : "finished"
-    default:
-      return kind
-  }
+  /** A test notification shaped like `kind`. */
+  readonly test?: true
 }
 
 const minutes = (clock: string): number => Number(clock.slice(0, 2)) * 60 + Number(clock.slice(3, 5))
@@ -143,40 +157,54 @@ function clip(text: string, max: number): string {
 
 const shorten = (title: string): string => clip(title, MAX_NAME) || "Session"
 
-export function pushPayload(
-  kind: PushKind,
-  sessionID: string,
-  sessionTitle: string,
-  detail?: PushDetail,
-  text?: string,
-  extra: PushExtra = {},
-): PushPayload {
-  const name = shorten(sessionTitle)
-  const precise = pushKindFor(kind, detail)
-  switch (precise) {
-    case "say":
-      return { kind: precise, sessionID, title: name, body: clip(text ?? "", SAY_MAX_CHARS) || "New reply. Tap to listen." }
-    case "handoff":
-      return { kind: precise, sessionID, title: name, body: "Sent from the terminal. Tap to talk." }
-    case "question":
-      return { kind: precise, sessionID, title: `${name} has a question`, body: "Tap to see it." }
-    case "permission":
-      // Never the request's summary (it may be a command line); the service worker fetches it from the hub.
-      return {
-        kind: precise,
-        sessionID,
-        title: `${name} needs permission`,
-        body: "Tap to review and answer.",
-        ...(extra.requestID ? { requestID: extra.requestID } : {}),
-      }
-    case "failed":
-      return { kind: precise, sessionID, title: `${name} failed`, body: "Tap to open the session." }
-    case "finished":
-      return { kind: precise, sessionID, title: `${name} finished`, body: "Tap to open the session." }
-    case "activity":
-      return { kind: precise, sessionID, title: name, body: clip(text ?? "", SAY_MAX_CHARS) || "New activity." }
+const MAX_SUBJECT = 40
+
+/** The title after the session name: the kind's label, with its subject where it has one. */
+function kindTitle(kind: NotificationKind, subject: string | undefined): string {
+  const about = subject ? clip(subject, MAX_SUBJECT) : ""
+  switch (kind) {
+    case "subagentDone":
+      return about ? `Subagent ${about} finished` : NOTIFICATION_LABELS.subagentDone
+    case "subagentFailed":
+      return about ? `Subagent ${about} failed` : NOTIFICATION_LABELS.subagentFailed
+    case "jobDone":
+    case "jobFailed":
+      return about ? `Script ${about}` : NOTIFICATION_LABELS[kind]
+    case "longTool":
+      return about ? `${NOTIFICATION_LABELS.longTool} (${about})` : NOTIFICATION_LABELS.longTool
+    default:
+      return NOTIFICATION_LABELS[kind]
   }
 }
+
+const OPEN = "Tap to open the session."
+
+export function pushPayload(kind: NotificationKind, sessionID: string, sessionTitle: string, text?: string, extra: PushExtra = {}): PushPayload {
+  const name = shorten(sessionTitle)
+  const detail = clip(text ?? "", SAY_MAX_CHARS)
+  const title = `${name} · ${kindTitle(kind, extra.subject)}`
+  switch (kind) {
+    case "say":
+      // A spoken reply reads as the session talking.
+      return { kind, sessionID, title: name, body: detail || "New reply. Tap to listen." }
+    case "handoff":
+      return { kind, sessionID, title, body: "Sent from the terminal. Tap to talk." }
+    case "question":
+      return { kind, sessionID, title, body: "Tap to see it." }
+    case "permission":
+      // Never the request's summary (it may be a command line); the service worker fetches it from the hub.
+      return { kind, sessionID, title, body: "Tap to review and answer.", ...(extra.requestID ? { requestID: extra.requestID } : {}) }
+    case "done":
+      return { kind, sessionID, title, body: detail || "Nothing is running or waiting. Tap to open." }
+    case "activity":
+      return { kind, sessionID, title, body: detail || "New activity." }
+    default:
+      return { kind, sessionID, title, body: detail || OPEN }
+  }
+}
+
+/** What a test notification of each kind is about. */
+const TEST_SUBJECT: Partial<Record<NotificationKind, string>> = { subagentDone: "explore", subagentFailed: "explore", jobDone: "exited 0", jobFailed: "exited 1", longTool: "45s" }
 
 /** web-push options per notification kind: urgent kinds wake a dozing phone and wait longer for it. */
 export function sendOptionsFor(kind: NotificationKind | "test"): { TTL: number; urgency: "high" | "normal" } {
@@ -185,10 +213,19 @@ export function sendOptionsFor(kind: NotificationKind | "test"): { TTL: number; 
     case "permission":
     case "failed":
       return { TTL: URGENT_TTL_SECONDS, urgency: "high" }
-    case "finished":
+    case "done":
+    case "stopped":
+    case "subagentFailed":
+    case "jobFailed":
+      // Worth seeing later, not worth waking a dozing phone.
       return { TTL: URGENT_TTL_SECONDS, urgency: "normal" }
+    case "turn":
+    case "retry":
+    case "subagentDone":
+    case "jobDone":
+    case "longTool":
     case "activity":
-      // A digest replaces the previous one: no need to wake a dozing phone or keep it long.
+      // Progress: stale soon, replaced by the next one.
       return { TTL: PUSH_TTL_SECONDS, urgency: "normal" }
     default:
       return { TTL: PUSH_TTL_SECONDS, urgency: "high" }
@@ -290,7 +327,7 @@ export class Push {
     // Settings may have changed while it waited.
     if (!body || !this.activityDevices(owner, sessionID, digest.last).includes(deviceID)) return
     const targets = this.store.pushSubscriptions().filter((s) => s.deviceID === deviceID)
-    await this.send(targets, pushPayload("activity" as PushKind, sessionID, digest.title, undefined, body))
+    await this.send(targets, pushPayload("activity", sessionID, digest.title, body))
   }
 
   /** Forgets digests idle for an hour (nothing pending, interval long over). */
@@ -312,17 +349,10 @@ export class Push {
    * in its quiet hours (hand-offs, an explicit request from the terminal, go through both). Returns the
    * number of successful deliveries.
    */
-  async notify(
-    kind: PushKind,
-    sessionID: string,
-    title: string,
-    detail?: PushDetail,
-    body?: string,
-    ownerID?: string,
-    extra?: PushExtra,
-  ): Promise<number> {
-    const precise = pushKindFor(kind, detail)
-    if (!this.cool(`${sessionID}\n${precise}`, precise === "say" ? SAY_COOLDOWN_MS : PUSH_COOLDOWN_MS)) return 0
+  async notify(kind: NotificationKind, sessionID: string, title: string, body?: string, ownerID?: string, extra?: PushExtra): Promise<number> {
+    const precise = kind
+    const key = `${sessionID}\n${precise}${extra?.key ? `\n${extra.key}` : ""}`
+    if (!this.cool(key, precise === "say" ? SAY_COOLDOWN_MS : PUSH_COOLDOWN_MS)) return 0
     const owners = new Map(this.store.devices().map((d) => [d.id, d.ownerID]))
     const at = this.now()
     const muted = new Map<string, boolean>()
@@ -340,13 +370,16 @@ export class Push {
       return !isMuted(owner) && !(quiet && inQuietHours(quiet, at))
     })
     if (targets.length === 0) return 0
-    const payload = pushPayload(kind, sessionID, title, detail, body, extra)
+    const payload = pushPayload(kind, sessionID, title, body, extra)
     const { delivered } = await this.send(targets, payload)
     return delivered
   }
 
-  /** Sends a test notification to `deviceID`'s own subscriptions, whatever its prefs; one per TEST_COOLDOWN_MS. */
-  async test(deviceID: string): Promise<PushTestResult> {
+  /**
+   * Sends a test notification to `deviceID`'s own subscriptions, whatever its prefs; one per TEST_COOLDOWN_MS. With
+   * a kind, it looks like that kind (title, urgency) for a "Test session".
+   */
+  async test(deviceID: string, kind?: NotificationKind): Promise<PushTestResult> {
     const key = `test\n${deviceID}`
     const last = this.lastSent.get(key)
     if (last && this.now() - last.at < last.cooldown) {
@@ -354,7 +387,9 @@ export class Push {
     }
     this.cool(key, TEST_COOLDOWN_MS)
     const targets = this.store.pushSubscriptions().filter((s) => s.deviceID === deviceID)
-    const payload: PushPayload = { kind: "test", sessionID: "", title: "Hub", body: "Test notification: notifications work on this device." }
+    const payload: PushPayload = kind
+      ? { ...pushPayload(kind, "", "Test session", `Test: this is how “${NOTIFICATION_LABELS[kind]}” looks on this device.`, { subject: TEST_SUBJECT[kind] }), test: true }
+      : { kind: "test", sessionID: "", title: "Hub", body: "Test notification: notifications work on this device." }
     const { delivered, failed } = await this.send(targets, payload)
     return { sent: delivered, failed }
   }

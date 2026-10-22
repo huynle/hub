@@ -13,13 +13,13 @@ import {
   type SpokeRequest,
 } from "../protocol"
 import type { Auth } from "./auth"
-import type { PushDetail, PushExtra, PushKind } from "./push"
+import type { NotificationKind, PushExtra } from "./push"
 import type { Registry } from "./registry"
 import { newID, type Store } from "./store"
 
 /** Push notifications (implemented by Push in push.ts) to `ownerID`'s devices. Returns the number of devices notified. */
 export interface Notifier {
-  notify(kind: PushKind, sessionID: string, title: string, detail?: PushDetail, body?: string, ownerID?: string, extra?: PushExtra): Promise<number>
+  notify(kind: NotificationKind, sessionID: string, title: string, body?: string, ownerID?: string, extra?: PushExtra): Promise<number>
 }
 
 /** The spoke answered with an error, or disconnected before answering. */
@@ -257,7 +257,7 @@ export class SpokeHub {
         if (tenant !== undefined && tenant !== owner) throw new Error("Unknown session")
         this.options.broadcast({ type: "handoff", sessionID: req.sessionID }, owner)
         const title = (tenant && this.options.registry.status(req.sessionID)?.[0]?.title) || req.sessionID
-        return { notified: await this.options.notifier.notify("handoff", req.sessionID, title, undefined, undefined, owner) }
+        return { notified: await this.options.notifier.notify("handoff", req.sessionID, title, undefined, owner) }
       }
       case "openLink": {
         const { code } = auth.issueLoginCode(owner)

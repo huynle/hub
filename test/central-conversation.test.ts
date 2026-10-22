@@ -494,34 +494,42 @@ describe("presence", () => {
 })
 
 describe("push in conversation mode", () => {
-  test("no finished push while conversation mode is on and the session is watched; blocked still pushes", async () => {
+  test("no turn push while the session is watched (conversation mode or not); a permission still pushes", async () => {
     h = harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true, title: "Fix bug" })] })
     conversationSpoke(client)
     await post("/api/sessions/ses_1/conversation", { on: true })
     expect((await post("/api/sessions/ses_1/presence", { visible: true })).status).toBe(204)
+    client.send(event("session.execution.started", { sessionID: "ses_1" }))
     client.send(event("session.execution.succeeded", { sessionID: "ses_1" }))
     client.send(event("permission.asked", { sessionID: "ses_1", id: "per_1", action: "bash" }))
     await waitFor(() => h.notified.length > 0)
-    expect(h.notified).toEqual([{ kind: "blocked", sessionID: "ses_1", title: "Fix bug" }])
+    expect(h.notified).toEqual([{ kind: "permission", sessionID: "ses_1", title: "Fix bug" }])
 
     await post("/api/sessions/ses_1/conversation", { on: false })
+    client.send(event("session.execution.started", { sessionID: "ses_1" }))
+    client.send(event("session.execution.succeeded", { sessionID: "ses_1" }))
+    await Bun.sleep(50)
+    expect(h.notified).toHaveLength(1)
+    expect((await post("/api/sessions/ses_1/presence", { visible: false })).status).toBe(204)
+    client.send(event("session.execution.started", { sessionID: "ses_1" }))
     client.send(event("session.execution.succeeded", { sessionID: "ses_1" }))
     await waitFor(() => h.notified.length > 1)
-    expect(h.notified[1]).toEqual({ kind: "finished", sessionID: "ses_1", title: "Fix bug" })
+    expect(h.notified[1]).toEqual({ kind: "turn", sessionID: "ses_1", title: "Fix bug" })
   })
 
-  test("when nobody watches, spoken texts and finished are pushed so results reach a locked phone", async () => {
+  test("when nobody watches, spoken texts and turns are pushed so results reach a locked phone", async () => {
     h = harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true, title: "Fix bug" })] })
     conversationSpoke(client)
     await post("/api/sessions/ses_1/conversation", { on: true })
+    client.send(event("session.execution.started", { sessionID: "ses_1" }))
     client.send(ended("ses_1", "msg_1", 0, "The fix is in and tests pass."))
     client.send(event("session.execution.succeeded", { sessionID: "ses_1" }))
     await waitFor(() => h.notified.length === 2)
     expect(h.notified).toEqual([
       { kind: "say", sessionID: "ses_1", title: "Fix bug", body: "The fix is in and tests pass." },
-      { kind: "finished", sessionID: "ses_1", title: "Fix bug" },
+      { kind: "turn", sessionID: "ses_1", title: "Fix bug" },
     ])
   })
 })

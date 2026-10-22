@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { DEFAULT_PUSH_PREFS, inQuietHours, Push, PUSH_COOLDOWN_MS, pushKindFor, SAY_COOLDOWN_MS, TEST_COOLDOWN_MS, URGENT_TTL_SECONDS, type PushSender } from "../src/central/push"
+import { DEFAULT_PUSH_PREFS, inQuietHours, NOTIFICATION_LABELS, Push, PUSH_COOLDOWN_MS, pushPayload, SAY_COOLDOWN_MS, sendOptionsFor, TEST_COOLDOWN_MS, URGENT_TTL_SECONDS, type PushSender } from "../src/central/push"
+import { PUSH_PREF_KEYS } from "../src/central/store"
 import { Store } from "../src/central/store"
 
 interface Sent {
@@ -65,16 +66,56 @@ describe("subscriptions and prefs", () => {
     expect(store.pushSubscriptions()).toEqual([])
   })
 
-  test("prefs default to hand-offs, questions, permissions and say; are per device and persist", () => {
+  const defaults = {
+    handoff: true,
+    question: true,
+    permission: true,
+    done: true,
+    failed: true,
+    turn: false,
+    stopped: false,
+    retry: false,
+    subagentDone: false,
+    subagentFailed: false,
+    jobDone: false,
+    jobFailed: false,
+    longTool: false,
+    say: true,
+    activity: false,
+  }
+
+  test("prefs default to needs-you, all done, failed, hand-offs and say; are per device and persist", () => {
     const a = store.addDevice("a").device
-    const defaults = { handoff: true, question: true, permission: true, finished: false, failed: false, say: true, activity: false }
     expect(store.pushPrefs(a.id)).toEqual(defaults)
     expect(DEFAULT_PUSH_PREFS).toEqual(defaults)
-    store.setPushPrefs(a.id, { finished: true })
-    expect(Store.open(dir).pushPrefs(a.id)).toEqual({ ...defaults, finished: true })
+    expect([...PUSH_PREF_KEYS].sort() as string[]).toEqual(Object.keys(defaults).sort())
+    store.setPushPrefs(a.id, { turn: true, subagentDone: true })
+    expect(Store.open(dir).pushPrefs(a.id)).toEqual({ ...defaults, turn: true, subagentDone: true })
   })
 
-  test("legacy prefs migrate: blocked → question + permission, finished → finished + failed", () => {
+  test("the old 'finished' key (every root turn) is accepted and means all done", () => {
+    const a = store.addDevice("a").device
+    expect(store.setPushPrefs(a.id, { finished: false } as any)).toMatchObject({ done: false, turn: false })
+    expect(store.setPushPrefs(a.id, { finished: true } as any)).toMatchObject({ done: true, turn: false })
+    expect("finished" in store.pushPrefs(a.id)).toBe(false)
+  })
+
+  test("0.7 prefs migrate: finished → all done (not every turn), failed and activity kept, new kinds off", () => {
+    const a = store.addDevice("a").device
+    const b = store.addDevice("b").device
+    const raw = store.data()
+    raw.devices.find((d) => d.id === a.id)!.pushPrefs = { handoff: true, question: true, permission: true, finished: true, failed: true, say: true, activity: true } as any
+    raw.devices.find((d) => d.id === b.id)!.pushPrefs = { handoff: true, question: true, permission: false, finished: false, failed: false, say: false, activity: false } as any
+    writeFileSync(path.join(dir, "state.json"), JSON.stringify(raw))
+    const reopened = Store.open(dir)
+    expect(reopened.pushPrefs(a.id)).toEqual({ ...defaults, done: true, failed: true, activity: true })
+    expect(reopened.pushPrefs(b.id)).toEqual({ ...defaults, permission: false, done: false, failed: false, say: false })
+    const stored = JSON.parse(readFileSync(path.join(dir, "state.json"), "utf8")).devices.find((d: any) => d.id === a.id).pushPrefs
+    expect(stored.finished).toBeUndefined()
+    expect(stored.done).toBe(true)
+  })
+
+  test("legacy prefs migrate: blocked → question + permission, finished → all done + failed", () => {
     const a = store.addDevice("a").device
     const b = store.addDevice("b").device
     const raw = store.data()
@@ -83,8 +124,8 @@ describe("subscriptions and prefs", () => {
     raw.devices.find((d) => d.id === b.id)!.pushPrefs = { handoff: false, blocked: true, finished: false, say: true } as any
     writeFileSync(path.join(dir, "state.json"), JSON.stringify(raw))
     const reopened = Store.open(dir)
-    expect(reopened.pushPrefs(a.id)).toEqual({ handoff: true, question: false, permission: false, finished: true, failed: true, say: false, activity: false })
-    expect(reopened.pushPrefs(b.id)).toEqual({ handoff: false, question: true, permission: true, finished: false, failed: false, say: true, activity: false })
+    expect(reopened.pushPrefs(a.id)).toEqual({ ...defaults, handoff: true, question: false, permission: false, done: true, failed: true, say: false })
+    expect(reopened.pushPrefs(b.id)).toEqual({ ...defaults, handoff: false, question: true, permission: true, done: false, failed: false, say: true })
     // Migrated on open and written back without the legacy key.
     expect(JSON.parse(readFileSync(path.join(dir, "state.json"), "utf8")).devices.find((d: any) => d.id === a.id).pushPrefs.blocked).toBeUndefined()
   })
@@ -118,16 +159,40 @@ describe("subscriptions and prefs", () => {
   })
 })
 
-describe("kind mapping", () => {
-  test("alerts map to the precise notification kind", () => {
-    expect(pushKindFor("handoff")).toBe("handoff")
-    expect(pushKindFor("say")).toBe("say")
-    expect(pushKindFor("blocked", "form")).toBe("question")
-    expect(pushKindFor("blocked", "permission")).toBe("permission")
-    expect(pushKindFor("blocked")).toBe("permission")
-    expect(pushKindFor("finished", "succeeded")).toBe("finished")
-    expect(pushKindFor("finished", "failed")).toBe("failed")
-    expect(pushKindFor("finished")).toBe("finished")
+describe("payloads per kind", () => {
+  test("every kind has a short label shown in the title after the session name", () => {
+    expect(Object.keys(NOTIFICATION_LABELS).sort()).toEqual([...PUSH_PREF_KEYS].sort())
+    const title = (kind: any, text?: string, subject?: string) => pushPayload(kind, "ses_1", "KVM Rewrite", text, { subject }).title
+    expect(title("question")).toBe("KVM Rewrite · Question")
+    expect(title("permission")).toBe("KVM Rewrite · Needs permission")
+    expect(title("done")).toBe("KVM Rewrite · All done")
+    expect(title("failed")).toBe("KVM Rewrite · Failed")
+    expect(title("turn")).toBe("KVM Rewrite · Turn finished")
+    expect(title("stopped")).toBe("KVM Rewrite · Stopped")
+    expect(title("retry")).toBe("KVM Rewrite · Retrying")
+    expect(title("subagentDone", undefined, "S3 macros")).toBe("KVM Rewrite · Subagent S3 macros finished")
+    expect(title("subagentFailed", undefined, "S3 macros")).toBe("KVM Rewrite · Subagent S3 macros failed")
+    expect(title("jobDone", undefined, "exited 0")).toBe("KVM Rewrite · Script exited 0")
+    expect(title("jobFailed", undefined, "exited 1")).toBe("KVM Rewrite · Script exited 1")
+    expect(title("longTool", undefined, "45s")).toBe("KVM Rewrite · Long tool finished (45s)")
+    // Say and hand-off keep the session name alone (the body says it all).
+    expect(title("say", "hi")).toBe("KVM Rewrite")
+    expect(title("handoff")).toBe("KVM Rewrite · Hand-off")
+    expect(title("activity", "3 tools")).toBe("KVM Rewrite · Activity")
+  })
+
+  test("bodies carry the given detail, clipped; a failure's reason; defaults otherwise", () => {
+    expect(pushPayload("failed", "s", "t", "Provider blocked the response").body).toBe("Provider blocked the response")
+    expect(pushPayload("failed", "s", "t").body).toBe("Tap to open the session.")
+    expect(pushPayload("jobFailed", "s", "t", "x".repeat(300), { subject: "exited 1" }).body.length).toBeLessThanOrEqual(180)
+    expect(pushPayload("done", "s", "t").body).toBe("Nothing is running or waiting. Tap to open.")
+  })
+
+  test("urgency and lifetime per kind", () => {
+    for (const kind of ["question", "permission", "failed"] as const) expect(sendOptionsFor(kind)).toEqual({ TTL: URGENT_TTL_SECONDS, urgency: "high" })
+    for (const kind of ["done", "subagentFailed", "jobFailed", "stopped"] as const) expect(sendOptionsFor(kind)).toEqual({ TTL: URGENT_TTL_SECONDS, urgency: "normal" })
+    for (const kind of ["turn", "retry", "subagentDone", "jobDone", "longTool", "activity"] as const) expect(sendOptionsFor(kind)).toEqual({ TTL: 300, urgency: "normal" })
+    for (const kind of ["say", "handoff", "test"] as const) expect(sendOptionsFor(kind)).toEqual({ TTL: 300, urgency: "high" })
   })
 })
 
@@ -186,22 +251,22 @@ describe("notify", () => {
 
   test("blocked titles say what is needed; kinds are precise; urgent kinds live longer", async () => {
     setup()
-    store.setPushPrefs(phone, { finished: true, failed: true })
-    await push.notify("blocked", "ses_1", "api-server", "permission", "bash: rm -rf build", undefined, { requestID: "per_1" })
-    await push.notify("blocked", "ses_2", "docs", "form")
-    await push.notify("finished", "ses_3", "build", "failed")
-    await push.notify("finished", "ses_4", "lint", "succeeded")
+    
+    await push.notify("permission", "ses_1", "api-server", "bash: rm -rf build", undefined, { requestID: "per_1" })
+    await push.notify("question", "ses_2", "docs")
+    await push.notify("failed", "ses_3", "build")
+    await push.notify("done", "ses_4", "lint")
     const by = (kind: string) => fake.sent.find((s) => s.payload.kind === kind)!
-    expect(by("permission").payload).toMatchObject({ title: "api-server needs permission", sessionID: "ses_1", requestID: "per_1" })
+    expect(by("permission").payload).toMatchObject({ title: "api-server · Needs permission", sessionID: "ses_1", requestID: "per_1" })
     // The request's summary (a command line) never goes through the push service.
     expect(fake.sent.find((s) => s.payload.kind === "permission")!.raw).not.toContain("rm -rf")
-    expect(by("question").payload.title).toBe("docs has a question")
-    expect(by("failed").payload.title).toBe("build failed")
-    expect(by("finished").payload.title).toBe("lint finished")
+    expect(by("question").payload.title).toBe("docs · Question")
+    expect(by("failed").payload.title).toBe("build · Failed")
+    expect(by("done").payload.title).toBe("lint · All done")
     for (const kind of ["permission", "question", "failed"]) {
       expect(by(kind).options).toMatchObject({ urgency: "high", TTL: URGENT_TTL_SECONDS })
     }
-    expect(by("finished").options.urgency).toBe("normal")
+    expect(by("done").options.urgency).toBe("normal")
     expect(URGENT_TTL_SECONDS).toBeGreaterThanOrEqual(3600)
   })
 
@@ -219,68 +284,69 @@ describe("notify", () => {
 
   test("prefs are respected per device and per precise kind", async () => {
     setup()
-    expect(await push.notify("finished", "ses_1", "t", "succeeded")).toBe(0)
-    store.setPushPrefs(tablet, { finished: true })
-    expect(await push.notify("finished", "ses_2", "t", "succeeded")).toBe(1)
+    expect(await push.notify("turn", "ses_1", "t")).toBe(0)
+    store.setPushPrefs(tablet, { turn: true })
+    expect(await push.notify("turn", "ses_2", "t")).toBe(1)
     expect(fake.sent.map((s) => s.endpoint)).toEqual([sub(2).endpoint])
-    // failed is its own toggle now.
-    expect(await push.notify("finished", "ses_2b", "t", "failed")).toBe(0)
-    store.setPushPrefs(phone, { failed: true })
-    expect(await push.notify("finished", "ses_2c", "t", "failed")).toBe(1)
+    // failed is its own toggle.
+    store.setPushPrefs(phone, { failed: false })
+    expect(await push.notify("failed", "ses_2c", "t")).toBe(1)
+    store.setPushPrefs(phone, { subagentDone: true })
+    expect(await push.notify("subagentDone", "ses_2d", "t", undefined, undefined, { subject: "explore" })).toBe(1)
     store.setPushPrefs(phone, { permission: false })
-    expect(await push.notify("blocked", "ses_3", "t", "permission")).toBe(1)
-    expect(await push.notify("blocked", "ses_4", "t", "form")).toBe(2)
+    expect(await push.notify("permission", "ses_3", "t")).toBe(1)
+    expect(await push.notify("question", "ses_4", "t")).toBe(2)
     store.setPushPrefs(tablet, { question: false })
-    expect(await push.notify("blocked", "ses_5", "t", "form")).toBe(1)
+    expect(await push.notify("question", "ses_5", "t")).toBe(1)
   })
 
   test("a muted session notifies nothing of its owner's devices except hand-offs", async () => {
     setup()
     const owner = store.devices().find((d) => d.id === phone)!.ownerID
     store.setSessionMuted(owner, "ses_1", true)
-    expect(await push.notify("blocked", "ses_1", "t", "permission", undefined, owner)).toBe(0)
-    expect(await push.notify("say", "ses_1", "t", undefined, "hi", owner)).toBe(0)
-    expect(await push.notify("handoff", "ses_1", "t", undefined, undefined, owner)).toBe(2)
-    expect(await push.notify("blocked", "ses_2", "t", "permission", undefined, owner)).toBe(2)
+    expect(await push.notify("permission", "ses_1", "t", undefined, owner)).toBe(0)
+    expect(await push.notify("say", "ses_1", "t", "hi", owner)).toBe(0)
+    expect(await push.notify("handoff", "ses_1", "t", undefined, owner)).toBe(2)
+    expect(await push.notify("permission", "ses_2", "t", undefined, owner)).toBe(2)
   })
 
   test("quiet hours silence a device except hand-offs", async () => {
     setup()
     clock = Date.parse("2026-01-15T23:00:00Z")
     store.setQuietHours(phone, { start: "22:00", end: "07:00", timeZone: "UTC" })
-    expect(await push.notify("blocked", "ses_1", "t", "permission")).toBe(1)
+    expect(await push.notify("permission", "ses_1", "t")).toBe(1)
     expect(fake.sent.map((s) => s.endpoint)).toEqual([sub(2).endpoint])
     expect(await push.notify("handoff", "ses_1", "t")).toBe(2)
     clock = Date.parse("2026-01-16T08:00:00Z")
-    expect(await push.notify("blocked", "ses_2", "t", "permission")).toBe(2)
+    expect(await push.notify("permission", "ses_2", "t")).toBe(2)
   })
 
   test("cooldown of 30 s per (session, kind)", async () => {
     setup()
     expect(PUSH_COOLDOWN_MS).toBe(30_000)
-    expect(await push.notify("blocked", "ses_1", "t", "permission")).toBe(2)
+    expect(await push.notify("permission", "ses_1", "t")).toBe(2)
     clock += 10_000
-    expect(await push.notify("blocked", "ses_1", "t", "permission")).toBe(0)
+    expect(await push.notify("permission", "ses_1", "t")).toBe(0)
     // Another kind of the same session has its own cooldown.
-    expect(await push.notify("blocked", "ses_1", "t", "form")).toBe(2)
+    expect(await push.notify("question", "ses_1", "t")).toBe(2)
     expect(await push.notify("handoff", "ses_1", "t")).toBe(2)
-    expect(await push.notify("blocked", "ses_2", "t", "permission")).toBe(2)
+    expect(await push.notify("permission", "ses_2", "t")).toBe(2)
     clock += PUSH_COOLDOWN_MS
-    expect(await push.notify("blocked", "ses_1", "t", "permission")).toBe(2)
+    expect(await push.notify("permission", "ses_1", "t")).toBe(2)
   })
 
   test("say pushes carry the spoken text (at most 180 chars) under the session title, high urgency, 10 s cooldown", async () => {
     setup()
     expect(SAY_COOLDOWN_MS).toBe(10_000)
-    expect(await push.notify("say", "ses_1", "api-server", undefined, `${"x".repeat(300)}`)).toBe(2)
+    expect(await push.notify("say", "ses_1", "api-server", `${"x".repeat(300)}`)).toBe(2)
     const { payload, options } = fake.sent[0]!
     expect(payload).toEqual({ kind: "say", sessionID: "ses_1", title: "api-server", body: `${"x".repeat(179)}…` })
     expect(options.urgency).toBe("high")
     clock += 5_000
-    expect(await push.notify("say", "ses_1", "api-server", undefined, "next")).toBe(0)
+    expect(await push.notify("say", "ses_1", "api-server", "next")).toBe(0)
     clock += 5_000
     store.setPushPrefs(phone, { say: false })
-    expect(await push.notify("say", "ses_1", "api-server", undefined, "  Tests\n  pass.  ")).toBe(1)
+    expect(await push.notify("say", "ses_1", "api-server", "  Tests\n  pass.  ")).toBe(1)
     expect(fake.sent.at(-1)!.payload.body).toBe("Tests pass.")
   })
 
@@ -311,6 +377,16 @@ describe("notify", () => {
     expect(await push.test(tablet)).toMatchObject({ sent: 1 })
     clock += TEST_COOLDOWN_MS
     expect(await push.test(phone)).toMatchObject({ sent: 1 })
+  })
+
+  test("a test of a chosen kind looks like that kind (label, urgency), marked as a test", async () => {
+    setup()
+    expect(await push.test(phone, "done")).toMatchObject({ sent: 1 })
+    expect(fake.sent[0]!.payload).toMatchObject({ kind: "done", sessionID: "", title: "Test session · All done", test: true })
+    expect(fake.sent[0]!.options.urgency).toBe("normal")
+    clock += TEST_COOLDOWN_MS
+    expect(await push.test(phone, "jobFailed")).toMatchObject({ sent: 1 })
+    expect(fake.sent[1]!.payload.title).toBe("Test session · Script exited 1")
   })
 
   test("no subscriptions → 0", async () => {

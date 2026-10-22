@@ -11,6 +11,26 @@
   again once. Both audio elements play at volume 1. Measured with the default voice: cue spread around the reply
   median went from −2.0…+4.8 dB to within 0.1 dB; normalising adds ~8 ms (max 60 ms) per phrase at prefetch and
   nothing at play time.
+- **No more false "finished" notifications; pick exactly which notifications each device gets.** "Finished"
+  fired on every turn of a root session, but in OpenCode v2 each background subagent that completes starts a
+  short continuation turn in its parent (a synthetic message), as do steering and Voice turns: in a real session
+  82 of 114 "finished" pushes came while subagents were still running. It also fired while you were looking at
+  the session. Now (see [docs/notifications.md](docs/notifications.md)):
+  - **All done** (new, on by default) replaces it: once per run, when the root's last turn succeeded and the
+    whole tree stayed settled for 15 s (no subagent or shell job running, no question or permission pending,
+    no hub turn). A continuation turn within the 15 s cancels it.
+  - New per-device kinds, off by default: **Turn finished** (the old every-turn behaviour), **Stopped**
+    (shutdown/inactivity), **Retrying**, **Subagent finished/failed**, **Script finished/failed** (background
+    shell or terminal exit code), **Long tool finished** (≥ 30 s). Failed (with the reason) is on by default.
+  - Titles say the kind: "KVM Rewrite · All done", "· Subagent S3 macros finished", "· Script exited 1";
+    progress kinds replace each other quietly.
+  - Run notifications are no longer sent while a device shows the session (questions and permissions are).
+  - Settings → Notifications: kinds grouped (Needs you, Session, Subagents, Scripts and tools, Voice, Activity
+    digest) with a one-line description each, a "You'll get: …" summary, and a test of a chosen kind
+    (`POST /api/push/test {kind}`).
+  - Prefs migrate on start: `finished: true` becomes All done (not every turn); failed, activity and the rest
+    are kept; new kinds start off. The API still accepts `finished` (→ `done`) and `blocked`.
+
 - **The console keeps a session's conversation in order**: subagents no longer bunch together at the bottom of
   the conversation, and thoughts no longer jump below the text or tools that came after them. Rows used to be
   sorted by their timestamps, which come from different clocks (OpenCode's message and part times, the hub's,

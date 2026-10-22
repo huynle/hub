@@ -73,19 +73,93 @@ export function describeTestResult(result: PushTestAnswer): { ok: boolean; text:
   return { ok: false, text: `Test failed: ${first.host} ${first.status !== undefined ? `answered ${first.status}` : "did not answer"}` }
 }
 
-export type NotifyToggle = "question" | "permission" | "failed" | "finished" | "handoff" | "say"
+/** The hub's notification kinds (src/central/push.ts NOTIFICATION_LABELS; docs/notifications.md). */
+export type NotifyKind =
+  | "question"
+  | "permission"
+  | "done"
+  | "failed"
+  | "turn"
+  | "stopped"
+  | "retry"
+  | "subagentDone"
+  | "subagentFailed"
+  | "jobDone"
+  | "jobFailed"
+  | "longTool"
+  | "say"
+  | "handoff"
+  | "activity"
+
+export interface NotifyKindInfo {
+  readonly key: NotifyKind
+  /** As in the notification's title ("KVM Rewrite · All done"). */
+  readonly label: string
+  readonly description: string
+}
+
+export interface NotifyGroup {
+  readonly title: string
+  readonly kinds: readonly NotifyKindInfo[]
+}
 
 /** Choices for the activity update interval (minutes). */
 export const ACTIVITY_MINUTES = [1, 2, 5, 10, 15, 30, 60] as const
 
-export const NOTIFY_TOGGLES: ReadonlyArray<readonly [NotifyToggle, string]> = [
-  ["question", "A session asks a question"],
-  ["permission", "A session needs permission"],
-  ["failed", "A session failed"],
-  ["finished", "A session finished (not Voice turns)"],
-  ["handoff", "Hand-offs from the terminal"],
-  ["say", "Voice replies when you're not watching"],
+/** Settings → Notifications: one toggle per kind, grouped. */
+export const NOTIFY_GROUPS: readonly NotifyGroup[] = [
+  {
+    title: "Needs you",
+    kinds: [
+      { key: "question", label: "Question", description: "A session or subagent asks you something." },
+      { key: "permission", label: "Needs permission", description: "A tool call waits for your OK (answer from the notification)." },
+    ],
+  },
+  {
+    title: "Session",
+    kinds: [
+      { key: "done", label: "All done", description: "The session and all its subagents and scripts finished; nothing waits on you. Once per run." },
+      { key: "failed", label: "Failed", description: "The session's run failed (provider or tool error), with the reason." },
+      { key: "turn", label: "Turn finished", description: "Every reply of the main session, also the short ones between subagents. Noisy." },
+      { key: "stopped", label: "Stopped", description: "A run stopped without you asking (OpenCode shut down, inactivity)." },
+      { key: "retry", label: "Retrying", description: "The provider failed and OpenCode is retrying the request." },
+    ],
+  },
+  {
+    title: "Subagents",
+    kinds: [
+      { key: "subagentDone", label: "Subagent finished", description: "Each subagent that finishes, by name." },
+      { key: "subagentFailed", label: "Subagent failed", description: "Each subagent that fails, with the reason." },
+    ],
+  },
+  {
+    title: "Scripts and tools",
+    kinds: [
+      { key: "jobDone", label: "Script finished", description: "A background shell or terminal exited 0." },
+      { key: "jobFailed", label: "Script failed", description: "A background shell or terminal exited non-zero, was killed or timed out." },
+      { key: "longTool", label: "Long tool finished", description: "A tool call that ran 30 seconds or more ended." },
+    ],
+  },
+  {
+    title: "Voice",
+    kinds: [
+      { key: "say", label: "Spoken reply", description: "Voice mode replies while no device shows the session." },
+      { key: "handoff", label: "Hand-off", description: "A session sent to this device from the terminal (ignores quiet hours)." },
+    ],
+  },
+  {
+    title: "Activity digest",
+    kinds: [{ key: "activity", label: "Activity", description: "One quiet, self-replacing summary per session: subagents, long tools, scripts, idle." }],
+  },
 ]
+
+export const NOTIFY_KINDS: readonly NotifyKindInfo[] = NOTIFY_GROUPS.flatMap((g) => g.kinds)
+
+/** "You'll get: All done, Failed, Question." for the toggles that are on, in Settings order. */
+export function notifySummary(prefs: Readonly<Record<string, boolean | undefined>>): string {
+  const on = NOTIFY_KINDS.filter((k) => prefs[k.key]).map((k) => k.label)
+  return on.length ? `You'll get: ${on.join(", ")}.` : "You'll get no notifications on this device."
+}
 
 export interface QuietHours {
   readonly start: string

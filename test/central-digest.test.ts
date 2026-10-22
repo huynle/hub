@@ -90,7 +90,7 @@ describe("activity digest push", () => {
     activity(push, "ses_1", step("job", "bun run build exited 0"))
     await advance(0)
     expect(sent.length).toBe(1)
-    expect(sent[0]!.payload).toEqual({ kind: "activity", sessionID: "ses_1", title: "Main", body: "2 tools · bun run build exited 0" })
+    expect(sent[0]!.payload).toEqual({ kind: "activity", sessionID: "ses_1", title: "Main · Activity", body: "2 tools · bun run build exited 0" })
     expect(sent[0]!.options).toMatchObject({ urgency: "normal", TTL: 300 })
   })
 

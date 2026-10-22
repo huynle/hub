@@ -20,7 +20,7 @@ import { SENSITIVITIES, type Sensitivity } from "../core/speech-vad"
 import { api, enc, errorText, getJSON } from "./api"
 import { enrollments, ensureMe, hub, loadEnrollments, me, setMe, stopEvents } from "./hub"
 import { isPhone, toggleSidebar } from "./layout"
-import { ACTIVITY_MINUTES, describeTestResult, localTimeZone, NOTIFY_TOGGLES, notifyStatus, type QuietHours } from "../core/notify-core"
+import { ACTIVITY_MINUTES, describeTestResult, localTimeZone, NOTIFY_GROUPS, NOTIFY_KINDS, notifyStatus, notifySummary, type QuietHours } from "../core/notify-core"
 import { currentSubscription, disableNotifications, enableNotifications, mutedSessions, notifyEnv, pushRevision, sendTestNotification, type PushPrefsView } from "./push"
 import { location$, navigate } from "./router"
 import { SpeechSettingsPanel } from "./SpeechSettings"
@@ -137,6 +137,7 @@ function NotificationsSection() {
   const [info, { refetch }] = createResource(pushRevision, () => notifyEnv())
   const [busy, setBusy] = createSignal(false)
   const [testResult, setTestResult] = createSignal<{ ok: boolean; text: string } | undefined>()
+  const [testKind, setTestKind] = createSignal("")
   const [prefs, setPrefs] = createSignal<Record<string, boolean> | undefined>()
   const [quiet, setQuiet] = createSignal<QuietHours | null>(null)
   const [minutes, setMinutes] = createSignal<number | undefined>()
@@ -172,7 +173,7 @@ function NotificationsSection() {
   const test = async () => {
     setTestResult(undefined)
     try {
-      setTestResult(describeTestResult(await sendTestNotification()))
+      setTestResult(describeTestResult(await sendTestNotification(testKind() || undefined)))
     } catch (e) {
       setTestResult({ ok: false, text: errorText(e) })
     }
@@ -205,9 +206,15 @@ function NotificationsSection() {
                 </button>
               </Show>
               <Show when={info()!.env.hubSubscriptions > 0}>
-                <button type="button" class="btn small" onClick={() => void test()}>
-                  Send test notification
-                </button>
+                <span class="notify-test">
+                  <select aria-label="Test notification kind" data-test-kind value={testKind()} onChange={(e) => setTestKind(e.currentTarget.value)}>
+                    <option value="">Basic test</option>
+                    <For each={NOTIFY_KINDS}>{(k) => <option value={k.key}>{k.label}</option>}</For>
+                  </select>
+                  <button type="button" class="btn small" onClick={() => void test()}>
+                    Send test notification
+                  </button>
+                </span>
               </Show>
             </div>
             <Show when={testResult()}>{(r) => <p class={r().ok ? "small ok" : "small err"} data-test-result>{r().text}</p>}</Show>
@@ -216,45 +223,53 @@ function NotificationsSection() {
       </Show>
       <Show when={currentPrefs()}>
         <h3>Notify me when</h3>
+        <p class="small notify-summary" data-notify-summary>
+          {notifySummary(currentPrefs()!)}
+        </p>
         <Show when={status() && status()!.state !== "on"}>
           <p class="small warn">These apply once this device is subscribed.</p>
         </Show>
-        <Show when={"activity" in currentPrefs()! && !currentPrefs()!.activity}>
+        <Show when={"activity" in currentPrefs()! && !currentPrefs()!.activity && !currentPrefs()!.done}>
           <p class="activity-hint" data-activity-hint>
-            <strong>Know what happens with the screen off:</strong> turn on <em>Activity updates</em> below for one quiet, self-replacing notification
-            per session (subagents, long tools, scripts that end, the session going idle).
+            <strong>Know what happens with the screen off:</strong> turn on <em>All done</em> for one notification when a session and its subagents
+            finish, or the <em>Activity digest</em> for one quiet, self-replacing summary per session.
           </p>
         </Show>
+        <For each={NOTIFY_GROUPS}>
+          {(group) => (
+            <section class="notify-group" data-notify-group={group.title}>
+              <h4>{group.title}</h4>
+              <ul class="switches">
+                <For each={group.kinds.filter((k) => k.key in currentPrefs()!)}>
+                  {(kind) => (
+                    <li>
+                      <label class="switch">
+                        <span class="notify-kind">
+                          <span>{kind.label}</span>
+                          <span class="small muted">{kind.description}</span>
+                        </span>
+                        <input type="checkbox" data-pref={kind.key} checked={!!currentPrefs()![kind.key]} onChange={(e) => void save({ [kind.key]: e.currentTarget.checked })} />
+                      </label>
+                      <Show when={kind.key === "activity" && currentPrefs()!.activity}>
+                        <div class="quiet-hours">
+                          <label>
+                            At most one per session every{" "}
+                            <select data-activity-minutes value={String(currentMinutes())} onChange={(e) => void save({ activityMinutes: Number(e.currentTarget.value) })}>
+                              <For each={ACTIVITY_MINUTES}>{(m) => <option value={String(m)}>{m === 1 ? "minute" : `${m} minutes`}</option>}</For>
+                            </select>
+                          </label>
+                          <span class="small muted">Collapses into one notification per session; respects quiet hours and muted sessions.</span>
+                        </div>
+                      </Show>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            </section>
+          )}
+        </For>
+        <h4>When</h4>
         <ul class="switches">
-          <For each={NOTIFY_TOGGLES}>
-            {([key, label]) => (
-              <li>
-                <label class="switch">
-                  <span>{label}</span>
-                  <input type="checkbox" data-pref={key} checked={!!currentPrefs()![key]} onChange={(e) => void save({ [key]: e.currentTarget.checked })} />
-                </label>
-              </li>
-            )}
-          </For>
-          <Show when={"activity" in currentPrefs()!}>
-            <li>
-              <label class="switch">
-                <span>Activity updates (subagents, long tools, scripts ending, idle)</span>
-                <input type="checkbox" data-pref="activity" checked={!!currentPrefs()!.activity} onChange={(e) => void save({ activity: e.currentTarget.checked })} />
-              </label>
-              <Show when={currentPrefs()!.activity}>
-                <div class="quiet-hours">
-                  <label>
-                    At most one per session every{" "}
-                    <select data-activity-minutes value={String(currentMinutes())} onChange={(e) => void save({ activityMinutes: Number(e.currentTarget.value) })}>
-                      <For each={ACTIVITY_MINUTES}>{(m) => <option value={String(m)}>{m === 1 ? "minute" : `${m} minutes`}</option>}</For>
-                    </select>
-                  </label>
-                  <span class="small muted">Collapses into one notification per session; respects quiet hours and muted sessions.</span>
-                </div>
-              </Show>
-            </li>
-          </Show>
           <li>
             <label class="switch">
               <span>Quiet hours</span>

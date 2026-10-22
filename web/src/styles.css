@@ -518,6 +518,14 @@ details.card summary { cursor: pointer; color: var(--muted); }
 .notify-facts dd { margin: 0; }
 .row-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .quiet-hours { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 6px; }
+.notify-summary { margin: 4px 0 8px; }
+.notify-group { margin: 14px 0 0; }
+.notify-group h4, #notifications h4 { font-size: 0.8125rem; color: var(--muted); font-weight: 500; margin: 14px 0 0; text-transform: uppercase; letter-spacing: 0.04em; }
+.notify-kind { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.notify-kind .small { line-height: 1.35; }
+.switch input[type="checkbox"] { flex: none; }
+.notify-test { display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.notify-test select { max-width: 60vw; }
 p.small.warn { color: var(--warn); }
 p.small.err { color: var(--err, #e5484d); }
 p.small.ok { color: var(--ok, inherit); }

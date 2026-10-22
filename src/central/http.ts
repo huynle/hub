@@ -12,7 +12,7 @@ import { speakable } from "../speakable"
 import { Auth, RateLimitError, ValidationError } from "./auth"
 import { emailAllowed, type CentralConfig } from "./config"
 import { authPage, cookieValue, deviceName, OIDC_COOKIE, OidcClient, OidcError } from "./oidc"
-import { Push, type PushSender } from "./push"
+import { isNotificationKind, Push, type PushSender } from "./push"
 import { pushEndpointProblem, resolveHost as systemResolveHost, type ResolveHost } from "./push-target"
 import { EventLog } from "./events-log"
 import { BusyError, Registry } from "./registry"
@@ -341,8 +341,12 @@ export function startCentral(options: CentralOptions): Central {
     if (!alert.owner) return
     // Activity updates are collected and throttled per device by the push layer.
     if (alert.kind === "activity") return push.activity(alert)
-    const extra = alert.requestID ? { requestID: alert.requestID } : undefined
-    notifier.notify(alert.kind, alert.sessionID, alert.title, alert.detail, alert.text, alert.owner, extra).catch((cause) => {
+    const extra = {
+      ...(alert.requestID ? { requestID: alert.requestID } : {}),
+      ...(alert.subject ? { subject: alert.subject } : {}),
+      ...(alert.key ? { key: alert.key } : {}),
+    }
+    notifier.notify(alert.kind, alert.sessionID, alert.title, alert.text, alert.owner, extra).catch((cause) => {
       console.error("[hub] push notification failed:", cause instanceof Error ? cause.message : cause)
     })
   })
@@ -642,10 +646,13 @@ export function startCentral(options: CentralOptions): Central {
       }
       return Response.json({ muted: store.setSessionMuted(user.id, sessionID, input.muted) })
     }),
-    route("POST", "/api/push/test", "user", async ({ device }) => {
+    route("POST", "/api/push/test", "user", async ({ request, device }) => {
+      // The body is optional (older clients send none): {kind?} picks what the test looks like.
+      const kind = (await body(request).catch(() => ({}) as Record<string, unknown>)).kind
+      if (kind !== undefined && !isNotificationKind(kind)) return error(400, `kind must be one of ${PUSH_PREF_KEYS.join(", ")}`)
       const subscriptions = store.pushSubscriptions().filter((s) => s.deviceID === device.id).length
       if (subscriptions === 0) return Response.json({ sent: 0, failed: [], subscriptions })
-      const result = await push.test(device.id)
+      const result = await push.test(device.id, kind)
       if ("limited" in result) {
         return Response.json({ error: "Wait a few seconds before sending another test" }, { status: 429, headers: { "retry-after": String(result.retryAfter) } })
       }
@@ -1325,11 +1332,11 @@ function pushTarget(value: unknown): { endpoint: string; keys: { p256dh: string;
   return { endpoint, keys: { p256dh, auth } }
 }
 
-/** Boolean pref fields (and 0.5.0's `blocked`) from untrusted input; undefined when nothing applies. */
+/** Boolean pref fields (and the legacy `blocked` and `finished`) from untrusted input; undefined when nothing applies. */
 function prefsInput(value: unknown): (Partial<PushPrefs> & LegacyPushPrefs) | undefined {
   if (typeof value !== "object" || value === null) return undefined
   const prefs: Partial<PushPrefs> & LegacyPushPrefs = {}
-  for (const key of [...PUSH_PREF_KEYS, "blocked"] as const) {
+  for (const key of [...PUSH_PREF_KEYS, "blocked", "finished"] as const) {
     const v = (value as Record<string, unknown>)[key]
     if (typeof v === "boolean") prefs[key] = v
   }

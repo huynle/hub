@@ -278,40 +278,43 @@ describe("alerts (push triggers)", () => {
     registry.connect("c2", laptop, hello("p2", "service"))
     registry.setSessions("c2", [session("ses_1", { title: "api-server" })])
     alerts = []
-    registry.subscribeAlerts((alert) => alerts.push(alert))
+    registry.subscribeAlerts((alert) => void (alert.kind !== "activity" && alerts.push(alert)))
   })
 
   test("a new permission anywhere in the tree alerts once for the root, never on SSE", () => {
     const asked = ev("permission.asked", { sessionID: "ses_child", id: "per_1", action: "bash", resources: ["rm -rf"] })
     registry.observe("c1", asked)
     registry.observe("c2", asked)
-    expect(alerts).toEqual([{ kind: "blocked", sessionID: "ses_1", title: "api-server", detail: "permission", requestID: "per_1" }])
+    expect(alerts).toEqual([{ kind: "permission", sessionID: "ses_1", title: "api-server", requestID: "per_1" }])
     expect(messages.some((m) => (m as any).type === "alert")).toBe(false)
   })
 
-  test("a new form alerts as blocked with detail form; unknown sessions do not alert", () => {
+  test("a new form alerts as a question; unknown sessions do not alert", () => {
     registry.observe("c1", ev("form.created", { form: { id: "frm_1", sessionID: "ses_1", title: "Pick" } }))
     registry.observe("c1", ev("form.created", { form: { id: "frm_1", sessionID: "ses_1", title: "Pick" } }))
     registry.observe("c1", ev("permission.asked", { sessionID: "ses_other", id: "per_9", action: "bash" }))
-    expect(alerts).toEqual([{ kind: "blocked", sessionID: "ses_1", title: "api-server", detail: "form" }])
+    expect(alerts).toEqual([{ kind: "question", sessionID: "ses_1", title: "api-server" }])
   })
 
-  test("root execution succeeded/failed alerts finished; child sessions do not", () => {
+  test("a root turn alerts turn, a root failure failed (with its reason); a child's end is not a root's", () => {
     registry.observe("c1", ev("session.execution.succeeded", { sessionID: "ses_child" }))
+    registry.observe("c1", ev("session.execution.started", { sessionID: "ses_1" }))
     registry.observe("c1", ev("session.execution.succeeded", { sessionID: "ses_1" }))
     registry.observe("c1", ev("session.execution.failed", { sessionID: "ses_1", error: { message: "x" } }))
-    registry.observe("c1", ev("session.execution.interrupted", { sessionID: "ses_1" }))
+    registry.observe("c1", ev("session.execution.interrupted", { sessionID: "ses_1", reason: "user" }))
     expect(alerts).toEqual([
-      { kind: "finished", sessionID: "ses_1", title: "api-server", detail: "succeeded" },
-      { kind: "finished", sessionID: "ses_1", title: "api-server", detail: "failed" },
+      { kind: "turn", sessionID: "ses_1", title: "api-server" },
+      { kind: "failed", sessionID: "ses_1", title: "api-server", text: "x" },
     ])
   })
 
-  test("no finished alert while a voice turn is active for the session", () => {
+  test("no turn alert while a voice turn is active for the session", () => {
     const release = registry.beginTurn("ses_1")
+    registry.observe("c1", ev("session.execution.started", { sessionID: "ses_1" }))
     registry.observe("c1", ev("session.execution.succeeded", { sessionID: "ses_1" }))
     release()
     expect(alerts).toEqual([])
+    registry.observe("c1", ev("session.execution.started", { sessionID: "ses_1" }))
     registry.observe("c1", ev("session.execution.succeeded", { sessionID: "ses_1" }))
     expect(alerts).toHaveLength(1)
   })
@@ -319,6 +322,7 @@ describe("alerts (push triggers)", () => {
   test("unsubscribe stops alerts", () => {
     const off = registry.subscribeAlerts(() => {})
     off()
+    registry.observe("c1", ev("session.execution.started", { sessionID: "ses_1" }))
     registry.observe("c1", ev("session.execution.succeeded", { sessionID: "ses_1" }))
     expect(alerts).toHaveLength(1)
   })
@@ -436,7 +440,7 @@ describe("presence and conversation-mode alerts", () => {
     registry.connect("c1", laptop, hello("p1"))
     registry.setSessions("c1", [session("ses_1", { owned: true, title: "api-server" }), session("ses_kid", { parentID: "ses_1" })])
     alerts = []
-    registry.subscribeAlerts((alert) => alerts.push(alert))
+    registry.subscribeAlerts((alert) => void (alert.kind !== "activity" && alerts.push(alert)))
   })
 
   test("a root is watched for 45 s after any device reports one of its sessions visible; hidden clears that device", () => {
@@ -456,9 +460,10 @@ describe("presence and conversation-mode alerts", () => {
     expect(registry.watched("ses_1")).toBe(false)
   })
 
-  test("in conversation mode: no finished alert while watched; when not watched, finished and each spoken root text alert", () => {
+  test("in conversation mode: no turn alert while watched; when not watched, turn and each spoken root text alert", () => {
     registry.setConversation("ses_1", true, "c1")
     registry.setPresence("dev_a", "ses_1", true)
+    registry.observe("c1", ev("session.execution.started", { sessionID: "ses_1" }))
     registry.observe("c1", ev("session.execution.succeeded", { sessionID: "ses_1" }))
     registry.observe("c1", ended("ses_1", 0, "Hello."))
     expect(alerts).toEqual([])
@@ -466,18 +471,25 @@ describe("presence and conversation-mode alerts", () => {
     registry.setPresence("dev_a", "ses_1", false)
     registry.observe("c1", ended("ses_1", 1, "All tests pass."))
     registry.observe("c1", ended("ses_kid", 0, "Subagent chatter."))
+    registry.observe("c1", ev("session.execution.started", { sessionID: "ses_1" }))
     registry.observe("c1", ev("session.execution.succeeded", { sessionID: "ses_1" }))
     expect(alerts).toEqual([
       { kind: "say", sessionID: "ses_1", title: "api-server", text: "All tests pass." },
-      { kind: "finished", sessionID: "ses_1", title: "api-server", detail: "succeeded" },
+      { kind: "turn", sessionID: "ses_1", title: "api-server" },
     ])
   })
 
-  test("outside conversation mode, presence does not suppress finished and texts never alert", () => {
+  test("outside conversation mode too, presence suppresses run notifications (not questions); texts never alert", () => {
     registry.setPresence("dev_a", "ses_1", true)
     registry.observe("c1", ended("ses_1", 0, "Hello."))
+    registry.observe("c1", ev("session.execution.started", { sessionID: "ses_1" }))
+    registry.observe("c1", ev("session.execution.failed", { sessionID: "ses_1", error: { message: "x" } }))
+    registry.observe("c1", ev("form.created", { form: { id: "frm_1", sessionID: "ses_1", title: "Pick" } }))
+    expect(alerts).toEqual([{ kind: "question", sessionID: "ses_1", title: "api-server" }])
+    registry.setPresence("dev_a", "ses_1", false)
+    registry.observe("c1", ev("session.execution.started", { sessionID: "ses_1" }))
     registry.observe("c1", ev("session.execution.succeeded", { sessionID: "ses_1" }))
-    expect(alerts).toEqual([{ kind: "finished", sessionID: "ses_1", title: "api-server", detail: "succeeded" }])
+    expect(alerts.at(-1)).toEqual({ kind: "turn", sessionID: "ses_1", title: "api-server" })
   })
 
   test("an expired child result is not spoken when its success arrives late", () => {
