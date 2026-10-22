@@ -72,6 +72,18 @@ async function replyForm(kind: "service" | "standalone", action: FormAction): Pr
 }
 
 /**
+ * Has OpenCode regenerate a session's title with its title agent: session.update with an empty title over
+ * the own server's HTTP API (the handler runs SessionTitle.generate and returns when it is done). The plugin
+ * API's session.update would rename the session to "" instead. "unavailable" when the server cannot be reached.
+ */
+async function generateTitle(kind: "service" | "standalone", sessionID: string): Promise<"done" | "unavailable"> {
+  const client = await ownClient(kind).catch(() => undefined)
+  if (!client) return "unavailable"
+  await client.session.update({ sessionID, title: "" })
+  return "done"
+}
+
+/**
  * What runs now on this process's own server: session.active (sessions with a run in progress) and the running
  * shells of the given directories (shell.list, per location) that belong to a session. Empty when the server
  * cannot be reached.
@@ -132,6 +144,7 @@ function hostFrom(ctx: Context, locations: () => PermissionLocation[], kind: "se
     replyForm: (action) => replyForm(kind, action),
     interrupt: (sessionID) => session.interrupt({ sessionID }),
     updateSession: (sessionID, input) => session.update({ sessionID, ...input }),
+    generateTitle: (sessionID) => generateTitle(kind, sessionID),
     switchAgent: (sessionID, id) => session.switchAgent({ sessionID, agent: id }),
     switchModel: (sessionID, model) => session.switchModel({ sessionID, model }),
     hasAgent: async (id) => {
