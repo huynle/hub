@@ -188,34 +188,14 @@ export function SessionView(props: { id: string }) {
     const rootID = typeof m.rootID === "string" ? m.rootID : m.sessionID
     if (m.type === "activity" && mine(rootID, m.sessionID) && m.item && m.item.kind !== "thinking") {
       // Tool steps; thinking shows up through streamed reasoning.
-      const item = m.item
-      timeline.upsert({
-        key: `activity:${m.sessionID}:${item.id}`,
-        sessionID: m.sessionID,
-        kind: "tool",
-        ...(item.tool ? { name: item.tool } : {}),
-        ...(item.summary ? { summary: item.summary } : {}),
-        ...(item.error ? { error: item.error } : {}),
-        state: item.state,
-        at: timeline.get(`activity:${m.sessionID}:${item.id}`)?.at ?? item.at,
-      })
+      timeline.activity(m.sessionID, m.item)
       bump()
     } else if (m.type === "reasoning" && mine(rootID, m.sessionID) && typeof m.messageID === "string" && typeof m.delta === "string") {
       timeline.appendReasoning({ sessionID: m.sessionID, messageID: m.messageID, delta: m.delta })
       bump()
     } else if (m.type === "delta" && mine(rootID, m.sessionID) && typeof m.messageID === "string" && typeof m.text === "string") {
-      const key = `${m.messageID}:text`
-      timeline.upsert({
-        key,
-        messageID: m.messageID,
-        sessionID: m.sessionID,
-        kind: "assistant",
-        text: `${timeline.get(key)?.text ?? ""}${m.text}`,
-        live: true,
-        at: timeline.get(key)?.at ?? Date.now(),
-      })
       // Text after reasoning ends that reasoning.
-      timeline.endReasoning(m.sessionID)
+      timeline.appendText({ sessionID: m.sessionID, messageID: m.messageID, ...(Number.isInteger(m.ordinal) ? { ordinal: m.ordinal } : {}), delta: m.text })
       bump()
     } else if (m.type === "turn" && m.sessionID === id && awaitingTurn) {
       const { sub, sentAt } = awaitingTurn
@@ -427,7 +407,7 @@ export function SessionView(props: { id: string }) {
       },
       tick: (key, kind) => setTicks((t) => ({ ...t, [key]: kind })),
       agent: (message) => {
-        const key = message.messageID ? `${message.messageID}:text` : `say:${++localSeq}`
+        const key = message.messageID ? timeline.liveTextKey(message.messageID) : `say:${++localSeq}`
         const { mode, text } = reconcileSay(timeline.get(key)?.text ?? "", message.text)
         if (mode !== "keep") {
           timeline.upsert({ key, messageID: message.messageID, kind: "assistant", text, at: timeline.get(key)?.at ?? Date.now() })
