@@ -20,9 +20,11 @@ Formerly **opencode-voice** and, briefly, **opencode-hub**
   (tool calls, thinking, subagents, streamed replies), read the conversation, send a turn (it steers the
   run while the session is busy), stop a whole session tree, answer permissions, switch models, and
   start new sessions, from the phone.
-- **Notifications**: web push when a session asks a question, needs permission, fails or finishes, with
-  per-device toggles, quiet hours and per-session mute; opt-in **Activity updates** (one quiet, self-replacing
-  notification per session) to follow subagents, long tools and scripts with the screen off.
+- **Notifications**: web push when a session asks a question, needs permission, fails, or is **all done** (the
+  session and all its subagents and scripts settled, once per run), plus opt-in finer kinds (every turn,
+  stopped, retrying, each subagent, each script, long tools) and **Activity updates** (one quiet, self-replacing
+  notification per session); one toggle per kind and device, quiet hours and per-session mute
+  ([docs/notifications.md](docs/notifications.md)).
 - **Live without waste**: the console's stream resumes where it left off after a lock or app switch (event
   ids + replay), pauses while the page is hidden, and carries streamed text only for the session on screen.
 - **Running detection**: a session counts as working while OpenCode reports it busy or retrying, or while a
@@ -204,10 +206,10 @@ conversation mode and utterances (403 `not_exposed` for sessions not shared with
 | `GET /api/sessions/:id/diff?file=` | one file's patch, on demand (capped at 400 KB as JSON, then `truncated: true`); never stored in the hub |
 | `POST /api/sessions/:id/read` · `GET /api/reads` | per-user read marks, synced to your other devices |
 | `GET /api/events?lite=1&session=<id>&last=<id>` | the live stream (SSE). Every message has an `id:`; reconnecting with `Last-Event-ID` (EventSource does it) or `?last=` replays what was missed when the hub still has it (last 2000 events or 5 minutes per user; one fresh `catalog` stands for any catalog changes), else sends the catalog then `{type: "resync"}` (the page refetches what it shows). Ids are `<epoch>.<n>`; a hub restart starts a new epoch. `lite=1` leaves out `delta`/`reasoning` except of `session`'s tree (status, activity, catalog, turns and the rest still come). Heartbeat: `event: ping` every 20 s |
-| `GET /api/push/prefs?endpoint=` | `{prefs, quietHours, activityMinutes, muted, subscriptions, subscribed?}`: this device's toggles (`handoff, question, permission, finished, failed, say, activity`), activity update interval and quiet hours, the user's muted sessions, how many subscriptions the hub holds for this device, and whether it holds `endpoint` |
+| `GET /api/push/prefs?endpoint=` | `{prefs, quietHours, activityMinutes, muted, subscriptions, subscribed?}`: this device's toggles (`handoff, question, permission, done, failed, turn, stopped, retry, subagentDone, subagentFailed, jobDone, jobFailed, longTool, say, activity`; `PUT` also accepts the legacy `finished` → `done` and `blocked` → question + permission), activity update interval and quiet hours, the user's muted sessions, how many subscriptions the hub holds for this device, and whether it holds `endpoint` |
 | `PUT /api/push/prefs {toggles…, quietHours?, activityMinutes?}` | boolean toggles (a 0.5.0 `blocked` sets question and permission); `quietHours` `{start: "HH:MM", end: "HH:MM", timeZone}` or `null`; `activityMinutes` a whole number 1–60 (400 when invalid) |
 | `POST /api/push/subscribe {subscription, prefs?, oldEndpoint?}` · `POST /api/push/unsubscribe {endpoint}` | this device's subscriptions; `oldEndpoint` is dropped (rotated subscription). The endpoint must be https on a public hostname that resolves only to public addresses (no loopback, private, link-local, CGNAT or ULA hosts, no `localhost`/`*.local`/`*.internal`), else 400 |
-| `POST /api/push/test` | a test notification to the caller's device only: `{sent, failed: [{host, status?}], subscriptions}`; 429 with `retry-after` within 10 s of the last one |
+| `POST /api/push/test {kind?}` | a test notification to the caller's device only, shaped like `kind` when given (400 for an unknown kind): `{sent, failed: [{host, status?}], subscriptions}`; 429 with `retry-after` within 10 s of the last one |
 | `PUT /api/push/mute {sessionID, muted}` | mutes or unmutes a session's notifications for the user: `{muted}` |
 
 ## Spoke (OpenCode plugin)
@@ -516,16 +518,30 @@ Pure logic lives in `web/src/core` and `web/src/lib` (bun tests in `test/web-*.t
   failed, the session still exists and the hub's `warning` is shown. 409 (background service not
   connected) is shown under the composer.
 
-**Notifications** (web push, VAPID keys generated once and stored in the state file). Each device picks what
-it wants (Settings → Notifications): **a session asks a question**, **needs permission**, **failed**,
-**finished** (a root session's run succeeded, except voice turns started from the page), **hand-offs from the
-terminal**, and **Voice replies when you're not watching** (pref `say`: spoken replies while no device shows
-the session). Questions, permissions, hand-offs and Voice replies are on by default; finished and failed are
-opt-in (0.5.0's single "blocked" toggle became question + permission, and its "finished" became finished +
-failed, migrated on start). Optional **quiet hours** per device (local start/end time in the browser's time
+**Notifications** (web push, VAPID keys generated once and stored in the state file). Each device picks each
+kind it wants (Settings → Notifications, grouped, with a one-line description each and a "You'll get: …"
+summary); [docs/notifications.md](docs/notifications.md) lists every kind, its trigger and what is not notified:
+
+- **Needs you**: a **question**, a **permission** (on by default).
+- **Session**: **All done** (on): the root session's last turn succeeded and the whole tree is settled (no
+  subagent or shell job running, nothing waiting for an answer, no hub turn) for 15 s, once per run;
+  **Failed** (on, with the reason); **Turn finished** (every root turn, 0.7's "finished": off, noisy because
+  each background subagent that completes starts a short continuation turn); **Stopped** (shutdown,
+  inactivity) and **Retrying** (provider retries), off.
+- **Subagents**: each subagent **finished** / **failed** (off). **Scripts and tools**: a background shell or
+  terminal **exited 0** / **failed** (non-zero, killed, timed out), a **long tool** (≥ 30 s) ended (off).
+- **Voice**: spoken replies while no device shows the session (`say`) and **hand-offs** from the terminal (on).
+- **Activity digest** (off, below).
+
+Titles read "*session* · *kind*" ("KVM Rewrite · All done", "KVM Rewrite · Subagent S3 macros finished",
+"KVM Rewrite · Script exited 1"). Nothing but questions, permissions, hand-offs and spoken replies is sent
+while a device shows the session. Stored 0.7 prefs migrate on start: `finished` becomes All done (not every
+turn), the rest is kept and the new kinds start off (0.5.0's single "blocked" toggle still becomes question +
+permission). Optional **quiet hours** per device (local start/end time in the browser's time
 zone) hold everything except hand-offs; **Mute notifications** in a session's ⋯ menu silences one session
 for you on every device (hand-offs still come through). At most one per session and kind every 30 s
-(Voice replies: 10 s); expired subscriptions (404/410) are pruned.
+(Voice replies: 10 s; subagents, scripts and long tools: per subagent, job or call); expired subscriptions
+(404/410) are pruned.
 
 **Activity updates** (pref `activity`, off by default on every device; Settings → Notifications shows a hint
 until it is on): to know what happens without keeping the screen on. Steps of interest in a session tree — a
@@ -543,12 +559,14 @@ device shows the session.
   notifications on this device** fixes it. When permission is granted, the app re-subscribes by itself on
   load if the hub lost the subscription, and the service worker re-subscribes when the browser rotates it
   (`pushsubscriptionchange`). **Send test notification** sends one to this device only and shows the result
-  (sent, or the push service's status).
+  (sent, or the push service's status); pick a kind next to it to see how that kind looks.
 - **Delivery**: questions, permissions and failures are sent with `urgency: high` and a TTL of one hour so a
   phone in doze gets them; they stay on screen until handled (`requireInteraction`), vibrate, and replace the
   previous one of the same session and kind. A permission notification asks the hub (with the device's
   cookie, from the service worker) what the request is, shows it, and offers **Allow once** / **Reject**;
-  the payload itself never carries it. Payloads are `{kind, sessionID, title, body, requestID?}`.
+  the payload itself never carries it. Payloads are `{kind, sessionID, title, body, requestID?, test?}`.
+  Failures (and failed subagents and scripts) vibrate; progress kinds (turn, retrying, subagent and script
+  finished, long tool, activity) replace the previous one of the session quietly.
 - **Android (Chrome)**, for notifications that arrive with the screen off: open the public URL, sign in or
   pair, then Chrome's menu → **Install app** (or Add to Home screen) and use the installed app; Settings →
   Notifications → **Enable notifications on this device** and **Send test notification**. In Android
@@ -740,10 +758,10 @@ SSE (`/api/events`) adds:
 - `status` entries of working sessions carry `since` (ms epoch the current run started), also in the catalog
   and `GET /api/sessions/:id`.
 
-Pushes in conversation mode depend on presence: while the session is watched, "finished" is not sent
-(the phone is open and speaking). When nobody watches, "finished" is sent as usual and each spoken text
+Pushes depend on presence: while the session is watched, run notifications (all done, turn, failed, …) are
+not sent (the page is open, and in conversation mode speaking). When nobody watches, they are sent as usual and in conversation mode each spoken text
 of the root session (the whole text part, when it ends) is pushed as kind `say` (title = session title, body = the text, max 180 chars; at
-most one every 10 s per session; on by default, pref `say`). "blocked" is always sent. `/api/transcribe` and `/api/speak` have no rate limit; `/api/speak` accepts up to
+most one every 10 s per session; on by default, pref `say`). Questions and permissions are always sent. `/api/transcribe` and `/api/speak` have no rate limit; `/api/speak` accepts up to
 `HUB_MAX_SPEECH_CHARS` per call, so the phone sends sentence-sized chunks. `/api/speak` streams the provider's MP3 through as it
 arrives (chunked; nothing is buffered on the hub, and a phone that cancels aborts the upstream request), so playback
 can start before synthesis ends; provider errors still answer 502 before any audio.
