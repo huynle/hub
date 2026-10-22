@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Voice mode: progress cues play as loud as the spoken replies.** Short cue phrases ("On it.", "Hang on." …)
+  came out of TTS up to ~4 dB louder or quieter than replies (measured: −15 to −22 LUFS against replies around
+  −19.5). Each phrase is now normalised while it is prefetched: measured (BS.1770 gated loudness), trimmed of
+  silence beyond 80 ms (cues start sooner), gained to the replies' loudness with peaks limited to −1 dBFS, and
+  cached as WAV. The target is the running median of measured replies per TTS voice (completed sentences decoded
+  when idle; −19.5 LUFS until then). The cue cache moved to `hub-cues-v2`, so old un-normalised cues are fetched
+  again once. Both audio elements play at volume 1. Measured with the default voice: cue spread around the reply
+  median went from −2.0…+4.8 dB to within 0.1 dB; normalising adds ~8 ms (max 60 ms) per phrase at prefetch and
+  nothing at play time.
 - **The console keeps a session's conversation in order**: subagents no longer bunch together at the bottom of
   the conversation, and thoughts no longer jump below the text or tools that came after them. Rows used to be
   sorted by their timestamps, which come from different clocks (OpenCode's message and part times, the hub's,
