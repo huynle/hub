@@ -963,8 +963,8 @@ describe("Spoke", () => {
     const page = await server.request({ op: "timeline", sessionID: "ses_a", limit: 2 })
     expect(page.result).toEqual({
       items: [
-        { key: "u1:text", messageID: "u1", sessionID: "ses_a", kind: "user", text: "Please inspect it", at: 1 },
-        { key: "a1:0", messageID: "a1", partID: "0", sessionID: "ses_a", kind: "reasoning", text: "## Inspecting\nI will read the file.", state: "done", at: 2, completed: 4 },
+        { key: "u1:text", messageID: "u1", sessionID: "ses_a", kind: "user", text: "Please inspect it", at: 1, pos: 1000 },
+        { key: "a1:0", messageID: "a1", partID: "0", sessionID: "ses_a", kind: "reasoning", text: "## Inspecting\nI will read the file.", state: "done", at: 2, completed: 4, pos: 2000 },
       ],
       cursor: "2",
     })
@@ -1063,8 +1063,8 @@ describe("prompt images", () => {
       { key: "u1:text", messageID: "u1", sessionID: "ses_a", kind: "user", text: "what is this?", at: 1, files: [
         { index: 0, mime: "image/png", name: "shot.png" },
         { index: 1, mime: "text/plain", name: "notes.txt" },
-      ] },
-      { key: "u2:text", messageID: "u2", sessionID: "ses_a", kind: "user", text: "", at: 2, files: [{ index: 0, mime: "image/jpeg" }] },
+      ], pos: 1000 },
+      { key: "u2:text", messageID: "u2", sessionID: "ses_a", kind: "user", text: "", at: 2, files: [{ index: 0, mime: "image/jpeg" }], pos: 2000 },
     ])
     const file = await server.request({ op: "timelineFile", sessionID: "ses_a", messageID: "u1", index: 0 })
     expect(file.result).toEqual({ file: { mime: "image/png", data: png, name: "shot.png" } })
