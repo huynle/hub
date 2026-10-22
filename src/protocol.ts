@@ -167,6 +167,12 @@ export const FORWARDED_EVENTS: ReadonlySet<string> = new Set([
   "session.seed",
 ])
 
+/**
+ * OpenCode events the spoke forwards only in another (compact) form: a subagent tool's progress, which names the
+ * child session, goes out as a `session.tool.called` with `childSessionID` (a type every hub accepts).
+ */
+export const COMPACTED_EVENTS: ReadonlySet<string> = new Set(["session.tool.progress"])
+
 /** Longest job command forwarded. */
 export const JOB_COMMAND_MAX = 200
 /** Longest retry reason forwarded. */
@@ -685,8 +691,14 @@ export function compactActivity(event: ForwardedEvent, sessionOf?: (jobID: strin
       return { type: event.type, data: { ...base, name: d.name } }
     case "session.tool.called":
       return { type: event.type, data: { ...base, summary: summarizeToolInput(d.input), background: (d.input as any)?.background === true } }
-    case "session.tool.success":
-      return { type: event.type, data: base }
+    case "session.tool.progress": {
+      const childSessionID = childSessionOf(d.metadata)
+      return childSessionID ? { type: "session.tool.called", data: { ...base, childSessionID } } : undefined
+    }
+    case "session.tool.success": {
+      const childSessionID = childSessionOf(d.metadata)
+      return { type: event.type, data: childSessionID ? { ...base, childSessionID } : base }
+    }
     case "session.tool.failed": {
       const message = typeof (d.error as any)?.message === "string" ? String((d.error as any).message).slice(0, ACTIVITY_SUMMARY_MAX) : "failed"
       return { type: event.type, data: { ...base, error: message } }
@@ -702,6 +714,12 @@ export function compactActivity(event: ForwardedEvent, sessionOf?: (jobID: strin
     default:
       return event
   }
+}
+
+/** The child session a subagent tool reports in its metadata (`{sessionID: "ses_…"}`). */
+function childSessionOf(metadata: unknown): string | undefined {
+  const id = (metadata as { sessionID?: unknown } | undefined)?.sessionID
+  return typeof id === "string" && /^ses_[A-Za-z0-9]+$/.test(id) ? id : undefined
 }
 
 const JOB_EVENTS = new Set(["session.shell.started", "session.shell.ended", "shell.created", "shell.exited", "shell.deleted", "pty.created", "pty.updated", "pty.exited", "pty.deleted"])

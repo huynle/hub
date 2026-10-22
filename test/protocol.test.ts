@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { encode, MAX_PROMPT_IMAGE_BYTES, MAX_PROMPT_IMAGES, MAX_PROMPT_IMAGES_BASE64, parseServerMessage, parseSpokeMessage, promptImagesProblem, PROTOCOL_VERSION } from "../src/protocol"
+import { encode, FORWARDED_EVENTS, MAX_PROMPT_IMAGE_BYTES, MAX_PROMPT_IMAGES, MAX_PROMPT_IMAGES_BASE64, parseServerMessage, parseSpokeMessage, promptImagesProblem, PROTOCOL_VERSION } from "../src/protocol"
 
 const hello = {
   t: "hello",
@@ -137,6 +137,14 @@ describe("activity compaction", () => {
     const failed = compactActivity({ type: "session.tool.failed", data: { sessionID: "s", assistantMessageID: "m", id: "t", error: { type: "x", message: "boom" } } })
     expect(failed.data.error).toBe("boom")
     expect(compactActivity({ type: "session.tool.called", data: { sessionID: "s", id: "t", input: { agent: "general", background: true } } }).data.background).toBe(true)
+  })
+  test("a subagent tool's child session goes out as a compact tool.called (old hubs accept it); other progress is dropped", () => {
+    const progress = compactActivity({ type: "session.tool.progress", data: { sessionID: "s", assistantMessageID: "m", id: "t", metadata: { sessionID: "ses_child", status: "running", secret: "BIG" } } })
+    expect(progress).toEqual({ type: "session.tool.called", data: { sessionID: "s", assistantMessageID: "m", id: "t", childSessionID: "ses_child" } })
+    expect(compactActivity({ type: "session.tool.progress", data: { sessionID: "s", id: "t", metadata: { lines: 3 } } })).toBeUndefined()
+    const ok = compactActivity({ type: "session.tool.success", data: { sessionID: "s", assistantMessageID: "m", id: "t", content: [], metadata: { sessionID: "ses_child", status: "completed" } } })
+    expect(ok.data).toEqual({ sessionID: "s", assistantMessageID: "m", id: "t", childSessionID: "ses_child" })
+    expect(FORWARDED_EVENTS.has(progress.type)).toBe(true)
   })
   test("tool events are forwardable", () => {
     const ev = (type: string) => JSON.stringify({ t: "event", event: { type, data: { sessionID: "ses_1" } } })

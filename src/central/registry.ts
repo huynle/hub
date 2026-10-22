@@ -51,8 +51,8 @@ export const STREAM_INTERVAL_MS = 100
 export type RegistryMessage =
   | { readonly type: "catalog" }
   | { readonly type: "status"; readonly sessionID: string; readonly sessions: LiveStatus[] }
-  /** Assistant text streamed in a root or subagent session (rootID: its root session). */
-  | { readonly type: "delta"; readonly sessionID: string; readonly rootID: string; readonly messageID?: string; readonly text: string }
+  /** Assistant text streamed in a root or subagent session (rootID: its root session; ordinal: its text part). */
+  | { readonly type: "delta"; readonly sessionID: string; readonly rootID: string; readonly messageID?: string; readonly ordinal?: number; readonly text: string }
   /** Reasoning text streamed in a root or subagent session. */
   | { readonly type: "reasoning"; readonly sessionID: string; readonly rootID: string; readonly messageID?: string; readonly delta: string }
   | { readonly type: "conversation"; readonly sessionID: string; readonly on: boolean }
@@ -81,6 +81,8 @@ export interface ActivityItem {
   readonly summary?: string
   /** The tool was started in the background (e.g. a background subagent). */
   readonly background?: true
+  /** A subagent tool: the child session it runs (once the tool reported it). */
+  readonly childSessionID?: string
   readonly state: ActivityState
   readonly error?: string
   /** ms epoch of creation, then of the last state change. */
@@ -228,7 +230,7 @@ interface Conn {
 interface Stream {
   last: number
   timer?: unknown
-  pending: Array<{ kind: "delta" | "reasoning"; rootID: string; messageID?: string; text: string }>
+  pending: Array<{ kind: "delta" | "reasoning"; rootID: string; messageID?: string; ordinal?: number; text: string }>
 }
 
 /** Latest assistant message of a child run, paired with its successful completion for direct speech. */
@@ -551,11 +553,12 @@ export class Registry {
     const text = typeof data.delta === "string" ? data.delta : ""
     if (!text) return
     const messageID = typeof data.assistantMessageID === "string" ? data.assistantMessageID : undefined
+    const ordinal = kind === "delta" && Number.isInteger(data.ordinal) && (data.ordinal as number) >= 0 ? (data.ordinal as number) : undefined
     let stream = this.streams.get(sessionID)
     if (!stream) remember(this.streams, sessionID, (stream = { last: -Infinity, pending: [] }))
     const tail = stream.pending.at(-1)
-    if (tail && tail.kind === kind && tail.messageID === messageID && tail.rootID === rootID) tail.text += text
-    else stream.pending.push({ kind, rootID, messageID, text })
+    if (tail && tail.kind === kind && tail.messageID === messageID && tail.ordinal === ordinal && tail.rootID === rootID) tail.text += text
+    else stream.pending.push({ kind, rootID, messageID, ...(ordinal === undefined ? {} : { ordinal }), text })
     if (stream.timer !== undefined) return
     const wait = stream.last + STREAM_INTERVAL_MS - this.now()
     if (wait <= 0) return this.flushStream(stream, sessionID)
@@ -574,9 +577,9 @@ export class Registry {
     const chunks = stream.pending
     stream.pending = []
     stream.last = this.now()
-    for (const { kind, rootID, messageID, text } of chunks) {
+    for (const { kind, rootID, messageID, ordinal, text } of chunks) {
       const message = { sessionID, rootID, ...(messageID ? { messageID } : {}) }
-      this.emit(kind === "delta" ? { type: "delta", ...message, text } : { type: "reasoning", ...message, delta: text })
+      this.emit(kind === "delta" ? { type: "delta", ...message, ...(ordinal === undefined ? {} : { ordinal }), text } : { type: "reasoning", ...message, delta: text })
     }
   }
 
@@ -1064,11 +1067,16 @@ export class Registry {
         const id = text(data.id)
         if (!id) return
         const summary = text(data.summary)
-        const details = { ...(summary ? { summary } : {}), ...(data.background === true ? { background: true as const } : {}) }
+        const childSessionID = text(data.childSessionID)
+        // A compact progress event (childSessionID only) adds the child to the item without touching the rest.
+        const details = childSessionID && !("summary" in data)
+          ? { childSessionID }
+          : { ...(summary ? { summary } : {}), ...(data.background === true ? { background: true as const } : {}), ...(childSessionID ? { childSessionID } : {}) }
         const existing = find(id)
         if (!existing) return add({ id, sessionID, kind: "tool", ...details, state: "running", at })
-        if (existing.summary === details.summary && existing.background === details.background) return
-        return this.replace(rootID, existing, { ...existing, ...details })
+        const next: ActivityItem = { ...existing, ...details }
+        if (next.summary === existing.summary && next.background === existing.background && next.childSessionID === existing.childSessionID) return
+        return this.replace(rootID, existing, next)
       }
       case "session.tool.success":
       case "session.tool.failed": {
@@ -1076,11 +1084,12 @@ export class Registry {
         if (!existing || existing.state !== "running") return
         const failed = event.type === "session.tool.failed"
         const error = failed ? (text(data.error) ?? "failed") : undefined
+        const childSessionID = existing.childSessionID ?? text(data.childSessionID)
         const took = at - existing.at
         const name = existing.summary ?? existing.tool ?? "tool"
         if (took >= LONG_TOOL_MS) this.step(rootID, "long", `${name} ${failed ? "failed" : "done"} (${Math.round(took / 1000)}s)`)
         else this.step(rootID, "tool", name)
-        return this.replace(rootID, existing, { ...existing, state: failed ? "failed" : "done", ...(error ? { error } : {}), at })
+        return this.replace(rootID, existing, { ...existing, state: failed ? "failed" : "done", ...(error ? { error } : {}), ...(childSessionID ? { childSessionID } : {}), at })
       }
       case "session.reasoning.started":
       case "session.reasoning.delta": {

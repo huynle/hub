@@ -769,7 +769,9 @@ describe("Spoke", () => {
     host.push({ type: "session.tool.failed", data: { ...base, id: "tool_2", error: { type: "x", message: "boom" }, content: "SECRET" } })
     host.push({ type: "session.reasoning.started", data: { sessionID: "ses_a", assistantMessageID: "msg_0", text: "SECRET THOUGHT" } })
     host.push({ type: "session.tool.called", data: { sessionID: "ses_b", id: "tool_b", input: { command: "ls" } } })
-    await until(() => forwarded(server).some((e) => e.type === "session.reasoning.started"))
+    host.push({ type: "session.tool.progress", data: { ...base, id: "tool_s", metadata: { sessionID: "ses_kid2", status: "running", note: "SECRET" } } })
+    host.push({ type: "session.tool.progress", data: { ...base, id: "tool_s", metadata: { output: "SECRET" } } })
+    await until(() => forwarded(server).some((e) => e.type === "session.tool.called" && e.data.childSessionID))
     await Bun.sleep(30)
     const activity = forwarded(server).filter((e) => e.type.startsWith("session.tool") || e.type.startsWith("session.reasoning"))
     expect(activity).toEqual([
@@ -779,6 +781,7 @@ describe("Spoke", () => {
       { type: "session.tool.failed", data: { ...base, id: "tool_2", error: "boom" } },
       { type: "session.reasoning.started", data: { sessionID: "ses_a", assistantMessageID: "msg_0" } },
       { type: "session.tool.called", data: { sessionID: "ses_b", id: "tool_b", summary: "ls", background: false } },
+      { type: "session.tool.called", data: { ...base, id: "tool_s", childSessionID: "ses_kid2" } },
     ])
     expect(JSON.stringify(server.frames)).not.toContain("SECRET")
   })

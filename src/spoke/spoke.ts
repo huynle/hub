@@ -6,6 +6,7 @@ import { readConfig, setSession, withServer, writeConfig, type Mode, type VoiceC
 import { isLoopbackURL } from "../loopback"
 import {
   compactActivity,
+  COMPACTED_EVENTS,
   FORWARDED_EVENTS,
   SEED_JOBS_MAX,
   type JobInfo,
@@ -1251,7 +1252,7 @@ export class Spoke {
         this.scheduleSeed()
       }
       void this.fetchInfo()
-      if (this.connection?.state === "connected" && FORWARDED_EVENTS.has(event.type)) {
+      if (this.connection?.state === "connected" && (FORWARDED_EVENTS.has(event.type) || COMPACTED_EVENTS.has(event.type))) {
         // Activity events go out compact: tool inputs become a short summary, outputs are dropped; job exits
         // get their session from the job.
         const compact = compactActivity({ type: event.type, data: (event.data ?? {}) as Record<string, unknown> }, (id) => this.tracker.jobSession(id))
