@@ -240,6 +240,18 @@ export class StatusBoard {
     return [...this.sessions.keys()]
   }
 
+  /**
+   * True when nothing in the tree runs (no run, busy or retrying status), waits for an answer, or has a running
+   * shell job. Terminals (pty) do not count: an open terminal is not work in progress.
+   */
+  settled(): boolean {
+    for (const entry of this.sessions.values()) {
+      if (entry.running || entry.busy || entry.blockers.length) return false
+      if (entry.jobs.some((job) => job.status === "running" && job.kind === "shell")) return false
+    }
+    return true
+  }
+
   snapshot(): { sessions: SessionStatus[] } {
     return { sessions: [...this.sessions.values()].map(view) }
   }
