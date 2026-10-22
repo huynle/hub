@@ -59,7 +59,8 @@ export interface AvailableModel {
 /**
  * A timeline page. Forward mode (`cursor`): oldest rows first, `cursor` for the next newer page. Newest-first
  * mode (`order: "desc"` or `before`): the newest rows (before `before`) in chronological order, `older` for the
- * page before them. Both cursors are opaque.
+ * page before them. Both cursors are opaque. Items are the spoke's rows (src/spoke/timeline.ts TimelineItem); newer
+ * spokes add optional `pos` (ordering position), `callID`, `childSessionID`, `title` and `ordinal`.
  */
 export interface TimelinePage {
   readonly items: readonly unknown[]
