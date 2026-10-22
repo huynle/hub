@@ -197,7 +197,7 @@ conversation mode and utterances (403 `not_exposed` for sessions not shared with
 |---|---|
 | `POST /api/sessions/:id/turn {text, images?}` | sends a turn; while the session tree is running it steers instead (202 `{mode: "steer", inboxID}`). An idle turn answers its `TurnResult` (`{outcome, reply, message?}`) when it ends; with `Prefer: respond-async` (the console sends it) a turn still running after 1.5 s answers 202 `{mode: "turn"}` (`Preference-Applied: respond-async`) and its result follows as an SSE `turn` event `{sessionID, outcome, reply, message?}`, so no proxy cuts a long request. The session stays busy until the turn ends either way. `images` is up to 4 `{mime, data, name?}` (PNG, JPEG, WebP or GIF; canonical base64 whose bytes match the type; each at most 512 KB decoded, together at most 750,000 base64 characters); `text` may be empty when images are attached. They reach OpenCode as inline file attachments. 400 empty, over 100,000 characters or invalid images (with the reason); 409 "A turn is already running for this session" |
 | `GET /api/sessions/:id/timeline?limit=N&order=desc` · `?limit=N&before=<older>` | the conversation as timeline rows, newest first: the latest `limit` rows (1–200, default 50) in chronological order, plus `older` (the cursor of the rows before them) while there are more. `before=<older>` returns the page before that cursor. Cursors are row keys, so they stay valid while new messages arrive. A page starts at a message boundary when it can (it may be up to twice `limit` then). 400 for an unknown cursor (history reverted or compacted: start again from the newest page). The forward mode `?limit=N&cursor=` (oldest rows first, `cursor` for the next page) still works; it cannot be combined with `before` or `order=desc`. The spoke reads OpenCode's history for a first page and serves the following pages from a short-lived per-session cache (30 s, dropped when the session changes) |
-| `GET /api/sessions/:id/timeline/messages/:message/files/:index` | one image attached to a user message, as bytes with its type (`cache-control: private, no-store`). Timeline user items list their attachments as `files: [{index, mime, name?}]` (never the bytes). Only PNG, JPEG, WebP and GIF are served (404 otherwise or when missing); 413 when the image would not fit in a protocol frame (about 650 KB) |
+| `GET /api/sessions/:id/timeline/messages/:message/files/:index` | one image attached to a user message, as bytes with its type (`cache-control: private, no-store`). Timeline user items list their attachments as `files: [{index, mime, name?}]` (never the bytes). Every timeline row carries `pos` (ordering position: session message order, then part order; derived from the message's creation time, kept increasing, so it does not change as pages move); tool rows `callID`, subagent tool rows `childSessionID` and `title` (the task description), assistant text rows `ordinal`. Only PNG, JPEG, WebP and GIF are served (404 otherwise or when missing); 413 when the image would not fit in a protocol frame (about 650 KB) |
 | `POST /api/sessions/:id/rename` | `{title}` → `{title}`: renames the session in OpenCode (`session.update`), through the process that owns it, else any other process that reports it. The title is trimmed and must be 1–200 characters (400 otherwise). Works with Voice off; the new title shows in every console at once (the spoke reports it before answering) |
 | `POST /api/sessions/:id/stop` | interrupts running descendants deepest first, then the root; idempotent. Also releases the hub's turn lock for the tree: a turn request still waiting answers `{outcome: "interrupted"}` and the next turn can start (`/interrupt` does the same) |
 | `GET /api/sessions/:id/summary` | context usage, todos, MCP status (at most 100 servers), branch and working-tree change stats (each part optional). `changes` lists at most 500 files, most-changed first, with `totalFiles` and `truncated`; its `additions`/`deletions` cover every file |
@@ -323,7 +323,11 @@ session, apply to the next turn or newly started worker, and fall back to the ma
 `workModel` when unset.
 
 The conversation is an inline execution timeline: streamed thinking, tools and nested subagents appear
-between messages as compact expandable rows. Reopening a session pages its projected message history from
+between messages as compact expandable rows. Rows keep the session's order, never wall-clock order: history
+rows carry the spoke's `pos` (message order, then part order), live rows go after the history loaded when they
+arrived (in arrival order) and are replaced in place by their stored row, and a subagent row stands where the
+tool call that spawned it is (timeline tool rows of `subagent`/`task` carry `childSessionID`; a subagent whose
+spawn is not loaded yet shows at the top of the loaded history). Reopening a session pages its projected message history from
 OpenCode. Expanding a tool fetches its complete input/output from the owning OpenCode process; the hub does
 not persist those potentially sensitive details.
 
@@ -718,13 +722,17 @@ SSE (`/api/events`) adds:
   delivery event arrives before the steer result).
 - `{type: "activity", sessionID, rootID, item}` when an activity item is created or changes state, for
   every session (all of the owner's devices see it, like `status`). `item` is `{id, sessionID, kind: "tool" | "thinking",
-  tool?, summary?, background?, state: "running" | "done" | "failed", error?, at}`; `sessionID` is where it
+  tool?, summary?, background?, childSessionID?, state: "running" | "done" | "failed", error?, at}`
+  (`childSessionID`: the session a subagent tool started, once the tool reports it); `sessionID` is where it
   happened (a subagent session maps to its root `rootID`). The hub keeps the 30 most recent items per
   root (in memory) and returns them, newest last, as `activity` in `GET /api/sessions/:id`. Spokes forward
   tool and reasoning events in compact form (`compactActivity`): tool name, a one-line summary of the
-  input (command, path, pattern…), ok/error; never file contents or outputs. Thinking items close on
+  input (command, path, pattern…), ok/error; never file contents or outputs. A subagent tool's
+  `session.tool.progress` goes out only as `session.tool.called {id, childSessionID}` (a type every hub
+  accepts); other progress is dropped. Thinking items close on
   `session.reasoning.ended`, when the next activity in that session starts, or when its run ends.
-- `{type: "delta", sessionID, rootID, messageID?, text}` (assistant text) and `{type: "reasoning", sessionID,
+- `{type: "delta", sessionID, rootID, messageID?, ordinal?, text}` (assistant text; `ordinal`: which text part of
+  the message, as OpenCode numbers them) and `{type: "reasoning", sessionID,
   rootID, messageID?, delta}` (reasoning text; spokes cut each delta to 2000 chars and never forward the full
   text of `session.reasoning.ended`) for root **and** subagent sessions. Per session they are coalesced to at
   most one send per 100 ms (the first delta goes out at once, later ones in the window are joined); anything
