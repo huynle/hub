@@ -19,37 +19,96 @@ export interface TimelineItem {
   readonly at?: number
   readonly completed?: number
   readonly files?: readonly TimelineFile[]
+  /**
+   * Ordering position: rows sort by it (never by `at`, whose clocks differ between parts). It follows the order
+   * of the session's messages and of the parts within a message, and depends only on the message's own creation
+   * time and its predecessors' (so it stays the same while history pages or the context window move).
+   */
+  readonly pos?: number
+  /** Tool rows: the tool call ID (live activity items use it as their ID). */
+  readonly callID?: string
+  /** Subagent (subagent/task) tool rows: the child session it runs in. */
+  readonly childSessionID?: string
+  /** Subagent tool rows: the task's short description. */
+  readonly title?: string
+  /** Assistant text rows: which text part of the message this is (0, 1, …), as in live text deltas. */
+  readonly ordinal?: number
 }
+
+/** Parts of one message a position leaves room for (later parts share the last slot). */
+const POS_PARTS = 1000
+const SUBAGENT_TOOLS = new Set(["subagent", "task"])
+const TITLE_MAX = 160
 
 const record = (value: unknown): Record<string, any> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : {}
 
 /** Projects OpenCode messages into stable, ordered, payload-light phone timeline rows. */
 export function timelineItems(sessionID: string, messages: readonly unknown[]): TimelineItem[] {
   const out: TimelineItem[] = []
+  let previous = -Infinity
   for (const raw of messages) {
     const message = record(raw)
     if (typeof message.id !== "string") continue
     const at = typeof message.time?.created === "number" ? message.time.created : undefined
+    // Messages keep the session's order even when one was created earlier than the one before it (a queued prompt).
+    const start = Math.max(at === undefined ? -Infinity : at * POS_PARTS, previous + POS_PARTS)
+    const first = (previous = Number.isFinite(start) ? start : 0)
+    const pos = (index: number) => first + Math.min(index, POS_PARTS - 1)
     if (message.type === "user") {
       const text = typeof message.text === "string" ? message.text : Array.isArray(message.content) ? message.content.filter((p: any) => p?.type === "text").map((p: any) => p.text).join("") : ""
       const files = userFiles(message.files)
-      if (text || files.length) out.push({ key: `${message.id}:text`, messageID: message.id, sessionID, kind: "user", text, ...(at === undefined ? {} : { at }), ...(files.length ? { files } : {}) })
+      if (text || files.length) out.push({ key: `${message.id}:text`, messageID: message.id, sessionID, kind: "user", text, ...(at === undefined ? {} : { at }), ...(files.length ? { files } : {}), pos: pos(0) })
       continue
     }
     if (message.type !== "assistant" || !Array.isArray(message.content)) continue
+    let texts = 0
     message.content.forEach((part: any, index: number) => {
       if (!part || typeof part !== "object") return
       const partID = String(index)
-      const base = { key: `${message.id}:${partID}`, messageID: message.id, partID, sessionID, ...(at === undefined ? {} : { at }) }
-      if (part.type === "text" && typeof part.text === "string" && part.text) out.push({ ...base, kind: "assistant", text: part.text })
+      const base = { key: `${message.id}:${partID}`, messageID: message.id, partID, sessionID, ...(at === undefined ? {} : { at }), pos: pos(index) }
+      if (part.type === "text" && typeof part.text === "string") {
+        const ordinal = texts++
+        if (part.text) out.push({ ...base, kind: "assistant", text: part.text, ordinal })
+      }
       if (part.type === "reasoning") out.push({ ...base, kind: "reasoning", text: String(part.text ?? ""), state: part.time?.completed === undefined ? "running" : "done", ...(typeof part.time?.created === "number" ? { at: part.time.created } : {}), ...(typeof part.time?.completed === "number" ? { completed: part.time.completed } : {}) })
       if (part.type === "tool") {
         const status = part.state?.status
-        out.push({ ...base, kind: "tool", name: String(part.name ?? "tool"), state: status === "error" ? "failed" : status === "completed" ? "done" : "running", ...(typeof part.time?.created === "number" ? { at: part.time.created } : {}), ...(typeof part.time?.completed === "number" ? { completed: part.time.completed } : {}) })
+        const name = String(part.name ?? "tool")
+        const spawn = SUBAGENT_TOOLS.has(name) ? subagentOf(part.state) : {}
+        out.push({
+          ...base,
+          kind: "tool",
+          name,
+          state: status === "error" ? "failed" : status === "completed" ? "done" : "running",
+          ...(typeof part.id === "string" && part.id ? { callID: part.id } : {}),
+          ...spawn,
+          ...(typeof part.time?.created === "number" ? { at: part.time.created } : {}),
+          ...(typeof part.time?.completed === "number" ? { completed: part.time.completed } : {}),
+        })
       }
     })
   }
   return out
+}
+
+const CHILD_SESSION = /sessionID:?\s*"?(ses_[A-Za-z0-9]+)/
+
+/** The child session (from the tool's metadata, else its output) and description of a subagent tool call. */
+function subagentOf(rawState: unknown): { childSessionID?: string; title?: string } {
+  const state = record(rawState)
+  const description = typeof state.input?.description === "string" ? state.input.description.trim().split("\n")[0]!.slice(0, TITLE_MAX) : ""
+  let child = typeof state.metadata?.sessionID === "string" && state.metadata.sessionID.startsWith("ses_") ? (state.metadata.sessionID as string) : undefined
+  if (!child) {
+    const outputs = [state.output, state.error, ...(Array.isArray(state.content) ? state.content.map((c: any) => c?.text) : [])]
+    for (const text of outputs) {
+      const match = typeof text === "string" ? CHILD_SESSION.exec(text) : null
+      if (match) {
+        child = match[1]
+        break
+      }
+    }
+  }
+  return { ...(child ? { childSessionID: child } : {}), ...(description ? { title: description } : {}) }
 }
 
 /** A newest-first timeline page: rows in chronological order, and the cursor of the rows before them. */

@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **The console keeps a session's conversation in order**: subagents no longer bunch together at the bottom of
+  the conversation, and thoughts no longer jump below the text or tools that came after them. Rows used to be
+  sorted by their timestamps, which come from different clocks (OpenCode's message and part times, the hub's,
+  the phone's), and a finished subagent got the time the page loaded. Now:
+  - Every timeline row from the spoke carries `pos`, its position in the session (message order, then part
+    order), and the console orders rows by it. Tool rows of `subagent`/`task` carry `childSessionID` (from the
+    tool's metadata, else its output) and `title`; tool rows `callID`; text rows `ordinal`.
+  - A subagent row stands in place of the tool call that spawned it, also after it finished and after a reload.
+    When the spawn is in an older page that is not loaded yet, the subagent shows at the top of the loaded
+    history and moves to its spawn when that page loads.
+  - Live thoughts, text, tools, sent messages and spawned subagents appear in arrival order after the history,
+    and when the stored rows arrive (reconnect) they replace the live ones in place.
+  - The spoke forwards a subagent tool's child session (`session.tool.progress`, sent as a compact
+    `session.tool.called {id, childSessionID}`, which older hubs accept); SSE `activity` items carry
+    `childSessionID` and `delta` events the text part's `ordinal`. All new fields are optional: older spokes
+    and hubs keep working (rows without `pos` keep the order of their pages).
+
 - **Sessions open on their newest messages, and older ones load while you scroll up**: the console used to load
   a conversation oldest first, 200 rows at a time and at most 2000 rows, before showing anything, so a long
   session opened slowly and could miss its newest messages. It now asks for the newest 80 rows (one request),

@@ -4,7 +4,8 @@
 // (attach, remove, attach again, send), Dictate → Send (input cleared, also when the turn's connection drops), a slow turn (202, reply later), the right rail and diff viewer render, a Voice-off session is inspectable, rename (table,
 // sidebar, top bar), archive (menu, Undo, Archived chip, Needs-you exception, bulk, inactive), resizable sidebar/rail, and
 // Voice mode speaking a streamed reply before its text ends (each sentence playing while its MP3 still downloads), with the turn timed (a browser with a silent fake mic), Voice mode with the screen off (the phone muting/ending the mic or suspending audio: paused in the Voice bar and the notification, listening again on unlock),
-// progressive history (newest page first, older pages while scrolling up, anchored, Retry), rich Markdown (tables, task lists, highlighted code, copy) and the text size (Settings, pinch, ctrl+wheel, kept after reload, phone at 1.8),
+// progressive history (newest page first, older pages while scrolling up, anchored, Retry), timeline order (subagents
+// where they were spawned, live rows in arrival order and after a reload), rich Markdown (tables, task lists, highlighted code, copy) and the text size (Settings, pinch, ctrl+wheel, kept after reload, phone at 1.8),
 // and speech detection (fake mics looping background noise: nothing sent, unless the on-device model is blocked; and a spoken request: one utterance, a hallucinated “Thank you.” shown as ignored). Screenshots go to $SMOKE_SHOTS (default: the OS temp
 // dir). Run `npm run build:web && npm run test:e2e`. Chromium: $CHROMIUM_PATH, else Playwright's cache, else PATH.
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
@@ -1612,6 +1613,69 @@ async function progressiveHistory(browser: Browser): Promise<void> {
   await context.close()
 }
 
+/** Timeline order (POST /mock/order): subagents where they were spawned, live rows in arrival order, after a reload too. */
+async function timelineOrder(browser: Browser): Promise<void> {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+  const page = await context.newPage()
+  current = page
+  const errors: string[] = []
+  page.on("pageerror", (e) => errors.push(e.message))
+  const keys = () => page.locator(".transcript > [data-key]").evaluateAll((els) => els.map((e) => (e as HTMLElement).dataset.key!))
+  /** Asserts that the rows keyed `expected` appear in this order. */
+  const inOrder = async (expected: string[]) => {
+    const all = await keys()
+    const at = expected.map((key) => all.indexOf(key))
+    assert(at.every((i) => i >= 0), `rows missing: ${expected.filter((_, n) => at[n]! < 0).join(", ")}`)
+    assert(at.every((i, n) => n === 0 || i > at[n - 1]!), `order ${expected.join(" < ")}: got positions ${at.join(", ")}`)
+    assert(new Set(all).size === all.length, "no duplicate rows")
+    return all
+  }
+  await mock("/mock/order", { on: true })
+
+  await check("timeline order: finished subagents sit after the turn that spawned them, not bunched at the bottom", async () => {
+    await page.goto(`${BASE}/s/ses_order`)
+    await page.locator('[data-key="sub:ses_child08"]').waitFor()
+    // Loading the older history (the first turn) while scrolled to the top.
+    const scroller = page.locator(".scroller")
+    for (let i = 0; i < 20 && !(await page.getByText("Beginning of conversation").count()); i++) {
+      await scroller.evaluate((el) => (el.scrollTop = 0))
+      await page.waitForTimeout(150)
+    }
+    const all = await inOrder([
+      "msg_001:text",
+      "sub:ses_child01", "sub:ses_child02", "sub:ses_child03", "sub:ses_child04", "sub:ses_child05",
+      "msg_004:0",
+      "sub:ses_child06", "sub:ses_child07", "sub:ses_child08",
+      "msg_030:0",
+      "msg_038:0",
+    ])
+    assert(!all.at(-1)!.startsWith("sub:"), `the last row is not a subagent: ${all.slice(-4).join(", ")}`)
+    await shot(page, "timeline-order-history")
+  })
+
+  await check("timeline order: a live turn's thought, text, tools and subagents stay in arrival order as they finish", async () => {
+    await page.locator(".scroller").evaluate((el) => (el.scrollTop = el.scrollHeight))
+    await mock("/mock/order", { live: true })
+    await page.locator('[data-key="sub:ses_child10"]').waitFor()
+    await page.locator('[data-key="msg_048:text:0"]').waitFor()
+    await inOrder(["msg_038:0", "msg_046:reasoning", "msg_046:text:0", "sub:ses_child09", "sub:ses_child10", "msg_048:text:0"])
+    // The subagents finish (status tree idle): they stay where they were spawned.
+    await page.waitForFunction(() => !document.querySelector('[data-key="sub:ses_child09"].working'))
+    const all = await inOrder(["msg_046:text:0", "sub:ses_child09", "sub:ses_child10", "msg_048:text:0"])
+    assert(all.at(-1) === "msg_048:text:0", `live text last: ${all.slice(-3).join(", ")}`)
+  })
+
+  await check("timeline order: after a reload the stored turn shows the same order", async () => {
+    await page.reload()
+    await page.locator('[data-key="sub:ses_child10"]').waitFor()
+    const all = await inOrder(["msg_038:0", "msg_046:0", "msg_046:1", "sub:ses_child09", "sub:ses_child10", "msg_048:0"])
+    assert(all.at(-1) === "msg_048:0", `stored text last: ${all.slice(-3).join(", ")}`)
+    await shot(page, "timeline-order-reload")
+    assert(!errors.length, `page errors: ${errors.join("; ")}`)
+  })
+  await context.close()
+}
+
 async function markdownAndTextSize(browser: Browser): Promise<void> {
   const RICH = "/s/ses_52"
   const transcriptPx = (page: Page) => page.locator(".msg.assistant").last().evaluate((el) => parseFloat(getComputedStyle(el).fontSize))
@@ -1772,6 +1836,8 @@ try {
   await markdownAndTextSize(browser)
   await mock("/mock/reset")
   await progressiveHistory(browser)
+  await mock("/mock/reset")
+  await timelineOrder(browser)
   await mock("/mock/reset")
   await notifications(browser)
   await mock("/mock/reset")

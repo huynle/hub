@@ -625,8 +625,8 @@ describe("streaming text and reasoning", () => {
     registry.observe("c1", text("ses_kid", "msg_k", "Running"))
     registry.observe("c1", text("ses_unknown", "msg_x", "nope"))
     expect(streamed()).toEqual([
-      { type: "delta", sessionID: "ses_1", rootID: "ses_1", messageID: "msg_1", text: "Hel" },
-      { type: "delta", sessionID: "ses_kid", rootID: "ses_1", messageID: "msg_k", text: "Running" },
+      { type: "delta", sessionID: "ses_1", rootID: "ses_1", messageID: "msg_1", ordinal: 0, text: "Hel" },
+      { type: "delta", sessionID: "ses_kid", rootID: "ses_1", messageID: "msg_k", ordinal: 0, text: "Running" },
     ])
   })
 

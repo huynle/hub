@@ -1,6 +1,13 @@
 // Pure session-timeline state (no DOM): timeline items keyed by `key` (history pages and live updates
 // merge in place), subagent rows from status trees with their own items nested under them, lazily loaded
 // tool details, and the model catalog for the Voice/Worker model menus.
+//
+// Order: rows never sort by wall-clock time (`at` comes from different clocks: OpenCode's message and part times,
+// the hub's, this device's). History rows carry the spoke's ordering position (`pos`: session message order, then
+// part order). Live rows (streamed thoughts and text, tool activity, sent messages) go after the history rows
+// that were loaded when they arrived, in arrival order; when their stored row arrives it takes their place. A
+// subagent row stands in place of the tool call that spawned it; without a loaded spawn it stays where it first
+// appeared live, or (seen before any of its history was loaded) at the top of the loaded history.
 
 export interface ModelSelection {
   providerID: string
@@ -65,52 +72,131 @@ export interface TimelineRow {
   completed?: number
   depth?: number
   detail?: unknown
+  /** History rows: ordering position from the spoke (session message order, then part order). */
+  pos?: number
+  /** Tool rows: the tool call ID. */
+  callID?: string
+  /** Subagent tool rows: the child session the call spawned. */
+  childSessionID?: string
   [key: string]: unknown
 }
 
 /** Key of the thought built from live deltas of a message (before its stored row is known). */
 const reasoningKey = (messageID: string) => `${messageID}:reasoning`
+/** Key of live text of a message's text part (`ordinal`; all its text with hubs that do not send it). */
+const textKey = (messageID: string, ordinal?: number) => (ordinal === undefined ? `${messageID}:text` : `${messageID}:text:${ordinal}`)
+/** Key of a live tool activity item. */
+const activityKey = (sessionID: string, id: string) => `activity:${sessionID}:${id}`
 
 export type TimelineInput = Omit<TimelineRow, "depth"> & { depth?: number }
+type Keyed = TimelineInput & { key: string }
+
+/** A live activity item (SSE `activity`): a tool call or a stretch of thinking. */
+export interface ActivityInput {
+  id: string
+  kind?: string
+  tool?: string
+  summary?: string
+  error?: string
+  state?: string
+  at?: number
+  childSessionID?: string
+}
+
+/**
+ * Where a row goes: by `pos`, then `live` (0 for history rows; live rows count up in arrival order after the
+ * history position they were anchored to).
+ */
+interface Place {
+  pos: number
+  live: number
+}
+const before = (a: Place, b: Place) => a.pos - b.pos || a.live - b.live
 
 interface Subagent {
   id: string
-  at: number
   title?: string
   state?: string
   since?: number
+  /** Where it first appeared live (spawned while this view was open); absent when it was already there. */
+  place?: Place
+  /** Order among subagents without a place (first seen first). */
+  seen: number
 }
 
 export class Timeline {
   private items = new Map<string, TimelineRow>()
   private subagents = new Map<string, Subagent>()
   private details = new Map<string, unknown>()
-  /** Display order among rows of the same time: new rows count up, rows of older pages count down. */
-  private order = new Map<string, number>()
-  private newest = 0
-  private oldest = 0
+  private places = new Map<string, Place>()
+  /** Highest and lowest history positions so far (live rows anchor after the highest). */
+  private top = 0
+  private bottom = 0
+  private liveSeq = 0
+  private seenSeq = 0
+  /** A newest history page was loaded (subagents appearing after it were spawned while the view was open). */
+  private loaded = false
+  /** A status tree was seen (subagents in the first one already existed). */
+  private snapshots = 0
   /** Keys of rows that came from history pages (dropped by forgetHistory). */
   private history = new Set<string>()
 
   /** History rows; `older`: a page from before the rows already loaded (they go first). */
   load(items: readonly TimelineInput[] | undefined, options: { older?: boolean } = {}): void {
-    const list = (items ?? []).filter((item) => item && typeof item.key === "string") as Array<TimelineInput & { key: string }>
-    if (options.older) {
-      const fresh = list.filter((item) => !this.order.has(item.key))
-      fresh.forEach((item, index) => this.order.set(item.key, this.oldest - fresh.length + index))
-      this.oldest -= fresh.length
-    }
-    for (const item of list) this.history.add(item.key)
+    const list = (items ?? []).filter((item) => item && typeof item.key === "string") as Keyed[]
+    // Rows from spokes without positions keep the order of the pages: newer pages after, older pages before.
+    const legacy = list.filter((item) => typeof item.pos !== "number" && !this.places.has(item.key))
+    legacy.forEach((item, index) => {
+      this.places.set(item.key, { pos: options.older ? this.bottom - legacy.length + index : this.top + 1 + index, live: 0 })
+    })
     for (const item of list) {
-      // A stored thought replaces the row its live deltas built; the streamed text stays when the provider
-      // stored none (many keep only an encrypted signature).
-      const liveKey = item?.kind === "reasoning" && typeof item.messageID === "string" ? reasoningKey(item.messageID) : undefined
-      const live = liveKey !== undefined && liveKey !== item.key ? this.items.get(liveKey) : undefined
-      if (live) {
-        this.items.delete(liveKey!)
-        this.upsert({ ...item, text: item.text || live.text || "" })
-      } else this.upsert(item)
+      if (typeof item.pos === "number" && Number.isFinite(item.pos)) this.places.set(item.key, { pos: item.pos, live: 0 })
+      const pos = this.places.get(item.key)!.pos
+      this.top = Math.max(this.top, pos)
+      this.bottom = Math.min(this.bottom, pos)
+      this.history.add(item.key)
     }
+    for (const item of list) {
+      // A stored row replaces the live row built for the same part (a thought keeps its streamed text when the
+      // provider stored none: many keep only an encrypted signature).
+      const live = this.liveTwin(item)
+      if (live) {
+        this.items.delete(live.key)
+        this.places.delete(live.key)
+        if (live.kind === "reasoning") this.put({ ...item, text: item.text || live.text || "" })
+        else if (live.kind === "tool") this.put({ ...pick(live, ["summary", "error"]), ...item })
+        else this.put(item)
+      } else this.put(item)
+    }
+    if (!options.older) {
+      // What is still live happened after this page: it goes after it, in the same order.
+      this.loaded = true
+      for (const [key, place] of this.places) if (place.live > 0 && place.pos < this.top) this.places.set(key, { ...place, pos: this.top })
+      for (const sub of this.subagents.values()) if (sub.place && sub.place.pos < this.top) sub.place = { ...sub.place, pos: this.top }
+    }
+  }
+
+  /** The live row a stored row replaces: the same thought, text part, tool call or sent message. */
+  private liveTwin(item: Keyed): TimelineRow | undefined {
+    if (this.history.has(item.key) && this.items.has(item.key)) return undefined
+    const messageID = typeof item.messageID === "string" ? item.messageID : undefined
+    const candidates: string[] = []
+    if (item.kind === "reasoning" && messageID) candidates.push(reasoningKey(messageID))
+    if (item.kind === "assistant" && messageID) {
+      if (typeof item.ordinal === "number") candidates.push(textKey(messageID, item.ordinal))
+      if (item.ordinal === undefined || item.ordinal === 0) candidates.push(textKey(messageID))
+    }
+    if (item.kind === "tool" && typeof item.callID === "string" && typeof item.sessionID === "string") candidates.push(activityKey(item.sessionID, item.callID))
+    for (const key of candidates) {
+      const row = key === item.key ? undefined : this.items.get(key)
+      if (row && !this.history.has(key)) return row
+    }
+    if (item.kind === "user" && typeof item.text === "string" && item.text) {
+      for (const row of this.items.values()) {
+        if (row.kind === "user" && !row.messageID && !this.history.has(row.key) && row.text === item.text) return row
+      }
+    }
+    return undefined
   }
 
   /**
@@ -133,6 +219,53 @@ export class Timeline {
     })
   }
 
+  /** A streamed text delta of a message's text part `ordinal` (hubs before 0.7 send none); it ends the thinking before it. */
+  appendText({ sessionID, messageID, ordinal, delta, at = Date.now() }: { sessionID?: string; messageID: string; ordinal?: number; delta: string; at?: number }): void {
+    const key = textKey(messageID, ordinal)
+    const current = this.items.get(key)
+    this.upsert({
+      key,
+      messageID,
+      ...(sessionID ? { sessionID } : {}),
+      kind: "assistant",
+      text: `${current?.text ?? ""}${delta}`,
+      live: true,
+      at: current?.at ?? at,
+    })
+    this.endReasoning(sessionID)
+  }
+
+  /** Key of the live text of a message that spoken text joins: its latest streamed text part, else the whole message's. */
+  liveTextKey(messageID: string): string {
+    let key = textKey(messageID)
+    let latest = -1
+    for (const row of this.items.values()) {
+      if (row.kind !== "assistant" || row.messageID !== messageID || this.history.has(row.key)) continue
+      const ordinal = row.key.startsWith(`${messageID}:text:`) ? Number(row.key.slice(messageID.length + 6)) : NaN
+      if (Number.isInteger(ordinal) && ordinal > latest) [key, latest] = [row.key, ordinal]
+    }
+    return key
+  }
+
+  /** A live tool activity item of `sessionID` (thinking items show up through streamed reasoning instead). */
+  activity(sessionID: string, item: ActivityInput): void {
+    if (!item || typeof item.id !== "string" || item.kind === "thinking") return
+    const key = activityKey(sessionID, item.id)
+    const current = this.items.get(key)
+    this.upsert({
+      key,
+      sessionID,
+      kind: "tool",
+      callID: item.id,
+      ...(item.tool ? { name: item.tool } : {}),
+      ...(item.summary ? { summary: item.summary } : {}),
+      ...(item.error ? { error: item.error } : {}),
+      ...(item.childSessionID ? { childSessionID: item.childSessionID } : {}),
+      state: item.state,
+      at: current?.at ?? item.at,
+    })
+  }
+
   /** Thinking ended (text followed, or the tree went idle): running thoughts of `sessionID` (all when omitted) are done. */
   endReasoning(sessionID: string | undefined, at = Date.now()): void {
     for (const row of this.items.values()) {
@@ -140,9 +273,18 @@ export class Timeline {
     }
   }
 
+  /** A row added or changed here (not from a history page): a new one goes after everything loaded so far. */
   upsert(item: TimelineInput): void {
     if (!item || typeof item.key !== "string") return
-    if (!this.order.has(item.key)) this.order.set(item.key, ++this.newest)
+    if (!this.places.has(item.key)) this.places.set(item.key, this.livePlace())
+    this.put(item as Keyed)
+  }
+
+  private livePlace(): Place {
+    return { pos: this.top, live: ++this.liveSeq }
+  }
+
+  private put(item: Keyed): void {
     this.items.set(item.key, { ...(this.items.get(item.key) ?? {}), ...item } as TimelineRow)
   }
 
@@ -155,7 +297,7 @@ export class Timeline {
   forgetHistory(): void {
     for (const key of this.history) {
       this.items.delete(key)
-      this.order.delete(key)
+      this.places.delete(key)
     }
     this.history.clear()
   }
@@ -180,19 +322,18 @@ export class Timeline {
     }
     // Older hubs send entries without parentID: everything but the root is below it then.
     const flat = (sessions ?? []).every((s) => s?.id === rootID || typeof s?.parentID !== "string")
+    // Subagents in the first tree already existed; later ones that work were spawned while this view is open.
+    const spawning = this.snapshots > 0 && this.loaded
+    if (sessions?.length) this.snapshots++
     for (const session of sessions ?? []) {
       const id = session?.id
       if (!session || typeof id !== "string" || !id || id === rootID) continue
       if (!below.has(id) && !(flat && (sessions ?? [])[0]?.id === rootID)) continue
       seen.add(id)
       const since = typeof session.since === "number" ? session.since : undefined
-      const current = this.subagents.get(id) ?? { id, at: since ?? Date.now() }
-      this.subagents.set(id, {
-        ...current,
-        title: typeof session.title === "string" ? session.title : undefined,
-        state: session.state === "idle" ? "done" : (session.state as string | undefined),
-        since,
-      })
+      const state = session.state === "idle" ? "done" : (session.state as string | undefined)
+      const current = this.subagents.get(id) ?? { id, seen: ++this.seenSeq, ...(spawning && state === "working" ? { place: this.livePlace() } : {}) }
+      this.subagents.set(id, { ...current, title: typeof session.title === "string" ? session.title : undefined, state, since })
     }
     for (const sub of this.subagents.values()) if (!seen.has(sub.id) && sub.state === "working") sub.state = "done"
   }
@@ -212,18 +353,28 @@ export class Timeline {
         children.set(item.sessionID, list)
       } else root.push(row)
     }
-    const seq = (key: string) => this.order.get(key) ?? 0
-    const groups = root.map((row) => ({ at: row.at ?? 0, seq: seq(row.key), rows: [row] }))
-    for (const sub of this.subagents.values()) {
-      groups.push({
-        at: sub.at ?? 0,
-        seq: Number.MAX_SAFE_INTEGER,
-        rows: [
-          { key: `sub:${sub.id}`, kind: "subagent", label: sub.title || sub.id, state: sub.state, sessionID: sub.id, depth: 0 },
-          ...(children.get(sub.id) ?? []).sort((a, b) => (a.at ?? 0) - (b.at ?? 0) || seq(a.key) - seq(b.key)),
-        ],
-      })
+    const place = (key: string): Place => this.places.get(key) ?? { pos: this.top, live: Number.MAX_SAFE_INTEGER }
+    const byPlace = (a: TimelineRow, b: TimelineRow) => before(place(a.key), place(b.key))
+    const group = (sub: Subagent): TimelineRow[] => [
+      { key: `sub:${sub.id}`, kind: "subagent", label: sub.title || sub.id, state: sub.state, sessionID: sub.id, depth: 0 },
+      ...(children.get(sub.id) ?? []).sort(byPlace),
+    ]
+    const groups: Array<{ place: Place; rows: TimelineRow[] }> = []
+    const placed = new Set<string>()
+    for (const row of root.sort(byPlace)) {
+      // A subagent stands in place of the (first) tool call that spawned it.
+      const sub = typeof row.childSessionID === "string" && !placed.has(row.childSessionID) ? this.subagents.get(row.childSessionID) : undefined
+      if (sub) placed.add(sub.id)
+      groups.push({ place: place(row.key), rows: sub ? group(sub) : [row] })
     }
-    return groups.sort((a, b) => a.at - b.at || a.seq - b.seq).flatMap((group) => group.rows)
+    const unplaced = [...this.subagents.values()].filter((sub) => !placed.has(sub.id))
+    const top = unplaced.filter((sub) => !sub.place).sort((a, b) => (a.since ?? Infinity) - (b.since ?? Infinity) || a.seen - b.seen)
+    top.forEach((sub, index) => groups.push({ place: { pos: -Infinity, live: index }, rows: group(sub) }))
+    for (const sub of unplaced) if (sub.place) groups.push({ place: sub.place, rows: group(sub) })
+    return groups.sort((a, b) => before(a.place, b.place)).flatMap((g) => g.rows)
   }
+}
+
+function pick(row: TimelineRow, keys: readonly string[]): Record<string, unknown> {
+  return Object.fromEntries(keys.filter((key) => row[key] !== undefined).map((key) => [key, row[key]]))
 }

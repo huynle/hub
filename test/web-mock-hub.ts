@@ -53,11 +53,17 @@
 // delayMs?, failOlder?, append?} lists "Long history" (ses_big, in /home/user/research) whose timeline has about
 // 1000 rows (`messages` messages, default 900); older pages wait `delayMs` and answer 502 while `failOlder`;
 // `append` adds that many messages at the end. The log keeps each request's query string.
+// Timeline order: POST /mock/order {on?, live?} lists "Subagent order" (ses_order), whose history is the spoke's rows of
+// a trimmed real session (test/fixtures/timeline-subagents-session.json, up to the turn that spawns S3 and S6) and
+// whose status tree lists its finished subagents (no `since`); `live` then plays that turn as SSE events (reasoning,
+// text with ordinal, tool activity, two subagents spawned with their child session, finishing later) and adds its
+// messages to the history.
 // MOCK_WEB_DIST serves another built console instead of web/dist (to measure an older build).
 import { existsSync, readFileSync, statSync } from "node:fs"
 import path from "node:path"
 import { SentenceStream } from "../src/central/say-stream"
-import { newestPage } from "../src/spoke/timeline"
+import { newestPage, timelineItems } from "../src/spoke/timeline"
+import orderSession from "./fixtures/timeline-subagents-session.json"
 import { speechModelList } from "../src/central/speech/models"
 import gatewayModels from "./fixtures/openai-compatible-gateway-models.json"
 
@@ -105,6 +111,8 @@ type Fixture = {
   now?: { kind: string; tool?: string; summary?: string }
   open?: boolean
   terminal?: { source: "herdr" | "tui"; workspaceID?: string; workspace?: string; title?: string; status?: string }
+  /** Its status tree (root first), when it has subagents. */
+  tree?: Status[]
 }
 const HOME = "/home/user/projects"
 const WORKSPACES: Array<[string, string]> = [
@@ -231,7 +239,7 @@ function applyPrefs(userID: string, body: Record<string, unknown>): string | und
   return undefined
 }
 const NOT_EXPOSED = { error: "Voice is not enabled for this session. Enable it from the session list.", code: "not_exposed" }
-const fixtureStatus = (s: Fixture) => [{ id: s.id, title: s.title, state: s.state, blockers: s.blockers }]
+const fixtureStatus = (s: Fixture) => s.tree ?? [{ id: s.id, title: s.title, state: s.state, blockers: s.blockers }]
 const catalogSession = (s: Fixture) => ({ ...s, owned: false, busy: false, conversation: !!s.conversation, status: fixtureStatus(s) })
 const mockSession = () => ({
   id: SESSION,
@@ -776,6 +784,62 @@ function bigRows(from: number, count: number) {
 }
 const bigFixture = (): Fixture => ({ id: BIG, title: "Long history", directory: "/home/user/research", project: "/home/user/research", projectName: "research", updated: Date.now() - 60 * 60_000, exposed: true, state: "idle", blockers: [] })
 
+/** "Subagent order" (POST /mock/order): a trimmed real session that spawned subagents over several turns. */
+const ORDER = "ses_order"
+type OrderMessage = { id: string; type: string; content?: Array<Record<string, any>> }
+const ORDER_CONTEXT = orderSession as unknown as OrderMessage[]
+/** Messages of the live turn: msg_046 (reasoning, text, shell), msg_047 (two subagents), msg_048 (text). */
+const ORDER_LIVE = [45, 48] as const
+let order = { messages: ORDER_LIVE[0] as number, run: 0 }
+const orderRows = () => timelineItems(ORDER, ORDER_CONTEXT.slice(0, order.messages)) as unknown as Array<Record<string, unknown>>
+function orderTree(working: readonly string[] = []): Status[] {
+  const spawned = orderRows().filter((r) => typeof r.childSessionID === "string")
+  const live = ORDER_CONTEXT.slice(order.messages, ORDER_LIVE[1]).flatMap((m) => (m.content ?? []).filter((p) => working.includes(p.state?.metadata?.sessionID)))
+  return [
+    { id: ORDER, title: "Subagent order", state: working.length ? "working" : "idle", blockers: [] },
+    ...spawned.map((r) => ({ id: r.childSessionID as string, parentID: ORDER, title: r.title as string, state: "idle", blockers: [] })),
+    ...live.map((p) => ({ id: p.state.metadata.sessionID as string, parentID: ORDER, title: p.state.input.description as string, state: "working", blockers: [], since: Date.now() })),
+  ]
+}
+const orderFixture = (): Fixture => ({ id: ORDER, title: "Subagent order", directory: "/home/user/research", project: "/home/user/research", projectName: "research", updated: Date.now() - 5 * 60_000, exposed: true, state: "idle", blockers: [], tree: orderTree() })
+function setOrderTree(tree: Status[]) {
+  const fixture = sessions.find((x) => x.id === ORDER)
+  if (fixture) Object.assign(fixture, { tree, state: tree[0]!.state })
+  emit({ type: "status", sessionID: ORDER, sessions: tree })
+}
+/** Plays the live turn of "Subagent order" as the hub's SSE events, then adds it to the history. */
+async function orderLive() {
+  const run = ++order.run
+  const [from, to] = ORDER_LIVE
+  const working: string[] = []
+  const event = (message: object) => run === order.run && emit({ sessionID: ORDER, rootID: ORDER, ...message })
+  setOrderTree(orderTree())
+  for (const message of ORDER_CONTEXT.slice(from, to)) {
+    let texts = 0
+    for (const part of message.content ?? []) {
+      await sleep(120)
+      if (part.type === "reasoning") event({ type: "reasoning", messageID: message.id, delta: "Checking what is left to do." })
+      if (part.type === "text") event({ type: "delta", messageID: message.id, ordinal: texts++, text: part.text })
+      if (part.type !== "tool") continue
+      const item = { id: part.id, sessionID: ORDER, kind: "tool", tool: part.name, state: "running", at: Date.now() }
+      event({ type: "activity", item })
+      const child = part.state?.metadata?.sessionID as string | undefined
+      if (child) {
+        event({ type: "activity", item: { ...item, childSessionID: child } })
+        working.push(child)
+        setOrderTree(orderTree(working))
+      }
+      await sleep(120)
+      event({ type: "activity", item: { ...item, ...(child ? { childSessionID: child } : {}), state: "done", at: Date.now() } })
+    }
+  }
+  await sleep(400)
+  if (run !== order.run) return
+  // The subagents finish; the turn is stored.
+  order.messages = to
+  setOrderTree(orderTree())
+}
+
 /** A timeline answer like the spoke's: newest-first pages (order=desc, before) or forward pages (cursor). */
 async function timelinePage(rows: ReadonlyArray<Record<string, unknown>>, url: URL, older = { delayMs: 0, fail: false }): Promise<Response> {
   const limit = Number(url.searchParams.get("limit") ?? 50)
@@ -857,6 +921,7 @@ async function consoleRoute(request: Request, url: URL, user: MockUser): Promise
       }
       if (match[3]) return Response.json({ detail: { name: "bash", state: { status: "error", input: { command: "bun test" }, error: "1 test failed" }, time: { start: Date.now() - 60_000, end: Date.now() - 54_000 } } })
       if (id === BIG) return timelinePage(big.rows, url, { delayMs: big.delayMs, fail: big.failOlder })
+      if (id === ORDER) return timelinePage(orderRows(), url)
       return timelinePage(timelineOf(id, fixture.title), url)
     case "model-prefs":
       if (m === "PUT") {
@@ -1057,6 +1122,15 @@ const server = Bun.serve({
       emitCatalog()
       return Response.json({ connected: serviceConnected })
     }
+    if (p === "/mock/order" && m === "POST") {
+      const body = await json()
+      if (body.on === true && !sessions.some((x) => x.id === ORDER)) {
+        sessions.push(orderFixture())
+        emitCatalog()
+      }
+      if (body.live === true) void orderLive()
+      return Response.json({ rows: orderRows().length })
+    }
     if (p === "/mock/auth" && m === "POST") {
       const body = await json()
       if (body.mode === "pairing" || body.mode === "oidc") authMode = body.mode
@@ -1068,6 +1142,7 @@ const server = Bun.serve({
     if (p === "/mock/reset" && m === "POST") {
       scenarioRun++
       big = { on: false, messages: 900, delayMs: 0, failOlder: false, rows: [] }
+      order = { messages: ORDER_LIVE[0], run: order.run + 1 }
       slowTurnMs = undefined
       log = []
       transcripts = []

@@ -53,6 +53,21 @@ describe("activity", () => {
     await events.cancel()
   })
 
+  test("a subagent tool item learns its child session; text deltas keep their text part ordinal", async () => {
+    h = harness()
+    const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
+    const events = sse(await h.api("/api/events"))
+    const tool = { sessionID: "ses_1", assistantMessageID: "msg_1", id: "tool_s" }
+    client.send(event("session.tool.input.started", { ...tool, name: "subagent" }))
+    client.send(event("session.tool.called", { ...tool, summary: "Research", background: true }))
+    client.send(event("session.tool.called", { ...tool, childSessionID: "ses_kid" }))
+    const linked = await events.next((m) => m.type === "activity" && m.item.childSessionID)
+    expect(linked.item).toMatchObject({ id: "tool_s", tool: "subagent", summary: "Research", background: true, childSessionID: "ses_kid", state: "running" })
+    client.send(event("session.text.delta", { sessionID: "ses_1", assistantMessageID: "msg_2", ordinal: 1, delta: "Second part" }))
+    expect(await events.next((m) => m.type === "delta")).toEqual({ type: "delta", sessionID: "ses_1", rootID: "ses_1", messageID: "msg_2", ordinal: 1, text: "Second part" })
+    await events.cancel()
+  })
+
   test("a session without activity has an empty list", async () => {
     h = harness()
     await spoke(h, { sessions: [session("ses_1", { owned: true })] })
