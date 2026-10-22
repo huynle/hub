@@ -3,7 +3,7 @@
 // a per-session turn lock, permission routing back to the process that asked, and conversation mode
 // (which sessions speak their replies on the phone).
 import path from "node:path"
-import type { ForwardedEvent, Hello, HerdrWorkspace, ProcessKind, SessionInfo, SpokeMode, TerminalInfo, Terminals } from "../protocol"
+import type { ForwardedEvent, Hello, HerdrWorkspace, ProcessKind, SessionInfo, SpokeFeature, SpokeMode, TerminalInfo, Terminals } from "../protocol"
 import { StatusBoard, type Blocker, type SessionStatus } from "../status"
 import { DoneWatch } from "./done"
 import { SentenceStream } from "./say-stream"
@@ -1258,6 +1258,11 @@ export class Registry {
    * 4. else any process that reports it, most recent activity first;
    * 5. else none.
    */
+  /** Whether a connected process announced an optional feature in its hello (older spokes announce none). */
+  supports(connID: string, feature: SpokeFeature): boolean {
+    return this.conns.get(connID)?.hello.features?.includes(feature) === true
+  }
+
   owner(sessionID: string): string | undefined {
     const tenant = this.sessionTenant(sessionID)
     const all = [...this.conns.values()].filter((c) => this.tenant(c) === tenant)

@@ -129,6 +129,7 @@ const SSE_HEARTBEAT_MS = 20_000
  */
 export const TURN_ACCEPT_MS = 1500
 const NO_OWNER = "No OpenCode process for this session is connected"
+const AUTO_NAME_OUTDATED = "Update the Hub plugin to use Auto-name"
 const NOT_EXPOSED = "Voice is not enabled for this session"
 /** A permission or question that is not pending any more: someone answered it elsewhere, or it expired. */
 const PERMISSION_GONE = "This request was already answered or expired"
@@ -1038,7 +1039,12 @@ export function startCentral(options: CentralOptions): Central {
 
   /** Renames a session in OpenCode through its owner process, falling back to other processes that report it. */
   async function rename(request: Request, sessionID: string): Promise<Response> {
-    const raw = (await body(request)).title
+    const json = await body(request)
+    if (json.auto !== undefined) {
+      if (json.auto !== true) return error(400, "Expected {auto: true} or {title}")
+      return autoName(sessionID)
+    }
+    const raw = json.title
     const title = typeof raw === "string" ? raw.trim() : ""
     if (!title) return error(400, "Expected {title}: a non-empty title")
     if (title.length > MAX_TITLE_CHARS) return error(400, `Title must be at most ${MAX_TITLE_CHARS} characters`)
@@ -1049,6 +1055,29 @@ export function startCentral(options: CentralOptions): Central {
       try {
         const result = await spokes.request(connID, { op: "rename", sessionID, title })
         return Response.json({ title: typeof result?.title === "string" ? result.title : title }, { headers: NO_STORE })
+      } catch (cause) {
+        failure ??= cause
+      }
+    }
+    throw failure
+  }
+
+  /**
+   * Has OpenCode regenerate the title with its title agent, through the processes reporting the session that
+   * support it (older spokes drop the op): 200 {title} or {title, unchanged}, 202 {pending} while generating.
+   */
+  async function autoName(sessionID: string): Promise<Response> {
+    const reporters = registry.sessionTargets(sessionID)
+    if (!reporters.length) throw new HttpError(409, NO_OWNER)
+    const targets = reporters.filter((connID) => registry.supports(connID, "autoName"))
+    if (!targets.length) throw new HttpError(409, AUTO_NAME_OUTDATED, "plugin_outdated")
+    let failure: unknown
+    for (const connID of targets) {
+      try {
+        const result = await spokes.request(connID, { op: "autoName", sessionID })
+        if (result?.pending) return Response.json({ pending: true }, { status: 202, headers: NO_STORE })
+        if (typeof result?.title !== "string") throw new SpokeError("OpenCode did not report a title")
+        return Response.json({ title: result.title, ...(result.unchanged ? { unchanged: true } : {}) }, { headers: NO_STORE })
       } catch (cause) {
         failure ??= cause
       }

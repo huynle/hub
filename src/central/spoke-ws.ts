@@ -85,6 +85,8 @@ interface Pending {
 export const TURN_GRACE_MS = 15_000
 /** Creating a session and opening it in a new Herdr tab (the spoke allows `herdr agent start` 20 s). */
 export const CREATE_IN_HERDR_TIMEOUT_MS = 45_000
+/** Auto-name: the spoke waits up to 20 s for OpenCode's generated title, then answers "pending". */
+export const AUTO_NAME_TIMEOUT_MS = 30_000
 
 const CLOSE_PROTOCOL = 4000
 const CLOSE_REVOKED = 4001
@@ -147,7 +149,9 @@ export class SpokeHub {
         ? this.options.turnTimeoutMs + (this.options.turnGraceMs ?? TURN_GRACE_MS)
         : req.op === "create" && req.herdrWorkspace
           ? Math.max(base, CREATE_IN_HERDR_TIMEOUT_MS) // the spoke waits for OpenCode to start in the new tab
-          : base
+          : req.op === "autoName"
+            ? Math.max(base, AUTO_NAME_TIMEOUT_MS)
+            : base
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
