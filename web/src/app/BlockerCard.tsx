@@ -75,7 +75,13 @@ function FormFields(props: { sessionID: string; blocker: Blocker; fields: FormFi
   const [errors, setErrors] = createSignal<Record<string, string>>({})
   const [busy, setBusy] = createSignal(false)
   const [sent, setSent] = createSignal(false)
-  const shown = createMemo(() => visibleFields(props.fields, values()))
+  // Field keys, not field objects: live updates hand in fresh objects for the same fields, which must not
+  // re-create the inputs (that drops focus and typed text).
+  const shown = createMemo((prev: string[] = []) => {
+    const next = visibleFields(props.fields, values()).map((f) => f.key)
+    return next.length === prev.length && next.every((k, i) => k === prev[i]) ? prev : next
+  })
+  const field = (key: string) => props.fields.find((f) => f.key === key)
   const set = (key: string, value: FormValues[string]) => {
     setValues((v) => ({ ...v, [key]: value }))
     if (errors()[key]) setErrors((e) => Object.fromEntries(Object.entries(e).filter(([k]) => k !== key)))
@@ -96,22 +102,33 @@ function FormFields(props: { sessionID: string; blocker: Blocker; fields: FormFi
     const problems = validateForm(props.fields, values())
     setErrors(problems)
     if (Object.keys(problems).length) return
-    void post({ answer: formAnswer(props.fields, values()) }, "Answer sent")
+    const answer = formAnswer(props.fields, values())
+    // An all-empty answer reaches OpenCode as "Unanswered" for every question: almost always a lost or missed
+    // selection, never what Submit means (Dismiss skips the questions).
+    if (props.blocker.question && !Object.values(answer).some((v) => (Array.isArray(v) ? v.length > 0 : v !== "" && v !== false))) {
+      toast("Pick or type an answer first (Dismiss skips the questions)", "err")
+      return
+    }
+    void post({ answer }, "Answer sent")
   }
   const disabled = () => busy() || sent()
   return (
     <form class="form-card" onSubmit={submit} novalidate>
       <fieldset disabled={disabled()}>
         <For each={shown()}>
-          {(f) => (
-            <div class={`form-field ${f.type}`} data-key={f.key}>
-              <FieldInput field={f} value={values()[f.key]} onChange={(v) => set(f.key, v)} formID={props.blocker.id} />
-              <Show when={errors()[f.key]}>
-                <p class="field-error small" role="alert">
-                  {errors()[f.key]}
-                </p>
-              </Show>
-            </div>
+          {(key) => (
+            <Show when={field(key)}>
+              {(f) => (
+                <div class={`form-field ${f().type}`} data-key={key}>
+                  <FieldInput field={f()} value={values()[key]} onChange={(v) => set(key, v)} formID={props.blocker.id} />
+                  <Show when={errors()[key]}>
+                    <p class="field-error small" role="alert">
+                      {errors()[key]}
+                    </p>
+                  </Show>
+                </div>
+              )}
+            </Show>
           )}
         </For>
         <div class="row">
