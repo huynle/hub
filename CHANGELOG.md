@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Auto-name**: let OpenCode name a session with its Title agent, from the console. **Auto-name** in every
+  session `⋯` menu (table, phone list, sidebar, session title) and a ✨ button next to the inline rename field;
+  the title shows "Naming…" until OpenCode answers, then "Renamed to …" or "OpenCode kept the title".
+  `POST /api/sessions/:id/rename {auto: true}` → spoke op `autoName`, which calls `session.update` with an empty
+  title on the process's own server (the plugin API's update would set an empty title) and waits up to 20 s for
+  `session.renamed` (202 `{pending}` after that). Spokes now list their optional features in the hello
+  (`features: ["autoName"]`); a process with an older plugin gets "Update the Hub plugin to use Auto-name"
+  instead of a request it would drop.
+
 - **Question answers no longer lost**: a question card in the console kept its answers in components that were rebuilt
   whenever any live update arrived (every session change sends a fresh catalog), so choices and typed text were
   silently reset and Submit sent every question to OpenCode as "Unanswered". Cards are now keyed by request ID and
