@@ -1,9 +1,12 @@
 // Progress cue output for conversation mode: short Web Audio earcons and short varied phrases spoken through
 // /api/speak. Phrases are prefetched when Voice mode starts and kept in memory and, keyed by the TTS voice
 // and the text, in Cache Storage, so later sessions start with them ready. A phrase that is not ready when
-// its cue fires plays a short tone instead (it never waits for synthesis). Timing decisions live in
+// its cue fires plays a short tone instead (it never waits for synthesis). While prefetching, each phrase is
+// normalised to the loudness of spoken replies (`normalize`, see loudness.ts) so cues and replies sound
+// equally loud; the cache remembers the target it was normalised to. Timing decisions live in
 // feedback-core.ts.
 import type { Cue } from "./feedback-core"
+import { DEFAULT_TARGET_LUFS } from "./loudness"
 
 const EARCONS = {
   heard: [{ freq: 880, ms: 80 }],
@@ -18,7 +21,13 @@ const EARCONS = {
 export type EarconName = keyof typeof EARCONS
 
 /** Cache Storage name and the (never fetched) URLs that key cue audio: one folder per voice key. */
-export const CUE_CACHE = "hub-cues-v1"
+export const CUE_CACHE = "hub-cues-v2"
+/** Earlier cue caches (un-normalised audio): deleted. */
+const OLD_CUE_CACHES = ["hub-cues-v1"]
+/** Response header of a cached cue: the loudness target (LUFS) it was normalised to (absent: not normalised). */
+const TARGET_HEADER = "x-hub-cue-target"
+/** A cached cue is normalised again when the target moved further than this (dB). */
+const RENORMALIZE_DB = 1
 const CUE_URL = "https://hub-cues.invalid"
 const cueFolder = (key: string) => `${CUE_URL}/${encodeURIComponent(key)}/`
 const cueURL = (key: string, text: string) => `${cueFolder(key)}${encodeURIComponent(text)}`
@@ -49,8 +58,12 @@ export const PREFETCH_CONCURRENCY = 2
 
 export type CueApi = (path: string, init: { method: string; json: { text: string }; signal?: AbortSignal }) => Promise<Response>
 
+/** Normalises a cue's audio to `target` LUFS (rejects when it cannot: the original then plays). */
+export type CueNormalizer = (audio: Blob, target: number) => Promise<Blob>
+
 interface Playable extends RateTarget {
   src: string
+  volume?: number
   paused: boolean
   play(): Promise<void>
   pause(): void
@@ -63,6 +76,8 @@ export class CuePlayer {
   private api: CueApi
   private speed?: () => number
   private onSpeaking?: (speaking: boolean) => void
+  private normalize?: CueNormalizer
+  private target?: (key: string | undefined) => number
   private phrases = new Map<string, Promise<string>>()
   /** Object URLs of phrases that are ready to play at once. */
   private urls = new Map<string, string>()
@@ -74,10 +89,28 @@ export class CuePlayer {
   private loading = new AbortController()
   speaking = false
 
-  constructor({ api, speed, onSpeaking, audio }: { api: CueApi; speed?: () => number; onSpeaking?: (speaking: boolean) => void; audio?: unknown }) {
+  constructor({
+    api,
+    speed,
+    onSpeaking,
+    audio,
+    normalize,
+    target,
+  }: {
+    api: CueApi
+    speed?: () => number
+    onSpeaking?: (speaking: boolean) => void
+    audio?: unknown
+    /** Loudness normaliser applied while loading (none: phrases play as synthesized). */
+    normalize?: CueNormalizer
+    /** Loudness target (LUFS) for a voice key; default −19.5. */
+    target?: (key: string | undefined) => number
+  }) {
     this.api = api
     this.speed = speed
     this.onSpeaking = onSpeaking
+    this.normalize = normalize
+    this.target = target
     this.audio = (audio ?? new Audio()) as Playable
   }
 
@@ -159,10 +192,25 @@ export class CuePlayer {
     const key = await this.key
     const store = key ? await cueStore() : undefined
     const request = key ? cueURL(key, text) : ""
-    let blob = store ? await store.match(request).then((res) => res?.blob(), () => undefined) : undefined
-    if (!blob) {
-      blob = await (await this.api("/api/speak", { method: "POST", json: { text }, signal })).blob()
-      await store?.put(request, new Response(blob, { headers: { "content-type": blob.type || "audio/mpeg" } })).catch(() => {})
+    const target = this.target?.(key) ?? DEFAULT_TARGET_LUFS
+    const cached = store ? await store.match(request).catch(() => undefined) : undefined
+    let blob = await cached?.blob().catch(() => undefined)
+    const fits = !this.normalize || Math.abs(Number(cached?.headers.get(TARGET_HEADER) ?? NaN) - target) <= RENORMALIZE_DB
+    if (!blob || !fits) {
+      // Synthesize only what is not cached; cached audio of another target is normalised again.
+      const source = blob ?? (await (await this.api("/api/speak", { method: "POST", json: { text }, signal })).blob())
+      blob = source
+      const headers: Record<string, string> = {}
+      if (this.normalize) {
+        try {
+          blob = await this.normalize(source, target)
+          headers[TARGET_HEADER] = String(target)
+        } catch {
+          // undecodable here: the original plays (and normalising is tried again next load)
+        }
+      }
+      headers["content-type"] = blob.type || "audio/mpeg"
+      await store?.put(request, new Response(blob, { headers })).catch(() => {})
     }
     const url = URL.createObjectURL(blob)
     this.urls.set(text, url)
@@ -174,6 +222,8 @@ export class CuePlayer {
     const key = await this.key
     const store = key ? await cueStore() : undefined
     if (!store || !key) return
+    const storage = (globalThis as { caches?: CacheStorage }).caches
+    for (const name of OLD_CUE_CACHES) await storage?.delete(name).catch(() => false)
     try {
       for (const request of await store.keys()) if (!request.url.startsWith(cueFolder(key))) await store.delete(request)
     } catch {
@@ -199,6 +249,7 @@ export class CuePlayer {
     const audio = this.audio
     this.setSpeaking(true)
     audio.src = url
+    audio.volume = 1 // same as the reply player
     applyRate(audio, this.speed?.() ?? 1)
     // Listen before play() so a very short phrase cannot end unnoticed.
     const finished = new Promise<void>((resolve) => {
