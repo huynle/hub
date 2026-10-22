@@ -69,7 +69,7 @@ beforeEach(async () => {
     noDevice: true,
     pushSender: async (target) => void pushed.push(target.endpoint),
     notifier: {
-      notify: async (kind, sessionID, _title, _detail, _body, owner) => {
+      notify: async (kind, sessionID, _title, _body, owner) => {
         notified.push({ kind, sessionID, ...(owner ? { owner } : {}) })
         return 1
       },
@@ -303,7 +303,7 @@ describe("catalog, SSE and push", () => {
     store.addPushSubscription(b.id, { endpoint: "https://push.example.com/b", keys: { p256dh: "x", auth: "y" } })
     const sent: string[] = []
     const push = new Push({ store, subject: "mailto:admin@example.com", sender: async (target: PushTarget, _p: string, _o: PushSendOptions) => void sent.push(target.endpoint) })
-    expect(await push.notify("handoff", "ses_1", "t", undefined, undefined, "u_a")).toBe(1)
+    expect(await push.notify("handoff", "ses_1", "t", undefined, "u_a")).toBe(1)
     expect(sent).toEqual(["https://push.example.com/a"])
   })
 

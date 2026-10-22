@@ -44,7 +44,7 @@ export function harness(overrides: Partial<CentralOptions> & { env?: Record<stri
       speak: async (text) => new TextEncoder().encode(`mp3:${text}`),
     },
     notifier: {
-      notify: async (kind, sessionID, title, _detail, body) => {
+      notify: async (kind, sessionID, title, body) => {
         notified.push({ kind, sessionID, title, ...(body ? { body } : {}) })
         return 2
       },
