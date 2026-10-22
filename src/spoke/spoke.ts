@@ -9,6 +9,7 @@ import {
   COMPACTED_EVENTS,
   FORWARDED_EVENTS,
   SEED_JOBS_MAX,
+  SPOKE_FEATURES,
   type JobInfo,
   type HerdrWorkspace,
   type FormAnswer,
@@ -99,6 +100,12 @@ export interface SpokeHost {
   interrupt(sessionID: string): Promise<unknown>
   /** Changes a session's settings in OpenCode (session.update); only the title is used. */
   updateSession?(sessionID: string, input: { title?: string }): Promise<unknown>
+  /**
+   * Has OpenCode regenerate the session's title with its title agent (session.update with an empty title on
+   * this process's own server; the plugin API's update would set an empty title instead). Resolves when
+   * OpenCode is done ("done", whether or not the title changed); "unavailable" when the server cannot be reached.
+   */
+  generateTitle?(sessionID: string): Promise<"done" | "unavailable">
   switchAgent(sessionID: string, agent: string): Promise<unknown>
   switchModel(sessionID: string, model: ModelRef): Promise<unknown>
   hasAgent(id: string): Promise<boolean>
@@ -172,6 +179,10 @@ export interface SpokeOptions {
   readonly herdrSettleMs?: number
   /** How often expired TUI presence is checked (default 5 s). */
   readonly presenceCheckMs?: number
+  /** How long autoName waits for OpenCode's generated title before answering "pending" (default 20 s). */
+  readonly autoNameWaitMs?: number
+  /** After generation returns without a session.renamed event, how long to wait for it (default 1.5 s). */
+  readonly autoNameSettleMs?: number
 }
 
 export type EnrollmentState = "pending" | "approved" | "denied" | "expired" | "error"
@@ -228,6 +239,8 @@ const FALLBACK_AGENT = "build"
 const LOCAL_HUB_MAX_RETRY_MS = 15 * 60_000
 const ENROLL_RETRY_MS = 500
 const NOT_SHARED = "This session is not shared with voice"
+const CANNOT_AUTO_NAME = "This OpenCode process cannot auto-name sessions (its server cannot be reached); use /rename in its terminal"
+export const AUTO_NAME_WAIT_MS = 20_000
 /** Longest session title the hub sets (OpenCode's own titles are shorter). */
 export const MAX_TITLE_CHARS = 200
 const UNKNOWN_SESSION = "Unknown session"
@@ -261,6 +274,8 @@ export class Spoke {
    * so an utterance needs no getSession round trip. Cleared when the event stream restarts (events may be lost).
    */
   private readonly sessionModels = new Map<string, { readonly model?: ModelRef }>()
+  /** Session → callbacks waiting for its next session.renamed event (autoName). */
+  private readonly renameWaiters = new Map<string, Set<(title: string) => void>>()
   private conversationChain: Promise<unknown> = Promise.resolve()
   private readonly abort = new AbortController()
   private snapshotTimer?: ReturnType<typeof setTimeout>
@@ -711,6 +726,7 @@ export class Spoke {
         mode: this.config.mode === "session" ? "session" : "always",
         opencodeVersion: this.host.opencodeVersion,
         pluginVersion: this.options.pluginVersion,
+        features: [...SPOKE_FEATURES],
       }),
       handle: (req) => this.handle(req),
       onWelcome: () => {
@@ -927,6 +943,8 @@ export class Spoke {
         return {}
       case "rename":
         return this.rename(req.sessionID, req.title)
+      case "autoName":
+        return this.autoName(req.sessionID)
       case "stop":
         return this.stopTree(req.sessionID)
       case "summary":
@@ -953,6 +971,45 @@ export class Spoke {
     await this.host.updateSession(sessionID, { title })
     if (this.tracker.observe({ type: "session.renamed", data: { sessionID, title } }, Date.now())) this.sendSnapshot()
     return { title }
+  }
+
+  /**
+   * Has OpenCode regenerate the title with its title agent, then reports the outcome: the new title (from
+   * session.renamed, or read back when the event is late), `unchanged` (OpenCode kept it or produced nothing),
+   * or `pending` when generation outlasts the wait (the catalog updates when the event arrives).
+   */
+  private async autoName(sessionID: string): Promise<ResultFor["autoName"]> {
+    const generate = this.host.generateTitle?.bind(this.host)
+    if (!generate) throw new Error(CANNOT_AUTO_NAME)
+    const before = (await this.host.getSession(sessionID)).title
+    let resolveRenamed!: (title: string) => void
+    const renamed = new Promise<string>((resolve) => (resolveRenamed = resolve))
+    const waiters = this.renameWaiters.get(sessionID) ?? new Set()
+    waiters.add(resolveRenamed)
+    this.renameWaiters.set(sessionID, waiters)
+    const timers: Array<ReturnType<typeof setTimeout>> = []
+    const after = <T>(ms: number, value: T) => new Promise<T>((resolve) => timers.push(setTimeout(() => resolve(value), ms)))
+    try {
+      const first = await Promise.race([
+        renamed.then((title) => ({ title })),
+        generate(sessionID).then((outcome) => ({ outcome })),
+        after(this.options.autoNameWaitMs ?? AUTO_NAME_WAIT_MS, { pending: true as const }),
+      ])
+      if ("title" in first) return { title: first.title }
+      if ("pending" in first) return { pending: true }
+      if (first.outcome === "unavailable") throw new Error(CANNOT_AUTO_NAME)
+      // Generation is done; its session.renamed event may still be on its way.
+      const late = await Promise.race([renamed, after(this.options.autoNameSettleMs ?? 1500, undefined)])
+      if (late !== undefined) return { title: late }
+      const title = (await this.host.getSession(sessionID)).title
+      if (title === before) return { unchanged: true, title }
+      if (this.tracker.observe({ type: "session.renamed", data: { sessionID, title } }, Date.now())) this.sendSnapshot()
+      return { title }
+    } finally {
+      for (const timer of timers) clearTimeout(timer)
+      waiters.delete(resolveRenamed)
+      if (waiters.size === 0) this.renameWaiters.delete(sessionID)
+    }
   }
 
   /** Answers a pending form through OpenCode, or through a polling TUI when this process cannot. */
@@ -1247,6 +1304,10 @@ export class Spoke {
         }
       }
       this.tasks.observe(event, Date.now())
+      if (event.type === "session.renamed" && typeof sessionID === "string") {
+        const title = (event.data as Record<string, unknown>).title
+        if (typeof title === "string") for (const waiter of this.renameWaiters.get(sessionID) ?? []) waiter(title)
+      }
       if (this.tracker.observe(event, Date.now())) this.scheduleSnapshot()
       if (this.options.kind === "service" && this.host.listRecent && LISTING_EVENTS.has(event.type) && !(event.data as any)?.parentID) {
         this.scheduleSeed()

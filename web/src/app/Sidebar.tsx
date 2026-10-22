@@ -4,7 +4,7 @@ import { For, Show, createMemo, createSignal } from "solid-js"
 import { account } from "../core/account-core"
 import { sidebarSections, voiceLive, type GroupBy, type SessionRow, type SidebarSort } from "../lib/sessions"
 import { isRenaming, sessionMenu } from "./actions"
-import { RenameTitle } from "./Rename"
+import { Naming, RenameTitle } from "./Rename"
 import { enrollments, me, rows } from "./hub"
 import { HubMark } from "./HubMark"
 import { route, sessionHref } from "./router"
@@ -143,6 +143,7 @@ function SideRow(props: { row: SessionRow; active: boolean; onPick: () => void }
           <VoiceDot />
         </Show>
         <span class="side-title">{r().title}</span>
+        <Naming id={r().id} />
         <Show when={r().jobs}>
           <span class="jobs-badge" title={jobsBadge(r().jobs)} aria-label={jobsBadge(r().jobs)}>
             {r().jobs}

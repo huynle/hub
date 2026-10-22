@@ -143,6 +143,52 @@ describe("sessions without voice", () => {
     expect(second).toHaveLength(2)
   })
 
+  describe("auto-name (rename with {auto: true})", () => {
+    async function autoMachine(features: string[] | undefined) {
+      const { token } = h.store.addMachine("laptop")
+      return spoke(h, { machine: { token }, hello: { kind: "service", ...(features ? { features } : {}) }, sessions: [session("ses_x", { owned: true })] })
+    }
+
+    test("asks the spoke to generate the title and answers what came back", async () => {
+      h = harness()
+      const client = await autoMachine(["autoName"])
+      let result: unknown = { title: "Fix the login bug" }
+      const seen = answer(client, (req) => (req.op === "autoName" ? result : {}))
+      const res = await post("/api/sessions/ses_x/rename", { auto: true })
+      expect(res.status).toBe(200)
+      expect(await res.json()).toEqual({ title: "Fix the login bug" })
+      expect(seen).toEqual([{ op: "autoName", sessionID: "ses_x" }])
+      result = { unchanged: true, title: "Same" }
+      const same = await post("/api/sessions/ses_x/rename", { auto: true })
+      expect(same.status).toBe(200)
+      expect(await same.json()).toEqual({ title: "Same", unchanged: true })
+      result = { pending: true }
+      const pending = await post("/api/sessions/ses_x/rename", { auto: true })
+      expect(pending.status).toBe(202)
+      expect(await pending.json()).toEqual({ pending: true })
+    })
+
+    test("an older spoke (no autoName feature) gets a clear error and is never asked", async () => {
+      h = harness()
+      const client = await autoMachine(undefined)
+      const seen = answer(client, () => ({}))
+      const res = await post("/api/sessions/ses_x/rename", { auto: true })
+      expect(res.status).toBe(409)
+      expect(await res.json()).toEqual({ error: "Update the Hub plugin to use Auto-name", code: "plugin_outdated" })
+      expect(seen).toEqual([])
+    })
+
+    test("spoke errors pass through; a non-boolean auto is a bad request", async () => {
+      h = harness()
+      const client = await autoMachine(["autoName"])
+      answer(client, () => new Error("This OpenCode process cannot auto-name sessions"))
+      const failed = await post("/api/sessions/ses_x/rename", { auto: true })
+      expect(failed.status).toBe(502)
+      expect(((await failed.json()) as any).error).toContain("cannot auto-name")
+      expect((await post("/api/sessions/ses_x/rename", { auto: "yes" })).status).toBe(400)
+    })
+  })
+
   test("a typed turn steers while the session tree is running", async () => {
     h = harness()
     const { client } = await machine()

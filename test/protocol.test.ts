@@ -26,6 +26,14 @@ describe("parseSpokeMessage", () => {
     expect(parseSpokeMessage("x".repeat(1_000_001))).toBeUndefined()
   })
 
+  test("a hello may list the spoke's features (strings); older spokes send none", () => {
+    expect(parseSpokeMessage(j({ ...hello, features: ["autoName"] }))).toMatchObject({ features: ["autoName"] })
+    expect(parseSpokeMessage(j({ ...hello, features: [] }))).toBeDefined()
+    expect(parseSpokeMessage(j({ ...hello, features: "autoName" }))).toBeUndefined()
+    expect(parseSpokeMessage(j({ ...hello, features: [5] }))).toBeUndefined()
+    expect(parseSpokeMessage(j({ ...hello, features: Array(65).fill("x") }))).toBeUndefined()
+  })
+
   test("rejects a hello with a bad kind or mode", () => {
     expect(parseSpokeMessage(j({ ...hello, kind: "tui" }))).toBeUndefined()
     expect(parseSpokeMessage(j({ ...hello, mode: "off" }))).toBeUndefined()
@@ -172,6 +180,13 @@ describe("session browser ops", () => {
     expect(parseServerMessage(r({ op: "create", directory: "/home/user/projects/x", title: "New" }))).toBeDefined()
     expect(parseServerMessage(r({ op: "create", directory: "relative/path" }))).toBeUndefined()
   })
+
+  test("autoName carries just a session", () => {
+    expect(parseServerMessage(r({ op: "autoName", sessionID: "ses_1" }))).toBeDefined()
+    expect(parseServerMessage(r({ op: "autoName", sessionID: "" }))).toBeUndefined()
+    expect(parseServerMessage(r({ op: "autoName" }))).toBeUndefined()
+  })
+
   test("rename carries a title string (the spoke checks its length and reports why)", () => {
     expect(parseServerMessage(r({ op: "rename", sessionID: "ses_1", title: "New name" }))).toBeDefined()
     expect(parseServerMessage(r({ op: "rename", sessionID: "ses_1", title: "" }))).toBeDefined()

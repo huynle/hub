@@ -5,7 +5,7 @@ import { DEFAULT_TABLE, inactiveRows, parseTable, serializeTable, tableRows, voi
 import { archiveSessions, isRenaming, sessionMenu } from "./actions"
 import { enrollments, hub, live, liveTick, rows, speechReady, me } from "./hub"
 import { isPhone } from "./layout"
-import { RenameTitle } from "./Rename"
+import { Naming, RenameTitle } from "./Rename"
 import { navigate, sessionHref } from "./router"
 import { speechSetup } from "../core/feedback-core"
 import { jobsBadge } from "../core/jobs-core"
@@ -271,6 +271,7 @@ function SessionTable(props: {
                 <RenameTitle id={r.id} title={r.title} place="table">
                   <a href={sessionHref(r.id)}>{r.title}</a>
                 </RenameTitle>
+                <Naming id={r.id} />
                 <Show when={r.unread}>
                   <span class="unread-dot" role="img" aria-label="Unread" />
                 </Show>
@@ -318,6 +319,7 @@ function PhoneRow(props: { row: SessionRow }) {
               <VoiceDot />
             </Show>
             {r().title}
+            <Naming id={r().id} />
             <Show when={r().unread}>
               <span class="unread-dot" role="img" aria-label="Unread" />
             </Show>

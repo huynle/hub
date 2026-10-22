@@ -45,7 +45,10 @@
 // `Prefer: respond-async` (as the hub) a ses_mock turn still running after 1.5 s answers 202 {mode:"turn"} and its
 // result follows as an SSE {type:"turn"} event. POST /mock/slow-turns {ms} sets how long a ses_mock turn works.
 // POST /api/sessions/:id/rename {title} (history fixtures; 400 blank or over 200 characters; POST /mock/fail {rename}
-// answers 502) sets the title and emits a catalog.
+// answers 502) sets the title and emits a catalog. Auto-name: {auto: true} waits 600 ms, then follows POST /mock/auto-name
+// {mode?, title?}: "rename" (default) sets `title` (default "Named by OpenCode") and answers {title}; "same" answers
+// {title, unchanged}; "pending" answers 202 {pending} and sets the title 1.5 s later; "outdated" answers 409
+// plugin_outdated; "fail" answers 502.
 // POST /mock/hold-turns {on} keeps a ses_mock turn working until it is stopped (or the hold is lifted), so a test
 // can steer and stop it without racing the turn's timer.
 // Progressive history: GET …/timeline pages like the spoke (src/spoke/timeline.ts newestPage: ?order=desc for the
@@ -215,6 +218,8 @@ let sessions = fixtures()
 let created = 0
 let fail = { expose: false, create: false, models: false, prefs: false, modelPrefs: false, rename: false }
 let serviceConnected = true
+const defaultAutoName = () => ({ mode: "rename" as "rename" | "same" | "pending" | "outdated" | "fail", title: "Named by OpenCode" })
+let autoName = defaultAutoName()
 /** A second online machine ("workstation", mac_5) with its own service and one session; POST /mock/workstation {on}. */
 let workstation = false
 const WORKSTATION_DIR = "/home/user/work/ml-lab"
@@ -1102,6 +1107,10 @@ const server = Bun.serve({
       emitCatalog()
       return Response.json({ ok: true, session: s })
     }
+    if (p === "/mock/auto-name" && m === "POST") {
+      autoName = { ...autoName, ...(await json()) }
+      return Response.json(autoName)
+    }
     if (p === "/mock/fail" && m === "POST") {
       fail = { ...fail, ...(await json()) }
       return Response.json(fail)
@@ -1153,6 +1162,7 @@ const server = Bun.serve({
       status = [{ id: SESSION, title: "Mock session", state: "idle", blockers: [] }]
       sessions = fixtures()
       fail = { expose: false, create: false, models: false, prefs: false, modelPrefs: false, rename: false }
+      autoName = defaultAutoName()
       reads = {}
       modelPrefs = {}
       turnRun++
@@ -1349,6 +1359,23 @@ const server = Bun.serve({
       if (action === "rename" && m === "POST") {
         const body = await json()
         last().body = body
+        if (body.auto === true) {
+          await Bun.sleep(600)
+          if (autoName.mode === "outdated") return Response.json({ error: "Update the Hub plugin to use Auto-name", code: "plugin_outdated" }, { status: 409 })
+          if (autoName.mode === "fail") return Response.json({ error: "OpenCode did not answer" }, { status: 502 })
+          if (autoName.mode === "same") return Response.json({ title: s.title, unchanged: true })
+          const named = autoName.title
+          if (autoName.mode === "pending") {
+            setTimeout(() => {
+              s.title = named
+              emitCatalog()
+            }, 1500)
+            return Response.json({ pending: true }, { status: 202 })
+          }
+          s.title = named
+          emitCatalog()
+          return Response.json({ title: named })
+        }
         await Bun.sleep(300)
         const title = typeof body.title === "string" ? body.title.trim() : ""
         if (!title || title.length > 200) return Response.json({ error: "Expected {title}: a non-empty title" }, { status: 400 })

@@ -17,7 +17,7 @@ afterEach(() => {
 
 function fakeHost(opts: { forms?: boolean } = {}) {
   const events = new EventQueue<Ev>()
-  const calls = { form: [] as unknown[], prompt: [] as unknown[], permission: [] as unknown[], get: [] as string[], interrupt: [] as string[], switch: [] as unknown[], create: [] as unknown[], model: [] as unknown[], update: [] as unknown[] }
+  const calls = { generate: [] as string[], form: [] as unknown[], prompt: [] as unknown[], permission: [] as unknown[], get: [] as string[], interrupt: [] as string[], switch: [] as unknown[], create: [] as unknown[], model: [] as unknown[], update: [] as unknown[] }
   /** Titles set through updateSession. */
   const titles = new Map<string, string>()
   /** Current model per session (absent: the default model). */
@@ -29,6 +29,13 @@ function fakeHost(opts: { forms?: boolean } = {}) {
   /** Parent of sessions as OpenCode reports them (subagent sessions). */
   const parents = new Map<string, string>()
   let inbox = 0
+  /**
+   * What OpenCode's title generation does (session.update with an empty title over the own server):
+   * "rename" publishes session.renamed with `title` and returns; "quiet" changes the title without an event
+   * (the event is late); "same" keeps the title; "hang" never returns; "unavailable" cannot reach the server;
+   * "error" fails.
+   */
+  const generation = { mode: "rename" as "rename" | "quiet" | "same" | "hang" | "unavailable" | "error", title: "Generated title" }
   const catalog = [
     { providerID: "anthropic", modelID: "claude-haiku", name: "Claude Haiku", enabled: true, status: "active", variants: [{ id: "fast" }] },
     { providerID: "anthropic", modelID: "claude-opus", name: "Claude Opus", enabled: true, status: "active", variants: [{ id: "thinking" }] },
@@ -50,6 +57,27 @@ function fakeHost(opts: { forms?: boolean } = {}) {
       const model = models.get(sessionID)
       const parentID = parents.get(sessionID)
       return { id: sessionID, title: titles.get(sessionID) ?? `Fetched ${sessionID}`, location: { directory: "/fetched" }, time: { updated: 5 }, ...(parentID ? { parentID } : {}), ...(agent ? { agent } : {}), ...(model ? { model } : {}) }
+    },
+    generateTitle: async (sessionID) => {
+      calls.generate.push(sessionID)
+      switch (generation.mode) {
+        case "unavailable":
+          return "unavailable"
+        case "error":
+          throw new Error("Title model failed")
+        case "hang":
+          return new Promise<never>(() => {})
+        case "same":
+          return "done"
+        case "quiet":
+          titles.set(sessionID, generation.title)
+          return "done"
+        case "rename":
+          titles.set(sessionID, generation.title)
+          events.push({ type: "session.renamed", data: { sessionID, title: generation.title } })
+          await Bun.sleep(5)
+          return "done"
+      }
     },
     updateSession: async (sessionID, input) => {
       calls.update.push({ sessionID, ...input })
@@ -86,7 +114,7 @@ function fakeHost(opts: { forms?: boolean } = {}) {
       return { id: `ses_new${calls.create.length}` }
     },
   }
-  return { host, calls, messages, agents, known, models, catalog, parents }
+  return { host, calls, messages, agents, known, models, catalog, parents, generation, titles }
 }
 
 function setup(
@@ -97,7 +125,7 @@ function setup(
   const file = path.join(dir, "config.json")
   const server = opts.server ?? fakeCentral()
   writeConfig(file, { ...defaults("box"), server: server.url, ...config })
-  const { host, calls, messages, agents, known, models, catalog, parents } = fakeHost({ forms: opts.forms })
+  const { host, calls, messages, agents, known, models, catalog, parents, generation, titles } = fakeHost({ forms: opts.forms })
   if (opts.listRecent) (host as { listRecent?: SpokeHost["listRecent"] }).listRecent = opts.listRecent
   const spoke = new Spoke(host, {
     configFile: file,
@@ -119,7 +147,7 @@ function setup(
   cleanups.push(() => server.stop())
   cleanups.push(() => spoke.stop())
   spoke.start()
-  return { spoke, server, host, calls, messages, file, agents, known, models, catalog, parents }
+  return { spoke, server, host, calls, messages, file, agents, known, models, catalog, parents, generation, titles }
 }
 
 const created = (sessionID: string, extra: Record<string, unknown> = {}): Ev => ({
@@ -153,6 +181,7 @@ describe("Spoke", () => {
       mode: "always",
       opencodeVersion: "2.0.25",
       pluginVersion: "9.9.9",
+      features: ["autoName"],
     })
     await until(() => lastSessions(server) !== undefined)
     host.push(created("ses_a"))
@@ -565,6 +594,73 @@ describe("Spoke", () => {
     await Bun.sleep(30)
     expect(await server.request({ op: "rename", sessionID: "ses_other", title: "Renamed" })).toMatchObject({ ok: true, result: { title: "Renamed" } })
     expect(calls.update).toEqual([{ sessionID: "ses_other", title: "Renamed" }])
+  })
+
+  describe("autoName", () => {
+    async function ready(options: Partial<SpokeOptions> = {}) {
+      const ctx = setup({ mode: "always", token: "tok" }, { options: { autoNameSettleMs: 50, ...options } })
+      await until(() => ctx.spoke.status().connection === "connected")
+      ctx.host.push(created("ses_a"))
+      await until(() => lastSessions(ctx.server)?.sessions.some((s) => s.id === "ses_a") === true)
+      ctx.titles.set("ses_a", "x")
+      return ctx
+    }
+
+    test("asks OpenCode to generate the title and reports the renamed title", async () => {
+      const { server, calls } = await ready()
+      const res = await server.request({ op: "autoName", sessionID: "ses_a" })
+      expect(res).toMatchObject({ ok: true, result: { title: "Generated title" } })
+      expect(calls.generate).toEqual(["ses_a"])
+      expect(calls.update).toEqual([])
+      await until(() => lastSessions(server)?.sessions.find((s) => s.id === "ses_a")?.title === "Generated title")
+    })
+
+    test("a title changed without a session.renamed event (yet) is read back from OpenCode", async () => {
+      const { server, generation } = await ready()
+      generation.mode = "quiet"
+      generation.title = "Quiet title"
+      expect(await server.request({ op: "autoName", sessionID: "ses_a" })).toMatchObject({ ok: true, result: { title: "Quiet title" } })
+    })
+
+    test("OpenCode keeping the title is reported as unchanged with the current title", async () => {
+      const { server, generation } = await ready()
+      generation.mode = "same"
+      const res = await server.request({ op: "autoName", sessionID: "ses_a" })
+      expect(res).toEqual(expect.objectContaining({ ok: true, result: { unchanged: true, title: "x" } }))
+    })
+
+    test("still generating after the wait: pending (the catalog updates when it lands)", async () => {
+      const { server, generation } = await ready({ autoNameWaitMs: 80 })
+      generation.mode = "hang"
+      const started = Date.now()
+      const res = await server.request({ op: "autoName", sessionID: "ses_a" })
+      expect(res).toEqual(expect.objectContaining({ ok: true, result: { pending: true } }))
+      expect(Date.now() - started).toBeLessThan(2000)
+    })
+
+    test("a late session.renamed within the wait still wins over a hanging call", async () => {
+      const { server, generation, host } = await ready({ autoNameWaitMs: 2000 })
+      generation.mode = "hang"
+      const pending = server.request({ op: "autoName", sessionID: "ses_a" })
+      await Bun.sleep(50)
+      host.push({ type: "session.renamed", data: { sessionID: "ses_other", title: "Not this one" } })
+      host.push({ type: "session.renamed", data: { sessionID: "ses_a", title: "From the event" } })
+      expect(await pending).toMatchObject({ ok: true, result: { title: "From the event" } })
+    })
+
+    test("a process that cannot reach its own server, or a host without generation, says so; errors pass through", async () => {
+      const { server, generation, host, spoke } = await ready()
+      generation.mode = "unavailable"
+      const unavailable = await server.request({ op: "autoName", sessionID: "ses_a" })
+      expect(unavailable).toMatchObject({ ok: false })
+      expect((unavailable as { error?: string }).error).toContain("cannot auto-name")
+      generation.mode = "error"
+      expect(await server.request({ op: "autoName", sessionID: "ses_a" })).toMatchObject({ ok: false, error: "Title model failed" })
+      delete (host as { generateTitle?: unknown }).generateTitle
+      const old = await server.request({ op: "autoName", sessionID: "ses_a" })
+      expect((old as { error?: string }).error).toContain("cannot auto-name")
+      expect(spoke.status().connection).toBe("connected")
+    })
   })
 
   test("interrupt interrupts the session", async () => {
