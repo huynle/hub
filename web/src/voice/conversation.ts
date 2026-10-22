@@ -11,6 +11,7 @@ import { junkTranscript } from "../core/junk-transcript"
 import { loadSilero } from "./silero"
 import { AudioClip, canStreamMp3, clipFrom, feed } from "../core/audio-stream"
 import { CuePlayer } from "../core/cues"
+import { cueLoudnessTarget, measureReply, normalizeCueAudio } from "./cue-loudness"
 import { MicLiveness, recoveryDelay, type LossReason } from "../core/mic-liveness"
 import { CueClock, CuePicker, cueTexts, CueScheduler, isWorking, subagentChanges, type StatusEntry } from "../core/feedback-core"
 import type { ApiInit } from "../app/api"
@@ -117,6 +118,8 @@ export class Conversation<B = unknown> {
   private cuePicker = new CuePicker({ ready: (text) => this.cuePlayer?.ready(text) ?? false })
   private scheduler = new CueScheduler({ pick: (cue) => this.cuePicker.pick(cue) })
   private cuePlayer: CuePlayer
+  /** The TTS voice key (cue cache and reply loudness are kept per voice); fetched once per conversation. */
+  private voiceKey?: Promise<string | undefined>
   private onVisibility: () => void
   /** Is the microphone really heard? The phone stops it with the screen off (muted track, suspended audio, no frames). */
   private liveness = new MicLiveness({ onChange: (live, reason) => this.livenessChanged(live, reason) })
@@ -168,6 +171,9 @@ export class Conversation<B = unknown> {
     this.cuePlayer = new CuePlayer({
       api: this.api as never,
       speed: this.opts.speed,
+      // Cues are normalised to the replies' loudness while they are prefetched (not when they play).
+      normalize: normalizeCueAudio,
+      target: cueLoudnessTarget,
       onSpeaking: (on) => {
         this.cueSpeaking = on
         this.guardEcho()
@@ -285,7 +291,8 @@ export class Conversation<B = unknown> {
   /** Loads the progress phrases now so each plays the moment its cue fires (cached per TTS voice). */
   private prefetchCues(): void {
     if (this.opts.cues === false || !this.scheduler.enabled) return
-    void this.cuePlayer.prefetch(cueTexts(), this.cueKey())
+    // Fetched afresh: the voice may have changed since the last prefetch.
+    void this.cuePlayer.prefetch(cueTexts(), (this.voiceKey = this.cueKey()))
   }
 
   /** The TTS settings that shape cue audio (provider, model, voice, speed, server); undefined if unknown. */
@@ -758,6 +765,11 @@ export class Conversation<B = unknown> {
       () => this.markTurn("firstByte"),
       () => {},
     )
+    // Once complete, the sentence's loudness is measured off the playback path: cues follow the replies.
+    void clip
+      .whole()
+      .then(async (chunks) => measureReply(chunks, await (this.voiceKey ??= this.cueKey())))
+      .catch(() => {})
     return clip
   }
 

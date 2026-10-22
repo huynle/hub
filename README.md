@@ -893,9 +893,20 @@ Pure logic is in `web/src/core/feedback-core.ts` (tested with bun); `web/src/cor
   playback changes. Each cue has several variants (`CUE_VARIANTS` in `web/src/core/feedback-core.ts`), chosen
   from a shuffle-bag: every variant once before any repeats, never the same phrase twice in a row, and a variant
   whose audio is already loaded wins. All variants are synthesized, 2 at a time, when Voice mode starts (ending Voice mode
-  cancels what is left) and kept in memory and in the browser's Cache Storage (`hub-cues-v1`, keyed by TTS provider, model, voice, speed and server, so a later
+  cancels what is left) and kept in memory and in the browser's Cache Storage (`hub-cues-v2`, keyed by TTS provider, model, voice, speed and server, so a later
   session starts with them ready and a voice change fetches them again); a ready phrase starts playing at
   once. A phrase that is not ready yet when its cue fires plays a short tone instead.
+- **Cue loudness**: short TTS phrases come out several dB louder or quieter than the spoken replies, so each
+  phrase is normalised while it is prefetched (never when it plays): decoded (`OfflineAudioContext`), measured
+  (ITU-R BS.1770 K-weighted, gated loudness), trimmed to at most 80 ms of leading/trailing silence, gained to the
+  replies' loudness with a look-ahead limiter keeping peaks at or below −1 dBFS, and stored as a 16-bit mono WAV
+  (with the target it was normalised to; a target that moved by more than 1 dB re-normalises the cached audio
+  without new synthesis). The target is −19.5 LUFS until replies are measured: each completed reply sentence of
+  at least 1 s is decoded when the page is idle, and the median of the last 21 per TTS voice
+  (`localStorage` `voice.replyLoudness`, clamped to −26…−14 LUFS) becomes the target. Audio that cannot be decoded
+  plays as synthesized. Cues and replies keep their plain `<audio>` elements (no Web Audio playback graph, which
+  would break background and iOS playback), both at volume 1 and the chosen speed. Pure parts:
+  `web/src/core/loudness.ts`; browser decoding: `web/src/voice/cue-loudness.ts`.
 - **Presence**: while a session view is open, the phone posts `POST /api/sessions/:id/presence
   {visible}` on visibility changes and every 30 s while visible, and `{visible:false}` on `pagehide` and
   when leaving the view. The hub uses this to decide when to push.

@@ -1,5 +1,6 @@
 // Pure logic for hands-free conversation mode (no DOM, no audio APIs): voice activity detection,
 // endpointing, voice commands, sentence splitting, WAV encoding and the sentence speech queue.
+import { encodeWav16 } from "./loudness"
 
 // ---------- words ----------
 
@@ -150,30 +151,7 @@ export function resample(samples: ArrayLike<number>, from: number, to: number): 
 
 /** Encodes mono float samples at `rate` as a 16 kHz mono 16-bit PCM WAV file. */
 export function encodeWav(samples: ArrayLike<number>, rate: number): Uint8Array<ArrayBuffer> {
-  const pcm = resample(samples, rate, WAV_RATE)
-  const bytes = new Uint8Array(44 + pcm.length * 2)
-  const view = new DataView(bytes.buffer)
-  const ascii = (at: number, text: string) => {
-    for (let i = 0; i < text.length; i++) bytes[at + i] = text.charCodeAt(i)
-  }
-  ascii(0, "RIFF")
-  view.setUint32(4, bytes.length - 8, true)
-  ascii(8, "WAVE")
-  ascii(12, "fmt ")
-  view.setUint32(16, 16, true)
-  view.setUint16(20, 1, true) // PCM
-  view.setUint16(22, 1, true) // mono
-  view.setUint32(24, WAV_RATE, true)
-  view.setUint32(28, WAV_RATE * 2, true)
-  view.setUint16(32, 2, true)
-  view.setUint16(34, 16, true)
-  ascii(36, "data")
-  view.setUint32(40, pcm.length * 2, true)
-  for (let i = 0; i < pcm.length; i++) {
-    const s = Math.max(-1, Math.min(1, pcm[i]!))
-    view.setInt16(44 + i * 2, Math.round(s < 0 ? s * 32768 : s * 32767), true)
-  }
-  return bytes
+  return encodeWav16(resample(samples, rate, WAV_RATE), WAV_RATE)
 }
 
 /**

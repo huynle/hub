@@ -2,10 +2,11 @@
 // voice and text, in Cache Storage for later page loads); playback uses the chosen speed; a phrase that is not
 // ready yet falls back to a short tone instead of waiting for synthesis.
 import { afterEach, describe, expect, test } from "bun:test"
-import { CuePlayer, PREFETCH_CONCURRENCY } from "../web/src/core/cues"
+import { CUE_CACHE, CuePlayer, PREFETCH_CONCURRENCY } from "../web/src/core/cues"
 
 class FakeAudio {
   src = ""
+  volume = 0.5
   paused = true
   playbackRate = 1
   defaultPlaybackRate = 1
@@ -32,6 +33,9 @@ function fakeCaches() {
   const url = (r: RequestInfo | URL) => (typeof r === "string" ? r : r instanceof URL ? r.href : r.url)
   return {
     stores,
+    async delete(name: string) {
+      return stores.delete(name)
+    },
     async open(name: string) {
       if (!stores.has(name)) stores.set(name, new Map())
       const store = stores.get(name)!
@@ -54,14 +58,22 @@ function fakeCaches() {
 }
 
 let urls = 0
-;(URL as any).createObjectURL = () => `blob:${++urls}`
+/** What each object URL points at (the audio a cue plays). */
+const objects = new Map<string, Blob>()
+;(URL as any).createObjectURL = (blob: Blob) => {
+  const url = `blob:${++urls}`
+  objects.set(url, blob)
+  return url
+}
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
 const g = globalThis as any
 afterEach(() => {
   delete g.caches
 })
 
-function setup({ fail = false, slow = false } = {}) {
+type Normalize = (audio: Blob, target: number) => Promise<Blob>
+
+function setup({ fail = false, slow = false, normalize, target }: { fail?: boolean; slow?: boolean; normalize?: Normalize; target?: (key: string | undefined) => number } = {}) {
   const calls: string[] = []
   const speaking: boolean[] = []
   const earcons: string[] = []
@@ -82,7 +94,7 @@ function setup({ fail = false, slow = false } = {}) {
     if (fail) throw new Error("tts down")
     return new Response(new Blob([`mp3:${init.json.text}`], { type: "audio/mpeg" }))
   }
-  const player = new CuePlayer({ api, speed: () => 1.5, onSpeaking: (on: boolean) => speaking.push(on), audio })
+  const player = new CuePlayer({ api, speed: () => 1.5, onSpeaking: (on: boolean) => speaking.push(on), audio, normalize, target })
   player.earcon = (name) => void earcons.push(name)
   return { player, calls, speaking, audio, earcons, release, aborted }
 }
@@ -227,5 +239,103 @@ describe("CuePlayer", () => {
     const player = new CuePlayer({ api: async () => new Response(""), audio: new FakeAudio() })
     expect(() => player.play([{ type: "earcon", name: "heard" }])).not.toThrow()
     expect(() => player.earcon("pending")).not.toThrow()
+  })
+})
+
+describe("CuePlayer loudness normalisation", () => {
+  /** A fake normaliser: "wav(<target>):<input>" and a log of its calls. */
+  function normalizer({ fail = false } = {}) {
+    const calls: Array<{ input: string; target: number }> = []
+    const normalize: Normalize = async (audio, target) => {
+      const input = await audio.text()
+      calls.push({ input, target })
+      if (fail) throw new Error("cannot decode")
+      return new Blob([`wav(${target}):${input}`], { type: "audio/wav" })
+    }
+    return { calls, normalize }
+  }
+  const played = async (audio: FakeAudio) => objects.get(audio.src)!.text()
+
+  test("the cue cache is a new version (old un-normalised cues are dropped)", async () => {
+    expect(CUE_CACHE).toBe("hub-cues-v2")
+    g.caches = fakeCaches()
+    await g.caches.open("hub-cues-v1")
+    const { player } = setup({ normalize: normalizer().normalize })
+    await player.prefetch(PHRASES, "voice")
+    expect([...g.caches.stores.keys()]).toEqual(["hub-cues-v2"])
+  })
+
+  test("phrases are normalised to the voice's target while prefetching, before they are ready", async () => {
+    const { calls, normalize } = normalizer()
+    const targets: Array<string | undefined> = []
+    const { player, audio } = setup({ normalize, target: (key) => (targets.push(key), -18) })
+    await player.prefetch(["Still working."], "voice-a")
+    expect(calls).toEqual([{ input: "mp3:Still working.", target: -18 }])
+    expect(targets).toContain("voice-a")
+    const done = player.say("Still working.")
+    expect(await played(audio)).toBe("wav(-18):mp3:Still working.")
+    audio.end()
+    await done
+    expect(calls).toHaveLength(1) // nothing happens at play time
+  })
+
+  test("without a target function the default −19.5 LUFS is used", async () => {
+    const { calls, normalize } = normalizer()
+    const { player } = setup({ normalize })
+    await player.prefetch(["Hang on."])
+    expect(calls[0]!.target).toBe(-19.5)
+  })
+
+  test("a phrase whose audio cannot be normalised plays the original", async () => {
+    const { normalize } = normalizer({ fail: true })
+    const { player, audio } = setup({ normalize })
+    await player.prefetch(["On it."])
+    expect(player.ready("On it.")).toBe(true)
+    void player.say("On it.")
+    expect(await played(audio)).toBe("mp3:On it.")
+  })
+
+  test("normalised phrases are cached: the next load neither synthesizes nor normalises", async () => {
+    g.caches = fakeCaches()
+    const first = normalizer()
+    await setup({ normalize: first.normalize, target: () => -20 }).player.prefetch(PHRASES, "voice")
+    expect(first.calls).toHaveLength(3)
+    const second = normalizer()
+    const again = setup({ normalize: second.normalize, target: () => -20.6 })
+    await again.player.prefetch(PHRASES, "voice")
+    expect(again.calls).toEqual([])
+    expect(second.calls).toEqual([])
+    void again.player.say("Still working.")
+    expect(await played(again.audio)).toBe("wav(-20):mp3:Still working.")
+  })
+
+  test("a target that moved by more than 1 dB re-normalises the cached audio (no new synthesis) and caches it", async () => {
+    g.caches = fakeCaches()
+    await setup({ normalize: normalizer().normalize, target: () => -20 }).player.prefetch(["Still working."], "voice")
+    const moved = normalizer()
+    const next = setup({ normalize: moved.normalize, target: () => -17 })
+    await next.player.prefetch(["Still working."], "voice")
+    expect(next.calls).toEqual([])
+    expect(moved.calls).toEqual([{ input: "wav(-20):mp3:Still working.", target: -17 }])
+    const third = normalizer()
+    await setup({ normalize: third.normalize, target: () => -17 }).player.prefetch(["Still working."], "voice")
+    expect(third.calls).toEqual([])
+  })
+
+  test("cached audio that was never normalised (decode failed) is tried again", async () => {
+    g.caches = fakeCaches()
+    await setup({ normalize: normalizer({ fail: true }).normalize }).player.prefetch(["On it."], "voice")
+    const retry = normalizer()
+    const next = setup({ normalize: retry.normalize })
+    await next.player.prefetch(["On it."], "voice")
+    expect(next.calls).toEqual([])
+    expect(retry.calls).toEqual([{ input: "mp3:On it.", target: -19.5 }])
+  })
+
+  test("cues play at full volume, like replies", async () => {
+    const { player, audio } = setup()
+    await player.prefetch(["Still working."])
+    void player.say("Still working.")
+    expect(audio.volume).toBe(1)
   })
 })
