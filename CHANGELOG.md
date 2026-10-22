@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Question answers no longer lost**: a question card in the console kept its answers in components that were rebuilt
+  whenever any live update arrived (every session change sends a fresh catalog), so choices and typed text were
+  silently reset and Submit sent every question to OpenCode as "Unanswered". Cards are now keyed by request ID and
+  fields by key, and a question form with nothing chosen is refused with a hint (Dismiss skips it).
 - **Voice mode: progress cues play as loud as the spoken replies.** Short cue phrases ("On it.", "Hang on." …)
   came out of TTS up to ~4 dB louder or quieter than replies (measured: −15 to −22 LUFS against replies around
   −19.5). Each phrase is now normalised while it is prefetched: measured (BS.1770 gated loudness), trimmed of

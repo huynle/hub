@@ -485,6 +485,11 @@ export function SessionView(props: { id: string }) {
 
   // ---------- derived ----------
   const blockers = () => blockersOf(found()?.session).filter((b) => !isChild() || (b.sessionID !== undefined && tree().has(b.sessionID)))
+  const blockerByID = createMemo(() => new Map(blockers().map((b) => [`${b.kind}:${b.id}`, b])))
+  const blockerIDs = createMemo((prev: string[] = []) => {
+    const next = [...blockerByID().keys()]
+    return next.length === prev.length && next.every((k, i) => k === prev[i]) ? prev : next
+  })
   const pulse = () => {
     liveTick()
     now()
@@ -614,7 +619,8 @@ export function SessionView(props: { id: string }) {
                 </Show>
               </Show>
               <For each={notes()}>{(n) => <p class={`note ${n.kind}`} role={n.kind === "err" ? "alert" : undefined}>{n.text}</p>}</For>
-              <For each={blockers()}>{(b) => <BlockerCard sessionID={id} blocker={b} rootID={id} />}</For>
+              {/* Keyed by request ID: catalog updates rebuild the blocker objects, which must not reset half-filled answers. */}
+              <For each={blockerIDs()}>{(key) => <Show when={blockerByID().get(key)}>{(b) => <BlockerCard sessionID={id} blocker={b()} rootID={id} />}</Show>}</For>
               <Show when={working()}>
                 <p class="working-line muted" role="status">
                   <span class="spinner small" /> {working()}
