@@ -8,7 +8,18 @@ self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim(
 
 /** Kinds that wait for the user: stay on screen until handled. */
 const STICKY = new Set(["question", "permission", "blocked"])
-const VIBRATE = { question: [200, 100, 200], permission: [200, 100, 200], blocked: [200, 100, 200], failed: [300], test: [100] }
+/** Progress kinds replace the previous one of the session quietly (same tag, no new alert). */
+const QUIET = new Set(["finished", "turn", "retry", "subagentDone", "jobDone", "longTool", "activity"])
+const VIBRATE = {
+  question: [200, 100, 200],
+  permission: [200, 100, 200],
+  blocked: [200, 100, 200],
+  failed: [300],
+  subagentFailed: [300],
+  jobFailed: [300],
+  done: [100, 60, 100],
+  test: [100],
+}
 
 const sessionURL = (sessionID) => (sessionID ? `/s/${encodeURIComponent(sessionID)}` : "/")
 
@@ -61,9 +72,9 @@ self.addEventListener("push", (event) => {
       }
       await self.registration.showNotification(data.title || "Hub", {
         body,
-        tag: `${sessionID}:${kind}`,
-        // A finished run or an activity digest replaces the previous one quietly (same tag, no new alert).
-        renotify: kind !== "finished" && kind !== "activity",
+        // One notification per session and kind (a test one does not replace a real one).
+        tag: `${data.test ? "test:" : ""}${sessionID}:${kind}`,
+        renotify: !QUIET.has(kind),
         requireInteraction: STICKY.has(kind),
         vibrate: VIBRATE[kind] || [100],
         icon: "/icon-192.png",

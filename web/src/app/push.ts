@@ -105,9 +105,9 @@ export async function disableNotifications(): Promise<void> {
   await sub.unsubscribe().catch(() => {})
 }
 
-/** POST /api/push/test: a test notification to this device's subscriptions. */
-export async function sendTestNotification(): Promise<PushTestAnswer> {
-  return (await api("/api/push/test", { method: "POST", json: {} })).json() as Promise<PushTestAnswer>
+/** POST /api/push/test: a test notification to this device's subscriptions, looking like `kind` when given. */
+export async function sendTestNotification(kind?: string): Promise<PushTestAnswer> {
+  return (await api("/api/push/test", { method: "POST", json: kind ? { kind } : {} })).json() as Promise<PushTestAnswer>
 }
 
 /** Mutes or unmutes a session's notifications for the signed-in user (shown at once, reverted on error). */

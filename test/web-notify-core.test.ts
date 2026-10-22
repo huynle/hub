@@ -1,6 +1,8 @@
 // Notification status on this device and whether to re-subscribe (web/src/core/notify-core.ts).
 import { describe, expect, test } from "bun:test"
-import { describeTestResult, NOTIFY_TOGGLES, notifyStatus, quietHoursLabel, shouldResubscribe, type NotifyEnv } from "../web/src/core/notify-core"
+import { describeTestResult, NOTIFY_GROUPS, NOTIFY_KINDS, notifyStatus, notifySummary, quietHoursLabel, shouldResubscribe, type NotifyEnv } from "../web/src/core/notify-core"
+import { NOTIFICATION_LABELS } from "../src/central/push"
+import { DEFAULT_PUSH_PREFS, PUSH_PREF_KEYS } from "../src/central/store"
 
 const env = (over: Partial<NotifyEnv> = {}): NotifyEnv => ({
   supported: true,
@@ -60,8 +62,26 @@ describe("describeTestResult", () => {
 })
 
 describe("toggles and quiet hours", () => {
-  test("one toggle per kind, in a fixed order", () => {
-    expect(NOTIFY_TOGGLES.map(([key]) => key)).toEqual(["question", "permission", "failed", "finished", "handoff", "say"])
+  test("one toggle per hub kind, grouped, each with the hub's label and a one-line description", () => {
+    expect(NOTIFY_GROUPS.map((g) => [g.title, g.kinds.map((k) => k.key)])).toEqual([
+      ["Needs you", ["question", "permission"]],
+      ["Session", ["done", "failed", "turn", "stopped", "retry"]],
+      ["Subagents", ["subagentDone", "subagentFailed"]],
+      ["Scripts and tools", ["jobDone", "jobFailed", "longTool"]],
+      ["Voice", ["say", "handoff"]],
+      ["Activity digest", ["activity"]],
+    ])
+    expect(NOTIFY_KINDS.map((k) => k.key).sort()).toEqual([...PUSH_PREF_KEYS].sort())
+    for (const kind of NOTIFY_KINDS) {
+      expect(kind.label).toBe(NOTIFICATION_LABELS[kind.key])
+      expect(kind.description.length).toBeGreaterThan(10)
+      expect(kind.description).not.toContain("\n")
+    }
+  })
+  test("summary of what this device gets, in group order", () => {
+    expect(notifySummary({ ...DEFAULT_PUSH_PREFS })).toBe("You'll get: Question, Needs permission, All done, Failed, Spoken reply, Hand-off.")
+    expect(notifySummary({ jobFailed: true, done: false })).toBe("You'll get: Script failed.")
+    expect(notifySummary({})).toBe("You'll get no notifications on this device.")
   })
   test("quiet hours label", () => {
     expect(quietHoursLabel(null)).toBe("Off")

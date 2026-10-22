@@ -62,6 +62,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs"
 import path from "node:path"
 import { SentenceStream } from "../src/central/say-stream"
+import { DEFAULT_PUSH_PREFS } from "../src/central/store"
 import { newestPage, timelineItems } from "../src/spoke/timeline"
 import orderSession from "./fixtures/timeline-subagents-session.json"
 import { speechModelList } from "../src/central/speech/models"
@@ -258,13 +259,15 @@ const mockSession = () => ({
   open: true,
   terminal: { source: "herdr", workspaceID: "w_gen", workspace: "general", title: "Mock session", status: herdrStatus(status[0]?.state ?? "idle") },
 })
-let pushPrefs: Record<string, boolean> = { handoff: true, question: true, permission: true, finished: false, failed: false, say: false, activity: false }
+let pushPrefs: Record<string, boolean> = { ...DEFAULT_PUSH_PREFS, say: false }
 let quietHours: { start: string; end: string; timeZone: string } | null = null
 let activityMinutes = 5
 /** Push subscription endpoints the fake hub holds for this device; tests fake PushManager in the page. */
 let pushEndpoints: string[] = []
 let mutedSessions: string[] = []
 let pushTests = 0
+/** Kinds asked for by POST /api/push/test ("" for a basic test). */
+let pushTestKinds: string[] = []
 let keys: Record<string, string | undefined> = { stt: "sk-or-v1-mock-stt-1234", tts: undefined }
 const seedSpeech = () => ({
   stt: { provider: "openrouter", model: "openai/whisper-1", language: "en" as string | undefined, baseURL: undefined as string | undefined },
@@ -1138,7 +1141,7 @@ const server = Bun.serve({
       emitCatalog()
       return Response.json({ mode: authMode, as: loginAs })
     }
-    if (p === "/mock/log") return Response.json({ log, textEnded, transcripts, conversation, pushPrefs, quietHours, activityMinutes, pushEndpoints, mutedSessions, pushTests, speech, keys, users, audit, enrollments, userSpeech: Object.fromEntries(userSpeech), viewPrefs: Object.fromEntries(viewPrefs), herdr })
+    if (p === "/mock/log") return Response.json({ log, textEnded, transcripts, conversation, pushPrefs, quietHours, activityMinutes, pushEndpoints, mutedSessions, pushTests, pushTestKinds, speech, keys, users, audit, enrollments, userSpeech: Object.fromEntries(userSpeech), viewPrefs: Object.fromEntries(viewPrefs), herdr })
     if (p === "/mock/reset" && m === "POST") {
       scenarioRun++
       big = { on: false, messages: 900, delayMs: 0, failOlder: false, rows: [] }
@@ -1164,12 +1167,13 @@ const server = Bun.serve({
       userSpeech = new Map()
       speech = seedSpeech()
       keys = { stt: "sk-or-v1-mock-stt-1234", tts: undefined }
-      pushPrefs = { handoff: true, question: true, permission: true, finished: false, failed: false, say: false, activity: false }
+      pushPrefs = { ...DEFAULT_PUSH_PREFS, say: false }
       quietHours = null
       activityMinutes = 5
       pushEndpoints = []
       mutedSessions = []
       pushTests = 0
+      pushTestKinds = []
       workstation = false
       emitCatalog()
       return Response.json({ ok: true })
@@ -1422,6 +1426,8 @@ const server = Bun.serve({
     }
     if (p === "/api/push/test" && m === "POST") {
       pushTests++
+      const body = await json()
+      pushTestKinds.push(typeof body.kind === "string" ? body.kind : "")
       return Response.json({ sent: pushEndpoints.length, failed: [], subscriptions: pushEndpoints.length })
     }
     if (p === "/api/push/mute" && m === "PUT") {
