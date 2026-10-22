@@ -211,7 +211,13 @@ export interface Hello {
   readonly mode: SpokeMode
   readonly opencodeVersion: string
   readonly pluginVersion: string
+  /** Optional ops this spoke supports (see SPOKE_FEATURES); older spokes send none. */
+  readonly features?: readonly string[]
 }
+
+/** Features a spoke announces in its hello, so the hub can refuse an op an older spoke would ignore. */
+export const SPOKE_FEATURES = ["autoName"] as const
+export type SpokeFeature = (typeof SPOKE_FEATURES)[number]
 
 export interface Sessions {
   readonly t: "sessions"
@@ -260,6 +266,11 @@ export type ServerRequest =
   | { readonly op: "interrupt"; readonly sessionID: string }
   /** Rename the session in OpenCode; the spoke trims the title and requires 1–200 characters. */
   | { readonly op: "rename"; readonly sessionID: string; readonly title: string }
+  /**
+   * Have OpenCode regenerate the title with its title agent (session.update with an empty title). Only for
+   * spokes whose hello lists the "autoName" feature (older spokes drop unknown ops).
+   */
+  | { readonly op: "autoName"; readonly sessionID: string }
   /** Interrupt the session's whole tree: running descendants deepest first, then the root. */
   | { readonly op: "stop"; readonly sessionID: string }
   /** Right-rail data: context usage, MCP servers, branch and working-tree change stats. */
@@ -350,6 +361,11 @@ export interface ResultFor {
   steer: { readonly inboxID: string }
   interrupt: Record<string, never>
   rename: { readonly title: string }
+  /**
+   * `title`: the new title. `unchanged`: OpenCode kept the title (`title` is the current one). `pending`: still
+   * generating after the spoke's wait; the catalog updates when it lands.
+   */
+  autoName: { readonly title?: string; readonly unchanged?: true; readonly pending?: true }
   stop: { readonly stopped: readonly string[] }
   summary: SessionSummary
   diff: { readonly patch?: FilePatch }
@@ -520,6 +536,7 @@ function isServerRequest(v: unknown): v is ServerRequest {
       if (!nonEmpty(v.sessionID) || !nonEmpty(v.formID) || v.formID.length > 300) return false
       return v.cancel === true ? v.answer === undefined : v.cancel === undefined && formAnswerProblem(v.answer) === undefined
     case "context":
+    case "autoName":
     case "interrupt":
     case "stop":
     case "summary":
@@ -597,7 +614,8 @@ export function parseSpokeMessage(raw: string | Buffer): SpokeMessage | undefine
         num(m.pid) &&
         (m.mode === "always" || m.mode === "session") &&
         str(m.opencodeVersion) &&
-        str(m.pluginVersion)
+        str(m.pluginVersion) &&
+        (m.features === undefined || (Array.isArray(m.features) && m.features.length <= 64 && m.features.every((f) => nonEmpty(f) && f.length <= 64)))
         ? (m as unknown as Hello)
         : undefined
     case "sessions":
