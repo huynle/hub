@@ -58,7 +58,8 @@
     "LICENSE"
   ],
   "workspaces": [
-    "packages/protocol"
+    "packages/protocol",
+    "packages/cli"
   ],
   "engines": {
     "bun": ">=1.3"
