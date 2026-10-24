@@ -50,6 +50,8 @@ export interface AgentDeps {
   readonly registry?: ReadRegistry
   /** Hub → spoke requests (show, log). */
   readonly spokes?: SpokeRequester
+  /** Heartbeat of GET /api/agent/watch. */
+  readonly heartbeatMs?: number
   readonly now?: () => number
 }
 
@@ -72,7 +74,7 @@ const userView = (user: UserRecord) => ({
 export function agentRoutes(deps: AgentDeps): AgentRoute[] {
   return [
     ...(deps.directory ? directoryRoutes(deps.directory) : []),
-    ...(deps.directory && deps.registry ? readRoutes({ store: deps.store, directory: deps.directory, registry: deps.registry, ...(deps.spokes ? { spokes: deps.spokes } : {}), ...(deps.now ? { now: deps.now } : {}) }) : []),
+    ...(deps.directory && deps.registry ? readRoutes({ store: deps.store, directory: deps.directory, registry: deps.registry, ...(deps.spokes ? { spokes: deps.spokes } : {}), ...(deps.heartbeatMs !== undefined ? { heartbeatMs: deps.heartbeatMs } : {}), ...(deps.now ? { now: deps.now } : {}) }) : []),
     {
       method: "GET",
       path: `${AGENT_PREFIX}/whoami`,

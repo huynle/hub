@@ -2,7 +2,7 @@
 // Sessions are reported by real spokes; session and app tokens come from fake verifiers.
 import { afterEach, describe, expect, test } from "bun:test"
 import type { BearerVerifier } from "../src/central/agent/actor"
-import { harness, session, spoke, waitFor, type Harness } from "./central-harness"
+import { harness, session, spoke, sse, waitFor, type Harness } from "./central-harness"
 
 const SES_1 = "hst_fake_ses_1"
 const APP = "hat_fake_app"
@@ -219,5 +219,73 @@ describe("GET /api/agent/sessions/:addr/log", () => {
     expect(res.status).toBe(422)
     expect((await json(res)).error).toMatchObject({ code: "unsupported", feature: "timeline", harness: "claude-code" })
     expect(seen).toEqual([])
+  })
+})
+
+describe("GET /api/agent/watch", () => {
+  const listeners = () => ((h.registry as any).listeners as Set<unknown>).size
+
+  test("streams compact state and blocker events for a session token; cleans up on disconnect", async () => {
+    const { client } = await start()
+    const before = listeners()
+    const disconnect = new AbortController()
+    const res = await bearer("/api/agent/watch", SES_1, { signal: disconnect.signal })
+    expect(res.status).toBe(200)
+    expect(res.headers.get("content-type")).toBe("text/event-stream")
+    const events = sse(res)
+    expect(await events.next()).toMatchObject({ type: "ready" })
+    await waitFor(() => listeners() === before + 1)
+    client.send(event("permission.asked", { sessionID: "ses_2", id: "per_2", action: "bash", resources: ["rm -rf dist"] }))
+    expect(await events.next((m) => m.type === "blocker.opened")).toMatchObject({ sessionID: "ses_2", rootID: "ses_2", blocker: { kind: "permission", id: "per_2", summary: "bash: rm -rf dist" } })
+    expect(await events.next((m) => m.type === "state")).toMatchObject({ sessionID: "ses_2", state: "blocked", prev: "working" })
+    client.send(event("permission.replied", { sessionID: "ses_2", requestID: "per_2" }))
+    expect(await events.next((m) => m.type === "blocker.closed")).toMatchObject({ sessionID: "ses_2", id: "per_2" })
+    disconnect.abort()
+    await waitFor(() => listeners() === before)
+  })
+
+  test("sends a ping heartbeat", async () => {
+    await start()
+    const reader = (await h.api("/api/agent/watch")).body!.getReader()
+    const decoder = new TextDecoder()
+    let text = ""
+    const deadline = Date.now() + 2000
+    while (!text.includes("event: ping") && Date.now() < deadline) text += decoder.decode((await reader.read()).value ?? new Uint8Array(), { stream: true })
+    expect(text).toContain("event: ping")
+    await reader.cancel()
+  })
+
+  test("blocked=1 sends blocker events only; session=<addr> only that session's tree", async () => {
+    const { client } = await start()
+    const blocked = sse(await h.api("/api/agent/watch?blocked=1"))
+    const one = sse(await h.api("/api/agent/watch?session=@web-work"))
+    await blocked.next((m) => m.type === "ready")
+    await one.next((m) => m.type === "ready")
+    client.send(event("permission.replied", { sessionID: "ses_1", requestID: "per_1" }))
+    client.send(event("session.execution.succeeded", { sessionID: "ses_2" }))
+    client.send(event("permission.asked", { sessionID: "ses_2", id: "per_2", action: "bash" }))
+    expect(await blocked.next()).toMatchObject({ type: "blocker.closed", sessionID: "ses_1", id: "per_1" })
+    expect(await blocked.next()).toMatchObject({ type: "blocker.opened", sessionID: "ses_2" })
+    expect(await one.next()).toMatchObject({ type: "state", sessionID: "ses_2", state: "idle" })
+    expect(await one.next((m) => m.type !== "state")).toMatchObject({ type: "blocker.opened", sessionID: "ses_2" })
+    await blocked.cancel()
+    await one.cancel()
+    const missing = await h.api("/api/agent/watch?session=@nobody")
+    expect(missing.status).toBe(404)
+  })
+
+  test("reports sessions added to and removed from the catalog", async () => {
+    const { client } = await start()
+    const events = sse(await h.api("/api/agent/watch"))
+    await events.next((m) => m.type === "ready")
+    const sessions = [
+      session("ses_1", { title: "API refactor", projectName: "hub" }),
+      session("ses_4", { title: "New one", projectName: "hub" }),
+    ]
+    client.send({ t: "sessions", sessions })
+    expect(await events.next((m) => m.type === "session.added")).toMatchObject({ sessionID: "ses_4", title: "New one" })
+    const removed = [await events.next((m) => m.type === "session.removed"), await events.next((m) => m.type === "session.removed")]
+    expect(removed.map((m) => m.sessionID).sort()).toEqual(["ses_2", "ses_3"])
+    await events.cancel()
   })
 })

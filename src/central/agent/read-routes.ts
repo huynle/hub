@@ -6,16 +6,18 @@
 //   GET /api/agent/sessions?project=&state=&machine=&label=k=v
 //   GET /api/agent/sessions/:addr          show: the catalog view plus the spoke's summary (when it serves one)
 //   GET /api/agent/sessions/:addr/log?n=20 the newest timeline rows (spoke feature "timeline")
+//   GET /api/agent/watch?blocked=1&session=<addr>  SSE of compact events (watch.ts)
 // show and log call spokes; a spoke without the feature answers unsupported {feature, harness}.
 import path from "node:path"
 import { featureForOp, type ServerRequest, type SpokeFeature } from "../../protocol"
-import type { CatalogMachine, CatalogSession, LiveStatus, NowActivity, SessionView } from "../registry"
+import type { CatalogMachine, CatalogSession, LiveStatus, NowActivity, RegistryMessage, SessionView } from "../registry"
 import { SpokeError } from "../spoke-ws"
 import type { Store } from "../store"
 import type { Directory, DirectoryEntry, RoleView } from "./directory"
 import type { AgentActor } from "./actor"
 import { AgentError } from "./errors"
 import { AGENT_PREFIX, type AgentRoute } from "./routes"
+import { watchStream } from "./watch"
 
 /** What the read routes need from the Registry. */
 export interface ReadRegistry {
@@ -24,6 +26,7 @@ export interface ReadRegistry {
   session(sessionID: string): SessionView | undefined
   owner(sessionID: string): string | undefined
   supports(connID: string, feature: SpokeFeature): boolean
+  subscribe(listener: (message: RegistryMessage, tenant?: string) => void): () => void
 }
 
 /** Hub → spoke requests (SpokeHub). */
@@ -36,6 +39,8 @@ export interface ReadDeps {
   readonly directory: Directory
   readonly registry: ReadRegistry
   readonly spokes?: SpokeRequester
+  /** Watch stream heartbeat (default WATCH_HEARTBEAT_MS). */
+  readonly heartbeatMs?: number
   readonly now?: () => number
 }
 
@@ -328,6 +333,25 @@ export function readRoutes(deps: ReadDeps): AgentRoute[] {
       path: `${AGENT_PREFIX}/sessions/:addr/log`,
       allow: READ,
       handle: async ({ user, params, url }) => ok(await log(deps, user.id, params.addr!, url.searchParams.get("n"))),
+    },
+    {
+      method: "GET",
+      path: `${AGENT_PREFIX}/watch`,
+      allow: READ,
+      handle: ({ user, url, request }) => {
+        const addr = url.searchParams.get("session") || undefined
+        const sessions = addr ? new Set(deps.directory.resolve(user.id, addr).sessions.map((s) => s.sessionID)) : undefined
+        const blocked = ["1", "true"].includes(url.searchParams.get("blocked") ?? "")
+        return watchStream({
+          registry: deps.registry,
+          userID: user.id,
+          signal: request.signal,
+          blocked,
+          ...(sessions ? { sessions } : {}),
+          ...(deps.heartbeatMs !== undefined ? { heartbeatMs: deps.heartbeatMs } : {}),
+          ...(deps.now ? { now: deps.now } : {}),
+        })
+      },
     },
   ]
 }
