@@ -17,7 +17,13 @@ export interface FakeCentral {
 }
 
 export function fakeCentral(
-  options: { onFrame?: (m: SpokeMessage, ws: ServerWebSocket<unknown>) => void; port?: number; enrollExtra?: Record<string, unknown> } = {},
+  options: {
+    onFrame?: (m: SpokeMessage, ws: ServerWebSocket<unknown>) => void
+    port?: number
+    enrollExtra?: Record<string, unknown>
+    /** Features the welcome lists (none by default, like a hub that predates them). */
+    hubFeatures?: readonly string[]
+  } = {},
 ): FakeCentral {
   let reqID = 0
   const waiters = new Map<string, (m: Extract<SpokeMessage, { t: "res" }>) => void>()
@@ -74,7 +80,10 @@ export function fakeCentral(
         const m = parseSpokeMessage(typeof data === "string" ? data : Buffer.from(data).toString("utf8"))
         if (!m) return
         fake.frames.push(m)
-        if (m.t === "hello") ws.send(encode({ t: "welcome", v: PROTOCOL_VERSION, machineID: "m_1", publicURL: "https://voice.example" }))
+        if (m.t === "hello") {
+          const features = options.hubFeatures ? { features: [...options.hubFeatures] } : {}
+          ws.send(encode({ t: "welcome", v: PROTOCOL_VERSION, machineID: "m_1", publicURL: "https://voice.example", ...features }))
+        }
         if (m.t === "res") waiters.get(m.id)?.(m)
         options.onFrame?.(m, ws)
       },

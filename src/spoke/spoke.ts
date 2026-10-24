@@ -8,6 +8,7 @@ import {
   compactActivity,
   COMPACTED_EVENTS,
   FORWARDED_EVENTS,
+  HARNESS_OPENCODE,
   SEED_JOBS_MAX,
   SPOKE_FEATURES,
   type JobInfo,
@@ -537,6 +538,11 @@ export class Spoke {
     })
   }
 
+  /** Whether the hub this spoke is connected to announced `feature` in its welcome (older hubs announce none). */
+  hubSupports(feature: string): boolean {
+    return this.connection?.hubSupports(feature) === true
+  }
+
   status(sessionID?: string): SpokeStatus {
     const connection = this.connection?.state ?? "off"
     const lastError = this.connection?.lastError
@@ -724,9 +730,13 @@ export class Spoke {
         directory: this.host.directory,
         pid: this.options.pid,
         mode: this.config.mode === "session" ? "session" : "always",
+        // Hubs that predate `harness` require opencodeVersion; newer ones read harness, harnessVersion, evidence.
         opencodeVersion: this.host.opencodeVersion,
         pluginVersion: this.options.pluginVersion,
         features: [...SPOKE_FEATURES],
+        harness: HARNESS_OPENCODE,
+        harnessVersion: this.host.opencodeVersion,
+        evidence: "native",
       }),
       handle: (req) => this.handle(req),
       onWelcome: () => {
