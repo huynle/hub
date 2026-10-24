@@ -7,6 +7,8 @@
 // route class (agentAllows) → 403 forbidden; then the handler, whose throws become the envelope (agentFailure).
 // Path parameters address sessions as `:addr` (resolved per caller), never `:session`.
 import type { DeviceRecord, Store, UserRecord } from "../store"
+import type { Directory } from "./directory"
+import { directoryRoutes } from "./directory-routes"
 import { agentAllows, type AgentActor, type AgentAllow, type BearerVerifier, type Credential, type Resolver } from "./actor"
 import { AgentError, agentFailure } from "./errors"
 
@@ -37,6 +39,8 @@ export interface AgentRoute {
 /** What the agent API needs from the hub. */
 export interface AgentDeps {
   readonly store: Store
+  /** Names, roles and address resolution (P1-T8); its routes are added when given. */
+  readonly directory?: Directory
 }
 
 /**
@@ -55,8 +59,9 @@ const userView = (user: UserRecord) => ({
 })
 
 /** The built-in /api/agent routes. */
-export function agentRoutes(_deps: AgentDeps): AgentRoute[] {
+export function agentRoutes(deps: AgentDeps): AgentRoute[] {
   return [
+    ...(deps.directory ? directoryRoutes(deps.directory) : []),
     {
       method: "GET",
       path: `${AGENT_PREFIX}/whoami`,

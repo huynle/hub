@@ -193,12 +193,13 @@ export class Directory {
   }
 
   /** Gives a role up; not_found when the session does not hold it. */
-  releaseRole(userID: string, sessionID: string, requested: string, scope?: string): void {
+  releaseRole(userID: string, sessionID: string, requested: string, scope?: string): { role: string; project?: string } {
     const { role, project } = parseRole(requested, scope)
-    this.update(userID, (draft) => {
+    return this.update(userID, (draft) => {
       const held = draft.roles.find((r) => r.sessionID === sessionID && r.role === role && r.project === project)
       if (!held) throw new AgentError("not_found", `Not holding @@${scoped(role, project)}`)
       draft.roles = draft.roles.filter((r) => r !== held)
+      return project !== undefined ? { role, project } : { role }
     })
   }
 
