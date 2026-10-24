@@ -76,8 +76,7 @@ export class ShellCorrelator {
 
   /** Forgets a tool call once it finished (its shell, if any, was created long before). */
   done(callID: string): void {
-    const index = this.#pending.findIndex((p) => p.call.id === callID)
-    if (index >= 0) this.#pending.splice(index, 1)
+    for (let i = this.#pending.length - 1; i >= 0; i--) if (this.#pending[i]!.call.id === callID) this.#pending.splice(i, 1)
   }
 
   /**

@@ -106,6 +106,17 @@ describe("ShellCorrelator", () => {
   })
 })
 
+describe("ShellCorrelator (hooks of several plugin instances)", () => {
+  test("done(callID) forgets every entry of the call, even when it was recorded twice", () => {
+    const k = new ShellCorrelator()
+    const call = shellCall("ses_a", "ls", "call_a")
+    k.record(call)
+    k.record(call)
+    k.done("call_a")
+    expect(k.size).toBe(0)
+  })
+})
+
 describe("applyHubEnv", () => {
   const bin = "/home/u/.local/state/hub/bin"
 
