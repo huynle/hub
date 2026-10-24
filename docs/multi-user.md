@@ -119,6 +119,75 @@ New or changed:
 
 In `pairing` mode the single user is admin, so everything works as before.
 
+## Agent actors and tokens
+
+`/api/agent/*` (the agent API, see the README's *Agent identity*) resolves every request to exactly one actor
+from exactly one credential. Credentials never mix: the device cookie together with a bearer token the hub
+recognises is refused (`400 invalid`); a bearer the hub does not know next to the cookie (e.g. one an auth proxy
+adds) is ignored.
+
+| Actor | Credential | Format and storage | Lifetime | Ends when |
+|---|---|---|---|---|
+| `user` (`via: "cookie"`) | `voice_device` cookie | random secret; only its hash is stored (DeviceRecord) | until revoked | the device is revoked, the user signs out or is disabled |
+| `user` (`via: "device-token"`) | `Authorization: Bearer <device token>` | the same secret as the cookie, issued by `POST /api/devices/redeem` for a link code | until revoked | as above; bearer requests skip the same-origin check |
+| `session` `{userID, machineID, sessionID}` | `Authorization: Bearer hst1.…` | `hst1.<payload>.<HMAC-SHA256>`, claims `typ, uid, mid, sid, exp, kid, ue, me, aud`; minted by the hub, never stored | 24 h (renewed with ⅓ left) | see *Epochs and revocation* |
+| `app` `{userID, tokenID, scopes, label?}` | `Authorization: Bearer hat_<id>_<secret>` | created by a user (`POST /api/agent/app-tokens`, shown once); only a sha256 hash is stored; at most 50 per user | until revoked | revoked (`DELETE /api/agent/app-tokens/:id`) or the user disabled |
+
+What each actor may do:
+
+- **user**: everything on `/api/agent`, and the console routes.
+- **session**: read every session of its user; name, claim and release roles **for its own session only**
+  (`403 forbidden` for another one); no console routes (`403`), no token management.
+- **app**: what its scopes allow; today the only scope is `sessions:read` (status, sessions, show, log, watch,
+  who); `whoami` always. No writes, no console routes, no token management (`403`).
+
+**Session token delivery.** The hub mints a token for every session (subagents included) that a spoke reports for
+its own user, and pushes it with the `sessionTokens` op only to spokes that announce the feature; spokes of other
+harnesses that do not announce it get none. The spoke keeps tokens in memory (never logged, dropped when they
+expire, when the session is deleted or when the connection changes) and puts a session's token into the shells
+that session starts (`HUB_SESSION_TOKEN`, with `HUB_URL`). Tokens are sent again after a reconnect, an epoch or key
+change, and by a 10-minute sweep before they get old. A token in a shell is visible to that shell's child
+processes; its reach is limited by its expiry, the session's liveness and the session verbs above.
+
+**Signing keys.** HMAC keys live in `<HUB_STATE_DIR>/token-keys.json` (0600, created on first use) or come from
+`HUB_TOKEN_KEYS` (same JSON, e.g. shared by several hub instances). Older keys are kept so tokens they signed still
+verify until they expire.
+
+### Epochs and revocation
+
+Each user and each machine has a token epoch (`tokenEpoch`, 0 when absent) that every session token carries
+(`ue`, `me`). A session token is accepted only while all of this holds: the signature under a known key, the hub's
+audience, the expiry, the user's and machine's **current** epochs, the machine exists, is not revoked and still
+belongs to the token's user, the user exists and is not disabled, and a connected process of that machine still
+reports the session for that user.
+
+| Event | Effect on tokens |
+|---|---|
+| Machine revoked (`DELETE /api/machines/:id`, admin route too) | machine epoch +1: its session tokens are dead at once |
+| User disabled | user epoch +1: all their session tokens are dead and stay dead after re-enabling; their device and app tokens are refused while disabled |
+| First admin sign-in migrates `local` (oidc) | moved machines and `local` get a new epoch: tokens minted before the move are dead |
+| Session no longer reported by that machine, or the spoke disconnects | its token answers `401` while no process of that machine reports the session |
+| Token expired | `401 token_expired`; a new shell gets the renewed token |
+| Device revoked / app token revoked | that token answers `401` |
+| Role change of a user | nothing (no epoch bump) |
+
+Tokens, codes and secrets are never logged or audited; app token creation and revocation are audited
+(`app-token.create`, `app-token.revoke`) without the token.
+
+### Agent tenancy
+
+- Every agent route answers only from the actor's user: status, sessions, show, log, watch, who, names and roles.
+  Another user's sessions, names and roles do not exist: `404 not_found`, exactly like unknown ones, for every
+  actor kind (so `hub show @name` of someone else's session exits 3).
+- Addresses (`ses_…` or a unique prefix, `@name[.project]`, `@@role[.project]`) resolve within the caller's
+  sessions; `ambiguous` candidates never list another user's sessions.
+- Names and roles are per user (stored in the user's record): two users can both have `@scout`.
+- The watch stream reads only the caller's tenant; session IDs are claimed by the tenant of the earliest
+  connected process that reports them, and the hub mints tokens only for sessions a spoke reports for its own
+  user (a session ID another user's process already claimed gets no token).
+- Admins manage users, machines and devices but, as on the console, do not read other users' sessions through
+  the agent API.
+
 ## Speech settings precedence
 
 user settings field → server default (admin, stored in `state.speech`) → `hub.json` → env. A user's
@@ -128,7 +197,8 @@ provider/baseURL drops the stored key of that scope (existing rule).
 ## Audit actions
 
 `signin`, `signin.denied`, `device.pair`, `device.revoke`, `machine.approve`, `machine.deny`,
-`machine.revoke`, `user.role`, `user.disable`, `user.enable`, `speech.default`, `migrate.local`.
+`machine.revoke`, `user.role`, `user.disable`, `user.enable`, `speech.default`, `migrate.local`,
+`device.link` (an app link code issued), `app-token.create`, `app-token.revoke`.
 Never include tokens, codes, keys or session content.
 
 ## Implementation notes (server, 0.3.0)

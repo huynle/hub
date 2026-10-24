@@ -35,6 +35,9 @@ Formerly **opencode-voice** and, briefly, **opencode-hub**
   Bring your own speech: OpenRouter or any OpenAI-compatible STT/TTS service (including self-hosted).
 - **What's open in your terminals first**: sessions open in Herdr or the OpenCode TUI, grouped like
   Herdr's sidebar, with the rest under Recent; rename, pin and archive in sync across devices.
+- **Agent identity**: every session's shells carry its own hub identity, so an agent can run `hub status`, name
+  itself (`@scout`), claim a role (`@@reviewer`) and read other sessions, with app tokens for scripts and device
+  tokens for apps ([Agent identity](#agent-identity-agent-api)).
 - **Session details**: context usage, todos, MCP status, branch and per-file diffs, on demand; unread
   marks synced per user.
 - **Self-hostable**: a hub on your computer with nothing extra to install, or your own hub for phones
@@ -213,10 +216,71 @@ conversation mode and utterances (403 `not_exposed` for sessions not shared with
 | `POST /api/push/test {kind?}` | a test notification to the caller's device only, shaped like `kind` when given (400 for an unknown kind): `{sent, failed: [{host, status?}], subscriptions}`; 429 with `retry-after` within 10 s of the last one |
 | `PUT /api/push/mute {sessionID, muted}` | mutes or unmutes a session's notifications for the user: `{muted}` |
 
+## Agent identity (agent API)
+
+Agents, scripts and apps talk to the hub through `/api/agent/*`, a small API with its own credentials, separate
+from the console's routes. Every request resolves to exactly one **actor**:
+
+| Actor | Credential | Who holds it |
+|---|---|---|
+| user | the device cookie (browsers) or the same secret as `Authorization: Bearer <device token>` (apps, CLIs; [linked with a code](#multi-user-sign-in-with-google)) | you, on one of your devices |
+| session | a **session token** `hst1.…` the hub mints for each session a spoke reports | that session's shells (`HUB_SESSION_TOKEN`) |
+| app | an **app token** `hat_…` you create (scope `sessions:read`) | a script or tool outside a session (`hub login`) |
+
+**Session tokens in shells.** The hub mints a 24 h token for every session (subagents included) its spokes report
+for you and pushes it to the spoke, which keeps it in memory only. Every shell an agent starts through OpenCode's
+shell tool gets that session's `HUB_SESSION_TOKEN` and `HUB_URL` (the spoke's hub), with the hub bin dir first on
+PATH, so [`hub`](#hub-cli) inside a session acts as that session: `hub whoami` prints `session ses_… on machine
+mch_…`. Tokens are renewed automatically before they expire; a shell started earlier keeps its old token, so a
+`token_expired` answer means: start a new shell. A token stops working as soon as the session is no longer
+reported by that machine, the machine is revoked or the user is disabled (see
+[docs/multi-user.md](docs/multi-user.md#agent-actors-and-tokens)). Spokes of other harnesses get tokens only
+when they announce the `sessionTokens` feature.
+
+**Addressing.** Wherever a route or command takes a session, it takes an address, resolved among the caller's
+own sessions only:
+
+| Address | Means |
+|---|---|
+| `ses_…` | a session ID, or an unambiguous prefix of one |
+| `@name` | a named root session. Names are `[a-z0-9-]`, 2–40 characters; each root session gets one from its first real title (`-2`, `-3` on a clash) and can be renamed (`hub name @scout`); the old name stays an alias for 24 h |
+| `@@role` | the session(s) holding a role (`hub role claim reviewer`); `--exclusive` claims fail while another live holder exists |
+| `@name.project`, `@@role.project` | scoped to a project (its name, else the folder name) |
+
+An address several sessions match answers `ambiguous` with the candidates; another user's sessions, names and
+roles do not exist (`not_found`). A name is released 7 days after its session is archived or deleted; a role
+holder offline for 30 minutes loses the role. Some role names (such as `orchestrator…`) are reserved to the user.
+
+**Routes.** Errors are `{error: {code, message, hint?, …}}` with the codes the [CLI](#hub-cli) maps to exit
+codes. Console routes refuse session and app tokens (403); `/api/agent` refuses a request carrying both the
+cookie and a hub bearer token (400).
+
+| Route | User | Session | App (`sessions:read`) | Result |
+|---|---|---|---|---|
+| `GET /api/agent/whoami` | ✓ | ✓ | ✓ (any scope) | `{actor, user}` |
+| `GET /api/agent/status` | ✓ | ✓ | ✓ | machines → projects → sessions, each with name, roles, state, harness, activity and blockers, plus `attention` |
+| `GET /api/agent/sessions?project=&state=&machine=&label=k=v` | ✓ | ✓ | ✓ | the same sessions as a flat list |
+| `GET /api/agent/sessions/:addr` | ✓ | ✓ | ✓ | one session with full blockers and the spoke's summary (`unsupported` when its harness lacks it) |
+| `GET /api/agent/sessions/:addr/log?n=20` | ✓ | ✓ | ✓ | newest timeline rows (1–200); `422 unsupported {feature, harness}` when the spoke has no timeline, `503 offline` |
+| `GET /api/agent/watch?blocked=1&session=<addr>` | ✓ | ✓ | ✓ | SSE of compact events (`ready`, `state`, `blocker.opened/closed`, `session.added/removed`; no text) |
+| `GET /api/agent/who?project=&role=` | ✓ | ✓ | ✓ | named, role-holding and online sessions |
+| `POST /api/agent/name {name, session?}` | ✓ | own session | – | names a session (`409 name_taken`) |
+| `POST /api/agent/roles/claim {role, exclusive?, project?, session?}` · `…/roles/release` | ✓ | own session | – | claims (with a new `generation`) or releases a role |
+| `POST /api/agent/app-tokens {label?, scopes?}` · `GET` · `DELETE …/:id` | ✓ | – | – | creates (token shown once), lists, revokes app tokens |
+
+Reads come from the hub's catalog; only `show` (summary) and `log` (timeline) ask the session's spoke, so they
+depend on what its harness supports. A session token reads all of its user's sessions but names and claims roles
+only for itself; an app token only reads. `GET /.well-known/hub` (public) answers `{publicURL, version,
+minClientVersion, auth, features}` for apps and CLIs.
+
+**Apps.** A native app links with a code from Settings → Devices → **Add app** (`POST /api/devices/link`, then
+`POST /api/devices/redeem` from the app; see [Multi-user](#multi-user-sign-in-with-google)) and uses the device
+token as a user actor, on console routes and `/api/agent` alike. Revoking the device ends it.
+
 ## hub CLI
 
-`hub` (also installed as `hubctl`) reads and names your sessions through the hub's `/api/agent` API, for agents
-and scripts. The OpenCode plugin writes both launchers into the hub bin dir (`$HUB_STATE_DIR/bin`, default
+`hub` (also installed as `hubctl`) reads and names your sessions through the hub's [`/api/agent` API](#agent-identity-agent-api),
+for agents and scripts. The OpenCode plugin writes both launchers into the hub bin dir (`$HUB_STATE_DIR/bin`, default
 `~/.local/state/hub/bin`) at start and puts that dir first on PATH in every shell it prepares, so inside a
 session `hub` just works. A launcher runs the CLI bundle shipped in this package (`packages/cli/dist/hub-cli.js`)
 with the OpenCode binary itself (`BUN_BE_BUN=1 exec <opencode> hub-cli.js "$@"`), so neither bun nor node has to
@@ -1226,6 +1290,12 @@ Console development: `bun test/web-mock-hub.ts 4311` fakes a hub with fixtures (
 `npm run dev:web` serves the console with hot reload, proxying `/api` to it (`HUB_URL` for a real hub).
 `npm run test:e2e` runs a headless Chromium smoke test against the mock hub at desktop and phone sizes
 (`CHROMIUM_PATH` if Playwright's browsers are not installed; screenshots go to the temp dir).
+
+`test/e2e-phase1.test.ts` (part of `npm test`) runs agent identity end to end in process: a hub, the OpenCode spoke
+and a second spoke of another harness, and the `hub` CLI as a session token, an app token, a linked device and a
+second user. The opt-in `HUB_IT_OPENCODE=1 bun test test/spoke-env-inject.it.test.ts` starts a private
+`opencode serve` (own port, password and XDG dirs) with a local stub model and checks a real shell: its
+`HUB_SESSION_TOKEN`, and that `hub whoami` there prints the session.
 
 Point a project's `.opencode/opencode.jsonc` at your checkout to try changes:
 `{ "plugins": [{ "package": "/path/to/hub" }] }`. If the plugin is also installed globally,
