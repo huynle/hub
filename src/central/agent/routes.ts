@@ -8,6 +8,7 @@
 // Path parameters address sessions as `:addr` (resolved per caller), never `:session`.
 import type { DeviceRecord, Store, UserRecord } from "../store"
 import { agentAllows, type AgentActor, type AgentAllow, type BearerVerifier, type Credential, type Resolver } from "./actor"
+import { appTokenRoutes, appTokenVerifier } from "./app-tokens"
 import { AgentError, agentFailure } from "./errors"
 
 export const AGENT_PREFIX = "/api/agent"
@@ -43,8 +44,8 @@ export interface AgentDeps {
  * Session and app token verifiers (P1-T5 adds the session token verifier, P1-T7 the app token one). Tried in
  * order after the device lookup; see BearerVerifier.
  */
-export function agentVerifiers(_deps: AgentDeps): BearerVerifier[] {
-  return []
+export function agentVerifiers(deps: AgentDeps): BearerVerifier[] {
+  return [appTokenVerifier(deps.store)]
 }
 
 const userView = (user: UserRecord) => ({
@@ -55,7 +56,7 @@ const userView = (user: UserRecord) => ({
 })
 
 /** The built-in /api/agent routes. */
-export function agentRoutes(_deps: AgentDeps): AgentRoute[] {
+export function agentRoutes(deps: AgentDeps): AgentRoute[] {
   return [
     {
       method: "GET",
@@ -63,6 +64,7 @@ export function agentRoutes(_deps: AgentDeps): AgentRoute[] {
       allow: { session: true, app: true },
       handle: ({ actor, user }) => Response.json({ actor, user: userView(user) }, { headers: { "cache-control": "no-store" } }),
     },
+    ...appTokenRoutes(deps.store),
   ]
 }
 
