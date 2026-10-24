@@ -7,7 +7,11 @@
 // route class (agentAllows) → 403 forbidden; then the handler, whose throws become the envelope (agentFailure).
 // Path parameters address sessions as `:addr` (resolved per caller), never `:session`.
 import type { DeviceRecord, Store, UserRecord } from "../store"
+import type { Directory } from "./directory"
+import { directoryRoutes } from "./directory-routes"
 import { agentAllows, type AgentActor, type AgentAllow, type BearerVerifier, type Credential, type Resolver } from "./actor"
+import { appTokenRoutes, appTokenVerifier } from "./app-tokens"
+import type { SessionTokens } from "./session-tokens"
 import { AgentError, agentFailure } from "./errors"
 
 export const AGENT_PREFIX = "/api/agent"
@@ -37,14 +41,18 @@ export interface AgentRoute {
 /** What the agent API needs from the hub. */
 export interface AgentDeps {
   readonly store: Store
+  /** Hub-minted session tokens (P1-T5). */
+  readonly sessionTokens?: SessionTokens
+  /** Names, roles and address resolution (P1-T8); its routes are added when given. */
+  readonly directory?: Directory
 }
 
 /**
  * Session and app token verifiers (P1-T5 adds the session token verifier, P1-T7 the app token one). Tried in
  * order after the device lookup; see BearerVerifier.
  */
-export function agentVerifiers(_deps: AgentDeps): BearerVerifier[] {
-  return []
+export function agentVerifiers(deps: AgentDeps): BearerVerifier[] {
+  return [...(deps.sessionTokens ? [deps.sessionTokens.verifier] : []), appTokenVerifier(deps.store)]
 }
 
 const userView = (user: UserRecord) => ({
@@ -55,14 +63,16 @@ const userView = (user: UserRecord) => ({
 })
 
 /** The built-in /api/agent routes. */
-export function agentRoutes(_deps: AgentDeps): AgentRoute[] {
+export function agentRoutes(deps: AgentDeps): AgentRoute[] {
   return [
+    ...(deps.directory ? directoryRoutes(deps.directory) : []),
     {
       method: "GET",
       path: `${AGENT_PREFIX}/whoami`,
       allow: { session: true, app: true },
       handle: ({ actor, user }) => Response.json({ actor, user: userView(user) }, { headers: { "cache-control": "no-store" } }),
     },
+    ...appTokenRoutes(deps.store),
   ]
 }
 

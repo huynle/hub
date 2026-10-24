@@ -304,6 +304,8 @@ export class Registry {
   private readonly active = new Map<string, { readonly cancel?: () => void }>()
   private readonly listeners = new Set<(message: RegistryMessage, tenant?: string) => void>()
   private readonly alertListeners = new Set<(alert: Alert) => void>()
+  /** Called after every sessions frame (unchanged snapshots too), e.g. to push session tokens. */
+  private readonly sessionsListeners = new Set<(connID: string) => void>()
   /** Pending form ID → its session and every connection that forwarded it, first first (like permissions). */
   private readonly forms = new Map<string, { connIDs: string[]; sessionID: string }>()
   /** Form IDs already alerted (forms may be forwarded by several processes). */
@@ -411,6 +413,29 @@ export class Registry {
     return conn && this.tenant(conn)
   }
 
+  /** IDs of the sessions the connection reports for its own tenant (subagents included); empty when unknown. */
+  reportedSessions(connID: string): string[] {
+    const conn = this.conns.get(connID)
+    return conn ? this.visible(conn).map((s) => s.id) : []
+  }
+
+  /** The machine of a connected process. */
+  connMachine(connID: string): string | undefined {
+    return this.conns.get(connID)?.machine.id
+  }
+
+  /** Whether a connected process of the machine reports the session for the machine's tenant. */
+  machineReports(machineID: string, sessionID: string): boolean {
+    for (const conn of this.conns.values()) if (conn.machine.id === machineID && this.reports(conn, sessionID)) return true
+    return false
+  }
+
+  /** Listens to every sessions frame (after it is applied, unchanged snapshots included). */
+  onSessions(listener: (connID: string) => void): () => void {
+    this.sessionsListeners.add(listener)
+    return () => this.sessionsListeners.delete(listener)
+  }
+
   connect(connID: string, machine: MachineRef, hello: Hello): void {
     const t = this.now()
     this.conns.set(connID, {
@@ -462,11 +487,13 @@ export class Registry {
     conn.lastSeen = this.now()
     // Spokes re-send their snapshot periodically; only changes reach the phones.
     const key = JSON.stringify(sessions)
-    if (key === conn.sessionsKey) return
-    conn.sessionsKey = key
-    conn.sessions = new Map(sessions.map((s) => [s.id, s]))
-    this.syncBoards()
-    this.emit({ type: "catalog" })
+    if (key !== conn.sessionsKey) {
+      conn.sessionsKey = key
+      conn.sessions = new Map(sessions.map((s) => [s.id, s]))
+      this.syncBoards()
+      this.emit({ type: "catalog" })
+    }
+    for (const listener of [...this.sessionsListeners]) listener(connID)
   }
 
   /** Records a machine's terminal context (sent by one process per machine); catalog on change. */
