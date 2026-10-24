@@ -1,7 +1,7 @@
 // Hub server plugin: a thin "spoke" that connects this OpenCode process to the hub. The web
 // console, phones and (optional) Voice speech live on the hub; this side only exposes sessions, forwards
 // their events, and runs remote / voice turns and permission replies on request.
-import { readFileSync } from "node:fs"
+import { mkdirSync, readFileSync } from "node:fs"
 import { hostname } from "node:os"
 import { Plugin } from "@opencode/plugin"
 import { DEFAULT_SUBAGENT, prepareConfigPath } from "./config"
@@ -9,6 +9,7 @@ import { HubRpc, VoiceRpc } from "./rpc"
 import { jobFromInfo, type JobInfo } from "./protocol"
 import { checkServer, parseServerInput } from "./setup"
 import { defineVoiceAgent, orchestratorParts, STOP_TOOL, STOP_TOOL_DESCRIPTION } from "./spoke/conversation"
+import { envInjector, hubBinDir, ShellCorrelator, stripInheritedHubEnv } from "./spoke/env-inject"
 import { herdrRunner } from "./spoke/herdr"
 import { listServiceSessions } from "./spoke/listing"
 import { ensureLocalHub } from "./spoke/localhub"
@@ -176,9 +177,36 @@ function hostFrom(ctx: Context, locations: () => PermissionLocation[], kind: "se
   }
 }
 
+/**
+ * Gives every shell the agent runs through the shell tool its session's HUB_URL/HUB_SESSION_TOKEN and puts the hub
+ * bin dir first on PATH (src/spoke/env-inject.ts). Known gap: user `!` commands have no tool call, so get no token.
+ */
+async function registerShellEnv(ctx: Context, identity: (sessionID: string) => { token: string; url?: string } | undefined) {
+  const binDir = hubBinDir()
+  try {
+    // The `hub`/`hubctl` launchers go here (P1-T10).
+    mkdirSync(binDir, { recursive: true, mode: 0o700 })
+  } catch (cause) {
+    console.error("[hub] could not create the hub bin directory", cause)
+  }
+  const injector = envInjector({ correlator: new ShellCorrelator(), binDir, identity })
+  const tool = (ctx as any).tool
+  const shell = (ctx as any).shell
+  try {
+    if (!tool?.hook || !shell?.hook) throw new Error("this OpenCode has no tool/shell hooks")
+    await tool.hook("execute.before", (event: any) => injector.toolBefore(event))
+    await tool.hook("execute.after", (event: any) => injector.toolAfter(event))
+    await shell.hook("create.before", (invocation: any) => injector.shellBefore(invocation))
+  } catch (cause) {
+    console.error("[hub] could not register the shell environment hooks", cause)
+  }
+}
+
 export default Plugin.define({
   id: "hub",
   async setup(ctx) {
+    // An OpenCode started from a session's shell must not act as that session (nor hand its token to its shells).
+    stripInheritedHubEnv(process.env)
     const kind = detectKind(process.argv)
     const membership: Membership<Spoke> = joinProcess(
       (processID) =>
@@ -247,6 +275,8 @@ export default Plugin.define({
     } catch (cause) {
       console.error("[hub] could not register the task stop tool", cause)
     }
+
+    await registerShellEnv(ctx, (sessionID) => membership.active()?.shellIdentity(sessionID))
 
     const run = async <T>(rpc: { error: (...args: any[]) => any }, action: (spoke: Spoke) => T | Promise<T>) => {
       const spoke = membership.active()
