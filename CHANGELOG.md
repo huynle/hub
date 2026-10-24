@@ -2,15 +2,77 @@
 
 ## Unreleased
 
-- **hub CLI** (`hub`, alias `hubctl`; private workspace `packages/cli`): `status`, `sessions [--project --state
-  --machine --label]`, `show <addr>`, `log <addr> [-n]`, `watch [--blocked] [--session]` (JSON lines), `whoami`,
-  `who [--project] [--role]`, `name <@name>`, `role claim|release <role> [--exclusive] [--session]`, `login`/`logout`.
-  Short text by default, `--json` for the raw answer; exit codes 0 ok, 1 other, 2 usage, 3 not found/ambiguous/
-  taken, 4 needs user, 5 forbidden/paused, 6 rate limited, 7 unsupported/offline, 8 gone, 9 unauthorized/expired.
-  Credentials: `HUB_URL` + `HUB_SESSION_TOKEN` first, else `~/.config/hub/cli.json` (0600) written by `hub login`
-  with an app token. Shipped as one JS bundle (`packages/cli/dist/hub-cli.js`, `npm run build:cli`, built by
-  prepack); the plugin writes `hub` and `hubctl` launchers into the hub bin dir at start that run it with the
-  OpenCode binary as bun (`BUN_BE_BUN=1`; `node` without Bun; the TypeScript source in a checkout without a build).
+### Agent identity
+
+Agents, scripts and apps get their own identity on the hub: every session's shells carry a session token, `hub`
+(the CLI) reads and names sessions through the new `/api/agent` API, and apps link with a code. The parts, from
+the protocol up:
+
+- **Harness-neutral spoke protocol** (still version 1, compatible both ways). The hello may carry `harness`,
+  `harnessVersion` and `evidence` (`native` | `hooks` | `rpc` | `screen`; anything else counts as `unknown`); the
+  OpenCode spoke sends `harness: "opencode"`, `evidence: "native"` and keeps `opencodeVersion` for older hubs. A
+  hello without `harness` is an OpenCode spoke with the implied v1 features (`IMPLIED_OPENCODE_FEATURES`); new
+  spokes announce all their features (`SPOKE_FEATURES`). The welcome lists the hub's features (`HUB_FEATURES`,
+  now `["harness"]`) and spokes remember them (`hubSupports`). `/api/machines` processes gain `harness`,
+  `harnessVersion` and `evidence`.
+- **Device tokens, agent API framework, discovery**: every `/api` request now resolves its caller through one
+  credential resolver. Besides the `voice_device` cookie, the same device secret works as
+  `Authorization: Bearer <device token>` (for native apps and CLIs) with the same powers and without the
+  same-origin check; the cookie together with a hub bearer token is refused (400 `invalid`), while a bearer the hub does not know (e.g. from an auth proxy) next to the cookie is ignored. New `/api/agent/*` routes answer
+  errors as `{error: {code, message, hint?}}` (`unauthorized`, `token_expired`, `forbidden`, `not_found`, …)
+  and start with `GET /api/agent/whoami` (`{actor, user}`). `GET /.well-known/hub` (public) answers
+  `{publicURL, version, minClientVersion, auth: {modes, oidc?}, features}`. Existing routes keep their error
+  format.
+- **Link native apps**: Settings → Devices → **Add app** shows a QR code and a `hubapp://link?hub=…&code=…`
+  link with a 5-minute countdown; the list updates once the app has linked. `POST /api/devices/link` issues
+  the single-use 256-bit link code (not valid at `/login` or `/api/pair`); `POST /api/devices/redeem {code,
+  deviceName?, publicKey?}` (public, works without `Origin` when the request carries no credential at all)
+  answers `{device, token}`: a device token for `Authorization: Bearer`, no cookie. An optional device public
+  key is stored for later strong approvals. The console's QR encoder is built in (no new dependency).
+- **Session tokens**: the hub mints a token for every session (subagents included) a spoke reports for its own
+  user, and sends it with the `sessionTokens` op to spokes that announce the feature: on each sessions frame
+  (new sessions, tokens with less than a third of their 24 h left, or after a key or epoch change), again in
+  full after a reconnect, and from a 10-minute refresh sweep. Format `hst1.<payload>.<HMAC-SHA256>` (claims
+  `typ, uid, mid, sid, exp, kid, ue, me, aud`), signed with the keys in `<HUB_STATE_DIR>/token-keys.json` or
+  `HUB_TOKEN_KEYS`. As `Authorization: Bearer`, a session token is a session actor on `/api/agent/*` routes
+  that admit sessions (`whoami`), `403` on console routes, `401 token_expired` once expired and `401` once the
+  session is no longer reported by that machine, the machine is revoked or the user disabled (both bump the
+  token epoch, so re-enabling does not revive old tokens). Tokens are never logged or audited. A session's
+  token is visible to its shell and child processes; it is limited by its expiry, the session's liveness and
+  the verbs sessions may use.
+- **Session tokens reach the spoke** (protocol still version 1): new server op `sessionTokens{tokens: [{sessionID,
+  token, exp}], hubURL?}` (at most 500 tokens per frame; `batchSessionTokens` splits a list under `MAX_FRAME`),
+  answered with `{applied, skipped: [{sessionID, reason: "unknown" | "expired"}]}`. It is the spoke feature
+  `sessionTokens`, announced by new spokes only (not implied for older OpenCode spokes), so hubs send it only to
+  spokes that list it. The OpenCode spoke keeps each reported session's latest token in memory (never logged,
+  dropped when expired or when the connection changes) and adopts no session for it.
+- **Session identity in shells**: every shell an agent runs through OpenCode's shell tool gets its session's
+  `HUB_SESSION_TOKEN` and `HUB_URL` (the spoke's server), set by plugin hooks (tool `execute.before` paired with
+  shell `create.before` by command; the same command pending from two sessions gets no token). Inherited
+  `HUB_URL`/`HUB_SESSION_TOKEN` are removed from the OpenCode process at plugin start and from every shell, and the
+  hub bin dir (`$HUB_STATE_DIR/bin`, default `~/.local/state/hub/bin`) goes first on PATH. A deleted session's token
+  is dropped. User `!` commands get no token. Opt-in integration test: `HUB_IT_OPENCODE=1 bun test
+  test/spoke-env-inject.it.test.ts`.
+- **App tokens**: a signed-in user (device cookie or device token) creates app/agent tokens with
+  `POST /api/agent/app-tokens {label?, scopes?}` → `201 {id, token, label?, scopes, created}` (the token,
+  `hat_<id>_<secret>`, is shown only here), lists them with `GET /api/agent/app-tokens` → `{tokens}` (no secrets)
+  and revokes one with `DELETE /api/agent/app-tokens/:id` → `204`. Labels ≤ 100 characters; scopes from
+  `sessions:read` (the default); at most 50 per user (`429 rate_limited`). Only sha256 hashes are stored. An app
+  token is an app actor on `/api/agent/*` routes its scopes allow (`whoami` always); it is refused on console
+  routes and on token management (`403 forbidden`), and once revoked or its user disabled (`401`). Creation and
+  revocation are audited (`app-token.create`, `app-token.revoke`).
+- **Session names and roles** (`@name`, `@@role`): the hub keeps a per-user record of every session its spokes
+  report (machine, parent, project, lastSeen; at most 2000). Root sessions get a name once, from their first
+  real title (OpenCode's "New session" placeholders are skipped), `[a-z0-9-]` 2–40, with `-2`, `-3` on a clash.
+  `POST /api/agent/name {name, session?}` sets one (409 `name_taken` when taken); the old name stays an alias for
+  24 h; a name is released 7 days after its session is archived (the console's Archive) or deleted.
+  `POST /api/agent/roles/claim {role, exclusive?, project?, session?}` / `roles/release` manage roles
+  (`role.project` scopes; every new holder gets a new `generation`; an exclusive claim fails while another live
+  holder exists; a holder offline for 30 min loses the role, except in the 2 min after the hub starts;
+  some role names, such as `orchestrator…`, are reserved to the user).
+  `GET /api/agent/who?project=&role=` lists named, role-holding and online sessions. Session tokens may read, and name or claim for their own session only.
+  Addresses (`ses_…` or a unique ID prefix, `@name[.project]`, `@@role[.project]`) resolve within the caller's
+  sessions only: another user's are `not_found`, and `ambiguous` candidates never list them.
 - **Agent reading** (`/api/agent/*`, for users, session tokens and app tokens with `sessions:read`):
   `GET /api/agent/status` answers the caller's snapshot `{at, you, machines: [{id, name, online, harnesses,
   projects: [{root, name, sessions}]}], attention}`; each session is `{id, name?, roles, title, state, harness,
@@ -24,71 +86,23 @@
   `GET /api/agent/watch?blocked=1&session=<addr>` is an SSE stream of compact JSON events for the caller's own
   sessions (`ready`, `state`, `blocker.opened`, `blocker.closed`, `session.added`, `session.removed`; no text),
   with a `ping` event every 20 s. Another user's sessions, names and roles answer `404 not_found` on every route.
-- **Link native apps**: Settings → Devices → **Add app** shows a QR code and a `hubapp://link?hub=…&code=…`
-  link with a 5-minute countdown; the list updates once the app has linked. `POST /api/devices/link` issues
-  the single-use 256-bit link code (not valid at `/login` or `/api/pair`); `POST /api/devices/redeem {code,
-  deviceName?, publicKey?}` (public, works without `Origin` when the request carries no credential at all)
-  answers `{device, token}`: a device token for `Authorization: Bearer`, no cookie. An optional device public
-  key is stored for later strong approvals. The console's QR encoder is built in (no new dependency).
-- **Session identity in shells**: every shell an agent runs through OpenCode's shell tool gets its session's
-  `HUB_SESSION_TOKEN` and `HUB_URL` (the spoke's server), set by plugin hooks (tool `execute.before` paired with
-  shell `create.before` by command; the same command pending from two sessions gets no token). Inherited
-  `HUB_URL`/`HUB_SESSION_TOKEN` are removed from the OpenCode process at plugin start and from every shell, and the
-  hub bin dir (`$HUB_STATE_DIR/bin`, default `~/.local/state/hub/bin`) goes first on PATH. A deleted session's token
-  is dropped. User `!` commands get no token. Opt-in integration test: `HUB_IT_OPENCODE=1 bun test
-  test/spoke-env-inject.it.test.ts`.
-- **Session tokens**: the hub mints a token for every session (subagents included) a spoke reports for its own
-  user, and sends it with the `sessionTokens` op to spokes that announce the feature: on each sessions frame
-  (new sessions, tokens with less than a third of their 24 h left, or after a key or epoch change), again in
-  full after a reconnect, and from a 10-minute refresh sweep. Format `hst1.<payload>.<HMAC-SHA256>` (claims
-  `typ, uid, mid, sid, exp, kid, ue, me, aud`), signed with the keys in `<HUB_STATE_DIR>/token-keys.json` or
-  `HUB_TOKEN_KEYS`. As `Authorization: Bearer`, a session token is a session actor on `/api/agent/*` routes
-  that admit sessions (`whoami`), `403` on console routes, `401 token_expired` once expired and `401` once the
-  session is no longer reported by that machine, the machine is revoked or the user disabled (both bump the
-  token epoch, so re-enabling does not revive old tokens). Tokens are never logged or audited. A session's
-  token is visible to its shell and child processes; it is limited by its expiry, the session's liveness and
-  the verbs sessions may use.
-- **Session names and roles** (`@name`, `@@role`): the hub keeps a per-user record of every session its spokes
-  report (machine, parent, project, lastSeen; at most 2000). Root sessions get a name once, from their first
-  real title (OpenCode's "New session" placeholders are skipped), `[a-z0-9-]` 2–40, with `-2`, `-3` on a clash.
-  `POST /api/agent/name {name, session?}` sets one (409 `name_taken` when taken); the old name stays an alias for
-  24 h; a name is released 7 days after its session is archived (the console's Archive) or deleted.
-  `POST /api/agent/roles/claim {role, exclusive?, project?, session?}` / `roles/release` manage roles
-  (`role.project` scopes; every new holder gets a new `generation`; an exclusive claim fails while another live
-  holder exists; a holder offline for 30 min loses the role, except in the 2 min after the hub starts;
-  `orchestrator…` and `concierge…` are reserved to the user). `GET /api/agent/who?project=&role=` lists named,
-  role-holding and online sessions. Session tokens may read, and name or claim for their own session only.
-  Addresses (`ses_…` or a unique ID prefix, `@name[.project]`, `@@role[.project]`) resolve within the caller's
-  sessions only: another user's are `not_found`, and `ambiguous` candidates never list them.
-- **Session tokens reach the spoke** (protocol still version 1): new server op `sessionTokens{tokens: [{sessionID,
-  token, exp}], hubURL?}` (at most 500 tokens per frame; `batchSessionTokens` splits a list under `MAX_FRAME`),
-  answered with `{applied, skipped: [{sessionID, reason: "unknown" | "expired"}]}`. It is the spoke feature
-  `sessionTokens`, announced by new spokes only (not implied for older OpenCode spokes), so hubs send it only to
-  spokes that list it. The OpenCode spoke keeps each reported session's latest token in memory (never logged,
-  dropped when expired or when the connection changes) and adopts no session for it.
-- **App tokens**: a signed-in user (device cookie or device token) creates app/agent tokens with
-  `POST /api/agent/app-tokens {label?, scopes?}` → `201 {id, token, label?, scopes, created}` (the token,
-  `hat_<id>_<secret>`, is shown only here), lists them with `GET /api/agent/app-tokens` → `{tokens}` (no secrets)
-  and revokes one with `DELETE /api/agent/app-tokens/:id` → `204`. Labels ≤ 100 characters; scopes from
-  `sessions:read` (the default); at most 50 per user (`429 rate_limited`). Only sha256 hashes are stored. An app
-  token is an app actor on `/api/agent/*` routes its scopes allow (`whoami` always); it is refused on console
-  routes and on token management (`403 forbidden`), and once revoked or its user disabled (`401`). Creation and
-  revocation are audited (`app-token.create`, `app-token.revoke`).
-- **Device tokens, agent API framework, discovery**: every `/api` request now resolves its caller through one
-  credential resolver. Besides the `voice_device` cookie, the same device secret works as
-  `Authorization: Bearer <device token>` (for native apps and CLIs) with the same powers and without the
-  same-origin check; the cookie together with a hub bearer token is refused (400 `invalid`), while a bearer the hub does not know (e.g. from an auth proxy) next to the cookie is ignored. New `/api/agent/*` routes answer
-  errors as `{error: {code, message, hint?}}` (`unauthorized`, `token_expired`, `forbidden`, `not_found`, …)
-  and start with `GET /api/agent/whoami` (`{actor, user}`). `GET /.well-known/hub` (public) answers
-  `{publicURL, version, minClientVersion, auth: {modes, oidc?}, features}`. Existing routes keep their error
-  format.
-- **Harness-neutral spoke protocol** (still version 1, compatible both ways). The hello may carry `harness`,
-  `harnessVersion` and `evidence` (`native` | `hooks` | `rpc` | `screen`; anything else counts as `unknown`); the
-  OpenCode spoke sends `harness: "opencode"`, `evidence: "native"` and keeps `opencodeVersion` for older hubs. A
-  hello without `harness` is an OpenCode spoke with the implied v1 features (`IMPLIED_OPENCODE_FEATURES`); new
-  spokes announce all their features (`SPOKE_FEATURES`). The welcome lists the hub's features (`HUB_FEATURES`,
-  now `["harness"]`) and spokes remember them (`hubSupports`). `/api/machines` processes gain `harness`,
-  `harnessVersion` and `evidence`.
+- **hub CLI** (`hub`, alias `hubctl`; private workspace `packages/cli`): `status`, `sessions [--project --state
+  --machine --label]`, `show <addr>`, `log <addr> [-n]`, `watch [--blocked] [--session]` (JSON lines), `whoami`,
+  `who [--project] [--role]`, `name <@name>`, `role claim|release <role> [--exclusive] [--session]`, `login`/`logout`.
+  Short text by default, `--json` for the raw answer; exit codes 0 ok, 1 other, 2 usage, 3 not found/ambiguous/
+  taken, 4 needs user, 5 forbidden/paused, 6 rate limited, 7 unsupported/offline, 8 gone, 9 unauthorized/expired.
+  Credentials: `HUB_URL` + `HUB_SESSION_TOKEN` first, else `~/.config/hub/cli.json` (0600) written by `hub login`
+  with an app token. Shipped as one JS bundle (`packages/cli/dist/hub-cli.js`, `npm run build:cli`, built by
+  prepack); the plugin writes `hub` and `hubctl` launchers into the hub bin dir at start that run it with the
+  OpenCode binary as bun (`BUN_BE_BUN=1`; `node` without Bun; the TypeScript source in a checkout without a build).
+- **Tests**: `test/e2e-phase1.test.ts` (in `npm test`) runs all of it end to end in process: a hub, the OpenCode
+  spoke and a second spoke of another harness (`fake`, evidence `hooks`, no features: no tokens, `hub log`
+  unsupported), and the CLI as a session token, an app token (`hub login`), a linked device and a second user (who
+  sees nothing: exit 3), until revoking the machine ends the session token (exit 9). The opt-in
+  `HUB_IT_OPENCODE=1 bun test test/spoke-env-inject.it.test.ts` also runs `hub whoami` in a real OpenCode shell
+  against an in-process hub and checks it prints the session.
+
+### Other changes
 
 - **Auto-name**: let OpenCode name a session with its Title agent, from the console. **Auto-name** in every
   session `⋯` menu (table, phone list, sidebar, session title) and a ✨ button next to the inline rename field;
