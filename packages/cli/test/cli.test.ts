@@ -1,7 +1,7 @@
 // The hub CLI against an in-process fake hub (Bun.serve): requests, text and --json output, exit codes,
 // credential precedence.
 import { afterAll, afterEach, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { EXIT, run, type Io } from "../src/cli"
@@ -541,5 +541,132 @@ describe("name and roles", () => {
     hub.routes["POST /api/agent/roles/claim"] = () => Response.json(body)
     const r = await cli(["role", "claim", "reviewer", "--json"])
     expect(JSON.parse(r.stdout)).toEqual(body)
+  })
+})
+
+/** An SSE response: each chunk written with a small delay; closes after the last unless `hold`. */
+function sse(chunks: string[], options: { hold?: boolean } = {}) {
+  const encoder = new TextEncoder()
+  return new Response(
+    new ReadableStream({
+      async start(controller) {
+        for (const chunk of chunks) {
+          controller.enqueue(encoder.encode(chunk))
+          await Bun.sleep(5)
+        }
+        if (!options.hold) controller.close()
+      },
+    }),
+    { headers: { "content-type": "text/event-stream" } },
+  )
+}
+
+const READY = `data: ${JSON.stringify({ type: "ready", at: 1 })}\n\n`
+const BLOCKED = `data: ${JSON.stringify({ type: "blocker.opened", sessionID: "ses_abc", rootID: "ses_abc", blocker: { kind: "permission", id: "per_1", summary: "bash: x" }, at: 2 })}\n\n`
+const PING = "event: ping\ndata: 0\n\n"
+
+describe("watch", () => {
+  test("prints each event as one JSON line and skips pings; filters become query parameters", async () => {
+    hub.routes["GET /api/agent/watch"] = () => sse([READY, PING, BLOCKED.slice(0, 20), BLOCKED.slice(20)], { hold: true })
+    const controller = new AbortController()
+    const running = cli(["watch", "--blocked", "--session", "@api"], { signal: controller.signal })
+    for (let i = 0; i < 100 && hub.seen.length === 0; i++) await Bun.sleep(5)
+    await Bun.sleep(80)
+    controller.abort()
+    const r = await running
+    expect(r.code).toBe(0)
+    const url = new URL(hub.seen[0]!.path, "http://x")
+    expect(url.pathname).toBe("/api/agent/watch")
+    expect(url.searchParams.get("blocked")).toBe("1")
+    expect(url.searchParams.get("session")).toBe("@api")
+    const lines = r.stdout.trim().split("\n")
+    expect(lines.map((l) => JSON.parse(l).type)).toEqual(["ready", "blocker.opened"])
+    expect(JSON.parse(lines[1]!).blocker.id).toBe("per_1")
+    expect(r.stderr).toBe("")
+  })
+
+  test("no filters: no query string", async () => {
+    hub.routes["GET /api/agent/watch"] = () => sse([READY])
+    await cli(["watch"])
+    expect(hub.seen[0]!.path).toBe("/api/agent/watch")
+  })
+
+  test("the hub ending the stream exits 1 after printing what came", async () => {
+    hub.routes["GET /api/agent/watch"] = () => sse([READY, BLOCKED])
+    const r = await cli(["watch"])
+    expect(r.code).toBe(1)
+    expect(r.stdout.trim().split("\n")).toHaveLength(2)
+    expect(r.stderr).toContain("ended")
+  })
+
+  test("an error before the stream uses the error's exit code", async () => {
+    hub.routes["GET /api/agent/watch"] = fail(401, "token_expired", "Token expired")
+    const r = await cli(["watch"])
+    expect(r.code).toBe(9)
+  })
+})
+
+describe("login and logout", () => {
+  const file = (home: string) => path.join(home, ".config", "hub", "cli.json")
+  const APP_WHOAMI = { actor: { kind: "app", userID: "u1", tokenID: "abcd", label: "cli", scopes: ["sessions:read"] }, user: SESSION_WHOAMI.user }
+
+  test("checks the token with whoami, then stores {url, token} owner-only", async () => {
+    hub.routes["GET /api/agent/whoami"] = () => Response.json(APP_WHOAMI)
+    const home = mkdtempSync(path.join(tmpdir(), "hub-cli-home-"))
+    const r = await cli(["login", "--url", hub.url, "--token", "hat_secret"], { env: {}, home })
+    expect(r.code).toBe(0)
+    expect(hub.seen[0]).toMatchObject({ path: "/api/agent/whoami", auth: "Bearer hat_secret" })
+    expect(JSON.parse(readFileSync(file(home), "utf8"))).toEqual({ url: hub.url, token: "hat_secret" })
+    expect(statSync(file(home)).mode & 0o777).toBe(0o600)
+    expect(r.stdout).toContain(hub.url)
+    expect(r.stdout + r.stderr).not.toContain("hat_secret")
+  })
+
+  test("then commands use it", async () => {
+    hub.routes["GET /api/agent/whoami"] = () => Response.json(APP_WHOAMI)
+    const home = mkdtempSync(path.join(tmpdir(), "hub-cli-home-"))
+    await cli(["login", "--url", hub.url, "--token", "hat_secret"], { env: {}, home })
+    const r = await cli(["whoami"], { env: {}, home })
+    expect(r.code).toBe(0)
+    expect(hub.seen[1]!.auth).toBe("Bearer hat_secret")
+  })
+
+  test("reads the token from stdin when --token is not given; HUB_URL is the default URL", async () => {
+    hub.routes["GET /api/agent/whoami"] = () => Response.json(APP_WHOAMI)
+    const home = mkdtempSync(path.join(tmpdir(), "hub-cli-home-"))
+    const r = await cli(["login"], { env: { HUB_URL: hub.url }, home, stdin: "hat_piped\n" })
+    expect(r.code).toBe(0)
+    expect(hub.seen[0]!.auth).toBe("Bearer hat_piped")
+    expect(JSON.parse(readFileSync(file(home), "utf8"))).toEqual({ url: hub.url, token: "hat_piped" })
+  })
+
+  test("uses the given token, not the session's HUB_SESSION_TOKEN", async () => {
+    hub.routes["GET /api/agent/whoami"] = () => Response.json(APP_WHOAMI)
+    await cli(["login", "--url", hub.url, "--token", "hat_given"])
+    expect(hub.seen[0]!.auth).toBe("Bearer hat_given")
+  })
+
+  test("a rejected token is not stored", async () => {
+    hub.routes["GET /api/agent/whoami"] = fail(401, "unauthorized", "Invalid or revoked token")
+    const home = mkdtempSync(path.join(tmpdir(), "hub-cli-home-"))
+    const r = await cli(["login", "--url", hub.url, "--token", "hat_bad"], { env: {}, home })
+    expect(r.code).toBe(9)
+    expect(existsSync(file(home))).toBe(false)
+  })
+
+  test("without a URL or a token it is a usage error", async () => {
+    expect((await cli(["login", "--token", "hat_x"], { env: {} })).code).toBe(2)
+    expect((await cli(["login", "--url", hub.url], { env: {}, stdin: "  \n" })).code).toBe(2)
+    expect(hub.seen).toEqual([])
+  })
+
+  test("logout deletes the login file", async () => {
+    const home = loggedIn(hub.url, "hat_file")
+    const r = await cli(["logout"], { env: {}, home })
+    expect(r.code).toBe(0)
+    expect(existsSync(file(home))).toBe(false)
+    const again = await cli(["logout"], { env: {}, home })
+    expect(again.code).toBe(0)
+    expect(again.stdout).toContain("not logged in")
   })
 })

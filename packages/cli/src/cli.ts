@@ -2,9 +2,10 @@
 // `run(argv, io)` is the whole program (main.ts wires it to the process); it returns the exit code.
 import pkg from "../package.json" with { type: "json" }
 import { parse, str, UsageError, type CommandSpec, type Parsed } from "./args"
-import { resolveCredentials, type Credentials, type Env } from "./credentials"
-import { atName, logText, roleText, sessionsText, showText, statusText, whoText, type SessionView } from "./format"
+import { loginFile, readLogin, removeLogin, resolveCredentials, writeLogin, type Credentials, type Env } from "./credentials"
+import { atName, logText, whoamiText, type Actor, roleText, sessionsText, showText, statusText, whoText, type SessionView } from "./format"
 import { call, CliError, EXIT } from "./http"
+import { watch } from "./watch"
 
 export { EXIT } from "./http"
 
@@ -63,7 +64,6 @@ const printJSON = (io: Io, value: unknown) => out(io, JSON.stringify(value, null
 /** A path segment; `@` stays readable (it is valid in a path). */
 const enc = (segment: string) => encodeURIComponent(segment).replace(/%40/g, "@")
 
-type Actor = { kind: string; sessionID?: string; machineID?: string; tokenID?: string; label?: string; scopes?: string[]; deviceID?: string; name?: string }
 
 /** Warns when this shell's OpenCode session is not the one the credential acts as (design §1.3, 31swaq28). */
 function crossCheck(io: Io, actor: Actor | undefined) {
@@ -71,17 +71,6 @@ function crossCheck(io: Io, actor: Actor | undefined) {
   if (!own || !actor || (actor.kind === "session" && actor.sessionID === own)) return
   const as = actor.kind === "session" ? `session ${actor.sessionID}` : actor.kind === "app" ? "an app token" : "the user"
   io.stderr(`hub: warning: this shell belongs to OpenCode session ${own}, but the credential acts as ${as}\n`)
-}
-
-function whoamiText(body: { actor: Actor; user: { id: string; name?: string; email?: string; role?: string } }): string {
-  const { actor, user } = body
-  const lines: string[] = []
-  if (actor.kind === "session") lines.push(`session ${actor.sessionID}${actor.machineID ? ` on machine ${actor.machineID}` : ""}`)
-  else if (actor.kind === "app") lines.push(`app token ${actor.tokenID}${actor.label ? ` (${actor.label})` : ""}${actor.scopes?.length ? ` scopes ${actor.scopes.join(",")}` : ""}`)
-  else lines.push(`user${actor.deviceID ? ` (device ${actor.deviceID})` : ""}`)
-  const who = [user.name, user.email ? `<${user.email}>` : undefined].filter(Boolean).join(" ") || user.id
-  lines.push(`user ${who}${user.role ? ` (${user.role})` : ""}`)
-  return lines.join("\n")
 }
 
 /** `?a=1&b=2` from flags (repeatable ones as repeated keys); empty when none are set. */
@@ -186,6 +175,37 @@ const COMMANDS: Record<string, Command> = {
         body: { role: context.parsed.args[0]!.replace(/^@@/, ""), ...(session ? { session } : {}) },
       })
       answer(context, body, (b) => `${b.sessionID} released ${roleText(b)}`)
+    },
+  },
+  watch: {
+    flags: { blocked: "bool", session: "string" },
+    async handle({ io, parsed, credentials }) {
+      const q = query([
+        ["blocked", parsed.flags.blocked ? "1" : undefined],
+        ["session", str(parsed.flags, "session")],
+      ])
+      await watch(credentials(), `/api/agent/watch${q}`, (line) => io.stdout(line), io.signal)
+    },
+  },
+  login: {
+    flags: { url: "string", token: "string" },
+    async handle(context) {
+      const { io, parsed } = context
+      const file = loginFile(io.env, io.home)
+      const url = (str(parsed.flags, "url") ?? io.env.HUB_URL ?? readLogin(file)?.url)?.replace(/\/+$/, "")
+      if (!url) throw new UsageError("needs --url <hub URL> (or HUB_URL)")
+      const token = (str(parsed.flags, "token") ?? (io.stdin ? await io.stdin() : "")).trim()
+      if (!token) throw new UsageError("needs an app token: --token, or on stdin (create one in the console: Settings → Agents)")
+      const credentials: Credentials = { url, token, source: "login" }
+      const body = await call<{ actor: Actor; user: { id: string } }>(credentials, "/api/agent/whoami")
+      writeLogin(file, { url, token })
+      answer(context, body, (b) => `logged in to ${url}\n${whoamiText(b)}\nsaved in ${file}`)
+    },
+  },
+  logout: {
+    async handle(context) {
+      const file = loginFile(context.io.env, context.io.home)
+      out(context.io, removeLogin(file) ? `logged out (deleted ${file}; the app token stays valid until revoked in the console)` : "not logged in")
     },
   },
 }

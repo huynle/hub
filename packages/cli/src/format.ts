@@ -159,5 +159,27 @@ export function whoText(entries: readonly WhoEntry[]): string {
     .join("\n")
 }
 
+/** A caller as whoami / status `you` report it. */
+export interface Actor {
+  readonly kind: string
+  readonly sessionID?: string
+  readonly machineID?: string
+  readonly tokenID?: string
+  readonly label?: string
+  readonly scopes?: readonly string[]
+  readonly deviceID?: string
+}
+
+export function whoamiText(body: { actor: Actor; user: { id: string; name?: string; email?: string; role?: string } }): string {
+  const { actor, user } = body
+  const lines: string[] = []
+  if (actor.kind === "session") lines.push(`session ${actor.sessionID}${actor.machineID ? ` on machine ${actor.machineID}` : ""}`)
+  else if (actor.kind === "app") lines.push(`app token ${actor.tokenID}${actor.label ? ` (${actor.label})` : ""}${actor.scopes?.length ? ` scopes ${actor.scopes.join(",")}` : ""}`)
+  else lines.push(`user${actor.deviceID ? ` (device ${actor.deviceID})` : ""}`)
+  const who = [user.name, user.email ? `<${user.email}>` : undefined].filter(Boolean).join(" ") || user.id
+  lines.push(`user ${who}${user.role ? ` (${user.role})` : ""}`)
+  return lines.join("\n")
+}
+
 export const roleText = (r: { role: string; project?: string }) => `@@${r.role}${r.project !== undefined ? `.${r.project}` : ""}`
 export { at as atName }
