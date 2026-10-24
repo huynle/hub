@@ -66,6 +66,28 @@ describe("catalog", () => {
     expect(registry.status("ses_1")).toBeUndefined()
   })
 
+  test("processes carry harness, harnessVersion and evidence; an old hello is OpenCode native", () => {
+    registry.connect("c1", laptop, hello("p1"))
+    registry.connect("c2", laptop, { ...hello("p2"), harness: "claude-code", harnessVersion: "1.0.3", evidence: "hooks", opencodeVersion: "" })
+    const [old, claude] = registry.catalog()[0]!.processes
+    expect(old).toMatchObject({ harness: "opencode", harnessVersion: "2.0.0", evidence: "native", opencodeVersion: "2.0.0" })
+    expect(claude).toMatchObject({ harness: "claude-code", harnessVersion: "1.0.3", evidence: "hooks", opencodeVersion: "" })
+  })
+
+  test("supports(): announced features, plus the implied v1 set for an old OpenCode hello", () => {
+    registry.connect("old", laptop, hello("p1"))
+    registry.connect("oldAuto", laptop, { ...hello("p2"), features: ["autoName"] })
+    registry.connect("claude", laptop, { ...hello("p3"), harness: "claude-code", features: ["summary"] })
+    expect(registry.supports("old", "timeline")).toBe(true)
+    expect(registry.supports("old", "modelPrefs")).toBe(true)
+    expect(registry.supports("old", "autoName")).toBe(false)
+    expect(registry.supports("oldAuto", "autoName")).toBe(true)
+    expect(registry.supports("oldAuto", "create")).toBe(true)
+    expect(registry.supports("claude", "summary")).toBe(true)
+    expect(registry.supports("claude", "timeline")).toBe(false)
+    expect(registry.supports("nope", "timeline")).toBe(false)
+  })
+
   test("ignores frames from unknown connections", () => {
     registry.setSessions("nope", [session("ses_1")])
     registry.observe("nope", ev("session.execution.started", { sessionID: "ses_1" }))
