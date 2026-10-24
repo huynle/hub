@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { defaults, readConfig, writeConfig, type VoiceConfig } from "../src/config"
-import { PROTOCOL_VERSION } from "../src/protocol"
+import { PROTOCOL_VERSION, SPOKE_FEATURES } from "../src/protocol"
 import type { HerdrRunner } from "../src/spoke/herdr"
 import { detectKind, Spoke, SpokeError, type SpokeHost, type SpokeOptions } from "../src/spoke/spoke"
 import { EventQueue, fakeCentral, until, type FakeCentral } from "./spoke-fake"
@@ -181,12 +181,23 @@ describe("Spoke", () => {
       mode: "always",
       opencodeVersion: "2.0.25",
       pluginVersion: "9.9.9",
-      features: ["autoName"],
+      features: [...SPOKE_FEATURES],
+      harness: "opencode",
+      harnessVersion: "2.0.25",
+      evidence: "native",
     })
     await until(() => lastSessions(server) !== undefined)
     host.push(created("ses_a"))
     await until(() => lastSessions(server)?.sessions.length === 1)
     expect(lastSessions(server)?.sessions[0]).toMatchObject({ id: "ses_a", title: "T ses_a", owned: true })
+  })
+
+  test("hubSupports() reflects the features in the hub's welcome (none from an older hub)", async () => {
+    const newHub = setup({ mode: "always", token: "tok" }, { server: fakeCentral({ hubFeatures: ["harness"] }) })
+    const oldHub = setup({ mode: "always", token: "tok" })
+    await until(() => newHub.spoke.status().connection === "connected" && oldHub.spoke.status().connection === "connected")
+    expect(newHub.spoke.hubSupports("harness")).toBe(true)
+    expect(oldHub.spoke.hubSupports("harness")).toBe(false)
   })
 
   test("does not connect when mode is off or there is no token", async () => {

@@ -1,6 +1,12 @@
 // Central server ↔ spoke protocol, version 1. JSON text frames over a WebSocket at /spoke/ws.
-// The spoke (OpenCode plugin) connects outbound with `Authorization: Bearer <machineToken>`.
+// A spoke (a harness plugin; OpenCode first) connects outbound with `Authorization: Bearer <machineToken>`.
 // Every frame is one object with a `t` discriminator. Unknown or malformed frames are rejected.
+//
+// Core and features: every spoke serves the core ops (turn, steer, interrupt, stop, permission, form); the
+// rest are features a spoke announces in its hello (SPOKE_FEATURES) and the hub uses only when announced.
+// A hello without `harness` comes from an OpenCode spoke that predates this split and implies
+// IMPLIED_OPENCODE_FEATURES. The hub announces its own features in the welcome (HUB_FEATURES), and a spoke
+// sends a newer request only when the hub listed it. Neither side bumps PROTOCOL_VERSION for a new feature.
 
 export const PROTOCOL_VERSION = 1
 
@@ -209,15 +215,68 @@ export interface Hello {
   readonly directory: string
   readonly pid: number
   readonly mode: SpokeMode
+  /**
+   * OpenCode's version. Required by hubs that predate `harness`, so every spoke sends it: OpenCode spokes their
+   * OpenCode version, other harnesses their own version (or "").
+   */
   readonly opencodeVersion: string
   readonly pluginVersion: string
   /** Optional ops this spoke supports (see SPOKE_FEATURES); older spokes send none. */
   readonly features?: readonly string[]
+  /** Harness id, e.g. "opencode" (HARNESS_OPENCODE). Absent in older OpenCode spokes; see helloHarness. */
+  readonly harness?: string
+  readonly harnessVersion?: string
+  /** How the spoke observes activity (EVIDENCE_LEVELS); a level this hub does not know counts as "unknown". */
+  readonly evidence?: string
 }
 
+export const HARNESS_OPENCODE = "opencode"
+
+/**
+ * How a spoke observes a session's activity: native harness events, lifecycle hooks, a harness RPC, or
+ * sampling the terminal screen. A session whose evidence is "unknown" never counts as idle.
+ */
+export const EVIDENCE_LEVELS = ["native", "hooks", "rpc", "screen"] as const
+export type EvidenceLevel = (typeof EVIDENCE_LEVELS)[number]
+
+/**
+ * Features an OpenCode spoke that predates `harness` serves without announcing them (every op it handled
+ * then except autoName, which was always announced). Do not add features here: new ones must be announced.
+ */
+export const IMPLIED_OPENCODE_FEATURES = [
+  "context",
+  "rename",
+  "summary",
+  "diff",
+  "conversation",
+  "models",
+  "modelPrefs",
+  "timeline",
+  "timelinePart",
+  "timelineFile",
+  "expose",
+  "create",
+] as const
+
 /** Features a spoke announces in its hello, so the hub can refuse an op an older spoke would ignore. */
-export const SPOKE_FEATURES = ["autoName"] as const
+export const SPOKE_FEATURES = [...IMPLIED_OPENCODE_FEATURES, "autoName"] as const
 export type SpokeFeature = (typeof SPOKE_FEATURES)[number]
+
+/** Features the hub announces in its welcome. "harness": it reads hello `harness`, `harnessVersion` and `evidence`. */
+export const HUB_FEATURES = ["harness"] as const
+export type HubFeature = (typeof HUB_FEATURES)[number]
+
+/** A spoke's harness, version and evidence level; a hello without `harness` is an OpenCode native spoke. */
+export function helloHarness(hello: Hello): { readonly harness: string; readonly harnessVersion: string; readonly evidence: EvidenceLevel | "unknown" } {
+  if (hello.harness === undefined) return { harness: HARNESS_OPENCODE, harnessVersion: hello.opencodeVersion, evidence: "native" }
+  const evidence = (EVIDENCE_LEVELS as readonly string[]).includes(hello.evidence ?? "") ? (hello.evidence as EvidenceLevel) : "unknown"
+  return { harness: hello.harness, harnessVersion: hello.harnessVersion ?? "", evidence }
+}
+
+/** The features a spoke serves: those it announced, plus IMPLIED_OPENCODE_FEATURES for a hello without `harness`. */
+export function spokeFeatures(hello: Hello): ReadonlySet<string> {
+  return new Set([...(hello.harness === undefined ? IMPLIED_OPENCODE_FEATURES : []), ...(hello.features ?? [])])
+}
 
 export interface Sessions {
   readonly t: "sessions"
@@ -244,6 +303,8 @@ export interface Welcome {
   readonly v: number
   readonly machineID: string
   readonly publicURL: string
+  /** The hub's features (see HUB_FEATURES); older hubs send none. */
+  readonly features?: readonly string[]
 }
 
 /** An image attached to a typed prompt: base64 bytes of a PNG, JPEG, WebP or GIF (see promptImagesProblem). */
@@ -294,6 +355,23 @@ export type ServerRequest =
    * it in a new tab of that Herdr workspace (`opencode --session <id>` in the directory).
    */
   | { readonly op: "create"; readonly directory: string; readonly title?: string; readonly herdrWorkspace?: string }
+
+/** The feature a spoke must announce for the hub to send `op`, or undefined for a core op every spoke serves. */
+export function featureForOp(op: ServerRequest["op"]): SpokeFeature | undefined {
+  switch (op) {
+    case "turn":
+    case "steer":
+    case "interrupt":
+    case "stop":
+    case "permission":
+    case "form":
+      return undefined
+    case "setModelPrefs":
+      return "modelPrefs"
+    default:
+      return op
+  }
+}
 
 export interface ContextUsage {
   /** Tokens of the latest assistant message (input + output + reasoning + cache). */
@@ -412,6 +490,10 @@ const str = (v: unknown): v is string => typeof v === "string"
 const nonEmpty = (v: unknown): v is string => typeof v === "string" && v.length > 0
 const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v)
 const ID = /^[A-Za-z0-9_.:@/+~-]{1,300}$/
+/** A short lowercase token (harness id, evidence level). */
+const token = (v: unknown, max: number): boolean => typeof v === "string" && v.length <= max && /^[a-z0-9][a-z0-9._-]*$/.test(v)
+/** A feature list: at most 64 names of 1–64 characters. */
+const featureList = (v: unknown): boolean => Array.isArray(v) && v.length <= 64 && v.every((f) => nonEmpty(f) && f.length <= 64)
 const isModelSelection = (v: unknown): v is ModelSelection =>
   isObj(v) && typeof v.providerID === "string" && ID.test(v.providerID) && typeof v.modelID === "string" && ID.test(v.modelID) && (v.variant === undefined || (typeof v.variant === "string" && ID.test(v.variant)))
 
@@ -615,7 +697,10 @@ export function parseSpokeMessage(raw: string | Buffer): SpokeMessage | undefine
         (m.mode === "always" || m.mode === "session") &&
         str(m.opencodeVersion) &&
         str(m.pluginVersion) &&
-        (m.features === undefined || (Array.isArray(m.features) && m.features.length <= 64 && m.features.every((f) => nonEmpty(f) && f.length <= 64)))
+        (m.features === undefined || featureList(m.features)) &&
+        (m.harness === undefined || token(m.harness, 64)) &&
+        (m.harnessVersion === undefined || (str(m.harnessVersion) && m.harnessVersion.length <= 100)) &&
+        (m.evidence === undefined || token(m.evidence, 32))
         ? (m as unknown as Hello)
         : undefined
     case "sessions":
@@ -643,7 +728,7 @@ export function parseServerMessage(raw: string | Buffer): ServerMessage | undefi
   if (!m) return undefined
   switch (m.t) {
     case "welcome":
-      return num(m.v) && nonEmpty(m.machineID) && str(m.publicURL) ? (m as unknown as Welcome) : undefined
+      return num(m.v) && nonEmpty(m.machineID) && str(m.publicURL) && (m.features === undefined || featureList(m.features)) ? (m as unknown as Welcome) : undefined
     case "req":
       return nonEmpty(m.id) && isServerRequest(m.req) ? (m as unknown as Req<ServerRequest>) : undefined
     case "res":

@@ -1,5 +1,15 @@
 import { describe, expect, test } from "bun:test"
-import { encode, FORWARDED_EVENTS, MAX_PROMPT_IMAGE_BYTES, MAX_PROMPT_IMAGES, MAX_PROMPT_IMAGES_BASE64, parseServerMessage, parseSpokeMessage, promptImagesProblem, PROTOCOL_VERSION } from "../src/index.ts"
+import {
+  encode,
+  EVIDENCE_LEVELS,
+  featureForOp,
+  FORWARDED_EVENTS,
+  helloHarness,
+  HUB_FEATURES,
+  IMPLIED_OPENCODE_FEATURES,
+  spokeFeatures,
+  SPOKE_FEATURES,
+  MAX_PROMPT_IMAGE_BYTES, MAX_PROMPT_IMAGES, MAX_PROMPT_IMAGES_BASE64, parseServerMessage, parseSpokeMessage, promptImagesProblem, PROTOCOL_VERSION } from "../src/index.ts"
 
 const hello = {
   t: "hello",
@@ -305,5 +315,111 @@ describe("job and status compaction", () => {
   test("status, job and seed events pass the spoke-message check", () => {
     const ev = (type: string) => JSON.stringify({ t: "event", event: { type, data: { sessionID: "ses_1" } } })
     for (const t of ["session.status", "shell.created", "shell.exited", "shell.deleted", "session.shell.started", "session.shell.ended", "pty.created", "pty.updated", "pty.exited", "pty.deleted", "session.seed"]) expect(parseSpokeMessage(ev(t))).toBeDefined()
+  })
+})
+
+// The hello and welcome checks of the v1 parsers deployed before harness fields existed (frozen copies): new
+// frames must still pass them, so a new spoke can talk to an old hub and an old spoke to a new hub.
+const oldHubAcceptsHello = (m: any) =>
+  typeof m.v === "number" &&
+  typeof m.processID === "string" && m.processID.length > 0 &&
+  (m.kind === "service" || m.kind === "standalone") &&
+  typeof m.directory === "string" &&
+  typeof m.pid === "number" &&
+  (m.mode === "always" || m.mode === "session") &&
+  typeof m.opencodeVersion === "string" &&
+  typeof m.pluginVersion === "string" &&
+  (m.features === undefined || (Array.isArray(m.features) && m.features.length <= 64 && m.features.every((f: unknown) => typeof f === "string" && f.length > 0 && f.length <= 64)))
+const oldSpokeAcceptsWelcome = (m: any) => typeof m.v === "number" && typeof m.machineID === "string" && m.machineID.length > 0 && typeof m.publicURL === "string"
+
+describe("harness-neutral hello", () => {
+  const newHello = { ...hello, harness: "opencode", harnessVersion: "2.0.25", evidence: "native", features: [...SPOKE_FEATURES] }
+
+  test("an old hello (no harness) is an OpenCode spoke with native evidence and the implied v1 features", () => {
+    const parsed = parseSpokeMessage(j(hello)) as any
+    expect(parsed).toBeDefined()
+    expect(helloHarness(parsed)).toEqual({ harness: "opencode", harnessVersion: "2.0.25", evidence: "native" })
+    const features = spokeFeatures(parsed)
+    for (const feature of IMPLIED_OPENCODE_FEATURES) expect(features.has(feature)).toBe(true)
+    // autoName was always announced explicitly; an old spoke that did not announce it does not get it.
+    expect(features.has("autoName")).toBe(false)
+    expect(spokeFeatures({ ...parsed, features: ["autoName"] }).has("autoName")).toBe(true)
+  })
+
+  test("a new hello with harness, harnessVersion and evidence parses and keeps its declared values", () => {
+    const parsed = parseSpokeMessage(j(newHello)) as any
+    expect(parsed).toMatchObject({ harness: "opencode", harnessVersion: "2.0.25", evidence: "native" })
+    expect(helloHarness(parsed)).toEqual({ harness: "opencode", harnessVersion: "2.0.25", evidence: "native" })
+    const claude = { ...hello, harness: "claude-code", harnessVersion: "1.2.3", evidence: "hooks", features: ["timeline"] }
+    const parsedClaude = parseSpokeMessage(j(claude)) as any
+    expect(helloHarness(parsedClaude)).toEqual({ harness: "claude-code", harnessVersion: "1.2.3", evidence: "hooks" })
+    // A declared harness gets only what it announces: no implied OpenCode features.
+    expect([...spokeFeatures(parsedClaude)]).toEqual(["timeline"])
+  })
+
+  test("a harness that declares no evidence level is unknown, never assumed native", () => {
+    const parsed = parseSpokeMessage(j({ ...hello, harness: "codex", harnessVersion: "0.9" })) as any
+    expect(helloHarness(parsed)).toEqual({ harness: "codex", harnessVersion: "0.9", evidence: "unknown" })
+  })
+
+  test("validates harness, harnessVersion and evidence", () => {
+    const bad = (extra: Record<string, unknown>) => parseSpokeMessage(j({ ...hello, ...extra }))
+    expect(bad({ harness: "" })).toBeUndefined()
+    expect(bad({ harness: 5 })).toBeUndefined()
+    expect(bad({ harness: "x".repeat(65) })).toBeUndefined()
+    expect(bad({ harness: "Open Code" })).toBeUndefined()
+    expect(bad({ harnessVersion: 2 })).toBeUndefined()
+    expect(bad({ harnessVersion: "x".repeat(101) })).toBeUndefined()
+    expect(bad({ evidence: "" })).toBeUndefined()
+    expect(bad({ evidence: "x".repeat(33) })).toBeUndefined()
+    expect(bad({ evidence: ["native"] })).toBeUndefined()
+    // An evidence level this hub does not know yet still parses (it counts as unknown), so a newer spoke connects.
+    const future = parseSpokeMessage(j({ ...hello, harness: "x", evidence: "telepathy" })) as any
+    expect(future).toBeDefined()
+    expect(helloHarness(future).evidence).toBe("unknown")
+    for (const level of EVIDENCE_LEVELS) expect(bad({ harness: "x", evidence: level })).toBeDefined()
+  })
+
+  test("a new hello still passes the old hub's parser (it keeps opencodeVersion)", () => {
+    expect(oldHubAcceptsHello(newHello)).toBe(true)
+    expect(oldHubAcceptsHello(JSON.parse(encode(parseSpokeMessage(j(newHello))!)))).toBe(true)
+  })
+
+  test("the OpenCode spoke announces every implied feature and autoName explicitly", () => {
+    expect(SPOKE_FEATURES).toEqual(expect.arrayContaining([...IMPLIED_OPENCODE_FEATURES, "autoName"]))
+    expect(SPOKE_FEATURES.length).toBeLessThanOrEqual(64)
+  })
+
+  test("core ops need no feature; optional ops map to the feature that serves them", () => {
+    for (const op of ["turn", "steer", "interrupt", "stop", "permission", "form"] as const) expect(featureForOp(op)).toBeUndefined()
+    expect(featureForOp("timeline")).toBe("timeline")
+    expect(featureForOp("setModelPrefs")).toBe("modelPrefs")
+    expect(featureForOp("autoName")).toBe("autoName")
+    expect(featureForOp("create")).toBe("create")
+  })
+})
+
+describe("welcome features", () => {
+  const welcome = { t: "welcome", v: PROTOCOL_VERSION, machineID: "m_1", publicURL: "https://hub.example" }
+
+  test("a welcome may list the hub's features; an old welcome without them still parses", () => {
+    expect(parseServerMessage(j(welcome))).toEqual(welcome as any)
+    expect(parseServerMessage(j({ ...welcome, features: ["harness"] }))).toMatchObject({ features: ["harness"] })
+    expect(parseServerMessage(j({ ...welcome, features: [] }))).toBeDefined()
+  })
+
+  test("rejects malformed welcome features", () => {
+    expect(parseServerMessage(j({ ...welcome, features: "harness" }))).toBeUndefined()
+    expect(parseServerMessage(j({ ...welcome, features: [1] }))).toBeUndefined()
+    expect(parseServerMessage(j({ ...welcome, features: [""] }))).toBeUndefined()
+    expect(parseServerMessage(j({ ...welcome, features: ["x".repeat(65)] }))).toBeUndefined()
+    expect(parseServerMessage(j({ ...welcome, features: Array(65).fill("x") }))).toBeUndefined()
+  })
+
+  test("HUB_FEATURES is a valid welcome list and an old spoke still accepts the welcome", () => {
+    expect(HUB_FEATURES).toContain("harness")
+    const frame = { ...welcome, features: [...HUB_FEATURES] }
+    expect(parseServerMessage(j(frame))).toEqual(frame as any)
+    expect(oldSpokeAcceptsWelcome(frame)).toBe(true)
   })
 })
