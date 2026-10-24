@@ -16,7 +16,7 @@ import { authPage, cookieValue, deviceName, OIDC_COOKIE, OidcClient, OidcError }
 import { isNotificationKind, Push, type PushSender } from "./push"
 import { pushEndpointProblem, resolveHost as systemResolveHost, type ResolveHost } from "./push-target"
 import { memoryBackends, type Backends } from "./backend"
-import { createResolver, type BearerVerifier } from "./agent/actor"
+import { createResolver, type BearerVerifier, type CredentialMode } from "./agent/actor"
 import { agentApi, agentRoutes, agentVerifiers, isAgentPath, wellKnown, type AgentRoute } from "./agent/routes"
 import { EventLog } from "./events-log"
 import { BusyError, Registry } from "./registry"
@@ -579,6 +579,14 @@ export function startCentral(options: CentralOptions): Central {
       store.audit({ actor: paired.device.ownerID, action: "device.pair", target: paired.device.id })
       return Response.json({ device: deviceView(paired.device) }, { headers: { "set-cookie": cookie(paired.token) } })
     }),
+    // A native app trades a link code for a device token (kept by the app, sent as Authorization: Bearer): no cookie.
+    route("POST", "/api/devices/redeem", "public", async ({ request }) => {
+      const input = await body(request)
+      const linked = auth.redeemLink(input.code, input.deviceName, input.publicKey)
+      if (!linked) return error(401, "Invalid or expired link code")
+      store.audit({ actor: linked.device.ownerID, action: "device.pair", target: linked.device.id, detail: "app link" })
+      return Response.json({ device: deviceView(linked.device), token: linked.token }, { headers: NO_STORE })
+    }),
 
     // any signed-in user, own data only
     route("GET", "/api/me", "user", ({ device, user }) =>
@@ -619,6 +627,13 @@ export function startCentral(options: CentralOptions): Central {
           .map((d) => ({ ...deviceView(d), current: d.id === device.id })),
       }),
     ),
+    // A link code for a native app, shown as a QR code / deep link in Settings → Devices → Add app.
+    route("POST", "/api/devices/link", "user", ({ user }) => {
+      const { code, expiresAt } = auth.issueLinkCode(user.id)
+      store.audit({ actor: user.id, action: "device.link" })
+      const url = `${APP_SCHEME}://link?hub=${encodeURIComponent(publicURL)}&code=${code}`
+      return Response.json({ code, expiresAt, hub: publicURL, url }, { headers: NO_STORE })
+    }),
     route("DELETE", "/api/devices/:id", "user", ({ params, user }) => {
       const target = store.devices().find((d) => d.id === params.id && d.ownerID === user.id)
       if (!target || !store.removeDevice(target.id)) return error(404, "No such device")
@@ -878,7 +893,7 @@ export function startCentral(options: CentralOptions): Central {
     if (mode === "mixed") return error(400, "Send the device cookie or a bearer token, not both", "invalid")
     // Bearer requests (device tokens of native apps) are not CSRF-prone; cookie writes must be same-origin (a
     // foreign bearer next to the cookie, e.g. from an auth proxy, is ignored: still a cookie request).
-    if (mode !== "bearer" && method !== "GET" && method !== "HEAD" && !sameOrigin(request)) {
+    if (mode !== "bearer" && method !== "GET" && method !== "HEAD" && !sameOrigin(request) && !credentialFree(request, mode, url)) {
       return error(403, "Cross-origin request refused")
     }
     const found = findRoute(method, url.pathname)
@@ -1379,6 +1394,25 @@ export function startCentral(options: CentralOptions): Central {
       await Promise.race([server.stop(true), Bun.sleep(250)])
     },
   }
+}
+
+/** Deep-link scheme of the native apps: `hubapp://link?hub=<public URL>&code=<link code>`. */
+export const APP_SCHEME = "hubapp"
+
+/**
+ * Public writes a native app makes with no ambient credential at all (no cookie, no bearer, no Origin or
+ * Referer): not CSRF-prone, the single-use code in the body is the credential. Every other write keeps the
+ * same-origin check, and so does any request carrying a cookie or a browser Origin.
+ */
+const CREDENTIAL_FREE = new Set(["POST /api/devices/redeem"])
+
+function credentialFree(request: Request, mode: CredentialMode, url: URL): boolean {
+  return (
+    mode === "none" &&
+    !request.headers.has("origin") &&
+    !request.headers.has("referer") &&
+    CREDENTIAL_FREE.has(`${request.method} ${url.pathname}`)
+  )
 }
 
 function userView(user: UserRecord) {
