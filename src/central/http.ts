@@ -16,7 +16,7 @@ import { authPage, cookieValue, deviceName, OIDC_COOKIE, OidcClient, OidcError }
 import { isNotificationKind, Push, type PushSender } from "./push"
 import { pushEndpointProblem, resolveHost as systemResolveHost, type ResolveHost } from "./push-target"
 import { memoryBackends, type Backends } from "./backend"
-import { createResolver, readCredentials, type BearerVerifier } from "./agent/actor"
+import { createResolver, type BearerVerifier } from "./agent/actor"
 import { agentApi, agentRoutes, agentVerifiers, isAgentPath, wellKnown, type AgentRoute } from "./agent/routes"
 import { EventLog } from "./events-log"
 import { BusyError, Registry } from "./registry"
@@ -874,12 +874,11 @@ export function startCentral(options: CentralOptions): Central {
 
   async function api(request: Request, server: Server<SpokeSocketData>, url: URL): Promise<Response> {
     const method = request.method
-    const credentials = readCredentials(request, COOKIE)
-    if (credentials.cookie !== undefined && credentials.bearer !== undefined) {
-      return error(400, "Send the device cookie or a bearer token, not both", "invalid")
-    }
-    // Bearer requests (device tokens of native apps) are not CSRF-prone; cookie writes must be same-origin.
-    if (credentials.bearer === undefined && method !== "GET" && method !== "HEAD" && !sameOrigin(request)) {
+    const mode = await resolveActor.mode(request)
+    if (mode === "mixed") return error(400, "Send the device cookie or a bearer token, not both", "invalid")
+    // Bearer requests (device tokens of native apps) are not CSRF-prone; cookie writes must be same-origin (a
+    // foreign bearer next to the cookie, e.g. from an auth proxy, is ignored: still a cookie request).
+    if (mode !== "bearer" && method !== "GET" && method !== "HEAD" && !sameOrigin(request)) {
       return error(403, "Cross-origin request refused")
     }
     const found = findRoute(method, url.pathname)

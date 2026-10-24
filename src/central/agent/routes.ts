@@ -2,12 +2,12 @@
 // envelope. http.ts registers it once (agentApi) and sends every /api/agent request here; later tasks add routes
 // to agentRoutes() and verifiers to agentVerifiers() without touching http.ts.
 //
-// Order for each request: cookie + bearer together → 400 invalid; cookie writes need the same origin (bearer
+// Order for each request: cookie + a hub bearer together → 400 invalid (a foreign bearer is ignored); cookie writes need the same origin (bearer
 // requests skip it) → 403 forbidden; credential → 401 unauthorized / token_expired; route → 404 not_found;
 // route class (agentAllows) → 403 forbidden; then the handler, whose throws become the envelope (agentFailure).
 // Path parameters address sessions as `:addr` (resolved per caller), never `:session`.
 import type { DeviceRecord, Store, UserRecord } from "../store"
-import { agentAllows, readCredentials, type AgentActor, type AgentAllow, type BearerVerifier, type Credential, type Resolver } from "./actor"
+import { agentAllows, type AgentActor, type AgentAllow, type BearerVerifier, type Credential, type Resolver } from "./actor"
 import { AgentError, agentFailure } from "./errors"
 
 export const AGENT_PREFIX = "/api/agent"
@@ -118,10 +118,10 @@ export function agentApi(options: AgentApiOptions): AgentApi {
 
   async function handle(request: Request, url: URL): Promise<Response> {
     try {
-      const { cookie, bearer } = readCredentials(request, options.cookieName)
-      if (cookie !== undefined && bearer !== undefined) throw new AgentError("invalid", MIXED)
+      const mode = await options.resolve.mode(request)
+      if (mode === "mixed") throw new AgentError("invalid", MIXED)
       const method = request.method
-      if (bearer === undefined && method !== "GET" && method !== "HEAD" && !options.sameOrigin(request)) {
+      if (mode !== "bearer" && method !== "GET" && method !== "HEAD" && !options.sameOrigin(request)) {
         throw new AgentError("forbidden", "Cross-origin request refused")
       }
       const resolved = await options.resolve(request)

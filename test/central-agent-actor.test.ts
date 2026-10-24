@@ -96,8 +96,25 @@ describe("createResolver", () => {
     expect(await resolver()(req({ authorization: "Bearer hst_old" }))).toEqual({ ok: false, reason: "expired", bearer: true })
   })
 
-  test("cookie and bearer together are refused, even when both are valid", async () => {
+  test("cookie and a hub bearer together are refused, even when both are valid", async () => {
     expect(await resolver()(req({ cookie: "voice_device=tok_alice", authorization: "Bearer tok_alice" }))).toEqual({ ok: false, reason: "mixed", bearer: true })
+    // A recognised session token (or an expired one) next to a cookie is mixed too.
+    expect(await resolver()(req({ cookie: "voice_device=tok_alice", authorization: "Bearer hst_old" }))).toEqual({ ok: false, reason: "mixed", bearer: true })
+    expect(await resolver().mode(req({ cookie: "voice_device=tok_alice", authorization: "Bearer tok_alice" }))).toBe("mixed")
+  })
+
+  test("a foreign bearer next to the cookie (auth proxy) is ignored: a cookie request", async () => {
+    const r = req({ cookie: "voice_device=tok_alice", authorization: "Bearer proxy-issued-jwt" })
+    expect(await resolver().mode(r)).toBe("cookie")
+    const resolved = await resolver()(r)
+    expect(resolved.ok && resolved.credential).toBe("cookie")
+    expect(resolved.ok && resolved.actor).toMatchObject({ kind: "user", via: "cookie" })
+  })
+
+  test("mode: none, cookie, bearer", async () => {
+    expect(await resolver().mode(req({}))).toBe("none")
+    expect(await resolver().mode(req({ cookie: "voice_device=nope" }))).toBe("cookie")
+    expect(await resolver().mode(req({ authorization: "Bearer nope" }))).toBe("bearer")
   })
 
   test("a disabled user's device and tokens resolve to nothing", async () => {

@@ -153,6 +153,18 @@ describe("credential errors", () => {
     expect((await agentRes.json()).error).toEqual({ code: "invalid", message: "Send the device cookie or a bearer token, not both" })
   })
 
+  test("a foreign bearer next to the cookie (auth proxy) is ignored; the same-origin check still applies", async () => {
+    start()
+    const proxied = { headers: { authorization: "Bearer proxy-issued-jwt" } }
+    const consoleRes = await h.api("/api/me", proxied)
+    expect(consoleRes.status).toBe(200)
+    const agentRes = await h.api("/api/agent/whoami", proxied)
+    expect(agentRes.status).toBe(200)
+    expect((await json(agentRes)).actor).toMatchObject({ kind: "user", via: "cookie" })
+    // Still a cookie request: a write without Origin is refused as cross-origin.
+    expect((await h.api("/api/prefs/view", { ...proxied, method: "PUT", json: {}, origin: null })).status).toBe(403)
+  })
+
   test("unknown bearer: 401 with the agent envelope on /api/agent, the old envelope elsewhere", async () => {
     start()
     const agentRes = await bearer("/api/agent/whoami", "nope")

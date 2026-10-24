@@ -6,7 +6,9 @@
 //   resolved through the same device lookup, with the same powers; bearer requests skip the same-origin check
 // - session token (P1-T5) and app token (P1-T7): bearer tokens resolved by a BearerVerifier
 //
-// A request with both a device cookie and a bearer token is refused ("mixed"): credentials never mix.
+// A request with both a device cookie and a bearer token the hub recognises is refused ("mixed"): credentials
+// never mix. A bearer the hub does not recognise next to the cookie (e.g. one an auth proxy adds) is ignored: the
+// request is a cookie request, same-origin check included.
 // Tokens are never logged; the device lookup is constant-time (Store.findDevice).
 import type { DeviceRecord, UserRecord } from "../store"
 
@@ -71,7 +73,13 @@ export interface ResolverDeps {
   readonly verifiers?: readonly BearerVerifier[]
 }
 
-export type Resolver = (request: Request) => Promise<Resolution>
+/** How a request authenticates: decides the same-origin check (cookie requests) and the mixed refusal. */
+export type CredentialMode = "none" | "cookie" | "bearer" | "mixed"
+
+export type Resolver = ((request: Request) => Promise<Resolution>) & {
+  /** none, cookie (incl. a cookie next to a foreign bearer), bearer, or mixed (cookie + a hub bearer). */
+  mode(request: Request): Promise<CredentialMode>
+}
 
 /** `Bearer <token>`; a Bearer header whose value is not one token still counts as a (invalid, empty) bearer. */
 const BEARER = /^\s*Bearer(?:\s+(.*))?$/i
@@ -109,12 +117,26 @@ export function createResolver(deps: ResolverDeps): Resolver {
     return { ok: true, credential: via, actor: { kind: "user", userID: user.id, deviceID: device.id, via }, user, device }
   }
 
-  return async (request) => {
+  /** The bearer is a hub credential (a device token, or a token a verifier answers for, expired included). */
+  const recognised = async (token: string): Promise<boolean> => {
+    if (!token) return false
+    if (deps.findDevice(token)) return true
+    for (const verifier of verifiers) if ((await verifier.verify(token)) !== undefined) return true
+    return false
+  }
+  const mode = async (request: Request): Promise<CredentialMode> => {
     const { cookie, bearer } = readCredentials(request, deps.cookieName)
-    if (bearer === undefined) {
-      if (cookie === undefined) return { ok: false, reason: "none", bearer: false }
+    if (bearer === undefined) return cookie === undefined ? "none" : "cookie"
+    if (cookie === undefined) return "bearer"
+    return (await recognised(bearer)) ? "mixed" : "cookie"
+  }
+
+  const resolve = async (request: Request): Promise<Resolution> => {
+    const { cookie, bearer } = readCredentials(request, deps.cookieName)
+    if (cookie !== undefined && (bearer === undefined || !(await recognised(bearer)))) {
       return byDevice(cookie, "cookie") ?? { ok: false, reason: "invalid", bearer: false }
     }
+    if (bearer === undefined) return { ok: false, reason: "none", bearer: false }
     if (cookie !== undefined) return { ok: false, reason: "mixed", bearer: true }
     if (!bearer) return { ok: false, reason: "invalid", bearer: true }
     const device = byDevice(bearer, "device-token")
@@ -130,6 +152,7 @@ export function createResolver(deps: ResolverDeps): Resolver {
     }
     return { ok: false, reason: "invalid", bearer: true }
   }
+  return Object.assign(resolve, { mode })
 }
 
 /** Which actors an /api/agent route admits besides user actors (cookie and device token reach every route). */

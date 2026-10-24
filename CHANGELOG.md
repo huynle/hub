@@ -5,7 +5,7 @@
 - **Device tokens, agent API framework, discovery**: every `/api` request now resolves its caller through one
   credential resolver. Besides the `voice_device` cookie, the same device secret works as
   `Authorization: Bearer <device token>` (for native apps and CLIs) with the same powers and without the
-  same-origin check; cookie and bearer together are refused (400 `invalid`). New `/api/agent/*` routes answer
+  same-origin check; the cookie together with a hub bearer token is refused (400 `invalid`), while a bearer the hub does not know (e.g. from an auth proxy) next to the cookie is ignored. New `/api/agent/*` routes answer
   errors as `{error: {code, message, hint?}}` (`unauthorized`, `token_expired`, `forbidden`, `not_found`, …)
   and start with `GET /api/agent/whoami` (`{actor, user}`). `GET /.well-known/hub` (public) answers
   `{publicURL, version, minClientVersion, auth: {modes, oidc?}, features}`. Existing routes keep their error
