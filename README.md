@@ -213,6 +213,61 @@ conversation mode and utterances (403 `not_exposed` for sessions not shared with
 | `POST /api/push/test {kind?}` | a test notification to the caller's device only, shaped like `kind` when given (400 for an unknown kind): `{sent, failed: [{host, status?}], subscriptions}`; 429 with `retry-after` within 10 s of the last one |
 | `PUT /api/push/mute {sessionID, muted}` | mutes or unmutes a session's notifications for the user: `{muted}` |
 
+## hub CLI
+
+`hub` (also installed as `hubctl`) reads and names your sessions through the hub's `/api/agent` API, for agents
+and scripts. The OpenCode plugin writes both launchers into the hub bin dir (`$HUB_STATE_DIR/bin`, default
+`~/.local/state/hub/bin`) at start and puts that dir first on PATH in every shell it prepares, so inside a
+session `hub` just works. A launcher runs the CLI bundle shipped in this package (`packages/cli/dist/hub-cli.js`)
+with the OpenCode binary itself (`BUN_BE_BUN=1 exec <opencode> hub-cli.js "$@"`), so neither bun nor node has to
+be installed; without Bun it falls back to `node`. The launchers are rewritten only when their content changes.
+
+**Name clash:** GitHub's old `hub` CLI (github/hub) uses the same name. In hub sessions ours comes first on PATH;
+elsewhere use `hubctl`, or call the bundle directly (`bun …/packages/cli/dist/hub-cli.js`).
+
+```
+hub status [--json]                       machines → projects → sessions, and what needs attention
+hub sessions [--project P] [--state S[,S]] [--machine M] [--label k=v]
+hub show <addr>                           state, blockers, activity, summary
+hub log <addr> [-n 20]                    newest timeline rows (1–200), printed oldest first
+hub watch [--blocked] [--session <addr>]  events as JSON lines until Ctrl-C (pings skipped)
+hub whoami                                who this credential is
+hub who [--project P] [--role R | @@role] named and role-holding sessions
+hub name <@name> [--session <addr>]
+hub role claim <role[.project]> [--exclusive] [--session <addr>]
+hub role release <role[.project]> [--session <addr>]
+hub login [--url URL] [--token APP_TOKEN] · hub logout
+hub help · hub --version
+```
+
+Addresses are `ses_…` (or an unambiguous prefix), `@name`, `@@role` and `@name.project`. Output is short text
+(one session per line: name and ID, state, harness, current activity, blockers); `--json` prints the hub's answer
+unchanged (for errors, the `{error: {code, message, hint?, …}}` envelope on stdout as well). Errors print the
+message, any candidates or retry time, and the hint on stderr.
+
+**Credentials.** `HUB_URL` + `HUB_SESSION_TOKEN` (the spoke sets them in each session's shells; the CLI then
+acts as that session) win over the login file. Outside a session, `hub login --url https://hub.example` stores
+an app token in `~/.config/hub/cli.json` (`$XDG_CONFIG_HOME` respected; mode 0600) after checking it with
+`whoami`; the token is read from stdin (or prompted) unless `--token` is given — prefer stdin, since arguments are
+visible to other local users in `ps`. App tokens are created by a signed-in user with
+`POST /api/agent/app-tokens {label?, scopes?}` (scope `sessions:read`; shown once) and revoked with
+`DELETE /api/agent/app-tokens/:id`; `hub logout` only deletes the file. App tokens can read but not name or
+claim roles (writes are for sessions and users). `whoami` and `status` warn on stderr when `OPENCODE_SESSION_ID`
+is set and the credential is not that session. The CLI removes `BUN_BE_BUN` from its own environment.
+
+| Exit | When |
+|---|---|
+| 0 | ok |
+| 1 | other errors, network failures, a watch stream the hub closed |
+| 2 | usage (unknown command or option, missing argument; also the hub's `invalid`) |
+| 3 | `not_found`, `ambiguous` (candidates listed), `name_taken` |
+| 4 | `needs_user` |
+| 5 | `forbidden`, `paused` |
+| 6 | `rate_limited` (with `retryAfter`) |
+| 7 | `unsupported`, `offline` |
+| 8 | `gone` |
+| 9 | `unauthorized`, `token_expired` (a session token: start a new shell), or not logged in |
+
 ## Spoke (OpenCode plugin)
 
 The plugin is a thin client ("spoke") of the hub. Every OpenCode process that loads
@@ -1164,6 +1219,7 @@ npm install         # bun install works too
 npm test            # bun test (scripts/test-ci.sh runs each file alone and builds the web app first)
 npm run typecheck   # hub and web app
 npm run build:web   # web/dist, served by `bun bin/hub.ts`
+npm run build:cli   # packages/cli/dist/hub-cli.js, the hub CLI bundle (prepack builds both)
 ```
 
 Console development: `bun test/web-mock-hub.ts 4311` fakes a hub with fixtures (serves `web/dist`), and

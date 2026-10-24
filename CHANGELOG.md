@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **hub CLI** (`hub`, alias `hubctl`; private workspace `packages/cli`): `status`, `sessions [--project --state
+  --machine --label]`, `show <addr>`, `log <addr> [-n]`, `watch [--blocked] [--session]` (JSON lines), `whoami`,
+  `who [--project] [--role]`, `name <@name>`, `role claim|release <role> [--exclusive] [--session]`, `login`/`logout`.
+  Short text by default, `--json` for the raw answer; exit codes 0 ok, 1 other, 2 usage, 3 not found/ambiguous/
+  taken, 4 needs user, 5 forbidden/paused, 6 rate limited, 7 unsupported/offline, 8 gone, 9 unauthorized/expired.
+  Credentials: `HUB_URL` + `HUB_SESSION_TOKEN` first, else `~/.config/hub/cli.json` (0600) written by `hub login`
+  with an app token. Shipped as one JS bundle (`packages/cli/dist/hub-cli.js`, `npm run build:cli`, built by
+  prepack); the plugin writes `hub` and `hubctl` launchers into the hub bin dir at start that run it with the
+  OpenCode binary as bun (`BUN_BE_BUN=1`; `node` without Bun; the TypeScript source in a checkout without a build).
 - **Agent reading** (`/api/agent/*`, for users, session tokens and app tokens with `sessions:read`):
   `GET /api/agent/status` answers the caller's snapshot `{at, you, machines: [{id, name, online, harnesses,
   projects: [{root, name, sessions}]}], attention}`; each session is `{id, name?, roles, title, state, harness,

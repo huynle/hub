@@ -11,6 +11,7 @@ FROM node:22-slim AS web
 WORKDIR /build
 COPY package.json package-lock.json ./
 COPY packages/protocol/package.json ./packages/protocol/
+COPY packages/cli/package.json ./packages/cli/
 RUN npm ci --no-audit --no-fund --ignore-scripts
 COPY web ./web
 RUN npx vite build --config web/vite.config.ts
@@ -19,6 +20,7 @@ FROM oven/bun:1.3-slim AS deps
 WORKDIR /build
 COPY package.json package-lock.json ./
 COPY packages/protocol/package.json ./packages/protocol/
+COPY packages/cli/package.json ./packages/cli/
 # Bun migrates package-lock.json; --frozen-lockfile keeps the pinned versions.
 RUN bun install --production --frozen-lockfile --ignore-scripts
 COPY docker/hub-deps.ts ./
