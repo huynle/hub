@@ -265,3 +265,281 @@ describe("usage", () => {
     expect(r.stdout.trim()).toMatch(/^\d+\.\d+\.\d+/)
   })
 })
+
+const SESSION = {
+  id: "ses_abc",
+  name: "@api",
+  roles: ["reviewer.hub"],
+  title: "Refactor the API",
+  state: "blocked",
+  harness: "opencode",
+  now: "bash: bun test",
+  blockers: [{ kind: "permission", id: "per_1", summary: "bash: git push origin main" }],
+  children: 0,
+  labels: {},
+}
+const IDLE = { id: "ses_def", roles: [], title: "Docs", state: "idle", harness: "opencode", blockers: [], children: 0, labels: {} }
+const STATUS = {
+  at: 1,
+  you: { kind: "session", sessionID: "ses_abc", name: "@api" },
+  machines: [
+    { id: "m1", name: "mbp", online: true, harnesses: ["opencode"], projects: [{ root: "/p/hub", name: "hub", sessions: [SESSION, IDLE] }] },
+    { id: "m2", name: "box", online: false, harnesses: [], projects: [] },
+  ],
+  attention: [{ kind: "permission", sessionID: "ses_abc", name: "@api", id: "per_1", summary: "bash: git push origin main" }],
+}
+
+describe("status", () => {
+  test("GET /api/agent/status; text groups machines, projects and one line per session", async () => {
+    hub.routes["GET /api/agent/status"] = () => Response.json(STATUS)
+    const r = await cli(["status"], { env: { HUB_URL: hub.url, HUB_SESSION_TOKEN: "t", OPENCODE_SESSION_ID: "ses_abc" } })
+    expect(r.code).toBe(0)
+    expect(hub.seen[0]!.path).toBe("/api/agent/status")
+    const lines = r.stdout.split("\n")
+    expect(lines.some((l) => l.includes("mbp") && l.includes("online"))).toBe(true)
+    expect(lines.some((l) => l.includes("box") && l.includes("offline"))).toBe(true)
+    expect(lines.some((l) => l.trim() === "hub")).toBe(true)
+    const line = lines.find((l) => l.includes("ses_abc") && l.includes("blocked"))!
+    expect(line).toContain("@api")
+    expect(line).toContain("opencode")
+    expect(line).toContain("bash: bun test")
+    expect(line).toContain("permission: bash: git push origin main")
+    expect(lines.some((l) => l.includes("ses_def") && l.includes("idle"))).toBe(true)
+    expect(r.stdout).toContain("attention")
+    expect(r.stderr).toBe("")
+  })
+
+  test("--json is the raw snapshot", async () => {
+    hub.routes["GET /api/agent/status"] = () => Response.json(STATUS)
+    const r = await cli(["status", "--json"])
+    expect(JSON.parse(r.stdout)).toEqual(STATUS)
+  })
+
+  test("warns when OPENCODE_SESSION_ID is not the snapshot's session", async () => {
+    hub.routes["GET /api/agent/status"] = () => Response.json(STATUS)
+    const r = await cli(["status"], { env: { HUB_URL: hub.url, HUB_SESSION_TOKEN: "t", OPENCODE_SESSION_ID: "ses_zzz" } })
+    expect(r.code).toBe(0)
+    expect(r.stderr).toContain("ses_zzz")
+  })
+})
+
+describe("sessions", () => {
+  test("filters become query parameters; one line per session", async () => {
+    hub.routes["GET /api/agent/sessions"] = () => Response.json({ sessions: [{ ...SESSION, machineID: "m1", project: "hub" }, { ...IDLE, machineID: "m1", project: "hub" }] })
+    const r = await cli(["sessions", "--project", "hub", "--state=idle,blocked", "--machine", "mbp", "--label", "a=1", "--label", "b=2"])
+    expect(r.code).toBe(0)
+    const url = new URL(hub.seen[0]!.path, "http://x")
+    expect(url.pathname).toBe("/api/agent/sessions")
+    expect(url.searchParams.get("project")).toBe("hub")
+    expect(url.searchParams.get("state")).toBe("idle,blocked")
+    expect(url.searchParams.get("machine")).toBe("mbp")
+    expect(url.searchParams.getAll("label")).toEqual(["a=1", "b=2"])
+    const lines = r.stdout.trim().split("\n")
+    expect(lines).toHaveLength(2)
+    expect(lines[0]).toContain("@api")
+    expect(lines[0]).toContain("blocked")
+    expect(lines[1]).toContain("ses_def")
+  })
+
+  test("no filters: no query string; none found says so", async () => {
+    hub.routes["GET /api/agent/sessions"] = () => Response.json({ sessions: [] })
+    const r = await cli(["sessions"])
+    expect(hub.seen[0]!.path).toBe("/api/agent/sessions")
+    expect(r.code).toBe(0)
+    expect(r.stdout).toContain("no sessions")
+  })
+
+  test("--json is the raw list", async () => {
+    hub.routes["GET /api/agent/sessions"] = () => Response.json({ sessions: [IDLE] })
+    const r = await cli(["sessions", "--json"])
+    expect(JSON.parse(r.stdout)).toEqual({ sessions: [IDLE] })
+  })
+})
+
+describe("show", () => {
+  const SHOW = {
+    ...SESSION,
+    online: true,
+    machineID: "m1",
+    project: "hub",
+    directory: "/p/hub",
+    blockers: [{ kind: "permission", id: "per_1", summary: "bash: git push origin main", sessionID: "ses_abc" }],
+    summary: { directory: "/p/hub", branch: "main" },
+  }
+
+  test("GET /api/agent/sessions/:addr; text shows state, blockers and summary", async () => {
+    hub.routes["GET /api/agent/sessions/@api"] = () => Response.json(SHOW)
+    const r = await cli(["show", "@api"])
+    expect(r.code).toBe(0)
+    expect(r.stdout).toContain("ses_abc")
+    expect(r.stdout).toContain("Refactor the API")
+    expect(r.stdout).toContain("blocked")
+    expect(r.stdout).toContain("bash: git push origin main")
+    expect(r.stdout).toContain("main")
+    expect(r.stdout).not.toContain("{")
+  })
+
+  test("addresses are path-encoded", async () => {
+    hub.routes["GET /api/agent/sessions/a%2Fb"] = () => Response.json(SHOW)
+    const r = await cli(["show", "a/b"])
+    expect(r.code).toBe(0)
+  })
+
+  test("--json is the raw view", async () => {
+    hub.routes["GET /api/agent/sessions/ses_abc"] = () => Response.json(SHOW)
+    const r = await cli(["show", "ses_abc", "--json"])
+    expect(JSON.parse(r.stdout)).toEqual(SHOW)
+  })
+
+  test("needs an address", async () => {
+    const r = await cli(["show"])
+    expect(r.code).toBe(2)
+  })
+
+  test("unsupported features are mentioned", async () => {
+    hub.routes["GET /api/agent/sessions/ses_abc"] = () => Response.json({ ...SHOW, summary: undefined, unsupported: [{ feature: "summary", harness: "claude-code" }] })
+    const r = await cli(["show", "ses_abc"])
+    expect(r.stdout).toContain("summary")
+    expect(r.stdout).toContain("claude-code")
+  })
+})
+
+describe("log", () => {
+  const LOG = {
+    sessionID: "ses_abc",
+    rows: [
+      { key: "k2", messageID: "m2", sessionID: "ses_abc", kind: "tool", name: "bash", state: "done", text: "bun test", at: 2 },
+      { key: "k1", messageID: "m1", sessionID: "ses_abc", kind: "user", text: "please fix\nthe tests", at: 1 },
+    ],
+  }
+
+  test("GET .../log?n=; rows printed oldest first, one per line", async () => {
+    hub.routes["GET /api/agent/sessions/@api/log"] = () => Response.json(LOG)
+    const r = await cli(["log", "@api", "-n", "5"])
+    expect(r.code).toBe(0)
+    expect(hub.seen[0]!.path).toBe("/api/agent/sessions/@api/log?n=5")
+    const lines = r.stdout.trim().split("\n")
+    expect(lines).toHaveLength(2)
+    expect(lines[0]).toContain("user")
+    expect(lines[0]).toContain("please fix the tests")
+    expect(lines[1]).toContain("bash")
+    expect(lines[1]).toContain("bun test")
+  })
+
+  test("without -n the hub's default applies", async () => {
+    hub.routes["GET /api/agent/sessions/@api/log"] = () => Response.json(LOG)
+    await cli(["log", "@api"])
+    expect(hub.seen[0]!.path).toBe("/api/agent/sessions/@api/log")
+  })
+
+  test("-n must be a number", async () => {
+    const r = await cli(["log", "@api", "-n", "lots"])
+    expect(r.code).toBe(2)
+    expect(hub.seen).toEqual([])
+  })
+
+  test("--json is the raw page", async () => {
+    hub.routes["GET /api/agent/sessions/@api/log"] = () => Response.json(LOG)
+    const r = await cli(["log", "@api", "--json"])
+    expect(JSON.parse(r.stdout)).toEqual(LOG)
+  })
+})
+
+describe("who", () => {
+  const WHO = {
+    sessions: [
+      { sessionID: "ses_abc", name: "api", project: "hub", title: "Refactor", state: "working", online: true, roles: [{ role: "reviewer", project: "hub", generation: 1 }] },
+      { sessionID: "ses_def", online: false, roles: [] },
+    ],
+  }
+
+  test("GET /api/agent/who with project and role; one line per session", async () => {
+    hub.routes["GET /api/agent/who"] = () => Response.json(WHO)
+    const r = await cli(["who", "--project", "hub", "--role", "reviewer"])
+    expect(r.code).toBe(0)
+    const url = new URL(hub.seen[0]!.path, "http://x")
+    expect(url.searchParams.get("project")).toBe("hub")
+    expect(url.searchParams.get("role")).toBe("reviewer")
+    const lines = r.stdout.trim().split("\n")
+    expect(lines).toHaveLength(2)
+    expect(lines[0]).toContain("@api")
+    expect(lines[0]).toContain("@@reviewer.hub")
+    expect(lines[0]).toContain("working")
+    expect(lines[1]).toContain("ses_def")
+    expect(lines[1]).toContain("offline")
+  })
+
+  test("a @@role argument is the role filter", async () => {
+    hub.routes["GET /api/agent/who"] = () => Response.json({ sessions: [] })
+    await cli(["who", "@@reviewer"])
+    expect(new URL(hub.seen[0]!.path, "http://x").searchParams.get("role")).toBe("reviewer")
+  })
+
+  test("--json is the raw list", async () => {
+    hub.routes["GET /api/agent/who"] = () => Response.json(WHO)
+    const r = await cli(["who", "--json"])
+    expect(JSON.parse(r.stdout)).toEqual(WHO)
+  })
+})
+
+describe("name and roles", () => {
+  test("name POSTs {name} (own session) and prints the name", async () => {
+    hub.routes["POST /api/agent/name"] = () => Response.json({ sessionID: "ses_abc", name: "api" })
+    const r = await cli(["name", "@api"])
+    expect(r.code).toBe(0)
+    expect(hub.seen[0]).toMatchObject({ method: "POST", path: "/api/agent/name", body: { name: "@api" } })
+    expect(r.stdout).toContain("@api")
+    expect(r.stdout).toContain("ses_abc")
+  })
+
+  test("name --session targets another session; a previous name is shown as an alias", async () => {
+    hub.routes["POST /api/agent/name"] = () => Response.json({ sessionID: "ses_def", name: "docs", alias: "old" })
+    const r = await cli(["name", "docs", "--session", "ses_def"])
+    expect(hub.seen[0]!.body).toEqual({ name: "docs", session: "ses_def" })
+    expect(r.stdout).toContain("@old")
+  })
+
+  test("name_taken exits 3", async () => {
+    hub.routes["POST /api/agent/name"] = fail(409, "name_taken", "@api is taken")
+    const r = await cli(["name", "@api"])
+    expect(r.code).toBe(3)
+    expect(r.stderr).toContain("@api is taken")
+  })
+
+  test("role claim POSTs {role, exclusive, session}", async () => {
+    hub.routes["POST /api/agent/roles/claim"] = () => Response.json({ sessionID: "ses_abc", role: "reviewer", project: "hub", generation: 3, exclusive: true })
+    const r = await cli(["role", "claim", "reviewer.hub", "--exclusive", "--session", "@api"])
+    expect(r.code).toBe(0)
+    expect(hub.seen[0]).toMatchObject({ method: "POST", path: "/api/agent/roles/claim", body: { role: "reviewer.hub", exclusive: true, session: "@api" } })
+    expect(r.stdout).toContain("@@reviewer.hub")
+    expect(r.stdout).toContain("ses_abc")
+  })
+
+  test("role claim without flags sends only the role", async () => {
+    hub.routes["POST /api/agent/roles/claim"] = () => Response.json({ sessionID: "ses_abc", role: "reviewer", generation: 1 })
+    await cli(["role", "claim", "@@reviewer"])
+    expect(hub.seen[0]!.body).toEqual({ role: "reviewer" })
+  })
+
+  test("role release POSTs {role}", async () => {
+    hub.routes["POST /api/agent/roles/release"] = () => Response.json({ sessionID: "ses_abc", role: "reviewer", released: true })
+    const r = await cli(["role", "release", "reviewer"])
+    expect(r.code).toBe(0)
+    expect(hub.seen[0]).toMatchObject({ method: "POST", path: "/api/agent/roles/release", body: { role: "reviewer" } })
+    expect(r.stdout).toContain("released")
+  })
+
+  test("role needs claim or release", async () => {
+    expect((await cli(["role"])).code).toBe(2)
+    expect((await cli(["role", "grab", "x"])).code).toBe(2)
+    expect((await cli(["role", "release", "x", "--exclusive"])).code).toBe(2)
+    expect(hub.seen).toEqual([])
+  })
+
+  test("--json prints the raw answer", async () => {
+    const body = { sessionID: "ses_abc", role: "reviewer", generation: 1 }
+    hub.routes["POST /api/agent/roles/claim"] = () => Response.json(body)
+    const r = await cli(["role", "claim", "reviewer", "--json"])
+    expect(JSON.parse(r.stdout)).toEqual(body)
+  })
+})
