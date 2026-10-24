@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Device tokens, agent API framework, discovery**: every `/api` request now resolves its caller through one
+  credential resolver. Besides the `voice_device` cookie, the same device secret works as
+  `Authorization: Bearer <device token>` (for native apps and CLIs) with the same powers and without the
+  same-origin check; cookie and bearer together are refused (400 `invalid`). New `/api/agent/*` routes answer
+  errors as `{error: {code, message, hint?}}` (`unauthorized`, `token_expired`, `forbidden`, `not_found`, …)
+  and start with `GET /api/agent/whoami` (`{actor, user}`). `GET /.well-known/hub` (public) answers
+  `{publicURL, version, minClientVersion, auth: {modes, oidc?}, features}`. Existing routes keep their error
+  format.
+
 - **Auto-name**: let OpenCode name a session with its Title agent, from the console. **Auto-name** in every
   session `⋯` menu (table, phone list, sidebar, session title) and a ✨ button next to the inline rename field;
   the title shows "Naming…" until OpenCode answers, then "Renamed to …" or "OpenCode kept the title".

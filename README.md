@@ -168,8 +168,8 @@ foreground with `hub.json`; `scripts/io.github.huynle.hub.plist` is a launchd te
 **Security:** the hub can drive your OpenCode sessions, which can run tools. Every API call needs a
 paired device or a signed-in user; spokes need machine tokens; nothing trusts the client IP. For a public
 hostname, consider [sign-in with Google](#multi-user-sign-in-with-google) or an authenticating proxy in
-front of the web app, and leave `/spoke/*`, `/auth/*`, `/healthz`, the manifest and icons reachable for
-spokes, sign-in and the PWA.
+front of the web app, and leave `/spoke/*`, `/auth/*`, `/healthz`, `/.well-known/hub`, the manifest and
+icons reachable for spokes, sign-in, app discovery and the PWA.
 
 ## Configuration
 
@@ -704,7 +704,12 @@ session.
 
 ### Hub API
 
-All routes need the device cookie; POSTs also need a same-origin `Origin` (or `Referer`). Every
+All routes need the device cookie; POSTs also need a same-origin `Origin` (or `Referer`). Native apps and
+other non-browser clients send the same device secret as `Authorization: Bearer <device token>` instead: same
+powers, no same-origin check (a request with both a cookie and a bearer token is refused with
+`400 {"error": …, "code": "invalid"}`; an unknown bearer token is `401 {"code": "unauthorized"}`). Other bearer
+tokens (session and app tokens) are refused on these routes (`403 {"code": "forbidden"}`); they are for
+`/api/agent/*` only. Every
 `/api/sessions/:id…` route answers `404 {"error": "Not found"}` for a session that none of the caller's
 machines reports (since 0.3.0; before, a session nobody reported was 409), so another user's session looks
 exactly like an unknown one. For a loopback
