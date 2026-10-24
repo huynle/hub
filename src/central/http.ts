@@ -14,6 +14,7 @@ import { emailAllowed, type CentralConfig } from "./config"
 import { authPage, cookieValue, deviceName, OIDC_COOKIE, OidcClient, OidcError } from "./oidc"
 import { isNotificationKind, Push, type PushSender } from "./push"
 import { pushEndpointProblem, resolveHost as systemResolveHost, type ResolveHost } from "./push-target"
+import { memoryBackends, type Backends } from "./backend"
 import { EventLog } from "./events-log"
 import { BusyError, Registry } from "./registry"
 import { audioFormat, SpeechError } from "./speech/provider"
@@ -44,8 +45,10 @@ export interface CentralOptions {
   readonly pushSender?: PushSender
   /** Resolves push endpoint hosts at subscribe time (SSRF check); the system resolver by default. */
   readonly resolveHost?: ResolveHost
-  /** Clock for sign-in expiry and the store (tests). */
+  /** Clock for sign-in expiry, the store, the registry and the backends (tests). */
   readonly now?: () => number
+  /** Shared state for new code (default: in memory, see ./backend). */
+  readonly backends?: Backends
   readonly timing?: {
     readonly helloTimeoutMs?: number
     readonly requestTimeoutMs?: number
@@ -66,6 +69,8 @@ export interface Central {
   readonly spokes: SpokeHub
   readonly push: Push
   readonly speechSettings: SpeechService
+  /** Backends for new code (state, bus, event log, counters, locks, catalog). */
+  readonly backends: Backends
   /** The JSON API's route table (method, path, access), for audits and tests. */
   readonly routes: readonly RouteInfo[]
   stop(): Promise<void>
@@ -218,8 +223,10 @@ export function startCentral(options: CentralOptions): Central {
   const web: WebAssets = options.web ?? diskAssets(options.webDir ?? path.join(import.meta.dir, "..", "..", "web", "dist"))
   const now = options.now ?? Date.now
   const store = Store.open(config.stateDir, now, { mode: config.auth.mode })
+  /** Used only by new code; existing state stays in the store, registry and event log. */
+  const backends = options.backends ?? memoryBackends({ now })
   // A machine's tenant is its owner (read live: ownership moves on migration).
-  const registry = new Registry(Date.now, undefined, (machineID) => store.machines().find((m) => m.id === machineID)?.ownerID)
+  const registry = new Registry(now, undefined, (machineID) => store.machines().find((m) => m.id === machineID)?.ownerID)
   const push = new Push({ store, subject: config.vapidSubject, sender: options.pushSender })
   const notifier = options.notifier ?? push
   /** SSE subscribers, one user each. */
@@ -1322,6 +1329,7 @@ export function startCentral(options: CentralOptions): Central {
     spokes,
     push,
     speechSettings,
+    backends,
     routes: routes.map(({ method, path, access }) => ({ method, path, access })),
     async stop() {
       spokes.stop()
