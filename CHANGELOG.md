@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Agent reading** (`/api/agent/*`, for users, session tokens and app tokens with `sessions:read`):
+  `GET /api/agent/status` answers the caller's snapshot `{at, you, machines: [{id, name, online, harnesses,
+  projects: [{root, name, sessions}]}], attention}`; each session is `{id, name?, roles, title, state, harness,
+  parentID?, busySince?, now?, blockers: [{kind, id, summary}], children, labels}` and `attention` lists every
+  blocker and error, oldest first. `GET /api/agent/sessions?project=&state=&machine=&label=k=v` is the same
+  sessions as a flat list (with `machineID`, `project`). Both read only the hub's catalog and never call a spoke.
+  `GET /api/agent/sessions/:addr` adds full blockers (form fields), `directory`, `online` and the spoke's
+  `summary` (`unsupported: [{feature, harness}]` instead when the spoke lacks it; `state: "offline"` for a known
+  session nobody reports). `GET /api/agent/sessions/:addr/log?n=20` (1–200) answers `{sessionID, rows, older?}`,
+  newest first, from the spoke's `timeline` (422 `unsupported {feature, harness}` without it, 503 `offline`).
+  `GET /api/agent/watch?blocked=1&session=<addr>` is an SSE stream of compact JSON events for the caller's own
+  sessions (`ready`, `state`, `blocker.opened`, `blocker.closed`, `session.added`, `session.removed`; no text),
+  with a `ping` event every 20 s. Another user's sessions, names and roles answer `404 not_found` on every route.
 - **Session tokens**: the hub mints a token for every session (subagents included) a spoke reports for its own
   user, and sends it with the `sessionTokens` op to spokes that announce the feature: on each sessions frame
   (new sessions, tokens with less than a third of their 24 h left, or after a key or epoch change), again in
