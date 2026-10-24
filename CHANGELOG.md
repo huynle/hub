@@ -14,6 +14,20 @@
   role-holding and online sessions. Session tokens may read, and name or claim for their own session only.
   Addresses (`ses_…` or a unique ID prefix, `@name[.project]`, `@@role[.project]`) resolve within the caller's
   sessions only: another user's are `not_found`, and `ambiguous` candidates never list them.
+- **Session tokens reach the spoke** (protocol still version 1): new server op `sessionTokens{tokens: [{sessionID,
+  token, exp}], hubURL?}` (at most 500 tokens per frame; `batchSessionTokens` splits a list under `MAX_FRAME`),
+  answered with `{applied, skipped: [{sessionID, reason: "unknown" | "expired"}]}`. It is the spoke feature
+  `sessionTokens`, announced by new spokes only (not implied for older OpenCode spokes), so hubs send it only to
+  spokes that list it. The OpenCode spoke keeps each reported session's latest token in memory (never logged,
+  dropped when expired or when the connection changes) and adopts no session for it.
+- **App tokens**: a signed-in user (device cookie or device token) creates app/agent tokens with
+  `POST /api/agent/app-tokens {label?, scopes?}` → `201 {id, token, label?, scopes, created}` (the token,
+  `hat_<id>_<secret>`, is shown only here), lists them with `GET /api/agent/app-tokens` → `{tokens}` (no secrets)
+  and revokes one with `DELETE /api/agent/app-tokens/:id` → `204`. Labels ≤ 100 characters; scopes from
+  `sessions:read` (the default); at most 50 per user (`429 rate_limited`). Only sha256 hashes are stored. An app
+  token is an app actor on `/api/agent/*` routes its scopes allow (`whoami` always); it is refused on console
+  routes and on token management (`403 forbidden`), and once revoked or its user disabled (`401`). Creation and
+  revocation are audited (`app-token.create`, `app-token.revoke`).
 - **Device tokens, agent API framework, discovery**: every `/api` request now resolves its caller through one
   credential resolver. Besides the `voice_device` cookie, the same device secret works as
   `Authorization: Bearer <device token>` (for native apps and CLIs) with the same powers and without the

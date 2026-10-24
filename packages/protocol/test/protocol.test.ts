@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import * as protocol from "../src/index.ts"
 import {
   encode,
   EVIDENCE_LEVELS,
@@ -9,6 +10,7 @@ import {
   IMPLIED_OPENCODE_FEATURES,
   spokeFeatures,
   SPOKE_FEATURES,
+  MAX_FRAME,
   MAX_PROMPT_IMAGE_BYTES, MAX_PROMPT_IMAGES, MAX_PROMPT_IMAGES_BASE64, parseServerMessage, parseSpokeMessage, promptImagesProblem, PROTOCOL_VERSION } from "../src/index.ts"
 
 const hello = {
@@ -421,5 +423,117 @@ describe("welcome features", () => {
     const frame = { ...welcome, features: [...HUB_FEATURES] }
     expect(parseServerMessage(j(frame))).toEqual(frame as any)
     expect(oldSpokeAcceptsWelcome(frame)).toBe(true)
+  })
+})
+
+describe("sessionTokens op", () => {
+  const entry = (sessionID: string, extra: Record<string, unknown> = {}) => ({ sessionID, token: `hst.${sessionID}.sig`, exp: 1_793_000_000_000, ...extra })
+  const frame = (req: Record<string, unknown>) => j({ t: "req", id: "r1", req: { op: "sessionTokens", ...req } })
+  const parses = (req: Record<string, unknown>) => parseServerMessage(frame(req)) !== undefined
+
+  test("accepts tokens for sessions, with or without the hub URL", () => {
+    const req = { op: "sessionTokens", tokens: [entry("ses_a"), entry("ses_b")], hubURL: "https://hub.example.com/" }
+    expect(parseServerMessage(j({ t: "req", id: "r1", req }))).toEqual({ t: "req", id: "r1", req } as any)
+    expect(parses({ tokens: [entry("ses_a")] })).toBe(true)
+    expect(parses({ tokens: [entry("ses_a")], hubURL: "http://127.0.0.1:4317" })).toBe(true)
+    expect(parses({ tokens: [] })).toBe(true)
+  })
+
+  test("rejects malformed token lists and entries", () => {
+    expect(parses({})).toBe(false)
+    expect(parses({ tokens: "x" })).toBe(false)
+    expect(parses({ tokens: [null] })).toBe(false)
+    expect(parses({ tokens: [entry("")] })).toBe(false)
+    expect(parses({ tokens: [entry("s".repeat(301))] })).toBe(false)
+    expect(parses({ tokens: [entry("s".repeat(300))] })).toBe(true)
+    expect(parses({ tokens: [{ sessionID: "ses_a", exp: 1 }] })).toBe(false)
+    expect(parses({ tokens: [entry("ses_a", { token: "" })] })).toBe(false)
+    expect(parses({ tokens: [entry("ses_a", { token: "has space" })] })).toBe(false)
+    expect(parses({ tokens: [entry("ses_a", { token: "tab\there" })] })).toBe(false)
+    expect(parses({ tokens: [entry("ses_a", { token: "new\nline" })] })).toBe(false)
+    expect(parses({ tokens: [entry("ses_a", { token: "non-ascii-é" })] })).toBe(false)
+    expect(parses({ tokens: [entry("ses_a", { token: "x".repeat(4097) })] })).toBe(false)
+    expect(parses({ tokens: [entry("ses_a", { token: "x".repeat(4096) })] })).toBe(true)
+    expect(parses({ tokens: [entry("ses_a", { exp: "1" })] })).toBe(false)
+    expect(parses({ tokens: [entry("ses_a", { exp: undefined })] })).toBe(false)
+    expect(parses({ tokens: [entry("ses_a", { sessionID: 5 })] })).toBe(false)
+  })
+
+  test("at most SESSION_TOKENS_MAX tokens per frame", () => {
+    expect(protocol.SESSION_TOKENS_MAX).toBe(500)
+    const many = (n: number) => Array.from({ length: n }, (_, i) => entry(`ses_${i}`))
+    expect(parses({ tokens: many(500) })).toBe(true)
+    expect(parses({ tokens: many(501) })).toBe(false)
+  })
+
+  test("hubURL must be an http(s) URL of at most 2048 characters", () => {
+    const tokens = [entry("ses_a")]
+    expect(parses({ tokens, hubURL: "ftp://hub.example" })).toBe(false)
+    expect(parses({ tokens, hubURL: "javascript:alert(1)" })).toBe(false)
+    expect(parses({ tokens, hubURL: "not a url" })).toBe(false)
+    expect(parses({ tokens, hubURL: "" })).toBe(false)
+    expect(parses({ tokens, hubURL: 5 })).toBe(false)
+    const base = "https://hub.example/"
+    expect(parses({ tokens, hubURL: base + "p".repeat(2048 - base.length) })).toBe(true)
+    expect(parses({ tokens, hubURL: base + "p".repeat(2049 - base.length) })).toBe(false)
+  })
+
+  test("sessionTokens is a spoke feature that must be announced: old OpenCode spokes do not imply it", () => {
+    expect(SPOKE_FEATURES as readonly string[]).toContain("sessionTokens")
+    expect(IMPLIED_OPENCODE_FEATURES as readonly string[]).not.toContain("sessionTokens")
+    expect(featureForOp("sessionTokens" as any)).toBe("sessionTokens" as any)
+    expect(spokeFeatures(hello as any).has("sessionTokens")).toBe(false)
+    expect(spokeFeatures({ ...hello, harness: "opencode", features: [...SPOKE_FEATURES] } as any).has("sessionTokens")).toBe(true)
+  })
+})
+
+describe("batchSessionTokens", () => {
+  const entry = (i: number, tokenChars = 40) => ({ sessionID: `ses_${i}`, token: "t".repeat(tokenChars), exp: 1_793_000_000_000 + i })
+  const frameChars = (req: unknown) => encode({ t: "req", id: "x".repeat(64), req } as any).length
+
+  test("nothing to send: no batches", () => {
+    expect(protocol.batchSessionTokens([])).toEqual([])
+  })
+
+  test("small lists fit one request carrying the hub URL", () => {
+    const tokens = [entry(1), entry(2)]
+    expect(protocol.batchSessionTokens(tokens, { hubURL: "https://hub.example" })).toEqual([{ op: "sessionTokens", tokens, hubURL: "https://hub.example" }])
+    expect(protocol.batchSessionTokens(tokens)).toEqual([{ op: "sessionTokens", tokens }])
+  })
+
+  test("splits at SESSION_TOKENS_MAX per request, keeping order", () => {
+    const tokens = Array.from({ length: 1201 }, (_, i) => entry(i, 8))
+    const batches = protocol.batchSessionTokens(tokens)
+    expect(batches.map((b: any) => b.tokens.length)).toEqual([500, 500, 201])
+    expect(batches.flatMap((b: any) => b.tokens)).toEqual(tokens)
+  })
+
+  test("every batch fits the frame budget (default under MAX_FRAME) and parses on the spoke", () => {
+    const tokens = Array.from({ length: 900 }, (_, i) => entry(i, 4096))
+    const hubURL = "https://hub.example/" + "p".repeat(1500)
+    const batches = protocol.batchSessionTokens(tokens, { hubURL })
+    expect(batches.length).toBeGreaterThan(1)
+    expect(batches.flatMap((b: any) => b.tokens)).toEqual(tokens)
+    for (const req of batches) {
+      expect(frameChars(req)).toBeLessThanOrEqual(MAX_FRAME)
+      expect(parseServerMessage(encode({ t: "req", id: "x".repeat(64), req } as any))).toBeDefined()
+    }
+    const small = protocol.batchSessionTokens(tokens.slice(0, 10), { maxChars: 10_000 })
+    for (const req of small) expect(JSON.stringify(req).length).toBeLessThanOrEqual(10_000)
+    expect(small.length).toBeGreaterThan(1)
+  })
+
+  test("a token that exactly fills the budget gets a request of its own, never an empty one", () => {
+    const one = [entry(1, 100)]
+    const exact = JSON.stringify({ op: "sessionTokens", tokens: one }).length
+    expect(protocol.batchSessionTokens(one, { maxChars: exact })).toEqual([{ op: "sessionTokens", tokens: one }])
+    const two = [entry(1, 100), entry(2, 100)]
+    const both = JSON.stringify({ op: "sessionTokens", tokens: two }).length
+    expect(protocol.batchSessionTokens(two, { maxChars: both }).map((b: any) => b.tokens.length)).toEqual([2])
+    expect(protocol.batchSessionTokens(two, { maxChars: both - 1 }).map((b: any) => b.tokens.length)).toEqual([1, 1])
+  })
+
+  test("a budget too small for a single token is an error, not a dropped token", () => {
+    expect(() => protocol.batchSessionTokens([entry(1, 4096)], { maxChars: 1000 })).toThrow(RangeError)
   })
 })
