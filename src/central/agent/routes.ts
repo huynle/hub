@@ -1,0 +1,163 @@
+// The /api/agent framework: its own route table (access "agent" in the hub's table), credential checks and error
+// envelope. http.ts registers it once (agentApi) and sends every /api/agent request here; later tasks add routes
+// to agentRoutes() and verifiers to agentVerifiers() without touching http.ts.
+//
+// Order for each request: cookie + a hub bearer together → 400 invalid (a foreign bearer is ignored); cookie writes need the same origin (bearer
+// requests skip it) → 403 forbidden; credential → 401 unauthorized / token_expired; route → 404 not_found;
+// route class (agentAllows) → 403 forbidden; then the handler, whose throws become the envelope (agentFailure).
+// Path parameters address sessions as `:addr` (resolved per caller), never `:session`.
+import type { DeviceRecord, Store, UserRecord } from "../store"
+import { agentAllows, type AgentActor, type AgentAllow, type BearerVerifier, type Credential, type Resolver } from "./actor"
+import { AgentError, agentFailure } from "./errors"
+
+export const AGENT_PREFIX = "/api/agent"
+
+export const isAgentPath = (pathname: string): boolean => pathname === AGENT_PREFIX || pathname.startsWith(`${AGENT_PREFIX}/`)
+
+export interface AgentContext {
+  readonly request: Request
+  readonly url: URL
+  readonly params: Record<string, string>
+  readonly actor: AgentActor
+  readonly credential: Credential
+  readonly user: UserRecord
+  /** The caller's device (user actors only). */
+  readonly device?: DeviceRecord
+}
+
+export interface AgentRoute {
+  readonly method: string
+  /** Express-style path under /api/agent, e.g. /api/agent/sessions/:addr. */
+  readonly path: string
+  /** Who besides user actors may call it (default: users only, e.g. token management). */
+  readonly allow: AgentAllow
+  handle(context: AgentContext): Response | Promise<Response>
+}
+
+/** What the agent API needs from the hub. */
+export interface AgentDeps {
+  readonly store: Store
+}
+
+/**
+ * Session and app token verifiers (P1-T5 adds the session token verifier, P1-T7 the app token one). Tried in
+ * order after the device lookup; see BearerVerifier.
+ */
+export function agentVerifiers(_deps: AgentDeps): BearerVerifier[] {
+  return []
+}
+
+const userView = (user: UserRecord) => ({
+  id: user.id,
+  ...(user.name ? { name: user.name } : {}),
+  ...(user.email ? { email: user.email } : {}),
+  role: user.role,
+})
+
+/** The built-in /api/agent routes. */
+export function agentRoutes(_deps: AgentDeps): AgentRoute[] {
+  return [
+    {
+      method: "GET",
+      path: `${AGENT_PREFIX}/whoami`,
+      allow: { session: true, app: true },
+      handle: ({ actor, user }) => Response.json({ actor, user: userView(user) }, { headers: { "cache-control": "no-store" } }),
+    },
+  ]
+}
+
+export interface AgentApiOptions {
+  readonly resolve: Resolver
+  readonly cookieName: string
+  /** CSRF guard for cookie writes (the hub's same-origin check). */
+  sameOrigin(request: Request): boolean
+  /** Records activity of a resolved caller (device and user lastSeen). */
+  touch?(user: UserRecord, device?: DeviceRecord): void
+  readonly routes: readonly AgentRoute[]
+}
+
+export interface AgentApi {
+  /** The route table (method, path) for the hub's audit table, as access "agent". */
+  readonly routes: readonly { readonly method: string; readonly path: string }[]
+  handle(request: Request, url: URL): Promise<Response>
+}
+
+interface Compiled {
+  readonly route: AgentRoute
+  readonly pattern: RegExp
+  readonly keys: string[]
+}
+
+const MIXED = "Send the device cookie or a bearer token, not both"
+
+export function agentApi(options: AgentApiOptions): AgentApi {
+  const compiled: Compiled[] = options.routes.map((route) => {
+    if (!isAgentPath(route.path) || route.path.includes(":session")) throw new Error(`agent route ${route.path}: must be under ${AGENT_PREFIX} and use :addr, not :session`)
+    const keys: string[] = []
+    const pattern = new RegExp(`^${route.path.replace(/:([a-z]+)/g, (_, key: string) => (keys.push(key), "([^/]+)"))}$`)
+    return { route, pattern, keys }
+  })
+
+  const find = (method: string, pathname: string) => {
+    for (const { route, pattern, keys } of compiled) {
+      if (route.method !== method) continue
+      const match = pattern.exec(pathname)
+      if (!match) continue
+      const params: Record<string, string> = {}
+      keys.forEach((key, i) => {
+        try {
+          params[key] = decodeURIComponent(match[i + 1]!)
+        } catch {
+          throw new AgentError("invalid", "Bad path")
+        }
+      })
+      return { route, params }
+    }
+    return undefined
+  }
+
+  async function handle(request: Request, url: URL): Promise<Response> {
+    try {
+      const mode = await options.resolve.mode(request)
+      if (mode === "mixed") throw new AgentError("invalid", MIXED)
+      const method = request.method
+      if (mode !== "bearer" && method !== "GET" && method !== "HEAD" && !options.sameOrigin(request)) {
+        throw new AgentError("forbidden", "Cross-origin request refused")
+      }
+      const resolved = await options.resolve(request)
+      if (!resolved.ok) {
+        if (resolved.reason === "expired") throw new AgentError("token_expired", "Token expired", { hint: "Get a new token" })
+        throw new AgentError("unauthorized", resolved.bearer ? "Invalid or revoked token" : "Sign in or send a bearer token")
+      }
+      options.touch?.(resolved.user, resolved.device)
+      const found = find(method, url.pathname)
+      if (!found) throw new AgentError("not_found", "Not found")
+      if (!agentAllows(found.route.allow, resolved.actor)) throw new AgentError("forbidden", "This credential cannot use this route")
+      const { actor, credential, user, device } = resolved
+      return await found.route.handle({ request, url, params: found.params, actor, credential, user, ...(device ? { device } : {}) })
+    } catch (cause) {
+      return agentFailure(cause)
+    }
+  }
+
+  return { routes: options.routes.map(({ method, path }) => ({ method, path })), handle }
+}
+
+/** Oldest client (native app, CLI) this hub still serves; raised when the API breaks old clients. */
+export const MIN_CLIENT_VERSION = "0.0.0"
+
+export interface WellKnownInfo {
+  readonly publicURL: string
+  readonly version: string
+  readonly auth: { readonly mode: "pairing" } | { readonly mode: "oidc"; readonly issuer: string }
+}
+
+/** GET /.well-known/hub: public discovery and version gating for apps and CLIs (design §14.5). */
+export function wellKnown(info: WellKnownInfo): Response {
+  // Pairing codes also work on an OIDC hub (a signed-in device issues them).
+  const auth = info.auth.mode === "oidc" ? { modes: ["oidc", "pairing"], oidc: { issuer: info.auth.issuer } } : { modes: ["pairing"] }
+  return Response.json(
+    { publicURL: info.publicURL, version: info.version, minClientVersion: MIN_CLIENT_VERSION, auth, features: [] },
+    { headers: { "cache-control": "public, max-age=60" } },
+  )
+}

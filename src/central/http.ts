@@ -1,5 +1,6 @@
 // Hub: HTTP routes (web UI, JSON API, SSE, enrollment) and the spoke WebSocket.
-// Phones authenticate with the `voice_device` cookie; spokes with machine bearer tokens. Source IPs
+// Phones authenticate with the `voice_device` cookie (or, in native apps, the same secret as a bearer device
+// token; see ./agent/actor.ts); spokes with machine bearer tokens. Source IPs
 // (including loopback) are never trusted.
 import type { Server } from "bun"
 import { diskAssets, type WebAssets } from "./assets"
@@ -15,6 +16,8 @@ import { authPage, cookieValue, deviceName, OIDC_COOKIE, OidcClient, OidcError }
 import { isNotificationKind, Push, type PushSender } from "./push"
 import { pushEndpointProblem, resolveHost as systemResolveHost, type ResolveHost } from "./push-target"
 import { memoryBackends, type Backends } from "./backend"
+import { createResolver, type BearerVerifier } from "./agent/actor"
+import { agentApi, agentRoutes, agentVerifiers, isAgentPath, wellKnown, type AgentRoute } from "./agent/routes"
 import { EventLog } from "./events-log"
 import { BusyError, Registry } from "./registry"
 import { audioFormat, SpeechError } from "./speech/provider"
@@ -49,6 +52,8 @@ export interface CentralOptions {
   readonly now?: () => number
   /** Shared state for new code (default: in memory, see ./backend). */
   readonly backends?: Backends
+  /** More bearer verifiers and /api/agent routes, after the built-in ones (tests). */
+  readonly agent?: { readonly verifiers?: readonly BearerVerifier[]; readonly routes?: readonly AgentRoute[] }
   readonly timing?: {
     readonly helloTimeoutMs?: number
     readonly requestTimeoutMs?: number
@@ -93,8 +98,11 @@ interface Listener {
 /** Messages a lite stream leaves out (unless they are of the listener's session tree). */
 const STREAMED = new Set(["delta", "reasoning"])
 
-/** Who may call a route: anyone, any signed-in user, admins, or the owner of the :session / :machine in the path. */
-export type Access = "public" | "user" | "admin" | "session" | "machine"
+/**
+ * Who may call a route: anyone, any signed-in user, admins, or the owner of the :session / :machine in the path;
+ * "agent": an /api/agent route (src/central/agent), checked per credential kind there.
+ */
+export type Access = "public" | "user" | "admin" | "session" | "machine" | "agent"
 
 export interface RouteInfo {
   readonly method: string
@@ -459,6 +467,25 @@ export function startCentral(options: CentralOptions): Central {
     }
   }
 
+  // One credential resolver for every /api request: device cookie, device token, session and app tokens.
+  const agentDeps = { store }
+  const resolveActor = createResolver({
+    cookieName: COOKIE,
+    findDevice: (token) => store.findDevice(token),
+    user: (id) => store.user(id),
+    verifiers: [...agentVerifiers(agentDeps), ...(options.agent?.verifiers ?? [])],
+  })
+  const agent = agentApi({
+    resolve: resolveActor,
+    cookieName: COOKIE,
+    sameOrigin,
+    touch: (user, device) => {
+      if (device) store.touchDevice(device.id)
+      store.touchUser(user.id)
+    },
+    routes: [...agentRoutes(agentDeps), ...(options.agent?.routes ?? [])],
+  })
+
   async function handle(request: Request, server: Server<SpokeSocketData>): Promise<Response | undefined> {
     const url = new URL(request.url)
     const { pathname } = url
@@ -492,9 +519,13 @@ export function startCentral(options: CentralOptions): Central {
         if (poll.status === "approved") broadcast({ type: "catalog" })
         return Response.json(poll)
       }
+      if (method === "GET" && pathname === "/.well-known/hub") {
+        return wellKnown({ publicURL, version: options.version ?? "0.0.0", auth: config.auth.mode === "oidc" ? { mode: "oidc", issuer: config.auth.issuer } : { mode: "pairing" } })
+      }
       if (method === "GET" && pathname === "/login") return login(request, url)
       if (oidc && method === "GET" && pathname === "/auth/login") return await authLogin(url)
       if (oidc && method === "GET" && pathname === "/auth/callback") return await authCallback(request, url)
+      if (isAgentPath(pathname)) return await agent.handle(request, url)
       if (pathname.startsWith("/api/")) return await api(request, server, url)
       if (method === "GET") return await staticFile(pathname, request.headers.get("accept-encoding"))
       return error(404, "Not found")
@@ -843,7 +874,11 @@ export function startCentral(options: CentralOptions): Central {
 
   async function api(request: Request, server: Server<SpokeSocketData>, url: URL): Promise<Response> {
     const method = request.method
-    if (method !== "GET" && method !== "HEAD" && !sameOrigin(request)) {
+    const mode = await resolveActor.mode(request)
+    if (mode === "mixed") return error(400, "Send the device cookie or a bearer token, not both", "invalid")
+    // Bearer requests (device tokens of native apps) are not CSRF-prone; cookie writes must be same-origin (a
+    // foreign bearer next to the cookie, e.g. from an auth proxy, is ignored: still a cookie request).
+    if (mode !== "bearer" && method !== "GET" && method !== "HEAD" && !sameOrigin(request)) {
       return error(403, "Cross-origin request refused")
     }
     const found = findRoute(method, url.pathname)
@@ -852,8 +887,13 @@ export function startCentral(options: CentralOptions): Central {
       return await found.route.handle({ request, server, url, params: found.params } as Context)
     }
 
-    const resolved = deviceFor(request)
-    if (!resolved) return error(401, "This device is not paired")
+    const resolved = await resolveActor(request)
+    if (!resolved.ok) {
+      if (resolved.reason === "expired") return error(401, "Token expired", "token_expired")
+      return resolved.bearer ? error(401, "Invalid or revoked token", "unauthorized") : error(401, "This device is not paired")
+    }
+    // Console routes are for the user's devices (cookie or device token) only, never session or app tokens.
+    if (resolved.actor.kind !== "user" || !resolved.device) return error(403, "This token cannot be used here", "forbidden")
     const { device, user } = resolved
     store.touchDevice(device.id)
     store.touchUser(user.id)
@@ -1330,7 +1370,7 @@ export function startCentral(options: CentralOptions): Central {
     push,
     speechSettings,
     backends,
-    routes: routes.map(({ method, path, access }) => ({ method, path, access })),
+    routes: [...routes.map(({ method, path, access }) => ({ method, path, access })), ...agent.routes.map(({ method, path }) => ({ method, path, access: "agent" as const }))],
     async stop() {
       spokes.stop()
       for (const listener of [...listeners]) listeners.delete(listener)
