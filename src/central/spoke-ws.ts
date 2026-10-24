@@ -3,6 +3,7 @@
 import type { Server, ServerWebSocket, WebSocketHandler } from "bun"
 import {
   encode,
+  HUB_FEATURES,
   MAX_FRAME,
   parseSpokeMessage,
   PROTOCOL_VERSION,
@@ -200,7 +201,8 @@ export class SpokeHub {
       ws.data.ready = true
       registry.connect(connID, { id: ws.data.machineID, name: ws.data.machineName }, message)
       this.options.store.touchMachine(ws.data.machineID)
-      this.send(ws, { t: "welcome", v: PROTOCOL_VERSION, machineID: ws.data.machineID, publicURL: this.options.publicURL })
+      // Older spokes ignore `features`; newer ones send a request a feature adds only when it is listed here.
+      this.send(ws, { t: "welcome", v: PROTOCOL_VERSION, machineID: ws.data.machineID, publicURL: this.options.publicURL, features: [...HUB_FEATURES] })
       return
     }
 
