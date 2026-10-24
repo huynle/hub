@@ -94,9 +94,6 @@ export function readCredentials(request: Request, cookieName: string): { cookie?
   return out
 }
 
-/** Whether the request carries a bearer token (it then skips the same-origin check). */
-export const hasBearer = (request: Request): boolean => BEARER.test(request.headers.get("authorization") ?? "")
-
 const CREDENTIAL: Record<"session" | "app", Credential> = { session: "session-token", app: "app-token" }
 
 export function createResolver(deps: ResolverDeps): Resolver {
@@ -141,6 +138,8 @@ export interface AgentAllow {
   readonly session?: boolean
   /** App tokens holding this scope may call it. */
   readonly scope?: string
+  /** Any app token may call it (introspection such as whoami). */
+  readonly app?: boolean
 }
 
 /** Route classes on /api/agent: users everywhere (incl. token management), sessions where allowed, apps by scope. */
@@ -151,6 +150,6 @@ export function agentAllows(allow: AgentAllow, actor: AgentActor): boolean {
     case "session":
       return allow.session === true
     case "app":
-      return allow.scope !== undefined && actor.scopes.includes(allow.scope)
+      return allow.app === true || (allow.scope !== undefined && actor.scopes.includes(allow.scope))
   }
 }

@@ -108,7 +108,10 @@ describe("route table", () => {
   test("every route declares its access; session and machine routes are classified as such", () => {
     expect(h.routes.length).toBeGreaterThan(20)
     for (const route of h.routes) {
-      expect(["public", "user", "admin", "session", "machine"]).toContain(route.access)
+      expect(["public", "user", "admin", "session", "machine", "agent"]).toContain(route.access)
+      // /api/agent addresses sessions with :addr (resolved per caller), never :session.
+      if (route.path.startsWith("/api/agent/")) expect({ path: route.path, access: route.access }).toEqual({ path: route.path, access: "agent" })
+      if (route.access === "agent") expect(route.path.startsWith("/api/agent/") && !route.path.includes(":session")).toBe(true)
       if (route.path.includes(":session")) expect(route.access).toBe("session")
       if (route.path.startsWith("/api/admin/")) expect(route.access).toBe("admin")
       if (route.path.includes(":machine")) expect(route.access).toBe("machine")
@@ -150,6 +153,7 @@ describe("route table", () => {
       "PUT /api/push/prefs",
       "PUT /api/push/mute",
       "POST /api/push/test",
+      "GET /api/agent/whoami",
     ]) {
       expect(keys).toContain(required)
     }

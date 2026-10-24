@@ -128,4 +128,9 @@ describe("agentAllows (route classes on /api/agent)", () => {
     expect(agentAllows({ scope: "sessions:launch" }, app)).toBe(false)
     expect(agentAllows({ scope: "sessions:read" }, app)).toBe(true)
   })
+
+  test("routes open to any app token (whoami)", () => {
+    expect(agentAllows({ app: true }, app)).toBe(true)
+    expect(agentAllows({ app: true }, session)).toBe(false)
+  })
 })
