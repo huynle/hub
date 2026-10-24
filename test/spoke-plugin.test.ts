@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test"
 import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -7,6 +7,18 @@ import plugin from "../src/index"
 import { EventQueue, fakeCentral, stopServer, until } from "./spoke-fake"
 
 const cleanups: Array<() => unknown> = []
+
+// Plugin setup writes the hub bin dir and the `hub`/`hubctl` launchers under HUB_STATE_DIR: keep them out of ~.
+const previousStateDir = process.env.HUB_STATE_DIR
+const stateDir = mkdtempSync(path.join(tmpdir(), "voice-plugin-state-"))
+beforeAll(() => {
+  process.env.HUB_STATE_DIR = stateDir
+})
+afterAll(() => {
+  if (previousStateDir === undefined) delete process.env.HUB_STATE_DIR
+  else process.env.HUB_STATE_DIR = previousStateDir
+  rmSync(stateDir, { recursive: true, force: true })
+})
 afterEach(async () => {
   for (const c of cleanups.splice(0).reverse()) await c()
 })

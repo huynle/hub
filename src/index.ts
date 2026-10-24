@@ -3,6 +3,7 @@
 // their events, and runs remote / voice turns and permission replies on request.
 import { mkdirSync, readFileSync } from "node:fs"
 import { hostname } from "node:os"
+import { fileURLToPath } from "node:url"
 import { Plugin } from "@opencode/plugin"
 import { DEFAULT_SUBAGENT, prepareConfigPath } from "./config"
 import { HubRpc, VoiceRpc } from "./rpc"
@@ -11,6 +12,7 @@ import { checkServer, parseServerInput } from "./setup"
 import { defineVoiceAgent, orchestratorParts, STOP_TOOL, STOP_TOOL_DESCRIPTION } from "./spoke/conversation"
 import { envInjector, hubBinDir, ShellCorrelator, stripInheritedHubEnv } from "./spoke/env-inject"
 import { herdrRunner } from "./spoke/herdr"
+import { cliEntry, installLaunchers } from "./spoke/launchers"
 import { listServiceSessions } from "./spoke/listing"
 import { ensureLocalHub } from "./spoke/localhub"
 import { replyPermission, type PermissionLocation } from "./spoke/locations"
@@ -184,10 +186,14 @@ function hostFrom(ctx: Context, locations: () => PermissionLocation[], kind: "se
 async function registerShellEnv(ctx: Context, identity: (sessionID: string) => { token: string; url?: string } | undefined) {
   const binDir = hubBinDir()
   try {
-    // The `hub`/`hubctl` launchers go here (P1-T10).
     mkdirSync(binDir, { recursive: true, mode: 0o700 })
+    // The `hub`/`hubctl` launchers run the CLI with this runtime (OpenCode's binary as bun; src/spoke/launchers.ts).
+    const bun = typeof process.versions.bun === "string"
+    const entry = cliEntry(fileURLToPath(new URL("..", import.meta.url)), bun)
+    if (entry) installLaunchers({ binDir, execPath: process.execPath, bun, entry })
+    else console.error("[hub] no built hub CLI (packages/cli/dist/hub-cli.js): `hub` is not installed")
   } catch (cause) {
-    console.error("[hub] could not create the hub bin directory", cause)
+    console.error("[hub] could not install the hub CLI launchers", cause)
   }
   const injector = envInjector({ correlator: new ShellCorrelator(), binDir, identity })
   const tool = (ctx as any).tool
