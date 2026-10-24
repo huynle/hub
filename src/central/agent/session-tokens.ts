@@ -42,6 +42,8 @@ export interface MintedSessionToken {
   readonly token: string
   /** Expiry, ms since the epoch. */
   readonly exp: number
+  /** The machine's stamp when minted (see SessionTokens.stamp). */
+  readonly stamp: string
 }
 
 interface Claims {
@@ -116,6 +118,16 @@ export class SessionTokens {
   }
 
   /**
+   * What a machine's tokens depend on besides the session: owner, active kid, user and machine epochs. Tokens
+   * minted under another stamp are stale (resend them); undefined when the machine cannot get tokens.
+   */
+  stamp(machineID: string): string | undefined {
+    const uid = this.#owner(machineID)
+    if (!uid) return undefined
+    return JSON.stringify([uid, this.#keys.active().kid, this.#store.userEpoch(uid), this.#store.machineEpoch(machineID)])
+  }
+
+  /**
    * A token for a session of the machine's owner (undefined when the machine is unknown, revoked or its owner
    * disabled, or the session belongs to another tenant or to nobody).
    */
@@ -136,7 +148,8 @@ export class SessionTokens {
       aud: this.#aud,
     }
     const payload = Buffer.from(JSON.stringify(claims)).toString("base64url")
-    return { token: `${SESSION_TOKEN_PREFIX}.${payload}.${sign(secret, payload).toString("base64url")}`, exp }
+    const stamp = JSON.stringify([uid, kid, claims.ue, claims.me])
+    return { token: `${SESSION_TOKEN_PREFIX}.${payload}.${sign(secret, payload).toString("base64url")}`, exp, stamp }
   }
 
   /** The session actor of a valid token, "expired" for a genuine token past its expiry, else undefined. */

@@ -92,6 +92,28 @@ describe("mint", () => {
   })
 })
 
+describe("stamp", () => {
+  test("changes with the user epoch, the machine epoch and the active key; minted tokens carry it", () => {
+    const first = tokens.stamp(machineID)!
+    expect(tokens.mint(machineID, "ses_1")!.stamp).toBe(first)
+    store.bumpUserEpoch("local")
+    const second = tokens.stamp(machineID)!
+    expect(second).not.toBe(first)
+    store.bumpMachineEpoch(machineID)
+    const third = tokens.stamp(machineID)!
+    expect(third).not.toBe(second)
+    keys.rotate()
+    expect(tokens.stamp(machineID)).not.toBe(third)
+    expect(tokens.mint(machineID, "ses_1")!.stamp).toBe(tokens.stamp(machineID)!)
+  })
+
+  test("undefined for a revoked or unknown machine", () => {
+    expect(tokens.stamp("mch_unknown")).toBeUndefined()
+    store.revokeMachine(machineID)
+    expect(tokens.stamp(machineID)).toBeUndefined()
+  })
+})
+
 describe("verify", () => {
   test("round trip: the session actor of the machine's owner", () => {
     const { token } = tokens.mint(machineID, "ses_1")!

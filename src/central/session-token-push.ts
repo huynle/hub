@@ -1,0 +1,192 @@
+// Delivers hub-minted session tokens (./agent/session-tokens.ts) to the spokes that report the sessions, with
+// the sessionTokens op (feature "sessionTokens"; older spokes get nothing).
+//
+// On every sessions frame of a connection, the hub sends tokens for the sessions it reports for its own tenant
+// (subagents included) that have none yet on that connection, whose token has less than a third of its lifetime
+// left, or whose machine stamp changed (user or machine epoch, active key). Unchanged tokens are not resent. A
+// reconnect is a new connection, so it gets every token again (the spoke drops its tokens when its connection
+// changes). Tokens the spoke skipped, and tokens of a failed send, are retried on the next frame or sweep. A
+// periodic sweep refreshes tokens nearing expiry and forgets connections that are gone.
+// Tokens are never logged.
+import { batchSessionTokens, type ResultFor, type SessionToken, type SessionTokensRequest, type SpokeFeature } from "../protocol"
+import type { Timers } from "./registry"
+
+/** How often the sweep looks for tokens to refresh (well under a third of their lifetime). */
+export const SESSION_TOKEN_SWEEP_MS = 10 * 60 * 1000
+/** A token is refreshed when less than this fraction of its lifetime remains. */
+export const SESSION_TOKEN_REFRESH_FRACTION = 1 / 3
+
+/** What the push reads from the registry. */
+export interface PushRegistry {
+  supports(connID: string, feature: SpokeFeature): boolean
+  connMachine(connID: string): string | undefined
+  /** Sessions the connection reports for its own tenant. */
+  reportedSessions(connID: string): string[]
+}
+
+/** Mints tokens (SessionTokens). */
+export interface TokenMinter {
+  readonly lifetimeMs: number
+  stamp(machineID: string): string | undefined
+  mint(machineID: string, sessionID: string): { token: string; exp: number; stamp: string } | undefined
+}
+
+export interface SessionTokenPushOptions {
+  readonly registry: PushRegistry
+  readonly tokens: TokenMinter
+  /** Sends a sessionTokens request to a connection (SpokeHub.request). */
+  send(connID: string, req: SessionTokensRequest): Promise<ResultFor["sessionTokens"]>
+  /** The URL sessions' shells reach the hub at. */
+  readonly hubURL: string
+  readonly now?: () => number
+  readonly timers?: Timers
+  readonly sweepMs?: number
+  /** Largest request JSON (default: what fits in a frame). */
+  readonly maxChars?: number
+  log?(message: string): void
+}
+
+/** What a connection was sent for a session. */
+interface Sent {
+  readonly exp: number
+  readonly stamp: string
+}
+
+const realTimers: Timers = {
+  set: (fn, ms) => {
+    const handle = setTimeout(fn, ms)
+    ;(handle as { unref?: () => void }).unref?.()
+    return handle
+  },
+  clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+}
+
+const reason = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause))
+
+export class SessionTokenPush {
+  /** connID → sessionID → the token last sent (or being sent). */
+  readonly #sent = new Map<string, Map<string, Sent>>()
+  readonly #inflight = new Set<Promise<unknown>>()
+  readonly #now: () => number
+  readonly #timers: Timers
+  #timer: unknown
+  #stopped = false
+
+  constructor(private readonly options: SessionTokenPushOptions) {
+    this.#now = options.now ?? Date.now
+    this.#timers = options.timers ?? realTimers
+  }
+
+  /** Handles a sessions frame of a connection: sends what is new or due. Resolves when the sends settle. */
+  sessions(connID: string): Promise<void> {
+    return this.#track(this.#sync(connID))
+  }
+
+  /** Refreshes tokens nearing expiry on every known connection; forgets connections that are gone. */
+  sweep(): Promise<void> {
+    return this.#track(this.#sweepAll())
+  }
+
+  /** Resolves when every send started so far has settled (tests). */
+  async idle(): Promise<void> {
+    while (this.#inflight.size > 0) await Promise.allSettled([...this.#inflight])
+  }
+
+  /** Arms the periodic sweep. */
+  start(): void {
+    this.#stopped = false
+    this.#arm()
+  }
+
+  stop(): void {
+    this.#stopped = true
+    if (this.#timer !== undefined) this.#timers.clear(this.#timer)
+    this.#timer = undefined
+  }
+
+  #arm(): void {
+    if (this.#stopped) return
+    this.#timer = this.#timers.set(() => {
+      void this.#track(this.#sweepAll().finally(() => this.#arm()))
+    }, this.options.sweepMs ?? SESSION_TOKEN_SWEEP_MS)
+  }
+
+  async #sweepAll(): Promise<void> {
+    await Promise.all([...this.#sent.keys()].map((connID) => this.#sync(connID)))
+  }
+
+  #track(work: Promise<void>): Promise<void> {
+    this.#inflight.add(work)
+    return work.finally(() => this.#inflight.delete(work))
+  }
+
+  async #sync(connID: string): Promise<void> {
+    const { registry, tokens } = this.options
+    const machineID = registry.connMachine(connID)
+    if (machineID === undefined || !registry.supports(connID, "sessionTokens")) {
+      this.#sent.delete(connID)
+      return
+    }
+    const stamp = tokens.stamp(machineID)
+    if (stamp === undefined) {
+      this.#sent.delete(connID)
+      return
+    }
+    let sent = this.#sent.get(connID)
+    if (!sent) this.#sent.set(connID, (sent = new Map()))
+    const reported = new Set(registry.reportedSessions(connID))
+    for (const sessionID of sent.keys()) if (!reported.has(sessionID)) sent.delete(sessionID)
+
+    const now = this.#now()
+    const refreshAt = tokens.lifetimeMs * SESSION_TOKEN_REFRESH_FRACTION
+    const due: SessionToken[] = []
+    const records = new Map<string, Sent>()
+    for (const sessionID of reported) {
+      const last = sent.get(sessionID)
+      if (last && last.stamp === stamp && last.exp - now >= refreshAt) continue
+      const minted = tokens.mint(machineID, sessionID)
+      if (!minted) continue
+      const entry = { sessionID, token: minted.token, exp: minted.exp }
+      if (!this.#fits(entry)) {
+        this.options.log?.(`[hub] session token for ${sessionID} does not fit in a frame; not sent`)
+        continue
+      }
+      const record = { exp: minted.exp, stamp: minted.stamp }
+      sent.set(sessionID, record)
+      records.set(sessionID, record)
+      due.push(entry)
+    }
+    if (due.length === 0) return
+
+    const forget = (sessionID: string) => {
+      if (records.has(sessionID) && sent.get(sessionID) === records.get(sessionID)) sent.delete(sessionID)
+    }
+    const requests = this.#batch(due)
+    await Promise.all(
+      requests.map(async (req) => {
+        try {
+          const result = await this.options.send(connID, req)
+          for (const { sessionID } of result.skipped) forget(sessionID)
+        } catch (cause) {
+          for (const { sessionID } of req.tokens) forget(sessionID)
+          this.options.log?.(`[hub] sending session tokens failed: ${reason(cause)}`)
+        }
+      }),
+    )
+  }
+
+  #batch(tokens: readonly SessionToken[]): SessionTokensRequest[] {
+    const { hubURL, maxChars } = this.options
+    return batchSessionTokens(tokens, { hubURL, ...(maxChars !== undefined ? { maxChars } : {}) })
+  }
+
+  /** Whether a token fits in a request on its own. */
+  #fits(entry: SessionToken): boolean {
+    try {
+      this.#batch([entry])
+      return true
+    } catch {
+      return false
+    }
+  }
+}
