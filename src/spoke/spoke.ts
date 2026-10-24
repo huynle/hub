@@ -549,6 +549,17 @@ export class Spoke {
     return this.tokens.get(sessionID)?.token
   }
 
+  /**
+   * What a session's shells get (src/spoke/env-inject.ts): its current token, with HUB_URL the server this spoke
+   * reaches the hub at (same machine as the shells), else the URL the hub sent. Undefined without a token.
+   */
+  shellIdentity(sessionID: string): { token: string; url?: string } | undefined {
+    const token = this.sessionToken(sessionID)
+    if (!token) return undefined
+    const url = this.config.server || this.tokens.hubURL
+    return url ? { token, url } : { token }
+  }
+
   /** The URL the hub told this spoke its sessions' shells reach it at (HUB_URL), if it sent one. */
   get hubURL(): string | undefined {
     return this.tokens.hubURL
@@ -1341,6 +1352,7 @@ export class Spoke {
       if (typeof sessionID === "string") this.timelines.invalidate(sessionID)
       this.turns.observe(event)
       this.observeModel(event)
+      if (event.type === "session.deleted" && typeof sessionID === "string") this.tokens.delete(sessionID)
       if (event.type === "form.replied" || event.type === "form.cancelled") {
         const formID = (event.data as Record<string, unknown> | undefined)?.id
         if (typeof formID === "string") {

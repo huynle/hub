@@ -1490,6 +1490,35 @@ describe("session tokens", () => {
     expect(spoke.hubURL).toBeUndefined()
   })
 
+  test("shellIdentity: the session's token with the spoke's server as HUB_URL; none without a token", async () => {
+    const { spoke, server, host } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    await until(() => lastSessions(server)?.sessions.length === 1)
+    expect(spoke.shellIdentity("ses_a")).toBeUndefined()
+    await server.request({ op: "sessionTokens", tokens: [{ sessionID: "ses_a", token: "hst.1", exp: later() }], hubURL: "https://hub.example" })
+    expect(spoke.shellIdentity("ses_a")).toEqual({ token: "hst.1", url: server.url })
+    expect(spoke.shellIdentity("ses_b")).toBeUndefined()
+  })
+
+  test("a deleted session's token is dropped", async () => {
+    const { spoke, server, host } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    host.push(created("ses_b"))
+    await until(() => lastSessions(server)?.sessions.length === 2)
+    await server.request({
+      op: "sessionTokens",
+      tokens: [
+        { sessionID: "ses_a", token: "hst.a", exp: later() },
+        { sessionID: "ses_b", token: "hst.b", exp: later() },
+      ],
+    })
+    host.push({ type: "session.deleted", data: { sessionID: "ses_a" } })
+    await until(() => spoke.sessionToken("ses_a") === undefined)
+    expect(spoke.sessionToken("ses_b")).toBe("hst.b")
+  })
+
   test("tokens never reach the console", async () => {
     const { spoke, server, host } = setup({ mode: "always", token: "tok" })
     await until(() => spoke.status().connection === "connected")
