@@ -18,6 +18,9 @@ import { pushEndpointProblem, resolveHost as systemResolveHost, type ResolveHost
 import { memoryBackends, type Backends } from "./backend"
 import { createResolver, type BearerVerifier } from "./agent/actor"
 import { agentApi, agentRoutes, agentVerifiers, isAgentPath, wellKnown, type AgentRoute } from "./agent/routes"
+import { SessionTokens } from "./agent/session-tokens"
+import { SessionTokenPush } from "./session-token-push"
+import { TokenKeys } from "./token-keys"
 import { EventLog } from "./events-log"
 import { BusyError, Registry } from "./registry"
 import { audioFormat, SpeechError } from "./speech/provider"
@@ -333,6 +336,18 @@ export function startCentral(options: CentralOptions): Central {
     turnTimeoutMs: config.turnTimeoutMs,
     ...options.timing,
   })
+  // Session tokens (design §1.3): minted for the sessions spokes report, pushed on their sessions frames.
+  const sessionTokens = new SessionTokens({ keys: TokenKeys.open(config.stateDir), store, sessions: registry, publicURL, now })
+  const tokenPush = new SessionTokenPush({
+    registry,
+    tokens: sessionTokens,
+    send: (connID, req) => spokes.request(connID, req),
+    hubURL: publicURL,
+    now,
+    log: (message) => console.error(message),
+  })
+  registry.onSessions((connID) => void tokenPush.sessions(connID))
+  tokenPush.start()
 
   /** The user's machines with their live processes and sessions. */
   const machines = (userID: string) => {
@@ -468,7 +483,7 @@ export function startCentral(options: CentralOptions): Central {
   }
 
   // One credential resolver for every /api request: device cookie, device token, session and app tokens.
-  const agentDeps = { store }
+  const agentDeps = { store, sessionTokens }
   const resolveActor = createResolver({
     cookieName: COOKIE,
     findDevice: (token) => store.findDevice(token),
@@ -927,6 +942,7 @@ export function startCentral(options: CentralOptions): Central {
 
   function revokeMachine(id: string, user: UserRecord): Response {
     if (!store.revokeMachine(id)) return error(404, "No such machine")
+    store.bumpMachineEpoch(id)
     store.audit({ actor: user.id, action: "machine.revoke", target: id })
     spokes.closeMachine(id, "revoked")
     broadcast({ type: "catalog" })
@@ -966,6 +982,7 @@ export function startCentral(options: CentralOptions): Central {
     }
     store.setUser(id, { ...(role ? { role: role as "admin" | "user" } : {}), ...(disabled !== undefined ? { disabled } : {}) })
     if (disabled === true) {
+      store.bumpUserEpoch(id)
       // Their machines go offline at once; their browsers get 401 from now on and lose their event streams.
       for (const machine of store.machines()) if (machine.ownerID === id) spokes.closeMachine(machine.id, "revoked")
       broadcast({ type: "catalog" })
@@ -1372,6 +1389,7 @@ export function startCentral(options: CentralOptions): Central {
     backends,
     routes: [...routes.map(({ method, path, access }) => ({ method, path, access })), ...agent.routes.map(({ method, path }) => ({ method, path, access: "agent" as const }))],
     async stop() {
+      tokenPush.stop()
       spokes.stop()
       for (const listener of [...listeners]) listeners.delete(listener)
       // Bun 1.3.5 quirk: once the server has closed a WebSocket itself, stop(true)'s promise never

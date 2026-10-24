@@ -210,6 +210,25 @@ describe("sessions frames", () => {
   })
 })
 
+describe("errors", () => {
+  test("a minter that throws (e.g. an unreadable key file) is logged; sessions() and the sweep still resolve", async () => {
+    const broken: TokenMinter = {
+      ...minter,
+      mint: () => {
+        throw new Error("Invalid token-keys.json")
+      },
+    }
+    push = make({ tokens: broken })
+    await push.sessions("c1")
+    push.start()
+    timers[0]!.fn()
+    await push.idle()
+    expect(sent).toEqual([])
+    expect(logged.filter((m) => m.includes("Invalid token-keys.json")).length).toBeGreaterThanOrEqual(2)
+    expect(timers).toHaveLength(2)
+  })
+})
+
 describe("refresh sweep", () => {
   test("start arms a timer; each sweep refreshes tokens nearing expiry and re-arms", async () => {
     push.start()

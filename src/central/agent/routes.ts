@@ -9,6 +9,7 @@
 import type { DeviceRecord, Store, UserRecord } from "../store"
 import { agentAllows, type AgentActor, type AgentAllow, type BearerVerifier, type Credential, type Resolver } from "./actor"
 import { appTokenRoutes, appTokenVerifier } from "./app-tokens"
+import type { SessionTokens } from "./session-tokens"
 import { AgentError, agentFailure } from "./errors"
 
 export const AGENT_PREFIX = "/api/agent"
@@ -38,6 +39,8 @@ export interface AgentRoute {
 /** What the agent API needs from the hub. */
 export interface AgentDeps {
   readonly store: Store
+  /** Hub-minted session tokens (P1-T5). */
+  readonly sessionTokens?: SessionTokens
 }
 
 /**
@@ -45,7 +48,7 @@ export interface AgentDeps {
  * order after the device lookup; see BearerVerifier.
  */
 export function agentVerifiers(deps: AgentDeps): BearerVerifier[] {
-  return [appTokenVerifier(deps.store)]
+  return [...(deps.sessionTokens ? [deps.sessionTokens.verifier] : []), appTokenVerifier(deps.store)]
 }
 
 const userView = (user: UserRecord) => ({

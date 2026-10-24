@@ -112,12 +112,14 @@ export class SessionTokenPush {
   }
 
   async #sweepAll(): Promise<void> {
-    await Promise.all([...this.#sent.keys()].map((connID) => this.#sync(connID)))
+    await Promise.all([...this.#sent.keys()].map((connID) => this.#track(this.#sync(connID))))
   }
 
+  /** Tracks work for idle(); failures (e.g. an unreadable key file) are logged, never thrown. */
   #track(work: Promise<void>): Promise<void> {
-    this.#inflight.add(work)
-    return work.finally(() => this.#inflight.delete(work))
+    const safe = work.catch((cause) => this.options.log?.(`[hub] session tokens: ${reason(cause)}`))
+    this.#inflight.add(safe)
+    return safe.finally(() => this.#inflight.delete(safe))
   }
 
   async #sync(connID: string): Promise<void> {
