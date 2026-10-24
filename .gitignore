@@ -4,3 +4,5 @@ node_modules/
 .DS_Store
 dist/
 .build/
+# Bun lockfile: not tracked; package-lock.json is the lockfile (npm ci in CI, migrated by bun in Docker).
+bun.lock

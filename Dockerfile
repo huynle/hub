@@ -10,6 +10,7 @@
 FROM node:22-slim AS web
 WORKDIR /build
 COPY package.json package-lock.json ./
+COPY packages/protocol/package.json ./packages/protocol/
 RUN npm ci --no-audit --no-fund --ignore-scripts
 COPY web ./web
 RUN npx vite build --config web/vite.config.ts
@@ -17,6 +18,7 @@ RUN npx vite build --config web/vite.config.ts
 FROM oven/bun:1.3-slim AS deps
 WORKDIR /build
 COPY package.json package-lock.json ./
+COPY packages/protocol/package.json ./packages/protocol/
 # Bun migrates package-lock.json; --frozen-lockfile keeps the pinned versions.
 RUN bun install --production --frozen-lockfile --ignore-scripts
 COPY docker/hub-deps.ts ./
@@ -33,6 +35,9 @@ COPY --from=deps /deps/node_modules ./node_modules
 COPY package.json ./
 COPY bin ./bin
 COPY src ./src
+# The protocol package (src/protocol.ts re-exports it by relative path).
+COPY packages/protocol/package.json ./packages/protocol/
+COPY packages/protocol/src ./packages/protocol/src
 COPY --from=web /build/web/dist ./web/dist
 
 ENV HUB_HOST=0.0.0.0 \

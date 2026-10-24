@@ -16,7 +16,9 @@ if ! build=$(npx --no-install vite build --config web/vite.config.ts --logLevel 
 fi
 failed=()
 total=0
-for file in test/*.test.ts; do
+# Root tests, then the workspace packages' own tests (packages/<name>/test; the shim has none).
+for file in test/*.test.ts packages/*/test/*.test.ts; do
+  [ -e "$file" ] || continue
   total=$((total + 1))
   if ! output=$(timeout "$LIMIT" bun test "$file" 2>&1); then
     status=$?
