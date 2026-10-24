@@ -289,3 +289,58 @@ describe("GET /api/agent/watch", () => {
     await events.cancel()
   })
 })
+
+describe("tenancy: user B against user A's sessions, names and roles", () => {
+  test("every /api/agent route answers B the same not_found as for nothing, or B's own (empty) lists", async () => {
+    const { client } = await start()
+    // A (local) holds a role and an app token.
+    expect((await bearer("/api/agent/roles/claim", SES_1, { method: "POST", json: { role: "reviewer" } })).status).toBe(200)
+    expect((await h.api("/api/agent/app-tokens", { method: "POST", json: { label: "a-token", scopes: ["sessions:read"] } })).status).toBe(201)
+    const bob = h.store.upsertUser({ email: "bob@example.test", role: "user" })
+    const cookie = `voice_device=${h.store.addDevice("bob phone", bob.id).token}`
+    const asBob = (pathname: string, init: RequestInit & { json?: unknown } = {}) => h.api(pathname, { ...init, cookie })
+
+    const notFound: Array<[string, string, unknown?]> = []
+    for (const addr of ["ses_1", "ses_3", "@api-refactor", "@web-work", "@@reviewer", "ses_nothing", "@nothing", "@@nothing"]) {
+      notFound.push(["GET", `/api/agent/sessions/${addr}`], ["GET", `/api/agent/sessions/${addr}/log`], ["GET", `/api/agent/watch?session=${encodeURIComponent(addr)}`])
+      notFound.push(["POST", "/api/agent/name", { name: "mine", session: addr }])
+      notFound.push(["POST", "/api/agent/roles/claim", { role: "spy", session: addr }])
+      notFound.push(["POST", "/api/agent/roles/release", { role: "reviewer", session: addr }])
+    }
+    const tokenID = h.store.agentData("local").appTokens![0]!.id
+    notFound.push(["DELETE", `/api/agent/app-tokens/${tokenID}`])
+    for (const [method, pathname, body] of notFound) {
+      const res = await asBob(pathname, { method, ...(body ? { json: body } : {}) })
+      expect([method, pathname, res.status]).toEqual([method, pathname, 404])
+      expect((await json(res)).error.code).toBe("not_found")
+    }
+
+    const secrets = ["ses_1", "ses_2", "ses_3", "api-refactor", "web-work", "reviewer", "a-token", "per_1", "laptop"]
+    const listings: Record<string, unknown> = {
+      status: await json(await asBob("/api/agent/status")),
+      sessions: await json(await asBob("/api/agent/sessions")),
+      who: await json(await asBob("/api/agent/who")),
+      whoami: await json(await asBob("/api/agent/whoami")),
+      tokens: await json(await asBob("/api/agent/app-tokens")),
+    }
+    expect(listings.status).toMatchObject({ you: { kind: "user" }, machines: [], attention: [] })
+    expect(listings.sessions).toEqual({ sessions: [] })
+    expect(listings.who).toEqual({ sessions: [] })
+    expect(listings.tokens).toEqual({ tokens: [] })
+    expect((listings.whoami as any).user.id).toBe(bob.id)
+    const text = JSON.stringify(listings)
+    for (const secret of secrets) expect([secret, text.includes(secret)]).toEqual([secret, false])
+
+    // B's watch sees none of A's events, while A's does.
+    const mine = sse(await h.api("/api/agent/watch"))
+    const theirs = sse(await asBob("/api/agent/watch"))
+    await mine.next((m) => m.type === "ready")
+    await theirs.next((m) => m.type === "ready")
+    client.send(event("permission.asked", { sessionID: "ses_2", id: "per_2", action: "bash" }))
+    client.send({ t: "sessions", sessions: [session("ses_1", { title: "API refactor", projectName: "hub" })] })
+    await mine.next((m) => m.type === "session.removed")
+    await expect(theirs.next(() => true, 300)).rejects.toThrow("timed out")
+    await mine.cancel()
+    await theirs.cancel()
+  })
+})
