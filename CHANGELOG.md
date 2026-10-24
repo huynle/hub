@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Harness-neutral spoke protocol** (still version 1, compatible both ways). The hello may carry `harness`,
+  `harnessVersion` and `evidence` (`native` | `hooks` | `rpc` | `screen`; anything else counts as `unknown`); the
+  OpenCode spoke sends `harness: "opencode"`, `evidence: "native"` and keeps `opencodeVersion` for older hubs. A
+  hello without `harness` is an OpenCode spoke with the implied v1 features (`IMPLIED_OPENCODE_FEATURES`); new
+  spokes announce all their features (`SPOKE_FEATURES`). The welcome lists the hub's features (`HUB_FEATURES`,
+  now `["harness"]`) and spokes remember them (`hubSupports`). `/api/machines` processes gain `harness`,
+  `harnessVersion` and `evidence`.
+
 - **Auto-name**: let OpenCode name a session with its Title agent, from the console. **Auto-name** in every
   session `⋯` menu (table, phone list, sidebar, session title) and a ✨ button next to the inline rename field;
   the title shows "Naming…" until OpenCode answers, then "Renamed to …" or "OpenCode kept the title".
