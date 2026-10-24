@@ -19,6 +19,7 @@ import {
   type PromptImage,
   type ResultFor,
   type ServerRequest,
+  type SessionTokensRequest,
   type SessionModelPrefs,
   type SpokeRequest,
   type TerminalInfo,
@@ -33,6 +34,7 @@ import { pollEnrollment, startEnrollment } from "./enroll"
 import { HerdrWatcher, openInHerdr, type HerdrRunner } from "./herdr"
 import type { LocalHubResult } from "./localhub"
 import { PresenceBook } from "./presence"
+import { SessionTokenStore } from "./session-tokens"
 import { changeStats, contextUsage, filePatch, mcpServers } from "./summary"
 import { browserSessions, isExposed, isReported, SessionTracker, shouldForward, type EventLike, type SessionDetails } from "./tracker"
 import { renderTaskBoard, TaskBoard } from "./taskboard"
@@ -256,6 +258,8 @@ export class Spoke {
   private connection?: SpokeConnection
   private connectionKey = ""
   private readonly tracker = new SessionTracker()
+  /** Session tokens from the hub (sessionTokens op), for the sessions' shells (P1-T6). Never logged. */
+  private readonly tokens = new SessionTokenStore()
   /** The background workers each session started (the voice agent's task board). */
   private readonly tasks = new TaskBoard()
   private readonly turns = new TurnTracker()
@@ -357,6 +361,7 @@ export class Spoke {
     this.connection?.stop()
     this.connection = undefined
     this.connectionKey = ""
+    this.tokens.clear()
   }
 
   isVoiceTurn(sessionID: string): boolean {
@@ -539,6 +544,16 @@ export class Spoke {
   }
 
   /** Whether the hub this spoke is connected to announced `feature` in its welcome (older hubs announce none). */
+  /** The session's current (unexpired) hub session token, for its shells (HUB_SESSION_TOKEN). */
+  sessionToken(sessionID: string): string | undefined {
+    return this.tokens.get(sessionID)?.token
+  }
+
+  /** The URL the hub told this spoke its sessions' shells reach it at (HUB_URL), if it sent one. */
+  get hubURL(): string | undefined {
+    return this.tokens.hubURL
+  }
+
   hubSupports(feature: string): boolean {
     return this.connection?.hubSupports(feature) === true
   }
@@ -712,6 +727,8 @@ export class Spoke {
       this.connection?.stop()
       this.connection = undefined
       this.connectionKey = key
+      // Tokens belong to the hub and machine they came from; the next connection's hub sends its own.
+      this.tokens.clear()
       if (active) this.connect(config)
     }
     if (previous.sessions.join() !== config.sessions.join()) this.scheduleSnapshot()
@@ -874,6 +891,7 @@ export class Spoke {
     // Session browser ops are not gated by exposure: they are how a session gets exposed.
     if (req.op === "expose") return this.expose(req.sessionID, req.on)
     if (req.op === "create") return this.create(req.directory, req.title, req.herdrWorkspace)
+    if (req.op === "sessionTokens") return this.storeSessionTokens(req)
     // Inspection and control need a session this process knows; Voice (conversation) is gated separately.
     if (!isReported(this.config, this.tracker, req.sessionID) && !(await this.adopt(req.sessionID))) throw new Error(UNKNOWN_SESSION)
     switch (req.op) {
@@ -967,6 +985,23 @@ export class Spoke {
       case "conversation":
         return this.setConversation(req.sessionID, req.on)
     }
+  }
+
+  /**
+   * Stores the hub's session tokens for sessions this process reports (the tracker knows them). Never adopts or
+   * exposes a session: a token for any other session is skipped as "unknown", an expired one as "expired".
+   */
+  private storeSessionTokens(req: SessionTokensRequest): ResultFor["sessionTokens"] {
+    const applied: string[] = []
+    const skipped: Array<ResultFor["sessionTokens"]["skipped"][number]> = []
+    for (const { sessionID, token, exp } of req.tokens) {
+      if (this.config.mode === "off" || !this.tracker.has(sessionID)) skipped.push({ sessionID, reason: "unknown" })
+      else if (this.tokens.set(sessionID, token, exp)) applied.push(sessionID)
+      else skipped.push({ sessionID, reason: "expired" })
+    }
+    if (req.hubURL !== undefined && applied.length > 0) this.tokens.hubURL = req.hubURL
+    this.tokens.prune()
+    return { applied, skipped }
   }
 
   /**

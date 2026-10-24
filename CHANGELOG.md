@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Session tokens reach the spoke** (protocol still version 1): new server op `sessionTokens{tokens: [{sessionID,
+  token, exp}], hubURL?}` (at most 500 tokens per frame; `batchSessionTokens` splits a list under `MAX_FRAME`),
+  answered with `{applied, skipped: [{sessionID, reason: "unknown" | "expired"}]}`. It is the spoke feature
+  `sessionTokens`, announced by new spokes only (not implied for older OpenCode spokes), so hubs send it only to
+  spokes that list it. The OpenCode spoke keeps each reported session's latest token in memory (never logged,
+  dropped when expired or when the connection changes) and adopts no session for it.
 - **App tokens**: a signed-in user (device cookie or device token) creates app/agent tokens with
   `POST /api/agent/app-tokens {label?, scopes?}` → `201 {id, token, label?, scopes, created}` (the token,
   `hat_<id>_<secret>`, is shown only here), lists them with `GET /api/agent/app-tokens` → `{tokens}` (no secrets)
