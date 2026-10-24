@@ -17,6 +17,7 @@ import { isNotificationKind, Push, type PushSender } from "./push"
 import { pushEndpointProblem, resolveHost as systemResolveHost, type ResolveHost } from "./push-target"
 import { memoryBackends, type Backends } from "./backend"
 import { createResolver, type BearerVerifier } from "./agent/actor"
+import { hubDirectory } from "./agent/directory-routes"
 import { agentApi, agentRoutes, agentVerifiers, isAgentPath, wellKnown, type AgentRoute } from "./agent/routes"
 import { SessionTokens } from "./agent/session-tokens"
 import { SessionTokenPush } from "./session-token-push"
@@ -483,7 +484,7 @@ export function startCentral(options: CentralOptions): Central {
   }
 
   // One credential resolver for every /api request: device cookie, device token, session and app tokens.
-  const agentDeps = { store, sessionTokens }
+  const agentDeps = { store, sessionTokens, directory: hubDirectory({ registry, store, now }) }
   const resolveActor = createResolver({
     cookieName: COOKIE,
     findDevice: (token) => store.findDevice(token),

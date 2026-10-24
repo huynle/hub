@@ -13,6 +13,18 @@
   token epoch, so re-enabling does not revive old tokens). Tokens are never logged or audited. A session's
   token is visible to its shell and child processes; it is limited by its expiry, the session's liveness and
   the verbs sessions may use.
+- **Session names and roles** (`@name`, `@@role`): the hub keeps a per-user record of every session its spokes
+  report (machine, parent, project, lastSeen; at most 2000). Root sessions get a name once, from their first
+  real title (OpenCode's "New session" placeholders are skipped), `[a-z0-9-]` 2–40, with `-2`, `-3` on a clash.
+  `POST /api/agent/name {name, session?}` sets one (409 `name_taken` when taken); the old name stays an alias for
+  24 h; a name is released 7 days after its session is archived (the console's Archive) or deleted.
+  `POST /api/agent/roles/claim {role, exclusive?, project?, session?}` / `roles/release` manage roles
+  (`role.project` scopes; every new holder gets a new `generation`; an exclusive claim fails while another live
+  holder exists; a holder offline for 30 min loses the role, except in the 2 min after the hub starts;
+  `orchestrator…` and `concierge…` are reserved to the user). `GET /api/agent/who?project=&role=` lists named,
+  role-holding and online sessions. Session tokens may read, and name or claim for their own session only.
+  Addresses (`ses_…` or a unique ID prefix, `@name[.project]`, `@@role[.project]`) resolve within the caller's
+  sessions only: another user's are `not_found`, and `ambiguous` candidates never list them.
 - **Session tokens reach the spoke** (protocol still version 1): new server op `sessionTokens{tokens: [{sessionID,
   token, exp}], hubURL?}` (at most 500 tokens per frame; `batchSessionTokens` splits a list under `MAX_FRAME`),
   answered with `{applied, skipped: [{sessionID, reason: "unknown" | "expired"}]}`. It is the spoke feature
