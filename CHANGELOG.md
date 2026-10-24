@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Session identity in shells**: every shell an agent runs through OpenCode's shell tool gets its session's
+  `HUB_SESSION_TOKEN` and `HUB_URL` (the spoke's server), set by plugin hooks (tool `execute.before` paired with
+  shell `create.before` by command; the same command pending from two sessions gets no token). Inherited
+  `HUB_URL`/`HUB_SESSION_TOKEN` are removed from the OpenCode process at plugin start and from every shell, and the
+  hub bin dir (`$HUB_STATE_DIR/bin`, default `~/.local/state/hub/bin`) goes first on PATH. A deleted session's token
+  is dropped. User `!` commands get no token. Opt-in integration test: `HUB_IT_OPENCODE=1 bun test
+  test/spoke-env-inject.it.test.ts`.
 - **Session tokens reach the spoke** (protocol still version 1): new server op `sessionTokens{tokens: [{sessionID,
   token, exp}], hubURL?}` (at most 500 tokens per frame; `batchSessionTokens` splits a list under `MAX_FRAME`),
   answered with `{applied, skipped: [{sessionID, reason: "unknown" | "expired"}]}`. It is the spoke feature
