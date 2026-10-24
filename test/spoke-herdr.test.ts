@@ -220,23 +220,27 @@ describe("herdrRunner", () => {
     return file
   }
 
+  // These spawn a real shell script. Limits are generous so the suite holds on a loaded machine (several test
+  // runs at once); each test still fails if the behaviour it checks breaks.
+  const SLOW = 30_000
+
   test("returns stdout and passes arguments", async () => {
     const bin = fakeBin('printf \'{"args":"%s"}\' "$*"')
-    expect(await herdrRunner(bin)(["agent", "list"], 3000)).toBe('{"args":"agent list"}')
-  })
+    expect(await herdrRunner(bin)(["agent", "list"], 20_000)).toBe('{"args":"agent list"}')
+  }, SLOW)
 
   test("answers when herdr exits even if a background process it started keeps stdout open", async () => {
-    const bin = fakeBin('(sleep 3 &) ; printf \'{"ok":true}\'')
-    const started = Date.now()
-    expect(await herdrRunner(bin)(["agent", "list"], 2500)).toBe('{"ok":true}')
-    expect(Date.now() - started).toBeLessThan(1500)
-  })
+    // The background sleep outlives the runner's timeout: waiting for the pipe to close would time out.
+    const bin = fakeBin('(sleep 60 &) ; printf \'{"ok":true}\'')
+    expect(await herdrRunner(bin)(["agent", "list"], 20_000)).toBe('{"ok":true}')
+  }, SLOW)
 
   test("non-zero exit, timeout and a missing executable reject", async () => {
-    await expect(herdrRunner(fakeBin("echo boom >&2; exit 3"))(["x"], 3000)).rejects.toThrow(/boom|3/)
+    await expect(herdrRunner(fakeBin("echo boom >&2; exit 3"))(["x"], 20_000)).rejects.toThrow(/boom|3/)
     const started = Date.now()
-    await expect(herdrRunner(fakeBin("sleep 5"))(["x"], 100)).rejects.toThrow(/timed out/)
-    expect(Date.now() - started).toBeLessThan(2000)
-    await expect(herdrRunner("/nonexistent/herdr")(["x"], 1000)).rejects.toThrow()
-  })
+    await expect(herdrRunner(fakeBin("sleep 60"))(["x"], 100)).rejects.toThrow(/timed out/)
+    // Far below the script's 60 s: the runner gave up at its own timeout.
+    expect(Date.now() - started).toBeLessThan(15_000)
+    await expect(herdrRunner("/nonexistent/herdr")(["x"], 20_000)).rejects.toThrow()
+  }, SLOW)
 })
