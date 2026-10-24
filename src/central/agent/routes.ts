@@ -9,6 +9,7 @@
 import type { DeviceRecord, Store, UserRecord } from "../store"
 import type { Directory } from "./directory"
 import { directoryRoutes } from "./directory-routes"
+import { readRoutes, type ReadRegistry, type SpokeRequester } from "./read-routes"
 import { agentAllows, type AgentActor, type AgentAllow, type BearerVerifier, type Credential, type Resolver } from "./actor"
 import { appTokenRoutes, appTokenVerifier } from "./app-tokens"
 import type { SessionTokens } from "./session-tokens"
@@ -45,6 +46,13 @@ export interface AgentDeps {
   readonly sessionTokens?: SessionTokens
   /** Names, roles and address resolution (P1-T8); its routes are added when given. */
   readonly directory?: Directory
+  /** The hub's catalog (P1-T9): the read routes are added when given with the directory. */
+  readonly registry?: ReadRegistry
+  /** Hub → spoke requests (show, log). */
+  readonly spokes?: SpokeRequester
+  /** Heartbeat of GET /api/agent/watch. */
+  readonly heartbeatMs?: number
+  readonly now?: () => number
 }
 
 /**
@@ -66,6 +74,7 @@ const userView = (user: UserRecord) => ({
 export function agentRoutes(deps: AgentDeps): AgentRoute[] {
   return [
     ...(deps.directory ? directoryRoutes(deps.directory) : []),
+    ...(deps.directory && deps.registry ? readRoutes({ store: deps.store, directory: deps.directory, registry: deps.registry, ...(deps.spokes ? { spokes: deps.spokes } : {}), ...(deps.heartbeatMs !== undefined ? { heartbeatMs: deps.heartbeatMs } : {}), ...(deps.now ? { now: deps.now } : {}) }) : []),
     {
       method: "GET",
       path: `${AGENT_PREFIX}/whoami`,

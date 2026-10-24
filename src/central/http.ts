@@ -484,7 +484,7 @@ export function startCentral(options: CentralOptions): Central {
   }
 
   // One credential resolver for every /api request: device cookie, device token, session and app tokens.
-  const agentDeps = { store, sessionTokens, directory: hubDirectory({ registry, store, now }) }
+  const agentDeps = { store, sessionTokens, directory: hubDirectory({ registry, store, now }), registry, spokes, heartbeatMs, now }
   const resolveActor = createResolver({
     cookieName: COOKIE,
     findDevice: (token) => store.findDevice(token),
