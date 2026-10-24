@@ -125,3 +125,34 @@ describe("GET /api/agent/status", () => {
     expect((await json(denied)).error.code).toBe("forbidden")
   })
 })
+
+describe("GET /api/agent/sessions", () => {
+  const ids = async (query: string) => (await json(await h.api(`/api/agent/sessions${query}`))).sessions.map((s: any) => s.id)
+
+  test("lists the user's sessions flat, with machine and project", async () => {
+    const { machine } = await start()
+    const { sessions } = await json(await h.api("/api/agent/sessions"))
+    expect(sessions.map((s: any) => [s.id, s.machineID, s.project])).toEqual([
+      ["ses_1", machine.id, "hub"],
+      ["ses_3", machine.id, "hub"],
+      ["ses_2", machine.id, "web"],
+    ])
+    expect(sessions[0]).toMatchObject({ name: "@api-refactor", state: "blocked", harness: "opencode", labels: {} })
+  })
+
+  test("filters by project, state, machine and label", async () => {
+    const { machine } = await start()
+    expect(await ids("?project=web")).toEqual(["ses_2"])
+    expect(await ids("?project=/u/hub")).toEqual(["ses_1", "ses_3"])
+    expect(await ids("?state=blocked")).toEqual(["ses_1"])
+    expect(await ids("?state=working,blocked")).toEqual(["ses_1", "ses_2"])
+    expect(await ids(`?machine=${machine.id}`)).toEqual(["ses_1", "ses_3", "ses_2"])
+    expect(await ids("?machine=laptop")).toEqual(["ses_1", "ses_3", "ses_2"])
+    expect(await ids("?machine=elsewhere")).toEqual([])
+    expect(await ids("?label=team=api")).toEqual([])
+    const bad = await h.api("/api/agent/sessions?label=nope")
+    expect(bad.status).toBe(400)
+    expect((await json(bad)).error.code).toBe("invalid")
+    expect((await h.api("/api/agent/sessions?state=sleeping")).status).toBe(400)
+  })
+})

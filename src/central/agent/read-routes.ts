@@ -9,6 +9,7 @@ import type { CatalogMachine, CatalogSession, LiveStatus, NowActivity } from "..
 import type { Store } from "../store"
 import type { Directory, DirectoryEntry, RoleView } from "./directory"
 import type { AgentActor } from "./actor"
+import { AgentError } from "./errors"
 import { AGENT_PREFIX, type AgentRoute } from "./routes"
 
 /** What the read routes need from the Registry. */
@@ -162,6 +163,29 @@ export function snapshot(deps: ReadDeps, userID: string, actor: AgentActor) {
   return { at: (deps.now ?? Date.now)(), you: you(actor, entries), machines, attention: attention(list, entries) }
 }
 
+const STATES = new Set(["idle", "working", "blocked", "error"])
+
+/** The /sessions filters: project (name or root), state (comma list), machine (ID or name), label k=v. */
+function sessionFilter(deps: ReadDeps, userID: string, params: URLSearchParams): (row: Row, view: AgentSessionView) => boolean {
+  const project = params.get("project") || undefined
+  const states = params.get("state")?.split(",").filter(Boolean)
+  if (states?.some((state) => !STATES.has(state))) throw new AgentError("invalid", "state must be idle, working, blocked or error (comma-separated)")
+  const machine = params.get("machine") || undefined
+  const machineIDs = machine && new Set(deps.store.machines().filter((m) => m.ownerID === userID && (m.id === machine || m.name === machine)).map((m) => m.id))
+  const labels = params.getAll("label").map((label) => {
+    const at = label.indexOf("=")
+    if (at < 1) throw new AgentError("invalid", "label must be key=value")
+    return [label.slice(0, at), label.slice(at + 1)] as const
+  })
+  return (row, view) => {
+    const { root, name } = projectOf(row.session)
+    if (project !== undefined && root !== project && name.toLowerCase() !== project.toLowerCase()) return false
+    if (states?.length && !states.includes(view.state)) return false
+    if (machineIDs && !machineIDs.has(row.machineID)) return false
+    return labels.every(([key, value]) => view.labels[key] === value)
+  }
+}
+
 const NO_STORE = { "cache-control": "no-store" }
 const ok = (body: unknown) => Response.json(body, { headers: NO_STORE })
 const READ = { session: true, scope: "sessions:read" } as const
@@ -178,9 +202,14 @@ export function readRoutes(deps: ReadDeps): AgentRoute[] {
       method: "GET",
       path: `${AGENT_PREFIX}/sessions`,
       allow: READ,
-      handle: ({ user }) => {
+      handle: ({ user, url }) => {
+        const keep = sessionFilter(deps, user.id, url.searchParams)
         const entries = directoryOf(deps.directory, user.id)
-        return ok({ sessions: rows(deps.registry, user.id).map((row) => ({ ...view(row, entries.get(row.session.id)), machineID: row.machineID, project: projectOf(row.session).name })) })
+        const sessions = rows(deps.registry, user.id)
+          .map((row) => ({ row, view: view(row, entries.get(row.session.id)) }))
+          .filter(({ row, view }) => keep(row, view))
+          .map(({ row, view }) => ({ ...view, machineID: row.machineID, project: projectOf(row.session).name }))
+        return ok({ sessions })
       },
     },
   ]
