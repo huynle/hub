@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { centralConfig } from "../src/central/config"
-import { hashToken, MODEL_PREFS_LIMIT, newToken, READS_LIMIT, Store } from "../src/central/store"
+import { hashToken, LOCAL_USER, MODEL_PREFS_LIMIT, newToken, READS_LIMIT, Store } from "../src/central/store"
 
 const tmp = () => mkdtempSync(path.join(tmpdir(), "voice-store-"))
 
@@ -231,5 +231,169 @@ describe("Store state directory permissions", () => {
     Store.open(dir, Date.now, { warn: (m) => warnings.push(m) })
     expect(warnings).toEqual([])
     expect(statSync(dir).mode & 0o777).toBe(0o700)
+  })
+})
+
+describe("Store agent data and token epochs", () => {
+  const stateFile = (dir: string) => path.join(dir, "state.json")
+  const readState = (dir: string) => JSON.parse(readFileSync(stateFile(dir), "utf8"))
+  const writeState = (dir: string, state: unknown) => writeFileSync(stateFile(dir), JSON.stringify(state), { mode: 0o600 })
+  /** A state.json as written by 0.6 (no agent data, no epochs). */
+  const oldState = () => ({
+    machines: [{ id: "mch_1", name: "box", tokenHash: hashToken("m"), created: 1, lastSeen: 1, ownerID: "u1" }],
+    devices: [],
+    push: [],
+    users: [
+      { id: LOCAL_USER, role: "admin", created: 1, lastSeen: 1 },
+      { id: "u1", email: "a@example.test", role: "user", created: 1, lastSeen: 1 },
+    ],
+    audit: [],
+  })
+
+  test("an old state file loads unchanged: no agent data, epochs default to 0 lazily", () => {
+    const dir = tmp()
+    writeState(dir, oldState())
+    const store = Store.open(dir)
+    expect(store.agentData("u1")).toEqual({})
+    expect(store.userEpoch("u1")).toBe(0)
+    expect(store.machineEpoch("mch_1")).toBe(0)
+    expect(store.userEpoch("missing")).toBe(0)
+    expect(readState(dir)).toEqual(oldState())
+  })
+
+  test("migrate normalises agent data and epochs, keeps unknown inner fields, and is idempotent", () => {
+    const dir = tmp()
+    const state = oldState() as any
+    state.users[1].agent = {
+      future: { kept: true },
+      names: [
+        { name: "api", sessionID: "ses_1", extra: 1 },
+        { name: "api", sessionID: "ses_dup" },
+        { name: 5, sessionID: "ses_2" },
+        "junk",
+        { name: "web", sessionID: "ses_3" },
+      ],
+      roles: [{ role: "reviewer", sessionID: "ses_1" }, { role: "reviewer", sessionID: "ses_1" }, { role: "x" }],
+      sessions: "not a list",
+      appTokens: [{ id: "tok_1", tokenHash: "h1", label: "ci", scopes: ["sessions:read"] }, { id: "tok_2" }],
+    }
+    state.users[1].tokenEpoch = 3
+    state.users[0].tokenEpoch = -1
+    state.users.push({ id: "u2", role: "user", created: 1, lastSeen: 1, agent: "bad", tokenEpoch: "7" })
+    state.machines[0].tokenEpoch = 2.5
+    writeState(dir, state)
+    const store = Store.open(dir)
+    expect(store.agentData("u1")).toEqual({
+      future: { kept: true },
+      names: [
+        { name: "api", sessionID: "ses_1", extra: 1 },
+        { name: "web", sessionID: "ses_3" },
+      ],
+      roles: [{ role: "reviewer", sessionID: "ses_1" }],
+      appTokens: [{ id: "tok_1", tokenHash: "h1", label: "ci", scopes: ["sessions:read"] }],
+    })
+    expect(store.userEpoch("u1")).toBe(3)
+    expect(store.userEpoch(LOCAL_USER)).toBe(0)
+    expect(store.agentData("u2")).toEqual({})
+    expect(store.userEpoch("u2")).toBe(0)
+    expect(store.machineEpoch("mch_1")).toBe(0)
+    const first = readFileSync(stateFile(dir), "utf8")
+    Store.open(dir)
+    expect(readFileSync(stateFile(dir), "utf8")).toBe(first)
+    const raw = readState(dir)
+    expect("agent" in raw.users[2]).toBe(false)
+    expect("tokenEpoch" in raw.users[2]).toBe(false)
+    expect("tokenEpoch" in raw.machines[0]).toBe(false)
+  })
+
+  test("agentData returns a copy; updateAgentData normalises, persists and saves only on real change", () => {
+    const dir = tmp()
+    const store = Store.open(dir)
+    const alice = store.upsertUser({ email: "alice@example.test", role: "user" })
+    const copy = store.agentData(alice.id)
+    copy.names = [{ name: "x", sessionID: "ses_x" }]
+    expect(store.agentData(alice.id)).toEqual({})
+
+    const next = store.updateAgentData(alice.id, (data) => {
+      data.names = [{ name: "api", sessionID: "ses_1" }, { name: "api", sessionID: "ses_2" }]
+      data.sessions = [{ sessionID: "ses_1", machineID: "mch_1" }]
+    })
+    expect(next).toEqual({ names: [{ name: "api", sessionID: "ses_1" }], sessions: [{ sessionID: "ses_1", machineID: "mch_1" }] })
+    expect(Store.open(dir).agentData(alice.id)).toEqual(next!)
+
+    const inode = statSync(stateFile(dir)).ino
+    expect(store.updateAgentData(alice.id, () => {})).toEqual(next!)
+    expect(store.updateAgentData(alice.id, (data) => ({ ...data }))).toEqual(next!)
+    expect(statSync(stateFile(dir)).ino).toBe(inode)
+
+    store.updateAgentData(alice.id, (data) => {
+      data.roles = [{ role: "reviewer", sessionID: "ses_1" }]
+    })
+    expect(statSync(stateFile(dir)).ino).not.toBe(inode)
+    expect(Store.open(dir).agentData(alice.id).roles).toEqual([{ role: "reviewer", sessionID: "ses_1" }])
+    expect(store.updateAgentData("missing", () => ({ names: [] }))).toBeUndefined()
+  })
+
+  test("epoch bumps persist", () => {
+    const dir = tmp()
+    const store = Store.open(dir)
+    const alice = store.upsertUser({ email: "alice@example.test", role: "user" })
+    const { machine } = store.addMachine("box", alice.id)
+    expect(store.bumpUserEpoch(alice.id)).toBe(1)
+    expect(store.bumpUserEpoch(alice.id)).toBe(2)
+    expect(store.bumpMachineEpoch(machine.id)).toBe(1)
+    expect(store.bumpUserEpoch("missing")).toBeUndefined()
+    expect(store.bumpMachineEpoch("missing")).toBeUndefined()
+    const again = Store.open(dir)
+    expect(again.userEpoch(alice.id)).toBe(2)
+    expect(again.machineEpoch(machine.id)).toBe(1)
+  })
+
+  test("migrateLocal moves the local user's agent data to the admin (no duplicates) and bumps epochs", () => {
+    const dir = tmp()
+    const store = Store.open(dir)
+    const own = store.addMachine("own").machine
+    const admin = store.upsertUser({ email: "admin@example.test", role: "admin" })
+    const adminMachine = store.addMachine("admin box", admin.id).machine
+    store.updateAgentData(LOCAL_USER, () => ({
+      names: [{ name: "api", sessionID: "ses_1" }, { name: "web", sessionID: "ses_2" }],
+      appTokens: [{ id: "tok_1", tokenHash: "h1" }],
+      future: { a: 1 },
+    }))
+    store.updateAgentData(admin.id, () => ({ names: [{ name: "api", sessionID: "ses_1" }], roles: [{ role: "lead", sessionID: "ses_9" }] }))
+    expect(store.migrateLocal(admin.id)).toBe(true)
+    const expected = {
+      names: [{ name: "api", sessionID: "ses_1" }, { name: "web", sessionID: "ses_2" }],
+      roles: [{ role: "lead", sessionID: "ses_9" }],
+      appTokens: [{ id: "tok_1", tokenHash: "h1" }],
+      future: { a: 1 },
+    }
+    expect(store.agentData(admin.id)).toEqual(expected)
+    expect(store.agentData(LOCAL_USER)).toEqual({})
+    expect(store.userEpoch(LOCAL_USER)).toBe(1)
+    expect(store.machineEpoch(own.id)).toBe(1)
+    expect(store.machineEpoch(adminMachine.id)).toBe(0)
+    const again = Store.open(dir)
+    expect(again.agentData(admin.id)).toEqual(expected)
+    expect(again.userEpoch(LOCAL_USER)).toBe(1)
+    expect(again.machineEpoch(own.id)).toBe(1)
+  })
+
+  test("downgrade: an older hub keeping only known top-level keys keeps user.agent and epochs", () => {
+    const dir = tmp()
+    const store = Store.open(dir)
+    const alice = store.upsertUser({ email: "alice@example.test", role: "user" })
+    const { machine } = store.addMachine("box", alice.id)
+    store.updateAgentData(alice.id, () => ({ names: [{ name: "api", sessionID: "ses_1" }] }))
+    store.bumpUserEpoch(alice.id)
+    store.bumpMachineEpoch(machine.id)
+    // What 0.6's Store.open does: keep only the known top-level keys, persist users/machines as-is, save.
+    const raw = readState(dir)
+    const known = ["machines", "devices", "vapid", "push", "speech", "users", "audit"]
+    writeState(dir, Object.fromEntries(Object.entries({ ...raw, unknownTop: 1 }).filter(([key]) => known.includes(key))))
+    const again = Store.open(dir)
+    expect(again.agentData(alice.id)).toEqual({ names: [{ name: "api", sessionID: "ses_1" }] })
+    expect(again.userEpoch(alice.id)).toBe(1)
+    expect(again.machineEpoch(machine.id)).toBe(1)
   })
 })

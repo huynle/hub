@@ -5,6 +5,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
 import { accessSync, chmodSync, constants as fsConstants, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import path from "node:path"
+import { type AgentData, mergeAgentData, normaliseAgentData, validEpoch } from "./agent-data"
 import type { StoredSpeech } from "./speech/settings"
 import type { ModelSelection, SessionModelPrefs } from "../protocol"
 
@@ -41,6 +42,10 @@ export interface UserRecord {
   reads?: Record<string, number>
   /** Sessions whose notifications the user muted, oldest first. */
   mutedSessions?: string[]
+  /** Agent control plane data (names, roles, sessions, app tokens); see agent-data.ts. */
+  agent?: AgentData
+  /** Bumped to invalidate every session token minted for this user (absent = 0). */
+  tokenEpoch?: number
 }
 
 /** Workspace keys are the phone's group keys: `herdr:<workspaceID>` or a folder path. */
@@ -70,6 +75,8 @@ export interface MachineRecord {
   lastSeen: number
   revoked?: boolean
   ownerID: string
+  /** Bumped to invalidate every session token minted for this machine (absent = 0). */
+  tokenEpoch?: number
 }
 
 /**
@@ -590,10 +597,68 @@ export class Store {
   migrateLocal(adminID: string): boolean {
     const local = this.user(LOCAL_USER)
     if (!local || local.disabled || adminID === LOCAL_USER) return false
-    for (const record of [...this.state.machines, ...this.state.devices]) if (record.ownerID === LOCAL_USER) record.ownerID = adminID
+    for (const machine of this.state.machines) {
+      if (machine.ownerID !== LOCAL_USER) continue
+      machine.ownerID = adminID
+      machine.tokenEpoch = (machine.tokenEpoch ?? 0) + 1
+    }
+    for (const device of this.state.devices) if (device.ownerID === LOCAL_USER) device.ownerID = adminID
+    const admin = this.user(adminID)
+    if (local.agent && admin) admin.agent = mergeAgentData(admin.agent ?? {}, local.agent)
+    delete local.agent
+    local.tokenEpoch = (local.tokenEpoch ?? 0) + 1
     local.disabled = true
     this.audit({ actor: "system", action: "migrate.local", target: adminID })
     return true
+  }
+
+  // ---------- agent data and token epochs ----------
+
+  /** A copy of the user's agent data ({} when none). */
+  agentData(userID: string): AgentData {
+    return structuredClone(this.user(userID)?.agent ?? {})
+  }
+
+  /**
+   * Changes a user's agent data: `change` edits a copy in place or returns a replacement; the result is
+   * normalised and saved only when it differs. Undefined for an unknown user.
+   */
+  updateAgentData(userID: string, change: (data: AgentData) => AgentData | void): AgentData | undefined {
+    const user = this.user(userID)
+    if (!user) return undefined
+    const draft = this.agentData(userID)
+    const next = normaliseAgentData(change(draft) ?? draft) ?? {}
+    if (JSON.stringify(next) !== JSON.stringify(user.agent ?? {})) {
+      if (Object.keys(next).length) user.agent = next
+      else delete user.agent
+      this.save()
+    }
+    return this.agentData(userID)
+  }
+
+  userEpoch(userID: string): number {
+    return this.user(userID)?.tokenEpoch ?? 0
+  }
+
+  machineEpoch(machineID: string): number {
+    return this.state.machines.find((m) => m.id === machineID)?.tokenEpoch ?? 0
+  }
+
+  /** Invalidates the user's session tokens; returns the new epoch (undefined for an unknown user). */
+  bumpUserEpoch(userID: string): number | undefined {
+    return this.bumpEpoch(this.user(userID))
+  }
+
+  /** Invalidates the machine's session tokens; returns the new epoch (undefined for an unknown machine). */
+  bumpMachineEpoch(machineID: string): number | undefined {
+    return this.bumpEpoch(this.state.machines.find((m) => m.id === machineID))
+  }
+
+  private bumpEpoch(record: { tokenEpoch?: number } | undefined): number | undefined {
+    if (!record) return undefined
+    record.tokenEpoch = (record.tokenEpoch ?? 0) + 1
+    this.save()
+    return record.tokenEpoch
   }
 
   // ---------- audit ----------
@@ -707,7 +772,10 @@ export class Store {
   }
 }
 
-/** Idempotent upgrade of older states: the local user exists, every machine and device has an owner. */
+/**
+ * Idempotent upgrade of older states: the local user exists, every machine and device has an owner, agent data
+ * and token epochs are valid.
+ */
 function migrate(state: StateData, t: number, options: StoreOptions): void {
   let local = state.users.find((u) => u.id === LOCAL_USER)
   if (!local) {
@@ -721,6 +789,17 @@ function migrate(state: StateData, t: number, options: StoreOptions): void {
   }
   for (const record of [...state.machines, ...state.devices]) {
     if (typeof record.ownerID !== "string" || !record.ownerID) record.ownerID = LOCAL_USER
+  }
+  // Agent data and token epochs are optional: invalid values are normalised or dropped (epochs read as 0).
+  for (const user of state.users) {
+    if ("agent" in user) {
+      const agent = normaliseAgentData(user.agent)
+      if (agent) user.agent = agent
+      else delete user.agent
+    }
+  }
+  for (const record of [...state.users, ...state.machines]) {
+    if ("tokenEpoch" in record && !validEpoch(record.tokenEpoch)) delete record.tokenEpoch
   }
   // 0.5.0 ({handoff, blocked, finished, say}) and 0.7 (finished = every turn) push prefs → the current toggles.
   for (const device of state.devices) {
