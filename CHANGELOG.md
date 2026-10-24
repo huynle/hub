@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Link native apps**: Settings → Devices → **Add app** shows a QR code and a `hubapp://link?hub=…&code=…`
+  link with a 5-minute countdown; the list updates once the app has linked. `POST /api/devices/link` issues
+  the single-use 256-bit link code (not valid at `/login` or `/api/pair`); `POST /api/devices/redeem {code,
+  deviceName?, publicKey?}` (public, works without `Origin` when the request carries no credential at all)
+  answers `{device, token}`: a device token for `Authorization: Bearer`, no cookie. An optional device public
+  key is stored for later strong approvals. The console's QR encoder is built in (no new dependency).
 - **Device tokens, agent API framework, discovery**: every `/api` request now resolves its caller through one
   credential resolver. Besides the `voice_device` cookie, the same device secret works as
   `Authorization: Bearer <device token>` (for native apps and CLIs) with the same powers and without the
