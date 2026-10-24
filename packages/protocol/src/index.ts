@@ -258,8 +258,11 @@ export const IMPLIED_OPENCODE_FEATURES = [
   "create",
 ] as const
 
-/** Features a spoke announces in its hello, so the hub can refuse an op an older spoke would ignore. */
-export const SPOKE_FEATURES = [...IMPLIED_OPENCODE_FEATURES, "autoName"] as const
+/**
+ * Features a spoke announces in its hello, so the hub can refuse an op an older spoke would ignore.
+ * "sessionTokens": the spoke stores the session tokens the hub sends (sessionTokens op) for its sessions' shells.
+ */
+export const SPOKE_FEATURES = [...IMPLIED_OPENCODE_FEATURES, "autoName", "sessionTokens"] as const
 export type SpokeFeature = (typeof SPOKE_FEATURES)[number]
 
 /** Features the hub announces in its welcome. "harness": it reads hello `harness`, `harnessVersion` and `evidence`. */
@@ -314,6 +317,23 @@ export interface PromptImage {
   readonly name?: string
 }
 
+/** A hub-minted session token for one session (design §1.3); `exp` is its expiry in ms since the epoch. */
+export interface SessionToken {
+  readonly sessionID: string
+  readonly token: string
+  readonly exp: number
+}
+
+/** Most tokens one sessionTokens request carries (see batchSessionTokens). */
+export const SESSION_TOKENS_MAX = 500
+/** Longest session token: printable ASCII without whitespace. */
+export const SESSION_TOKEN_MAX_CHARS = 4096
+/** Longest hub URL a sessionTokens request carries. */
+export const HUB_URL_MAX_CHARS = 2048
+
+/** Why a spoke did not store a session token: it does not report the session, or the token has expired. */
+export type SessionTokenSkipReason = "unknown" | "expired"
+
 export type ServerRequest =
   /** `text` may be empty when `images` are attached. */
   | { readonly op: "turn"; readonly sessionID: string; readonly text: string; readonly voiceStyle: boolean; readonly images?: readonly PromptImage[] }
@@ -355,6 +375,12 @@ export type ServerRequest =
    * it in a new tab of that Herdr workspace (`opencode --session <id>` in the directory).
    */
   | { readonly op: "create"; readonly directory: string; readonly title?: string; readonly herdrWorkspace?: string }
+  /**
+   * Session tokens for sessions the spoke reported (feature "sessionTokens"); each replaces the session's older
+   * one. `hubURL`: the URL the sessions' shells reach the hub at. No session is adopted or exposed by this op.
+   * Send through batchSessionTokens so every frame stays under MAX_FRAME.
+   */
+  | { readonly op: "sessionTokens"; readonly tokens: readonly SessionToken[]; readonly hubURL?: string }
 
 /** The feature a spoke must announce for the hub to send `op`, or undefined for a core op every spoke serves. */
 export function featureForOp(op: ServerRequest["op"]): SpokeFeature | undefined {
@@ -457,6 +483,8 @@ export interface ResultFor {
   timelineFile: { readonly file?: PromptImage; readonly tooLarge?: boolean }
   expose: { readonly exposed: boolean }
   create: { readonly sessionID: string; readonly openedIn?: "herdr" }
+  /** `applied`: sessions whose token the spoke stored; `skipped`: the others, with the reason. */
+  sessionTokens: { readonly applied: readonly string[]; readonly skipped: ReadonlyArray<{ readonly sessionID: string; readonly reason: SessionTokenSkipReason }> }
 }
 
 // ---------- both directions ----------
@@ -499,6 +527,56 @@ const isModelSelection = (v: unknown): v is ModelSelection =>
 
 /** Largest frame (in characters) either side accepts; a larger one is a protocol error. */
 export const MAX_FRAME = 1_000_000
+
+const SESSION_TOKEN_TEXT = new RegExp(`^[\\x21-\\x7e]{1,${SESSION_TOKEN_MAX_CHARS}}$`)
+
+function isSessionToken(v: unknown): v is SessionToken {
+  return isObj(v) && nonEmpty(v.sessionID) && v.sessionID.length <= 300 && str(v.token) && SESSION_TOKEN_TEXT.test(v.token) && num(v.exp)
+}
+
+/** An http(s) URL of at most HUB_URL_MAX_CHARS characters. */
+export function isHubURL(v: unknown): v is string {
+  if (!nonEmpty(v) || v.length > HUB_URL_MAX_CHARS) return false
+  try {
+    const url = new URL(v)
+    return url.protocol === "http:" || url.protocol === "https:"
+  } catch {
+    return false
+  }
+}
+
+/** Characters batchSessionTokens leaves free in a frame for the `{"t":"req","id":…}` envelope around a request. */
+export const SESSION_TOKENS_ENVELOPE_CHARS = 1024
+
+export type SessionTokensRequest = Extract<ServerRequest, { op: "sessionTokens" }>
+
+/**
+ * Splits tokens into sessionTokens requests, in order, of at most SESSION_TOKENS_MAX tokens whose JSON is at most
+ * `maxChars` characters (default: MAX_FRAME less SESSION_TOKENS_ENVELOPE_CHARS). Each request carries `hubURL`.
+ * Throws a RangeError when one token alone does not fit `maxChars`.
+ */
+export function batchSessionTokens(tokens: readonly SessionToken[], options: { readonly hubURL?: string; readonly maxChars?: number } = {}): SessionTokensRequest[] {
+  const maxChars = options.maxChars ?? MAX_FRAME - SESSION_TOKENS_ENVELOPE_CHARS
+  const request = (batch: readonly SessionToken[]): SessionTokensRequest => ({ op: "sessionTokens", tokens: batch, ...(options.hubURL !== undefined ? { hubURL: options.hubURL } : {}) })
+  const empty = JSON.stringify(request([])).length
+  const out: SessionTokensRequest[] = []
+  let batch: SessionToken[] = []
+  let size = empty
+  for (const { sessionID, token, exp } of tokens) {
+    const entry = { sessionID, token, exp }
+    const chars = JSON.stringify(entry).length
+    if (empty + chars > maxChars) throw new RangeError(`A session token for ${sessionID} does not fit in ${maxChars} characters`)
+    if (batch.length > 0 && (batch.length >= SESSION_TOKENS_MAX || size + 1 + chars > maxChars)) {
+      out.push(request(batch))
+      batch = []
+      size = empty
+    }
+    size += chars + (batch.length > 0 ? 1 : 0)
+    batch.push(entry)
+  }
+  if (batch.length > 0) out.push(request(batch))
+  return out
+}
 
 function isSession(v: unknown): v is SessionInfo {
   return (
@@ -663,6 +741,8 @@ function isServerRequest(v: unknown): v is ServerRequest {
         (v.title === undefined || (str(v.title) && v.title.length <= 200)) &&
         (v.herdrWorkspace === undefined || (nonEmpty(v.herdrWorkspace) && v.herdrWorkspace.length <= 100))
       )
+    case "sessionTokens":
+      return Array.isArray(v.tokens) && v.tokens.length <= SESSION_TOKENS_MAX && v.tokens.every(isSessionToken) && (v.hubURL === undefined || isHubURL(v.hubURL))
     default:
       return false
   }

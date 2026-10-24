@@ -1412,3 +1412,106 @@ describe("running detection: forwarding and seeding", () => {
     await until(() => forwarded(server).some((e) => e.type === "session.seed" && e.data.status.type === "idle"), 3000)
   })
 })
+
+describe("session tokens", () => {
+  const later = () => Date.now() + 60_000
+
+  test("stores tokens for sessions this process reports; unknown and expired ones are skipped, nothing is adopted", async () => {
+    const { spoke, server, host, calls, parents } = setup({ mode: "session", sessions: ["ses_a"], token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    host.push(created("ses_b"))
+    await until(() => lastSessions(server)?.sessions.length === 2)
+    // OpenCode would let the spoke adopt ses_kid (it descends from ses_a), but tokens never adopt sessions.
+    parents.set("ses_kid", "ses_a")
+    const getsBefore = calls.get.length
+    const res = await server.request({
+      op: "sessionTokens",
+      tokens: [
+        { sessionID: "ses_a", token: "hst.a", exp: later() },
+        { sessionID: "ses_b", token: "hst.b", exp: later() },
+        { sessionID: "ses_kid", token: "hst.kid", exp: later() },
+        { sessionID: "ses_a", token: "hst.a2", exp: later() },
+        { sessionID: "ses_b", token: "hst.old", exp: Date.now() - 1 },
+      ],
+      hubURL: "https://hub.example",
+    })
+    expect(res).toMatchObject({
+      ok: true,
+      result: {
+        applied: ["ses_a", "ses_b", "ses_a"],
+        skipped: [
+          { sessionID: "ses_kid", reason: "unknown" },
+          { sessionID: "ses_b", reason: "expired" },
+        ],
+      },
+    })
+    expect(calls.get.length).toBe(getsBefore)
+    expect(spoke.sessionToken("ses_a")).toBe("hst.a2")
+    expect(spoke.sessionToken("ses_b")).toBe("hst.b")
+    expect(spoke.sessionToken("ses_kid")).toBeUndefined()
+    expect(spoke.hubURL).toBe("https://hub.example")
+    expect(lastSessions(server)?.sessions.map((s) => s.id).sort()).toEqual(["ses_a", "ses_b"])
+  })
+
+  test("in mode always, a session the spoke has not reported is still unknown", async () => {
+    const { spoke, server } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    const res = await server.request({ op: "sessionTokens", tokens: [{ sessionID: "ses_ghost", token: "hst.g", exp: later() }] })
+    expect(res).toMatchObject({ ok: true, result: { applied: [], skipped: [{ sessionID: "ses_ghost", reason: "unknown" }] } })
+    expect(spoke.sessionToken("ses_ghost")).toBeUndefined()
+    expect(spoke.hubURL).toBeUndefined()
+  })
+
+  test("a newer token replaces the older one; a frame without hubURL keeps the URL; expired tokens are gone", async () => {
+    const { spoke, server, host } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    await until(() => lastSessions(server)?.sessions.length === 1)
+    await server.request({ op: "sessionTokens", tokens: [{ sessionID: "ses_a", token: "hst.1", exp: later() }], hubURL: "http://127.0.0.1:4317" })
+    const soon = Date.now() + 80
+    await server.request({ op: "sessionTokens", tokens: [{ sessionID: "ses_a", token: "hst.2", exp: soon }] })
+    expect(spoke.sessionToken("ses_a")).toBe("hst.2")
+    expect(spoke.hubURL).toBe("http://127.0.0.1:4317")
+    await Bun.sleep(Math.max(0, soon - Date.now()) + 5)
+    expect(spoke.sessionToken("ses_a")).toBeUndefined()
+  })
+
+  test("tokens are forgotten when the connection changes (mode, server or machine token)", async () => {
+    const { spoke, server, host } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    await until(() => lastSessions(server)?.sessions.length === 1)
+    await server.request({ op: "sessionTokens", tokens: [{ sessionID: "ses_a", token: "hst.1", exp: later() }], hubURL: "https://hub.example" })
+    expect(spoke.sessionToken("ses_a")).toBe("hst.1")
+    spoke.setMode("off")
+    await until(() => spoke.status().connection === "off")
+    expect(spoke.sessionToken("ses_a")).toBeUndefined()
+    expect(spoke.hubURL).toBeUndefined()
+  })
+
+  test("tokens never reach the console", async () => {
+    const { spoke, server, host } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    await until(() => lastSessions(server)?.sessions.length === 1)
+    const lines: string[] = []
+    const original = { log: console.log, error: console.error, warn: console.warn, info: console.info, debug: console.debug }
+    for (const name of Object.keys(original) as Array<keyof typeof original>) console[name] = (...args: unknown[]) => void lines.push(args.map((a) => Bun.inspect(a)).join(" "))
+    try {
+      await server.request({
+        op: "sessionTokens",
+        tokens: [
+          { sessionID: "ses_a", token: "SECRET-A", exp: later() },
+          { sessionID: "ses_x", token: "SECRET-X", exp: later() },
+          { sessionID: "ses_a", token: "SECRET-OLD", exp: 1 },
+        ],
+      })
+    } finally {
+      Object.assign(console, original)
+    }
+    expect(lines.join("\n")).not.toContain("SECRET")
+    expect(Bun.inspect(spoke)).not.toContain("SECRET")
+    expect(spoke.sessionToken("ses_a")).toBe("SECRET-A")
+  })
+})
