@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { TURN_GRACE_MS } from "../src/central/spoke-ws"
-import { PROTOCOL_VERSION } from "../src/protocol"
+import { HUB_FEATURES, PROTOCOL_VERSION } from "../src/protocol"
 import { connect, harness, hello, PUBLIC, session, spoke, sse, waitFor, type Harness } from "./central-harness"
 
 let h: Harness
@@ -68,18 +68,20 @@ describe("spoke authentication", () => {
     await client.closed
   })
 
-  test("welcome carries machine ID and public URL; catalog shows reported sessions", async () => {
+  test("welcome carries machine ID, public URL and the hub's features; catalog shows reported sessions", async () => {
     h = harness()
     const { machine, token } = h.store.addMachine("laptop")
     const client = await connect(h, token)
     client.send(hello("p1"))
-    expect(await client.next()).toEqual({ t: "welcome", v: PROTOCOL_VERSION, machineID: machine.id, publicURL: PUBLIC })
+    expect(await client.next()).toEqual({ t: "welcome", v: PROTOCOL_VERSION, machineID: machine.id, publicURL: PUBLIC, features: [...HUB_FEATURES] })
     client.send({ t: "sessions", sessions: [session("ses_1", { owned: true })] })
     await waitFor(() => h.registry.hasSession("ses_1"))
     const body = (await (await h.api("/api/machines")).json()) as any
     const laptop = body.machines.find((m: any) => m.id === machine.id)
     expect(laptop).toMatchObject({ name: "laptop", online: true })
     expect(laptop.processes[0].sessions[0]).toMatchObject({ id: "ses_1", owned: true, busy: false })
+    // An old hello (no harness) is listed as OpenCode, with its version under both names.
+    expect(laptop.processes[0]).toMatchObject({ harness: "opencode", harnessVersion: "2.0.0", evidence: "native", opencodeVersion: "2.0.0" })
   })
 
   test("stale sockets are dropped by the heartbeat", async () => {

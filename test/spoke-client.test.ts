@@ -127,6 +127,26 @@ describe("SpokeConnection", () => {
     expect(states).toEqual(["connecting", "connected"])
   })
 
+  test("remembers the features the hub's welcome lists; an old hub's welcome lists none", async () => {
+    const fake = fakeServer({ welcome: false })
+    const conn = connect(fake.url)
+    await until(() => fake.frames.length === 1)
+    expect(conn.hubSupports("harness")).toBe(false)
+    fake.send({ t: "welcome", v: 1, machineID: "m", publicURL: "https://x", features: ["harness", "future"] })
+    await until(() => conn.state === "connected")
+    expect(conn.hubSupports("harness")).toBe(true)
+    expect(conn.hubSupports("future")).toBe(true)
+    expect(conn.hubSupports("other")).toBe(false)
+    // Reconnected to an older hub: its features are forgotten as soon as the socket closes.
+    fake.sockets[0]!.close(1001, "restart")
+    await until(() => conn.state !== "connected")
+    expect(conn.hubSupports("harness")).toBe(false)
+    await until(() => fake.frames.filter((f) => f.t === "hello").length === 2)
+    fake.send({ t: "welcome", v: 1, machineID: "m", publicURL: "https://x" })
+    await until(() => conn.state === "connected")
+    expect(conn.hubSupports("harness")).toBe(false)
+  })
+
   test("send() only delivers after welcome", async () => {
     const fake = fakeServer({ welcome: false })
     const conn = connect(fake.url)

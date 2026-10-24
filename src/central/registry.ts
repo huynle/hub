@@ -3,7 +3,7 @@
 // a per-session turn lock, permission routing back to the process that asked, and conversation mode
 // (which sessions speak their replies on the phone).
 import path from "node:path"
-import type { ForwardedEvent, Hello, HerdrWorkspace, ProcessKind, SessionInfo, SpokeFeature, SpokeMode, TerminalInfo, Terminals } from "../protocol"
+import { helloHarness, spokeFeatures, type EvidenceLevel, type ForwardedEvent, type Hello, type HerdrWorkspace, type ProcessKind, type SessionInfo, type SpokeFeature, type SpokeMode, type TerminalInfo, type Terminals } from "../protocol"
 import { StatusBoard, type Blocker, type SessionStatus } from "../status"
 import { DoneWatch } from "./done"
 import { SentenceStream } from "./say-stream"
@@ -206,8 +206,13 @@ export interface CatalogProcess {
   readonly directory: string
   readonly pid: number
   readonly mode: SpokeMode
+  /** OpenCode's version as the hello sent it (kept for older consoles; see harnessVersion). */
   readonly opencodeVersion: string
   readonly pluginVersion: string
+  /** Harness id ("opencode" for hellos that predate harness), its version and the declared evidence level. */
+  readonly harness: string
+  readonly harnessVersion: string
+  readonly evidence: EvidenceLevel | "unknown"
   readonly connected: number
   readonly lastSeen: number
   readonly sessions: CatalogSession[]
@@ -229,6 +234,8 @@ interface Conn {
   readonly id: string
   readonly machine: MachineRef
   readonly hello: Hello
+  /** What the process serves: announced features ∪ the implied v1 set for an old OpenCode hello. */
+  readonly features: ReadonlySet<string>
   readonly connected: number
   readonly seq: number
   lastSeen: number
@@ -410,6 +417,7 @@ export class Registry {
       id: connID,
       machine,
       hello,
+      features: spokeFeatures(hello),
       connected: t,
       seq: ++this.seq,
       lastSeen: t,
@@ -926,6 +934,7 @@ export class Registry {
         mode,
         opencodeVersion,
         pluginVersion,
+        ...helloHarness(conn.hello),
         connected: conn.connected,
         lastSeen: conn.lastSeen,
         sessions: this.visible(conn).map((s) => {
@@ -1258,9 +1267,12 @@ export class Registry {
    * 4. else any process that reports it, most recent activity first;
    * 5. else none.
    */
-  /** Whether a connected process announced an optional feature in its hello (older spokes announce none). */
+  /**
+   * Whether a connected process serves an optional feature: it announced it in its hello, or it is an OpenCode
+   * spoke that predates harness and the feature is in IMPLIED_OPENCODE_FEATURES.
+   */
   supports(connID: string, feature: SpokeFeature): boolean {
-    return this.conns.get(connID)?.hello.features?.includes(feature) === true
+    return this.conns.get(connID)?.features.has(feature) === true
   }
 
   owner(sessionID: string): string | undefined {
