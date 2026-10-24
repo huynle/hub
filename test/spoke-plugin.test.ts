@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { defaults, writeConfig } from "../src/config"
@@ -14,6 +14,8 @@ afterEach(async () => {
 function fakeContext(overrides: { hookThrows?: boolean; registerThrows?: boolean; directory?: string; pending?: Record<string, string> } = {}) {
   const queue = new EventQueue<{ type: string; data: Record<string, unknown> }>()
   const hooks: Array<(event: any) => void> = []
+  const toolHooks: Record<string, (event: any) => void> = {}
+  const shellHooks: Record<string, (event: any) => void> = {}
   const transforms: Array<(editor: any) => void> = []
   const tools: Array<{ name: string; description: string; input: unknown; execute: (input: any, context: any) => Promise<any> }> = []
   const interrupts: string[] = []
@@ -64,6 +66,16 @@ function fakeContext(overrides: { hookThrows?: boolean; registerThrows?: boolean
         fn({ add: (tool: (typeof tools)[number]) => tools.push(tool) })
         return { dispose: async () => {} }
       },
+      hook: async (name: string, fn: (event: any) => void) => {
+        toolHooks[name] = fn
+        return { dispose: async () => {} }
+      },
+    },
+    shell: {
+      hook: async (name: string, fn: (event: any) => void) => {
+        shellHooks[name] = fn
+        return { dispose: async () => {} }
+      },
     },
     // Location-scoped like OpenCode's: only requests pending in this instance's location are found.
     permission: {
@@ -87,7 +99,7 @@ function fakeContext(overrides: { hookThrows?: boolean; registerThrows?: boolean
     },
   }
   const rpc = { signal: new AbortController().signal, error: (type: string, message: string, data: unknown) => ({ type, message, data }) }
-  return { ctx, hooks, transforms, tools, interrupts, switches, rpc, registered, replies, queue, call: (name: string, input: unknown = {}) => handlers![name]!(input, rpc) }
+  return { ctx, hooks, toolHooks, shellHooks, transforms, tools, interrupts, switches, rpc, registered, replies, queue, call: (name: string, input: unknown = {}) => handlers![name]!(input, rpc) }
 }
 
 function tempConfig(config: Partial<ReturnType<typeof defaults>>) {
@@ -346,5 +358,93 @@ describe("plugin setup", () => {
     cleanups.push((await plugin.setup(fake.ctx as any)) as () => void)
     expect(await fake.call("conversation", { sessionID: "ses_b", on: true })).toMatchObject({ type: "invalid" })
     expect(fake.switches).toEqual([])
+  })
+})
+
+describe("session env injection hooks", () => {
+  function tempStateDir() {
+    const dir = mkdtempSync(path.join(tmpdir(), "hub-state-"))
+    const previous = process.env.HUB_STATE_DIR
+    process.env.HUB_STATE_DIR = dir
+    cleanups.push(() => {
+      if (previous === undefined) delete process.env.HUB_STATE_DIR
+      else process.env.HUB_STATE_DIR = previous
+      rmSync(dir, { recursive: true, force: true })
+    })
+    return dir
+  }
+  const shellCall = (sessionID: string, command: string) => ({ tool: "shell", sessionID, agent: "build", messageID: "msg_1", id: `call_${sessionID}`, input: { command } })
+  const invocation = (command: string, env: Record<string, string | undefined>) => ({ command, cwd: "/w", timeout: 0, shell: "/bin/sh", env })
+
+  test("setup strips an inherited HUB_URL/HUB_SESSION_TOKEN from the process and creates the hub bin dir", async () => {
+    tempConfig({ mode: "off" })
+    const state = tempStateDir()
+    const saved = { url: process.env.HUB_URL, token: process.env.HUB_SESSION_TOKEN }
+    cleanups.push(() => {
+      for (const [name, value] of [["HUB_URL", saved.url], ["HUB_SESSION_TOKEN", saved.token]] as const) {
+        if (value === undefined) delete process.env[name]
+        else process.env[name] = value
+      }
+    })
+    process.env.HUB_URL = "http://outer.example"
+    process.env.HUB_SESSION_TOKEN = "outer-token"
+    const fake = fakeContext()
+    cleanups.push((await plugin.setup(fake.ctx as any)) as () => void)
+    expect(process.env.HUB_URL).toBeUndefined()
+    expect(process.env.HUB_SESSION_TOKEN).toBeUndefined()
+    const bin = path.join(state, "bin")
+    expect(existsSync(bin) && statSync(bin).isDirectory()).toBe(true)
+  })
+
+  test("registers tool execute.before/after and shell create.before; an unmatched shell is stripped and gets PATH", async () => {
+    tempConfig({ mode: "off" })
+    const state = tempStateDir()
+    const fake = fakeContext()
+    cleanups.push((await plugin.setup(fake.ctx as any)) as () => void)
+    expect(Object.keys(fake.toolHooks).sort()).toEqual(["execute.after", "execute.before"])
+    expect(Object.keys(fake.shellHooks)).toEqual(["create.before"])
+    const inv = invocation("ls", { HUB_SESSION_TOKEN: "outer", HUB_URL: "http://outer", PATH: "/usr/bin" })
+    fake.shellHooks["create.before"]!(inv)
+    expect(inv.env.HUB_SESSION_TOKEN).toBeUndefined()
+    expect(inv.env.HUB_URL).toBeUndefined()
+    expect(inv.env.PATH).toBe(`${path.join(state, "bin")}${path.delimiter}/usr/bin`)
+  })
+
+  test("a session's shell tool call gets the session's token and the spoke's server as HUB_URL", async () => {
+    const server = fakeCentral()
+    cleanups.push(() => stopServer(server))
+    tempConfig({ server: server.url, mode: "always", token: "tok" })
+    tempStateDir()
+    const fake = fakeContext()
+    cleanups.push((await plugin.setup(fake.ctx as any)) as () => void)
+    await until(() => server.frames.some((f) => f.t === "sessions"))
+    fake.queue.push({ type: "session.created", data: { sessionID: "ses_a", title: "A" } })
+    await until(() => server.frames.some((f) => f.t === "sessions" && (f as any).sessions.some((s: any) => s.id === "ses_a")))
+    const res = await server.request({ op: "sessionTokens", tokens: [{ sessionID: "ses_a", token: "hst.a", exp: Date.now() + 60_000 }] })
+    expect(res).toMatchObject({ ok: true, result: { applied: ["ses_a"] } })
+
+    fake.toolHooks["execute.before"]!(shellCall("ses_a", "hub whoami"))
+    const inv = invocation("hub whoami", { HUB_SESSION_TOKEN: "outer", PATH: "/usr/bin" })
+    fake.shellHooks["create.before"]!(inv)
+    expect(inv.env.HUB_SESSION_TOKEN).toBe("hst.a")
+    expect(inv.env.HUB_URL).toBe(server.url)
+
+    // The same command later without a tool call (e.g. a user ! command) gets no token.
+    const again = invocation("hub whoami", {})
+    fake.shellHooks["create.before"]!(again)
+    expect(again.env.HUB_SESSION_TOKEN).toBeUndefined()
+  })
+
+  test("survives a server without tool/shell hooks", async () => {
+    tempConfig({ mode: "off" })
+    tempStateDir()
+    const fake = fakeContext()
+    delete (fake.ctx as any).shell
+    ;(fake.ctx as any).tool.hook = async () => {
+      throw new Error("no hooks")
+    }
+    const cleanup = await plugin.setup(fake.ctx as any)
+    expect(typeof cleanup).toBe("function")
+    ;(cleanup as () => void)()
   })
 })
