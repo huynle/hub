@@ -134,7 +134,8 @@ export function directoryRoutes(directory: Directory): AgentRoute[] {
     {
       method: "GET",
       path: `${AGENT_PREFIX}/who`,
-      allow: { session: true },
+      // Reading the directory: sessions, and app tokens holding sessions:read; writes stay users and sessions.
+      allow: { session: true, scope: "sessions:read" },
       handle: ({ url, user }) => {
         const project = url.searchParams.get("project") || undefined
         const role = url.searchParams.get("role") || undefined

@@ -58,11 +58,14 @@ describe("GET /api/agent/who", () => {
     expect((await json(await h.api("/api/agent/who?project=elsewhere"))).sessions).toEqual([])
   })
 
-  test("app tokens are refused (forbidden)", async () => {
+  test("app tokens with sessions:read may read who, but never name or claim", async () => {
     await start()
     const res = await bearer("/api/agent/who", APP)
-    expect(res.status).toBe(403)
-    expect((await json(res)).error.code).toBe("forbidden")
+    expect(res.status).toBe(200)
+    expect((await json(res)).sessions.map((s: any) => s.sessionID)).toContain("ses_1")
+    const write = await post("/api/agent/name", { name: "@x", session: "ses_1" }, APP)
+    expect(write.status).toBe(403)
+    expect((await json(write)).error.code).toBe("forbidden")
   })
 })
 
