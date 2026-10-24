@@ -410,6 +410,8 @@ function seedEnrollments() {
 let users = seedUsers()
 let extraMachines = seedMachines()
 let devices = seedDevices()
+/** App link codes (POST /api/devices/link), redeemed by POST /mock/redeem standing in for the native app. */
+let linkCodes = new Map<string, { ownerID: string; expiresAt: number }>()
 let audit = seedAudit()
 let enrollments = seedEnrollments()
 /** Owner of the main fixtures (laptop, desktop): the implicit owner in pairing mode, alice in oidc mode. */
@@ -1172,6 +1174,7 @@ const server = Bun.serve({
       users = seedUsers()
       extraMachines = seedMachines()
       devices = seedDevices()
+      linkCodes = new Map()
       audit = seedAudit()
       enrollments = seedEnrollments()
       userSpeech = new Map()
@@ -1187,6 +1190,16 @@ const server = Bun.serve({
       workstation = false
       emitCatalog()
       return Response.json({ ok: true })
+    }
+    if (p === "/mock/redeem" && m === "POST") {
+      const body = await json()
+      const grant = linkCodes.get(body.code)
+      linkCodes.delete(body.code)
+      if (!grant || grant.expiresAt < Date.now()) return Response.json({ error: "Invalid or expired link code" }, { status: 401 })
+      const device = { id: `dev_app_${devices.length + 1}`, name: String(body.deviceName ?? "App"), ownerID: grant.ownerID, lastSeen: Date.now() }
+      devices.push(device)
+      record(grant.ownerID, "device.pair", device.id, "app link")
+      return Response.json({ device, token: "mock-device-token" })
     }
     if (p === "/mock/workstation" && m === "POST") {
       workstation = (await json()).on !== false
@@ -1467,6 +1480,13 @@ const server = Bun.serve({
     if (p === "/api/devices") {
       const current = { id: user.id === "u_bob" ? "dev_bob_chrome" : "dev_1", name: "Chrome", lastSeen: Date.now(), current: true }
       return Response.json({ devices: [current, ...devices.filter((d) => d.ownerID === user.id)] })
+    }
+    if (p === "/api/devices/link" && m === "POST") {
+      const code = crypto.randomUUID().replaceAll("-", "") + "linkcode000"
+      const expiresAt = Date.now() + 5 * 60_000
+      linkCodes.set(code, { ownerID: user.id, expiresAt })
+      const hub = url.origin
+      return Response.json({ code, expiresAt, hub, url: `hubapp://link?hub=${encodeURIComponent(hub)}&code=${code}` })
     }
     if ((match0 = /^\/api\/devices\/([^/]+)$/.exec(p)) && m === "DELETE") {
       const id = decodeURIComponent(match0[1]!)
