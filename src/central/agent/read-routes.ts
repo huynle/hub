@@ -4,8 +4,13 @@
 // Routes (user actors always; session tokens and app tokens holding sessions:read):
 //   GET /api/agent/status
 //   GET /api/agent/sessions?project=&state=&machine=&label=k=v
+//   GET /api/agent/sessions/:addr          show: the catalog view plus the spoke's summary (when it serves one)
+//   GET /api/agent/sessions/:addr/log?n=20 the newest timeline rows (spoke feature "timeline")
+// show and log call spokes; a spoke without the feature answers unsupported {feature, harness}.
 import path from "node:path"
-import type { CatalogMachine, CatalogSession, LiveStatus, NowActivity } from "../registry"
+import { featureForOp, type ServerRequest, type SpokeFeature } from "../../protocol"
+import type { CatalogMachine, CatalogSession, LiveStatus, NowActivity, SessionView } from "../registry"
+import { SpokeError } from "../spoke-ws"
 import type { Store } from "../store"
 import type { Directory, DirectoryEntry, RoleView } from "./directory"
 import type { AgentActor } from "./actor"
@@ -16,12 +21,21 @@ import { AGENT_PREFIX, type AgentRoute } from "./routes"
 export interface ReadRegistry {
   catalog(): CatalogMachine[]
   sessionTenant(sessionID: string): string | undefined
+  session(sessionID: string): SessionView | undefined
+  owner(sessionID: string): string | undefined
+  supports(connID: string, feature: SpokeFeature): boolean
+}
+
+/** Hub → spoke requests (SpokeHub). */
+export interface SpokeRequester {
+  request(connID: string, req: ServerRequest): Promise<unknown>
 }
 
 export interface ReadDeps {
   readonly store: Pick<Store, "machines">
   readonly directory: Directory
   readonly registry: ReadRegistry
+  readonly spokes?: SpokeRequester
   readonly now?: () => number
 }
 
@@ -163,6 +177,97 @@ export function snapshot(deps: ReadDeps, userID: string, actor: AgentActor) {
   return { at: (deps.now ?? Date.now)(), you: you(actor, entries), machines, attention: attention(list, entries) }
 }
 
+/** The session an address names for the user, if the user's spokes report it now (else offline). */
+function located(deps: ReadDeps, userID: string, addr: string) {
+  const entry = deps.directory.resolveOne(userID, addr)
+  const live = deps.registry.sessionTenant(entry.sessionID) === userID ? deps.registry.session(entry.sessionID) : undefined
+  const list = rows(deps.registry, userID)
+  const row = list.find((r) => r.session.id === entry.sessionID) ?? (live && list.find((r) => r.session.id === live.status[0]?.id))
+  return { entry, live, row }
+}
+
+/** The connection to ask for `op` about a session: unsupported when it lacks the op's feature, offline when none. */
+function spokeFor(deps: ReadDeps, sessionID: string, op: ServerRequest["op"], harness: string): string {
+  const connID = deps.registry.owner(sessionID)
+  if (!connID || !deps.spokes) throw new AgentError("offline", "No spoke reports this session now")
+  const feature = featureForOp(op)
+  if (feature && !deps.registry.supports(connID, feature)) {
+    throw new AgentError("unsupported", `The ${harness} spoke does not support ${feature}`, { extra: { feature, harness } })
+  }
+  return connID
+}
+
+async function ask(deps: ReadDeps, connID: string, req: ServerRequest): Promise<unknown> {
+  try {
+    return await deps.spokes!.request(connID, req)
+  } catch (cause) {
+    if (cause instanceof SpokeError && cause.message.includes("disconnected")) throw new AgentError("offline", "The session's spoke disconnected")
+    throw cause
+  }
+}
+
+/** GET /sessions/:addr: the session's catalog view with full blockers, and its summary from the spoke. */
+async function show(deps: ReadDeps, userID: string, addr: string) {
+  const { entry, live, row } = located(deps, userID, addr)
+  const name = entry.name ? { name: `@${entry.name}` } : {}
+  const roles = entry.roles.map(roleLabel)
+  if (!live) {
+    return {
+      id: entry.sessionID,
+      ...name,
+      roles,
+      ...(entry.title ? { title: entry.title } : {}),
+      state: "offline",
+      online: false,
+      ...(entry.parentID ? { parentID: entry.parentID } : {}),
+      ...(entry.project ? { project: entry.project } : {}),
+      ...(entry.machineID ? { machineID: entry.machineID } : {}),
+      ...(entry.lastSeen !== undefined ? { lastSeen: entry.lastSeen } : {}),
+      blockers: [],
+    }
+  }
+  const harness = row?.harness ?? "unknown"
+  const own = live.status.find((e) => e.id === live.id) as LiveStatus | undefined
+  const base = {
+    id: live.id,
+    ...name,
+    roles,
+    title: live.title,
+    state: live.state,
+    harness,
+    online: true,
+    ...(row ? { machineID: row.machineID } : {}),
+    project: live.projectName || path.basename(live.project || live.directory),
+    directory: live.directory,
+    ...(live.parentID ? { parentID: live.parentID } : {}),
+    ...(own?.since !== undefined ? { busySince: own.since } : {}),
+    ...(live.now ? { now: nowText(live.now), activity: live.now } : {}),
+    blockers: live.blockers.map(({ sessionTitle: _, ...b }) => b),
+    children: live.status.filter((e) => e.parentID === live.id).length,
+    labels: {},
+  }
+  try {
+    const connID = spokeFor(deps, live.id, "summary", harness)
+    return { ...base, summary: await ask(deps, connID, { op: "summary", sessionID: live.id }) }
+  } catch (cause) {
+    if (cause instanceof AgentError && cause.code === "unsupported") return { ...base, unsupported: [cause.options.extra] }
+    if (cause instanceof AgentError && cause.code === "offline") return base
+    console.error("[hub] agent show: summary failed:", cause)
+    return { ...base, failed: [{ feature: "summary" }] }
+  }
+}
+
+/** GET /sessions/:addr/log: the newest `n` timeline rows, newest first. */
+async function log(deps: ReadDeps, userID: string, addr: string, raw: string | null) {
+  const n = raw === null ? 20 : Number(raw)
+  if (!Number.isInteger(n) || n < 1 || n > 200) throw new AgentError("invalid", "n must be 1–200")
+  const { entry, live, row } = located(deps, userID, addr)
+  if (!live) throw new AgentError("offline", "No spoke reports this session now")
+  const connID = spokeFor(deps, entry.sessionID, "timeline", row?.harness ?? "unknown")
+  const page = (await ask(deps, connID, { op: "timeline", sessionID: entry.sessionID, limit: n, order: "desc" })) as { items?: unknown[]; older?: string }
+  return { sessionID: entry.sessionID, rows: page.items ?? [], ...(page.older ? { older: page.older } : {}) }
+}
+
 const STATES = new Set(["idle", "working", "blocked", "error"])
 
 /** The /sessions filters: project (name or root), state (comma list), machine (ID or name), label k=v. */
@@ -211,6 +316,18 @@ export function readRoutes(deps: ReadDeps): AgentRoute[] {
           .map(({ row, view }) => ({ ...view, machineID: row.machineID, project: projectOf(row.session).name }))
         return ok({ sessions })
       },
+    },
+    {
+      method: "GET",
+      path: `${AGENT_PREFIX}/sessions/:addr`,
+      allow: READ,
+      handle: async ({ user, params }) => ok(await show(deps, user.id, params.addr!)),
+    },
+    {
+      method: "GET",
+      path: `${AGENT_PREFIX}/sessions/:addr/log`,
+      allow: READ,
+      handle: async ({ user, params, url }) => ok(await log(deps, user.id, params.addr!, url.searchParams.get("n"))),
     },
   ]
 }

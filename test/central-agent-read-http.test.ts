@@ -156,3 +156,68 @@ describe("GET /api/agent/sessions", () => {
     expect((await h.api("/api/agent/sessions?state=sleeping")).status).toBe(400)
   })
 })
+
+describe("GET /api/agent/sessions/:addr (show)", () => {
+  test("answers state, full blockers, now, name and roles, and the spoke's summary", async () => {
+    const { client } = await start()
+    const seen = answer(client, (req) => (req.op === "summary" ? { context: { used: 10 }, branch: "main" } : undefined))
+    client.send(event("form.created", { form: { id: "frm_1", sessionID: "ses_1", title: "Pick one", fields: [{ key: "choice", type: "string", title: "Choice" }] } }))
+    await waitFor(() => (h.registry.session("ses_1")?.blockers.length ?? 0) === 2)
+    const res = await h.api("/api/agent/sessions/@api-refactor")
+    expect(res.status).toBe(200)
+    const body = await json(res)
+    expect(body).toMatchObject({ id: "ses_1", name: "@api-refactor", roles: [], title: "API refactor", state: "blocked", harness: "opencode", online: true, project: "hub" })
+    expect(body.blockers[0]).toEqual({ kind: "permission", id: "per_1", summary: "bash: git push origin main", sessionID: "ses_1" })
+    expect(body.blockers[1]).toMatchObject({ kind: "form", id: "frm_1", fields: [{ key: "choice", type: "string" }] })
+    expect(body.summary).toEqual({ context: { used: 10 }, branch: "main" })
+    expect(body.unsupported).toBeUndefined()
+    expect(seen).toEqual([{ op: "summary", sessionID: "ses_1" }])
+  })
+
+  test("a spoke without the summary feature: no summary, an unsupported note, no request", async () => {
+    const { client } = await start({ hello: { harness: "claude-code", harnessVersion: "1.0", features: [] } })
+    const seen = answer(client)
+    const body = await json(await h.api("/api/agent/sessions/ses_2"))
+    expect(body).toMatchObject({ id: "ses_2", harness: "claude-code", state: "working" })
+    expect(body.summary).toBeUndefined()
+    expect(body.unsupported).toEqual([{ feature: "summary", harness: "claude-code" }])
+    expect(seen).toEqual([])
+  })
+
+  test("unknown and ambiguous addresses use the agent envelope", async () => {
+    await start()
+    const missing = await h.api("/api/agent/sessions/@nobody")
+    expect(missing.status).toBe(404)
+    expect((await json(missing)).error.code).toBe("not_found")
+    for (const session of ["ses_1", "ses_2"]) await h.api("/api/agent/roles/claim", { method: "POST", json: { role: "worker", session } })
+    const ambiguous = await h.api("/api/agent/sessions/@@worker")
+    expect(ambiguous.status).toBe(409)
+    expect((await json(ambiguous)).error.candidates.map((c: any) => c.sessionID).sort()).toEqual(["ses_1", "ses_2"])
+    expect((await h.api("/api/agent/sessions/bad addr")).status).toBe(400)
+  })
+})
+
+describe("GET /api/agent/sessions/:addr/log", () => {
+  test("asks the spoke for the newest timeline rows (n, default 20, at most 200)", async () => {
+    const { client } = await start()
+    const seen = answer(client, (req) => (req.op === "timeline" ? { items: [{ id: "r2" }, { id: "r1" }], older: "c1" } : undefined))
+    const res = await bearer("/api/agent/sessions/@web-work/log?n=2", SES_1)
+    expect(res.status).toBe(200)
+    expect(await json(res)).toEqual({ sessionID: "ses_2", rows: [{ id: "r2" }, { id: "r1" }], older: "c1" })
+    expect((await h.api("/api/agent/sessions/ses_2/log")).status).toBe(200)
+    expect(seen).toEqual([
+      { op: "timeline", sessionID: "ses_2", limit: 2, order: "desc" },
+      { op: "timeline", sessionID: "ses_2", limit: 20, order: "desc" },
+    ])
+    for (const n of ["0", "201", "x"]) expect((await h.api(`/api/agent/sessions/ses_2/log?n=${n}`)).status).toBe(400)
+  })
+
+  test("unsupported {feature: timeline, harness} when the spoke lacks it", async () => {
+    const { client } = await start({ hello: { harness: "claude-code", features: [] } })
+    const seen = answer(client)
+    const res = await h.api("/api/agent/sessions/ses_2/log")
+    expect(res.status).toBe(422)
+    expect((await json(res)).error).toMatchObject({ code: "unsupported", feature: "timeline", harness: "claude-code" })
+    expect(seen).toEqual([])
+  })
+})
