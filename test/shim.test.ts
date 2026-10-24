@@ -21,12 +21,14 @@ describe("main package", () => {
   })
 
   test("does not ship the shim", () => {
-    // Only the private protocol workspace package ships inside the hub (src/protocol.ts re-exports it).
+    // Only the private workspace packages ship inside the hub: the protocol (src/protocol.ts re-exports it) and the
+    // CLI bundle (built by prepack, `npm run build:cli`; the spoke's hub/hubctl launchers run it).
     const packaged = main.files.filter((f: string) => f.startsWith("packages"))
-    expect(packaged).toEqual(["packages/protocol/src", "packages/protocol/package.json"])
+    expect(packaged).toEqual(["packages/protocol/src", "packages/protocol/package.json", "packages/cli/dist/hub-cli.js"])
     expect(main.files.some((f: string) => f.includes("opencode-voice-shim"))).toBe(false)
     expect(main.workspaces).not.toContain("packages/opencode-voice-shim")
-    for (const f of main.files) expect(existsSync(path.join(root, f))).toBe(true)
+    const built = new Set(["packages/cli/dist/hub-cli.js"])
+    for (const f of main.files) if (!built.has(f)) expect(existsSync(path.join(root, f))).toBe(true)
   })
 })
 

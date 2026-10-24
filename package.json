@@ -47,6 +47,7 @@
     "src",
     "packages/protocol/src",
     "packages/protocol/package.json",
+    "packages/cli/dist/hub-cli.js",
     "bin",
     "web/dist",
     "docker",
@@ -71,9 +72,10 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit && tsc --noEmit -p web",
     "build:web": "vite build --config web/vite.config.ts",
+    "build:cli": "bun build packages/cli/src/main.ts --target=node --outfile=packages/cli/dist/hub-cli.js",
     "dev:web": "vite --config web/vite.config.ts",
     "test:e2e": "bun web/e2e/smoke.ts",
-    "prepack": "npm run build:web",
+    "prepack": "npm run build:web && npm run build:cli",
     "hub": "bun bin/hub.ts"
   },
   "dependencies": {

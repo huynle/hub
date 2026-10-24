@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test"
-import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { defaults, writeConfig } from "../src/config"
@@ -406,6 +406,20 @@ describe("session env injection hooks", () => {
     expect(process.env.HUB_SESSION_TOKEN).toBeUndefined()
     const bin = path.join(state, "bin")
     expect(existsSync(bin) && statSync(bin).isDirectory()).toBe(true)
+  })
+
+  test("setup writes the hub and hubctl launchers running the CLI with this runtime", async () => {
+    tempConfig({ mode: "off" })
+    const state = tempStateDir()
+    const fake = fakeContext()
+    cleanups.push((await plugin.setup(fake.ctx as any)) as () => void)
+    for (const name of ["hub", "hubctl"]) {
+      const file = path.join(state, "bin", name)
+      expect(statSync(file).mode & 0o777).toBe(0o755)
+      const script = readFileSync(file, "utf8")
+      expect(script).toContain(`BUN_BE_BUN=1 '${process.execPath}'`)
+      expect(script).toMatch(/packages\/cli\/(dist\/hub-cli\.js|src\/main\.ts)'/)
+    }
   })
 
   test("registers tool execute.before/after and shell create.before; an unmatched shell is stripped and gets PATH", async () => {
