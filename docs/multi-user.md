@@ -113,6 +113,8 @@ New or changed:
 | `DELETE /api/admin/machines/:id`, `DELETE /api/admin/devices/:id` | admin | revoke anyone's |
 | `GET /api/admin/audit` | admin | newest first, max 200 |
 | `GET /api/devices`, `DELETE /api/devices/:id` | any | own devices only |
+| `POST /api/devices/link` | any | `{code, expiresAt, hub, url}`: a single-use app link code (256-bit, 5 min) for the caller; `url` is `hubapp://link?hub=<public URL>&code=<code>` |
+| `POST /api/devices/redeem {code, deviceName?, publicKey?}` | public | `{device, token}`: a new device of the code's issuer; `token` is its device token (`Authorization: Bearer`), no cookie |
 | `DELETE /api/machines/:id` | any | own machines only (admins use the admin route for others') |
 
 In `pairing` mode the single user is admin, so everything works as before.

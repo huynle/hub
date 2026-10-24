@@ -228,6 +228,8 @@ export interface DeviceRecord {
   /** Minutes between two activity updates of one session (ACTIVITY_INTERVAL_MINUTES when absent). */
   activityMinutes?: number
   ownerID: string
+  /** Public key a native app registered at link time (PEM or base64), for later strong approvals. */
+  publicKey?: string
 }
 
 export interface VapidKeys {
@@ -397,10 +399,11 @@ export class Store {
     this.touch(this.state.machines.find((m) => m.id === id))
   }
 
-  addDevice(name: string, ownerID: string = LOCAL_USER): { device: DeviceRecord; token: string } {
+  addDevice(name: string, ownerID: string = LOCAL_USER, extra: { publicKey?: string } = {}): { device: DeviceRecord; token: string } {
     const token = newToken()
     const t = this.now()
     const device: DeviceRecord = { id: newID("dev"), name, tokenHash: hashToken(token), created: t, lastSeen: t, ownerID }
+    if (extra.publicKey) device.publicKey = extra.publicKey
     this.state.devices.push(device)
     this.save()
     return { device, token }

@@ -654,6 +654,16 @@ disconnects their machines at once.
 login links from `/hub` belong to the machine's owner. The bootstrap pairing code and the local
 first-machine auto-approve exist only in `pairing` mode.
 
+**Native apps** link from Settings → Devices → **Add app**: the dialog shows a QR code of
+`hubapp://link?hub=<public URL>&code=<code>` (and the link itself), with a 5-minute countdown. The code is
+single use, 256-bit, belongs to the user who opened the dialog (who must still be active when it is redeemed)
+and works only for linking: `/login` and `/api/pair` refuse it. The app calls `POST /api/devices/redeem
+{code, deviceName?, publicKey?}` (no cookie, and no `Origin` needed: the code is the only credential) and gets
+`{device, token}`; it keeps `token` and sends it as `Authorization: Bearer <device token>`. The device appears
+in the list (audit `device.pair`, "app link"); revoking it invalidates the token. `deviceName` is cleaned
+(control characters dropped, at most 64 characters, "App" when empty); `publicKey` (PEM or base64, at most
+4096 characters) is stored with the device for later strong approvals.
+
 **Speech**: each user can set their own provider, models, voice and key (Settings → Speech); fields they
 leave empty come from the server default (admins: Settings → Speech → Server default), then `hub.json`,
 then the env. A user's key is only ever shown (masked) to that user.

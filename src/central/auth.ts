@@ -2,6 +2,7 @@
 // - machine enrollment (device-code flow): a spoke asks, the owner approves in the web UI, the spoke polls for its token
 // - device pairing: short single-use numeric codes, shown in the /hub dialog or logged at startup
 // - login links: long single-use codes opened from the terminal to sign a browser in
+// - app link codes: long single-use codes (QR / hubapp:// deep link) a native app redeems for a device token
 // Pending codes live in memory only; a restart invalidates them.
 import { randomBytes, randomInt } from "node:crypto"
 import type { EnrollPoll, EnrollStart } from "../protocol"
@@ -54,6 +55,9 @@ export const ENROLL_TTL_MS = 10 * 60_000
 export const ENROLL_INTERVAL_MS = 2000
 export const PAIR_TTL_MS = 5 * 60_000
 export const LOGIN_TTL_MS = 2 * 60_000
+export const LINK_TTL_MS = 5 * 60_000
+/** Longest device public key accepted at link time (characters). */
+export const MAX_PUBLIC_KEY = 4096
 
 /** RFC 8628 base-20 alphabet: no vowels, no look-alike characters. */
 const USER_CODE_ALPHABET = "BCDFGHJKLMNPQRSTVWXZ"
@@ -75,6 +79,25 @@ function name(value: unknown, what: string, fallback?: string): string {
   if (!text && fallback !== undefined) return fallback
   if (!text || text.length > 64) throw new ValidationError(`Invalid ${what}: 1-64 characters required`)
   return text
+}
+
+/** A device name from a client: control and format characters dropped, whitespace collapsed, ≤ 64 characters. */
+function deviceLabel(value: unknown, fallback: string): string {
+  const text = typeof value === "string" ? value.replace(/[\p{Cc}\p{Cf}]/gu, " ").trim().replace(/\s+/g, " ") : ""
+  return text ? [...text].slice(0, 64).join("").trim() : fallback
+}
+
+const PEM = /^-----BEGIN PUBLIC KEY-----([\s\S]*)-----END PUBLIC KEY-----$/
+const KEY_BODY = /^[A-Za-z0-9+/_-]{16,}={0,2}$/
+
+/** An optional device public key: PEM ("PUBLIC KEY") or bare base64/base64url; undefined when absent. */
+function publicKey(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined
+  if (typeof value !== "string" || value.length > MAX_PUBLIC_KEY) throw new ValidationError("Invalid public key")
+  const key = value.trim()
+  const body = (PEM.exec(key)?.[1] ?? key).replace(/\s+/g, "")
+  if (!KEY_BODY.test(body)) throw new ValidationError("Invalid public key")
+  return key
 }
 
 interface Enrollment {
@@ -116,6 +139,7 @@ export class Auth {
   private readonly enrollments = new Map<string, Enrollment>() // by deviceCode
   private readonly pairCodes = new Map<string, Grant>()
   private readonly loginCodes = new Map<string, Grant>()
+  private readonly linkCodes = new Map<string, Grant>()
   private readonly mode: "pairing" | "oidc"
   private readonly enrollLimiter: Limiter
   private readonly pairFailures: Limiter
@@ -257,6 +281,34 @@ export class Auth {
     return this.redeemLogin(code) !== undefined
   }
 
+  // ---------- app link codes ----------
+
+  /** A single-use app link code; the device it links belongs to `ownerID`. Never valid at /login or /api/pair. */
+  issueLinkCode(ownerID: string = LOCAL_USER): { code: string; expiresAt: number } {
+    this.sweep()
+    const code = randomBytes(32).toString("base64url")
+    const expiresAt = this.now() + LINK_TTL_MS
+    this.linkCodes.set(code, { expiresAt, ownerID })
+    return { code, expiresAt }
+  }
+
+  /**
+   * Redeems an app link code for a new device and its token, or undefined (unknown, used, expired, or owner
+   * gone or disabled). Throws ValidationError for a malformed public key (the code stays valid). The code is
+   * deleted before the device is created. No rate limiter: 256-bit codes cannot be guessed, and a shared
+   * limiter would let bad redeems lock out pairing.
+   */
+  redeemLink(code: unknown, deviceName: unknown, key?: unknown): { device: DeviceRecord; token: string } | undefined {
+    const label = deviceLabel(deviceName, "App")
+    const pk = publicKey(key)
+    this.sweep()
+    const grant = typeof code === "string" ? this.linkCodes.get(code) : undefined
+    if (!grant) return undefined
+    this.linkCodes.delete(code as string)
+    if (!this.active(grant.ownerID)) return undefined
+    return this.store.addDevice(label, grant.ownerID, pk ? { publicKey: pk } : {})
+  }
+
   private active(userID: string): boolean {
     const user = this.store.user(userID)
     return user !== undefined && !user.disabled
@@ -267,5 +319,6 @@ export class Auth {
     for (const [key, e] of this.enrollments) if (e.expiresAt < t) this.enrollments.delete(key)
     for (const [key, grant] of this.pairCodes) if (grant.expiresAt < t) this.pairCodes.delete(key)
     for (const [key, grant] of this.loginCodes) if (grant.expiresAt < t) this.loginCodes.delete(key)
+    for (const [key, grant] of this.linkCodes) if (grant.expiresAt < t) this.linkCodes.delete(key)
   }
 }

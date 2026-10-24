@@ -15,6 +15,19 @@
   `GET /api/agent/watch?blocked=1&session=<addr>` is an SSE stream of compact JSON events for the caller's own
   sessions (`ready`, `state`, `blocker.opened`, `blocker.closed`, `session.added`, `session.removed`; no text),
   with a `ping` event every 20 s. Another user's sessions, names and roles answer `404 not_found` on every route.
+- **Link native apps**: Settings → Devices → **Add app** shows a QR code and a `hubapp://link?hub=…&code=…`
+  link with a 5-minute countdown; the list updates once the app has linked. `POST /api/devices/link` issues
+  the single-use 256-bit link code (not valid at `/login` or `/api/pair`); `POST /api/devices/redeem {code,
+  deviceName?, publicKey?}` (public, works without `Origin` when the request carries no credential at all)
+  answers `{device, token}`: a device token for `Authorization: Bearer`, no cookie. An optional device public
+  key is stored for later strong approvals. The console's QR encoder is built in (no new dependency).
+- **Session identity in shells**: every shell an agent runs through OpenCode's shell tool gets its session's
+  `HUB_SESSION_TOKEN` and `HUB_URL` (the spoke's server), set by plugin hooks (tool `execute.before` paired with
+  shell `create.before` by command; the same command pending from two sessions gets no token). Inherited
+  `HUB_URL`/`HUB_SESSION_TOKEN` are removed from the OpenCode process at plugin start and from every shell, and the
+  hub bin dir (`$HUB_STATE_DIR/bin`, default `~/.local/state/hub/bin`) goes first on PATH. A deleted session's token
+  is dropped. User `!` commands get no token. Opt-in integration test: `HUB_IT_OPENCODE=1 bun test
+  test/spoke-env-inject.it.test.ts`.
 - **Session tokens**: the hub mints a token for every session (subagents included) a spoke reports for its own
   user, and sends it with the `sessionTokens` op to spokes that announce the feature: on each sessions frame
   (new sessions, tokens with less than a third of their 24 h left, or after a key or epoch change), again in
