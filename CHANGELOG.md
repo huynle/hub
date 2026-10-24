@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Session tokens**: the hub mints a token for every session (subagents included) a spoke reports for its own
+  user, and sends it with the `sessionTokens` op to spokes that announce the feature: on each sessions frame
+  (new sessions, tokens with less than a third of their 24 h left, or after a key or epoch change), again in
+  full after a reconnect, and from a 10-minute refresh sweep. Format `hst1.<payload>.<HMAC-SHA256>` (claims
+  `typ, uid, mid, sid, exp, kid, ue, me, aud`), signed with the keys in `<HUB_STATE_DIR>/token-keys.json` or
+  `HUB_TOKEN_KEYS`. As `Authorization: Bearer`, a session token is a session actor on `/api/agent/*` routes
+  that admit sessions (`whoami`), `403` on console routes, `401 token_expired` once expired and `401` once the
+  session is no longer reported by that machine, the machine is revoked or the user disabled (both bump the
+  token epoch, so re-enabling does not revive old tokens). Tokens are never logged or audited. A session's
+  token is visible to its shell and child processes; it is limited by its expiry, the session's liveness and
+  the verbs sessions may use.
 - **Session names and roles** (`@name`, `@@role`): the hub keeps a per-user record of every session its spokes
   report (machine, parent, project, lastSeen; at most 2000). Root sessions get a name once, from their first
   real title (OpenCode's "New session" placeholders are skipped), `[a-z0-9-]` 2–40, with `-2`, `-3` on a clash.
