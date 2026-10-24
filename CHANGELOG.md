@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Link native apps**: Settings → Devices → **Add app** shows a QR code and a `hubapp://link?hub=…&code=…`
+  link with a 5-minute countdown; the list updates once the app has linked. `POST /api/devices/link` issues
+  the single-use 256-bit link code (not valid at `/login` or `/api/pair`); `POST /api/devices/redeem {code,
+  deviceName?, publicKey?}` (public, works without `Origin` when the request carries no credential at all)
+  answers `{device, token}`: a device token for `Authorization: Bearer`, no cookie. An optional device public
+  key is stored for later strong approvals. The console's QR encoder is built in (no new dependency).
 - **Session identity in shells**: every shell an agent runs through OpenCode's shell tool gets its session's
   `HUB_SESSION_TOKEN` and `HUB_URL` (the spoke's server), set by plugin hooks (tool `execute.before` paired with
   shell `create.before` by command; the same command pending from two sessions gets no token). Inherited

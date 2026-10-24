@@ -859,6 +859,26 @@ async function desktop(browser: Browser): Promise<void> {
     await page.getByPlaceholder("Describe a task or ask a question").waitFor()
   })
 
+  await check("desktop: Settings → Devices → Add app shows a QR code and link; the list updates once the app redeems it", async () => {
+    await page.goto(`${BASE}/settings#devices`)
+    await page.locator("#devices .list li").first().waitFor()
+    const before = await page.locator("#devices .list li").count()
+    await page.locator("#devices").getByRole("button", { name: "Add app" }).click()
+    const dialog = page.locator("dialog.add-app[open]")
+    await dialog.getByRole("img", { name: "QR code for the app link" }).waitFor()
+    const d = (await dialog.locator("svg.qr path").getAttribute("d")) ?? ""
+    assert(d.split("M").length > 200, `QR path has modules: ${d.length} chars`)
+    const link = (await dialog.locator(".add-app-link").textContent()) ?? ""
+    assert(link.startsWith(`hubapp://link?hub=${encodeURIComponent(BASE)}&code=`), `deep link: ${link}`)
+    assert(/^[0-5]:[0-5]\d$/.test((await dialog.locator(".add-app-countdown").textContent()) ?? ""), "countdown shown")
+    await shot(page, "desktop-settings-add-app")
+    const code = new URL(link.replace(/^hubapp:/, "https:")).searchParams.get("code")
+    assert((await mock("/mock/redeem", { code, deviceName: "Android (Pixel 9)" })).ok, "mock app redeemed the code")
+    await dialog.waitFor({ state: "hidden", timeout: 8000 })
+    await page.locator("#devices .list li").getByText("Android (Pixel 9)").waitFor()
+    assert((await page.locator("#devices .list li").count()) === before + 1, "one more device")
+  })
+
   await check("desktop: Settings → Voice → Mic sensitivity: Normal by default, a choice is kept on this device", async () => {
     await page.evaluate(() => localStorage.removeItem("voice.sensitivity"))
     await page.goto(`${BASE}/settings#voice`)

@@ -156,6 +156,11 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--l
 .dialog-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px 6px; }
 .dialog-head h2 { margin: 0; font-size: 0.9375rem; font-weight: 600; }
 .dialog-body { padding: 4px 14px 14px; overflow: auto; max-height: calc(84vh - 56px); }
+.add-app-body { display: grid; gap: 10px; }
+.add-app .qr { display: block; width: min(260px, 70vw); height: auto; margin: 4px auto; border-radius: 8px; image-rendering: pixelated; }
+.add-app-link { font-size: 0.7188rem; word-break: break-all; padding: 6px 8px; background: var(--bg); border: 1px solid var(--line-2); border-radius: 6px; user-select: all; }
+.add-app-countdown { font-variant-numeric: tabular-nums; }
+.add-app-expired { display: grid; justify-items: center; gap: 8px; padding: 24px 0; }
 .picker-search { width: 100%; margin-bottom: 8px; }
 .picker-list { list-style: none; margin: 0; padding: 0; max-height: 55vh; overflow: auto; }
 .picker-group { padding: 8px 8px 2px; font-weight: 600; text-transform: none; }

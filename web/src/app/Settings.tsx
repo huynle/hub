@@ -1,5 +1,5 @@
 // /settings: account, notifications, voice, speech, machines (with approvals), devices and admin screens.
-import { For, Show, createResource, createSignal, onMount, type JSX } from "solid-js"
+import { For, Show, createResource, createSignal, onCleanup, onMount, type JSX } from "solid-js"
 import {
   USER_FILTERS,
   USER_SORTS,
@@ -25,7 +25,9 @@ import { currentSubscription, disableNotifications, enableNotifications, mutedSe
 import { location$, navigate } from "./router"
 import { SpeechSettingsPanel } from "./SpeechSettings"
 import { toast } from "./toast"
-import { IconButton, ago, now, plural } from "./ui"
+import { Dialog, IconButton, ago, now, plural } from "./ui"
+import { linkCountdown, linkDeadline, linkedDevice } from "../core/link-core"
+import { qrCode, qrSvgPath } from "../lib/qr"
 import { voicePrefs } from "../voice/audio"
 import { FONT_SCALE_DEFAULT, FONT_SCALE_MAX, FONT_SCALE_MIN, FONT_SCALE_STEP, formatScale } from "../core/font-scale"
 import { setTextScale, textScale } from "./text-size"
@@ -476,8 +478,11 @@ function MachinesSection() {
   )
 }
 
+type DeviceRow = { id: string; name: string; lastSeen: number; current?: boolean }
+
 function DevicesSection() {
-  const [devices, { refetch }] = createResource(() => getJSON("/api/devices").then((r) => r.devices as Array<{ id: string; name: string; lastSeen: number; current?: boolean }>))
+  const [devices, { refetch, mutate }] = createResource(() => getJSON("/api/devices").then((r) => r.devices as DeviceRow[]))
+  const [adding, setAdding] = createSignal(false)
   const revoke = async (d: { id: string; name: string; current?: boolean }) => {
     if (d.current) return void signOut()
     if (!confirm(`Revoke ${d.name}?`)) return
@@ -491,6 +496,22 @@ function DevicesSection() {
   }
   return (
     <Section id="devices" title="Devices">
+      <div class="row">
+        <p class="small muted grow">Browsers and the Hub app signed in to your account. Add the app on a phone or tablet by scanning a code.</p>
+        <button type="button" class="btn small" onClick={() => setAdding(true)}>
+          Add app
+        </button>
+      </div>
+      <Show when={adding()}>
+        <AddAppDialog
+          known={new Set((devices() ?? []).map((d) => d.id))}
+          onLinked={(list) => mutate(list)}
+          onClose={() => {
+            setAdding(false)
+            void refetch()
+          }}
+        />
+      </Show>
       <Show when={devices()} fallback={<p class="small muted">{devices.error ? errorText(devices.error) : "Loading…"}</p>}>
         <ul class="list">
           <For each={devices()}>
@@ -514,6 +535,114 @@ function DevicesSection() {
         </ul>
       </Show>
     </Section>
+  )
+}
+
+/** Interval of the device list refresh while the Add app dialog waits for the app to redeem its code. */
+const LINK_POLL_MS = 2000
+
+/**
+ * Settings → Devices → Add app: a single-use link code (POST /api/devices/link) as a QR code and a hubapp:// link,
+ * with its countdown. The app redeems it for its own device token; the dialog notices the new device (polling
+ * the device list), names it and closes.
+ */
+function AddAppDialog(props: { known: ReadonlySet<string>; onLinked: (devices: DeviceRow[]) => void; onClose: () => void }) {
+  /** expiresAt: on this device's clock (see linkDeadline). */
+  const [link, setLink] = createSignal<{ code: string; expiresAt: number; hub: string; url: string }>()
+  const [failed, setFailed] = createSignal("")
+  const [clock, setClock] = createSignal(Date.now())
+  const issue = async () => {
+    setFailed("")
+    try {
+      const res = await api("/api/devices/link", { method: "POST", json: {} })
+      const body = (await res.json()) as { code: string; expiresAt: number; hub: string; url: string }
+      const t = Date.now()
+      setClock(t)
+      setLink({ ...body, expiresAt: linkDeadline(body.expiresAt, res.headers.get("date"), t) })
+    } catch (e) {
+      setFailed(errorText(e))
+    }
+  }
+  const expired = () => (link()?.expiresAt ?? 0) <= clock()
+  const qr = () => {
+    const l = link()
+    return l ? qrCode(l.url, { ecc: "M" }) : undefined
+  }
+  const tick = setInterval(() => setClock(Date.now()), 1000)
+  let polling = false
+  const poll = setInterval(async () => {
+    if (polling || !link() || expired()) return
+    polling = true
+    try {
+      const list = (await getJSON("/api/devices")).devices as DeviceRow[]
+      const added = linkedDevice(props.known, list)
+      if (added) {
+        props.onLinked(list)
+        toast(`${added.name} linked`)
+        props.onClose()
+      }
+    } catch {
+      // keep waiting; the next poll retries
+    } finally {
+      polling = false
+    }
+  }, LINK_POLL_MS)
+  onCleanup(() => {
+    clearInterval(tick)
+    clearInterval(poll)
+  })
+  void issue()
+  return (
+    <Dialog open title="Add the Hub app" onClose={props.onClose} class="add-app">
+      <Show when={link()} fallback={<p class="small muted">{failed() || "Creating a link code…"}</p>}>
+        {(l) => (
+          <div class="add-app-body">
+            <p class="small">
+              In the Hub app, choose <b>Add hub</b> and scan this code, or open the link on the phone with the app. It links the app to your account on{" "}
+              <b>{l().hub}</b>.
+            </p>
+            <Show
+              when={!expired()}
+              fallback={
+                <div class="add-app-expired">
+                  <p class="small warn">This code expired.</p>
+                  <button type="button" class="btn small primary" onClick={() => void issue()}>
+                    New code
+                  </button>
+                </div>
+              }
+            >
+              <svg class="qr" role="img" aria-label="QR code for the app link" viewBox={`0 0 ${qr()!.size + 8} ${qr()!.size + 8}`} shape-rendering="crispEdges">
+                <rect width="100%" height="100%" fill="#fff" />
+                <path d={qrSvgPath(qr()!, 4)} fill="#000" />
+              </svg>
+              <p class="small muted">
+                Expires in <span class="add-app-countdown">{linkCountdown(l().expiresAt, clock())}</span> · single use
+              </p>
+              <div class="row">
+                <code class="add-app-link grow">{l().url}</code>
+                <button
+                  type="button"
+                  class="btn small"
+                  onClick={() =>
+                    void navigator.clipboard?.writeText(l().url).then(
+                      () => toast("Link copied"),
+                      () => toast("Copy failed", "err"),
+                    )
+                  }
+                >
+                  Copy
+                </button>
+                <a class="btn small" href={l().url}>
+                  Open
+                </a>
+              </div>
+            </Show>
+            <p class="small muted">Anyone with this code can sign in as you until it is used or expires; show it only to your own device.</p>
+          </div>
+        )}
+      </Show>
+    </Dialog>
   )
 }
 
