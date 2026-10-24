@@ -75,6 +75,8 @@ export class SpokeConnection {
 
   private socket?: SocketLike
   private welcomed = false
+  /** Features the hub listed in its welcome on the current socket (none before a welcome or from an old hub). */
+  private hubFeatures: ReadonlySet<string> = new Set()
   private stopped = true
   private attempt = 0
   private retry?: ReturnType<typeof setTimeout>
@@ -98,6 +100,11 @@ export class SpokeConnection {
     this.drop(1000, "stop")
     this.failPending("disconnected")
     this.setState("off")
+  }
+
+  /** Whether the connected hub announced `feature`; send a request a newer hub added only when it did. */
+  hubSupports(feature: string): boolean {
+    return this.hubFeatures.has(feature)
   }
 
   /** Reconnects at once (e.g. after a local hub was started) instead of waiting out the backoff. */
@@ -172,6 +179,7 @@ export class SpokeConnection {
       this.socket = undefined
       const wasWelcomed = this.welcomed
       this.welcomed = false
+      this.hubFeatures = new Set()
       this.failPending("disconnected")
       if (this.stopped || this.state === "revoked") return
       this.fail(wasWelcomed ? `Connection closed${ev.reason ? `: ${ev.reason}` : ""}` : (this.lastError ?? "Could not connect"))
@@ -185,6 +193,7 @@ export class SpokeConnection {
     switch (frame.t) {
       case "welcome":
         this.welcomed = true
+        this.hubFeatures = new Set(frame.features ?? [])
         this.attempt = 0
         this.publicURL = frame.publicURL
         this.machineID = frame.machineID
@@ -243,6 +252,7 @@ export class SpokeConnection {
     const socket = this.socket
     this.socket = undefined
     this.welcomed = false
+    this.hubFeatures = new Set()
     if (!socket) return
     socket.onopen = socket.onmessage = socket.onerror = socket.onclose = null
     try {
