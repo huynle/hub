@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { encode, FORWARDED_EVENTS, MAX_PROMPT_IMAGE_BYTES, MAX_PROMPT_IMAGES, MAX_PROMPT_IMAGES_BASE64, parseServerMessage, parseSpokeMessage, promptImagesProblem, PROTOCOL_VERSION } from "../src/protocol"
+import { encode, FORWARDED_EVENTS, MAX_PROMPT_IMAGE_BYTES, MAX_PROMPT_IMAGES, MAX_PROMPT_IMAGES_BASE64, parseServerMessage, parseSpokeMessage, promptImagesProblem, PROTOCOL_VERSION } from "../src/index.ts"
 
 const hello = {
   t: "hello",
@@ -129,7 +129,7 @@ describe("conversation ops", () => {
 })
 
 describe("activity compaction", () => {
-  const { compactActivity, summarizeToolInput } = require("../src/protocol")
+  const { compactActivity, summarizeToolInput } = require("../src/index.ts")
   test("summarizes tool input without the full payload", () => {
     expect(summarizeToolInput({ command: "bun test\nmore" })).toBe("bun test")
     expect(summarizeToolInput({ filePath: "/a/b.ts", content: "x".repeat(10000) })).toBe("/a/b.ts")
@@ -271,7 +271,7 @@ describe("prompt images", () => {
 })
 
 describe("job and status compaction", () => {
-  const { compactActivity } = require("../src/protocol")
+  const { compactActivity } = require("../src/index.ts")
   const info = { id: "sh_1", status: "running", command: "bun run build && " + "x".repeat(500), cwd: "/w", shell: "bash", file: "/tmp/f", pid: 9, metadata: { sessionID: "ses_1", background: true }, time: { started: 1000 } }
 
   test("session.status keeps the type and a short retry reason", () => {

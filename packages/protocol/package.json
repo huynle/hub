@@ -1,0 +1,12 @@
+{
+  "name": "@huynle/hub-protocol",
+  "version": "0.6.1",
+  "private": true,
+  "description": "Hub ↔ spoke wire protocol (internal; shipped inside @huynle/hub, not published on its own).",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./package.json": "./package.json"
+  }
+}

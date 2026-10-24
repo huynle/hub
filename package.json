@@ -45,6 +45,8 @@
     "tui.ts",
     "rpc.ts",
     "src",
+    "packages/protocol/src",
+    "packages/protocol/package.json",
     "bin",
     "web/dist",
     "docker",
@@ -54,6 +56,9 @@
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
+  ],
+  "workspaces": [
+    "packages/protocol"
   ],
   "engines": {
     "bun": ">=1.3"
