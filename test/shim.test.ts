@@ -21,7 +21,11 @@ describe("main package", () => {
   })
 
   test("does not ship the shim", () => {
-    expect(main.files.some((f: string) => f.startsWith("packages"))).toBe(false)
+    // Only the private protocol workspace package ships inside the hub (src/protocol.ts re-exports it).
+    const packaged = main.files.filter((f: string) => f.startsWith("packages"))
+    expect(packaged).toEqual(["packages/protocol/src", "packages/protocol/package.json"])
+    expect(main.files.some((f: string) => f.includes("opencode-voice-shim"))).toBe(false)
+    expect(main.workspaces).not.toContain("packages/opencode-voice-shim")
     for (const f of main.files) expect(existsSync(path.join(root, f))).toBe(true)
   })
 })

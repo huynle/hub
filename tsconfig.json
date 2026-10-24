@@ -11,5 +11,5 @@
     "types": ["bun"],
     "lib": ["ES2022", "DOM"]
   },
-  "include": ["server.ts", "tui.ts", "rpc.ts", "src", "test", "bin", "web/e2e"]
+  "include": ["server.ts", "tui.ts", "rpc.ts", "src", "test", "bin", "web/e2e", "packages/protocol/src", "packages/protocol/test"]
 }
