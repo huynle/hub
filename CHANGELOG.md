@@ -70,7 +70,8 @@ the protocol up:
   (`role.project` scopes; every new holder gets a new `generation`; an exclusive claim fails while another live
   holder exists; a holder offline for 30 min loses the role, except in the 2 min after the hub starts;
   some role names, such as `orchestrator…`, are reserved to the user).
-  `GET /api/agent/who?project=&role=` lists named, role-holding and online sessions. Session tokens may read, and name or claim for their own session only.
+  `GET /api/agent/who?project=&role=` lists named, role-holding and online sessions. Session tokens may read,
+  and name or claim for their own session only.
   Addresses (`ses_…` or a unique ID prefix, `@name[.project]`, `@@role[.project]`) resolve within the caller's
   sessions only: another user's are `not_found`, and `ambiguous` candidates never list them.
 - **Agent reading** (`/api/agent/*`, for users, session tokens and app tokens with `sessions:read`):
