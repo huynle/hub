@@ -62,12 +62,25 @@ export interface CentralConfig {
   readonly auth: AuthConfig
   /** hub.json `agents.never`: permission patterns no agent may ever approve, for every user (design §5, §7). */
   readonly agentsNever: readonly string[]
+  /** hub.json `agents.launches`: per-user launch caps, only those set (placement fills in its defaults). */
+  readonly launchCaps?: HubLaunches
+}
+
+/** hub.json `agents.launches`: per-user launch caps (design §6.2, §7). */
+export interface HubLaunches {
+  /** Launches waiting to be placed. */
+  readonly maxQueued?: number
+  /** Launches placed and not ended (placing, provisioning, running). */
+  readonly maxActive?: number
+  /** New launches per clock hour. */
+  readonly perHour?: number
 }
 
 /** hub.json `agents`, validated. */
 export interface HubAgents {
   /** Normalised `action[:glob]` patterns (see agent/policy.ts), duplicates dropped. */
   readonly never?: readonly string[]
+  readonly launches?: HubLaunches
 }
 
 /** hub.json, validated. */
@@ -84,7 +97,9 @@ export interface HubFile {
 type Env = Readonly<Record<string, string | undefined>>
 
 const HUB_KEYS = new Set(["host", "port", "publicURL", "stateDir", "speech", "auth", "agents"])
-const AGENTS_KEYS = new Set(["never"])
+const AGENTS_KEYS = new Set(["never", "launches"])
+const LAUNCH_CAP_KEYS = ["maxQueued", "maxActive", "perHour"] as const
+const LAUNCH_CAP_MAX = 100_000
 const AUTH_KEYS = new Set(["mode", "issuer", "clientId", "clientSecret", "allowed", "admins"])
 const EMAIL = /^[^\s@,]+@[^\s@,]+\.[^\s@,]+$/
 const DOMAIN = /^@[^\s@,]+\.[^\s@,]+$/
@@ -222,16 +237,39 @@ function readHubAgents(raw: unknown, file: string, warnings: string[], fail: (me
   if (!isObj(raw)) fail("agents must be an object")
   const input = raw as Record<string, unknown>
   for (const key of Object.keys(input)) if (!AGENTS_KEYS.has(key)) warnings.push(`${file}: unknown key "agents.${key}" ignored`)
-  if (input.never === undefined) return {}
-  if (!Array.isArray(input.never)) fail('agents.never must be a list of patterns ("action" or "action:glob")')
+  const launches = input.launches === undefined ? undefined : readHubLaunches(input.launches, file, warnings, fail)
+  const never = input.never === undefined ? undefined : readNever(input.never, fail)
+  return { ...(never ? { never } : {}), ...(launches ? { launches } : {}) }
+}
+
+function readHubLaunches(raw: unknown, file: string, warnings: string[], fail: (message: string) => never): HubLaunches {
+  if (!isObj(raw)) fail("agents.launches must be an object")
+  const input = raw as Record<string, unknown>
+  const caps: Record<string, number> = {}
+  for (const key of Object.keys(input)) {
+    if (!(LAUNCH_CAP_KEYS as readonly string[]).includes(key)) {
+      warnings.push(`${file}: unknown key "agents.launches.${key}" ignored`)
+      continue
+    }
+    const value = input[key]
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > LAUNCH_CAP_MAX) {
+      fail(`agents.launches.${key} must be a whole number from 1 to ${LAUNCH_CAP_MAX}`)
+    }
+    caps[key] = value as number
+  }
+  return caps
+}
+
+function readNever(raw: unknown, fail: (message: string) => never): string[] {
+  if (!Array.isArray(raw)) fail('agents.never must be a list of patterns ("action" or "action:glob")')
   const never: string[] = []
-  for (const item of input.never as unknown[]) {
+  for (const item of raw as unknown[]) {
     const pattern = typeof item === "string" ? parsePattern(item) : undefined
     if (!pattern) fail(`agents.never: ${JSON.stringify(item)} is not a pattern ("action" or "action:glob")`)
     const text = formatPattern(pattern!)
     if (!never.includes(text)) never.push(text)
   }
-  return { never }
+  return never
 }
 
 /** Validates the OIDC issuer: https, or plain http on loopback when the dev flag is set. No trailing slash. */
@@ -307,6 +345,7 @@ export function centralConfig(rawEnv: Env = process.env, home: string = homedir(
     ...(file.speech ? { speech: file.speech } : {}),
     auth: authConfig(env, file.auth),
     agentsNever: [...(file.agents?.never ?? [])],
+    ...(file.agents?.launches ? { launchCaps: { ...file.agents.launches } } : {}),
   }
 }
 
