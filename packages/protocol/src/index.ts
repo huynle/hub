@@ -7,6 +7,17 @@
 // A hello without `harness` comes from an OpenCode spoke that predates this split and implies
 // IMPLIED_OPENCODE_FEATURES. The hub announces its own features in the welcome (HUB_FEATURES), and a spoke
 // sends a newer request only when the hub listed it. Neither side bumps PROTOCOL_VERSION for a new feature.
+//
+// Modules: launch.ts (launch vocabulary and workspace checks), node.ts (the `hub node` hello, frames and ops on the
+// same socket), webhook.ts (webhook signature format), wire.ts (shared frame primitives). All are re-exported here.
+
+import { featureList, ID, isByeFrame as isBye, isObj, isResFrame as isRes, isWelcomeFrame, MAX_FRAME, nonEmpty, num, parseFrame as parse, str, token, UNSAFE_CHARS } from "./wire.ts"
+import type { NodeMessage, NodeServerMessage } from "./node.ts"
+
+export * from "./launch.ts"
+export * from "./node.ts"
+export * from "./webhook.ts"
+export { MAX_FRAME }
 
 export const PROTOCOL_VERSION = 1
 
@@ -305,18 +316,25 @@ export const IMPLIED_OPENCODE_FEATURES = [
  * "permissionMessage": it passes a permission reply's `message` (a deny reason) on to the harness.
  * "actTokens": it keeps the act tokens the hub sends (actTokens op) apart from session tokens, never in any
  * environment, for its own act verbs only (the OpenCode hub tool).
+ * "launch": its create op takes a launch's `launchID`, `agent` and `model` (see isLaunchCreate); a launch create's
+ * directory may be a new workspace under the machine's node workspace roots rather than one the spoke reported.
  */
-export const KNOWN_SPOKE_FEATURES = [...IMPLIED_OPENCODE_FEATURES, "autoName", "sessionTokens", "deliver", "hubPrompt", "permissionMessage", "actTokens"] as const
+export const KNOWN_SPOKE_FEATURES = [...IMPLIED_OPENCODE_FEATURES, "autoName", "sessionTokens", "deliver", "hubPrompt", "permissionMessage", "actTokens", "launch"] as const
 export type SpokeFeature = (typeof KNOWN_SPOKE_FEATURES)[number]
 /** What this package's OpenCode spoke announces (without "deliver" and "hubPrompt" when its OpenCode has no synthetic messages). */
-export const SPOKE_FEATURES: readonly SpokeFeature[] = KNOWN_SPOKE_FEATURES
+/** What this package's OpenCode spoke announces: "launch" joins when the spoke serves launch creates (P4-T6). */
+export const SPOKE_FEATURES: readonly SpokeFeature[] = KNOWN_SPOKE_FEATURES.filter((f) => f !== "launch")
 
 /**
  * Features the hub announces in its welcome. "harness": it reads hello `harness`, `harnessVersion` and `evidence`.
  * "messaging": it routes messages between sessions (it sends deliver to spokes that announce that feature).
+ * "nodes": it accepts a node hello (role "node", see node.ts) and sends node ops; a node backs off from a hub
+ * without it. "launches": it launches sessions (it sends launch creates to spokes that announce "launch").
  */
-export const HUB_FEATURES = ["harness", "messaging"] as const
-export type HubFeature = (typeof HUB_FEATURES)[number]
+export const KNOWN_HUB_FEATURES = ["harness", "messaging", "nodes", "launches"] as const
+export type HubFeature = (typeof KNOWN_HUB_FEATURES)[number]
+/** What this hub announces: "nodes" joins with NodeHub (P4-T4), "launches" with the launch routes (P4-T9). */
+export const HUB_FEATURES: readonly HubFeature[] = ["harness", "messaging"]
 
 /** A spoke's harness, version and evidence level; a hello without `harness` is an OpenCode native spoke. */
 export function helloHarness(hello: Hello): { readonly harness: string; readonly harnessVersion: string; readonly evidence: EvidenceLevel | "unknown" } {
@@ -470,12 +488,21 @@ export type ServerRequest =
   | { readonly op: "timelineFile"; readonly sessionID: string; readonly messageID: string; readonly index: number }
   /** Enable or disable voice for one session (adds/removes it from the machine config's session list). */
   | { readonly op: "expose"; readonly sessionID: string; readonly on: boolean }
-  /** Create a session in a workspace directory the spoke already reported. */
   /**
    * Create a session in a workspace directory the spoke already reported. With `herdrWorkspace`, also open
    * it in a new tab of that Herdr workspace (`opencode --session <id>` in the directory).
+   * Launch fields (feature "launch", see isLaunchCreate): `launchID` the launch the session is for, `agent` and
+   * `model` the agent and model to start it with (the spoke refuses an agent or model its harness lacks).
    */
-  | { readonly op: "create"; readonly directory: string; readonly title?: string; readonly herdrWorkspace?: string }
+  | {
+      readonly op: "create"
+      readonly directory: string
+      readonly title?: string
+      readonly herdrWorkspace?: string
+      readonly launchID?: string
+      readonly agent?: string
+      readonly model?: ModelSelection
+    }
   /**
    * Session tokens for sessions the spoke reported (feature "sessionTokens"); each replaces the session's older
    * one. `hubURL`: the URL the sessions' shells reach the hub at. No session is adopted or exposed by this op.
@@ -519,8 +546,19 @@ export function requestFeatures(req: ServerRequest): SpokeFeature[] {
   const out: SpokeFeature[] = op ? [op] : []
   if (req.op === "deliver" && req.meta.kind === "prompt") out.push("hubPrompt")
   if (req.op === "permission" && req.message !== undefined) out.push("permissionMessage")
+  if (isLaunchCreate(req)) out.push("launch")
   return out
 }
+
+export type CreateRequest = Extract<ServerRequest, { op: "create" }>
+
+/** Whether `req` is a create carrying launch fields (feature "launch"). */
+export function isLaunchCreate(req: ServerRequest): req is CreateRequest {
+  return req.op === "create" && (req.launchID !== undefined || req.agent !== undefined || req.model !== undefined)
+}
+
+/** Longest agent name a launch create carries. */
+export const AGENT_NAME_MAX = 100
 
 /** Longest permission reply message (deny reason). */
 export const PERMISSION_MESSAGE_MAX = 1000
@@ -642,20 +680,8 @@ export type ServerMessage = Welcome | Req<ServerRequest> | Res | Bye
 
 // ---------- validation ----------
 
-const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v)
-const str = (v: unknown): v is string => typeof v === "string"
-const nonEmpty = (v: unknown): v is string => typeof v === "string" && v.length > 0
-const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v)
-const ID = /^[A-Za-z0-9_.:@/+~-]{1,300}$/
-/** A short lowercase token (harness id, evidence level). */
-const token = (v: unknown, max: number): boolean => typeof v === "string" && v.length <= max && /^[a-z0-9][a-z0-9._-]*$/.test(v)
-/** A feature list: at most 64 names of 1–64 characters. */
-const featureList = (v: unknown): boolean => Array.isArray(v) && v.length <= 64 && v.every((f) => nonEmpty(f) && f.length <= 64)
 const isModelSelection = (v: unknown): v is ModelSelection =>
   isObj(v) && typeof v.providerID === "string" && ID.test(v.providerID) && typeof v.modelID === "string" && ID.test(v.modelID) && (v.variant === undefined || (typeof v.variant === "string" && ID.test(v.variant)))
-
-/** Largest frame (in characters) either side accepts; a larger one is a protocol error. */
-export const MAX_FRAME = 1_000_000
 
 const SESSION_TOKEN_TEXT = new RegExp(`^[\\x21-\\x7e]{1,${SESSION_TOKEN_MAX_CHARS}}$`)
 
@@ -756,15 +782,14 @@ function isHerdrInfo(v: unknown): boolean {
   )
 }
 
-/** Control (C0, C1), format (bidi, zero-width, BOM) and line/paragraph separator characters. */
-const UNSAFE_CHARS = /[\p{Cc}\p{Cf}\u2028\u2029]/u
-
 /** A permission reply message: 1–PERMISSION_MESSAGE_MAX characters, newlines and tabs but no other unsafe characters. */
 const permissionMessage = (v: unknown): v is string => nonEmpty(v) && v.length <= PERMISSION_MESSAGE_MAX && !UNSAFE_CHARS.test(v.replace(/[\n\t]/g, ""))
 
 /** A non-empty address of at most DELIVER_ID_MAX characters without characters that could fake a header. */
 const address = (v: unknown): v is string => nonEmpty(v) && v.length <= DELIVER_ID_MAX && !UNSAFE_CHARS.test(v)
 const deliverID = (v: unknown): v is string => typeof v === "string" && v.length <= DELIVER_ID_MAX && ID.test(v)
+/** An agent name: 1–AGENT_NAME_MAX printable characters, not starting with "-" or a space. */
+const agentName = (v: unknown): v is string => nonEmpty(v) && v.length <= AGENT_NAME_MAX && !UNSAFE_CHARS.test(v) && !/^[-\s]/.test(v)
 
 /** Why `v` is not an acceptable deliver request, or undefined when it is. */
 export function deliverProblem(v: unknown): string | undefined {
@@ -918,7 +943,10 @@ function isServerRequest(v: unknown): v is ServerRequest {
         v.directory.startsWith("/") &&
         v.directory.length <= 4096 &&
         (v.title === undefined || (str(v.title) && v.title.length <= 200)) &&
-        (v.herdrWorkspace === undefined || (nonEmpty(v.herdrWorkspace) && v.herdrWorkspace.length <= 100))
+        (v.herdrWorkspace === undefined || (nonEmpty(v.herdrWorkspace) && v.herdrWorkspace.length <= 100)) &&
+        (v.launchID === undefined || deliverID(v.launchID)) &&
+        (v.agent === undefined || agentName(v.agent)) &&
+        (v.model === undefined || isModelSelection(v.model))
       )
     case "sessionTokens":
       return Array.isArray(v.tokens) && v.tokens.length <= SESSION_TOKENS_MAX && v.tokens.every(isSessionToken) && (v.hubURL === undefined || isHubURL(v.hubURL))
@@ -931,20 +959,6 @@ function isServerRequest(v: unknown): v is ServerRequest {
   }
 }
 
-const isRes = (v: Record<string, unknown>) =>
-  nonEmpty(v.id) && typeof v.ok === "boolean" && (v.error === undefined || str(v.error))
-const isBye = (v: Record<string, unknown>) => str(v.reason)
-
-function parse(raw: string | Buffer): Record<string, unknown> | undefined {
-  const text = typeof raw === "string" ? raw : raw.toString("utf8")
-  if (text.length > MAX_FRAME) return undefined
-  try {
-    const value = JSON.parse(text)
-    return isObj(value) ? value : undefined
-  } catch {
-    return undefined
-  }
-}
 
 /** Parses a frame received by the server. Returns undefined for anything invalid. */
 export function parseSpokeMessage(raw: string | Buffer): SpokeMessage | undefined {
@@ -952,7 +966,9 @@ export function parseSpokeMessage(raw: string | Buffer): SpokeMessage | undefine
   if (!m) return undefined
   switch (m.t) {
     case "hello":
-      return num(m.v) &&
+      // A spoke hello has no role (v1) or role "spoke"; a node hello (role "node") is parsed by parseNodeMessage.
+      return (m.role === undefined || m.role === "spoke") &&
+        num(m.v) &&
         nonEmpty(m.processID) &&
         (m.kind === "service" || m.kind === "standalone") &&
         str(m.directory) &&
@@ -991,7 +1007,7 @@ export function parseServerMessage(raw: string | Buffer): ServerMessage | undefi
   if (!m) return undefined
   switch (m.t) {
     case "welcome":
-      return num(m.v) && nonEmpty(m.machineID) && str(m.publicURL) && (m.features === undefined || featureList(m.features)) ? (m as unknown as Welcome) : undefined
+      return isWelcomeFrame(m) ? (m as unknown as Welcome) : undefined
     case "req":
       return nonEmpty(m.id) && isServerRequest(m.req) ? (m as unknown as Req<ServerRequest>) : undefined
     case "res":
@@ -1003,7 +1019,7 @@ export function parseServerMessage(raw: string | Buffer): ServerMessage | undefi
   }
 }
 
-export const encode = (message: SpokeMessage | ServerMessage): string => JSON.stringify(message)
+export const encode = (message: SpokeMessage | ServerMessage | NodeMessage | NodeServerMessage): string => JSON.stringify(message)
 
 // ---------- HTTP enrollment (spoke ↔ server, before a machine token exists) ----------
 
