@@ -17,6 +17,7 @@ import type { Delivery } from "./delivery"
 import { MessageFeed, messageRoutes } from "./message-routes"
 import type { SessionTokens } from "./session-tokens"
 import { AgentError, agentFailure } from "./errors"
+import { type AgentAudit, auditRoutes } from "./audit"
 
 export const AGENT_PREFIX = "/api/agent"
 
@@ -57,6 +58,8 @@ export interface AgentDeps {
   readonly delivery?: Delivery
   /** Decisions (ask @me, P2-T9): with the message routes. */
   readonly decisions?: Decisions
+  /** The agent audit (P3-T5): GET /api/agent/audit when given. */
+  readonly audit?: AgentAudit
   /** Stored messages as they are sent (the hub also streams them to the console); a new feed when absent. */
   readonly feed?: MessageFeed
   /** Heartbeat of GET /api/agent/watch. */
@@ -93,6 +96,7 @@ export function agentRoutes(deps: AgentDeps): AgentRoute[] {
       handle: ({ actor, user }) => Response.json({ actor, user: userView(user) }, { headers: { "cache-control": "no-store" } }),
     },
     ...appTokenRoutes(deps.store),
+    ...(deps.audit ? auditRoutes(deps.audit) : []),
   ]
 }
 
