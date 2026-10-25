@@ -15,6 +15,18 @@ export interface Blocker {
   readonly question?: true
   /** form: its fields, bounded, so a phone can render and answer it. */
   readonly fields?: readonly FormFieldSpec[]
+  /** permission: an agent escalated it (outside its grant) and recommends this (the hub adds it, P3-T8). */
+  readonly recommendation?: BlockerRecommendation
+}
+
+/** "@orchestrator recommends Approve: only runs tests in the worktree". */
+export interface BlockerRecommendation {
+  /** Who recommends it, as the hub names the agent. */
+  readonly by: string
+  readonly recommends: "approve"
+  readonly why?: string
+  /** The Decision the user answers it in. */
+  readonly decisionID?: string
 }
 
 export interface FormOptionSpec {

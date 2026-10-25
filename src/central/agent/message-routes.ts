@@ -27,7 +27,7 @@
 // - Every stored message is published on the MessageFeed (GET /api/agent/watch 'message' events, waiters).
 import type { Store } from "../store"
 import type { AgentActor } from "./actor"
-import type { AskInput, DecisionState, Decisions, Tier, Urgency } from "./decisions"
+import { type AskInput, DECISION_STATES, type DecisionState, type Decisions, type Tier, type Urgency } from "./decisions"
 import type { Delivery, SendOptions, Sent } from "./delivery"
 import type { Directory } from "./directory"
 import { partyFromActor, partyKey } from "./envelope"
@@ -123,7 +123,6 @@ const sendOptions = (body: Body): SendOptions => {
 const isMe = (to: string) => to === "@me" || to.startsWith("@me.")
 
 const DECISION_FIELDS = ["options", "recommendation", "urgency", "tier", "deadline", "onTimeout", "about"] as const
-const DECISION_STATES: readonly DecisionState[] = ["open", "answered", "expired"]
 
 /** The state query parameter of a Decision listing, or undefined. */
 export function decisionStateQuery(raw: string | null): DecisionState | undefined {

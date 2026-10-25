@@ -49,6 +49,29 @@ async function permissionSummary(sessionID, requestID) {
   }
 }
 
+/** Who an escalation's recommendation is from, as the console names it. */
+function partyName(from) {
+  if (from && from.kind === "session") return from.name ? `@${from.name}` : "An agent"
+  if (from && from.kind === "app") return `app ${from.label || from.tokenID || ""}`.trim()
+  return "An agent"
+}
+
+/** An open escalation's recommendation ("@orchestrator recommends Approve once: …"), fetched from the hub, never carried by the push. */
+async function escalationSummary(decisionID) {
+  try {
+    const res = await fetch(`/api/decisions/${encodeURIComponent(decisionID)}`, { credentials: "same-origin" })
+    if (!res.ok) return undefined
+    const { decision } = await res.json()
+    if (!decision || decision.state !== "open" || !decision.action || !decision.recommendation) return undefined
+    const option = (decision.options || []).find((o) => o && o.id === decision.recommendation.option)
+    if (!option) return undefined
+    const why = decision.recommendation.why ? `: ${decision.recommendation.why}` : ""
+    return `${partyName(decision.from)} recommends ${option.label}${why}`
+  } catch {
+    return undefined
+  }
+}
+
 self.addEventListener("push", (event) => {
   let data = {}
   try {
@@ -65,6 +88,10 @@ self.addEventListener("push", (event) => {
       let body = data.body || ""
       let actions = [{ action: "open", title: "Open" }]
       // Answer from the notification only when the hub confirms the request is pending and we can show what it is.
+      if (decisionID) {
+        const summary = await escalationSummary(decisionID)
+        if (summary) body = summary.length > 180 ? `${summary.slice(0, 179)}…` : summary
+      }
       if (kind === "permission" && sessionID && requestID) {
         const summary = await permissionSummary(sessionID, requestID)
         if (summary) {

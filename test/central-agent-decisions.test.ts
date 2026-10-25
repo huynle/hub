@@ -5,7 +5,7 @@
 // asker as a reply. A real delivery engine over fake spokes, a fake clock and fake timers.
 import { describe, expect, test } from "bun:test"
 import type { AgentActor, UserActor } from "../src/central/agent/actor"
-import { DECISION_TICK_MS, Decisions, type Decision } from "../src/central/agent/decisions"
+import { DECISION_STATES, DECISION_TICK_MS, Decisions, type Decision } from "../src/central/agent/decisions"
 import { Delivery, type DeliveryRegistry } from "../src/central/agent/delivery"
 import type { DirectoryEntry, Resolved } from "../src/central/agent/directory"
 import { AgentError } from "../src/central/agent/errors"
@@ -382,5 +382,127 @@ describe("listing", () => {
     expect(ids(await s.decisions.list(U, { state: "open" }))).toEqual([b.id])
     expect(ids(await s.decisions.list(U, { from: { kind: "session", sessionID: "ses_a" } }))).toEqual([a.id])
     expect(await s.decisions.list("u2")).toEqual([])
+  })
+})
+
+describe("closed elsewhere (P3-T8)", () => {
+  test("close: an open Decision becomes closed with a reason, the asker hears it, later answers are gone", async () => {
+    const s = setup()
+    const { decision } = await s.decisions.ask(U, asSession("ses_a"), { question: "Approve?", options: OPTIONS })
+    s.changes.length = 0
+    s.clock.set(T0 + MIN)
+    const closed = await s.decisions.close(U, decision.id, "The request was answered elsewhere")
+    expect(closed).toMatchObject({ state: "closed", closed: { at: T0 + MIN, reason: "The request was answered elsewhere" } })
+    expect(closed!.answer).toBeUndefined()
+    expect(s.changes).toEqual([{ userID: U, id: decision.id, state: "closed" }])
+    const reply = (await s.delivery.messages.list(U, { kind: "user" })).find((m) => m.kind === "reply")!
+    expect(reply).toMatchObject({ replyTo: decision.messageID, recipient: { kind: "session", sessionID: "ses_a" } })
+    expect(reply.text).toBe(`Decision ${decision.id} closed: The request was answered elsewhere`)
+    await expect(s.decisions.answer(U, decision.id, { option: "go" }, cookieUser)).rejects.toMatchObject({ code: "gone" })
+    expect((await s.decisions.list(U, { state: "closed" })).map((d) => d.id)).toEqual([decision.id])
+  })
+
+  test("close leaves answered, expired and unknown Decisions alone (undefined, no change)", async () => {
+    const s = setup()
+    const a = (await s.decisions.ask(U, asSession("ses_a"), { question: "A?", options: OPTIONS })).decision
+    await s.decisions.answer(U, a.id, { option: "go" }, cookieUser)
+    const e = (await s.decisions.ask(U, asSession("ses_a"), { question: "E?", expiresInMs: HOUR })).decision
+    s.clock.set(T0 + HOUR)
+    s.changes.length = 0
+    expect(await s.decisions.close(U, a.id, "x")).toBeUndefined()
+    expect(await s.decisions.close(U, e.id, "x")).toBeUndefined()
+    expect(await s.decisions.close(U, "dec_nope", "x")).toBeUndefined()
+    expect(await s.decisions.close("u2", a.id, "x")).toBeUndefined()
+    expect(s.changes).toEqual([])
+    expect((await s.decisions.get(U, a.id))?.state).toBe("answered")
+  })
+
+  test("DECISION_STATES lists every state, closed included", () => {
+    expect([...DECISION_STATES]).toEqual(["open", "answered", "expired", "closed"])
+  })
+})
+
+describe("Decisions that act (escalations, P3-T8)", () => {
+  const ACTION = { kind: "permission" as const, requestID: "per_1", rootID: "ses_b", sessionID: "ses_b", always: false }
+  const APPROVE = [{ id: "approve", label: "Approve once" }, { id: "deny", label: "Deny", safe: true }]
+  function acting(outcome: () => Promise<"done" | "gone">) {
+    const s = setup()
+    const calls: Array<{ userID: string; id: string; option?: string; by: string }> = []
+    const decisions = new Decisions({
+      state: s.state,
+      delivery: s.delivery,
+      now: s.clock.now,
+      timers: s.clock.timers,
+      notify: (userID, decision, reason) => s.notified.push({ userID, id: decision.id, reason, sessionID: decision.sessionID ?? "" }),
+      changed: (userID, decision) => s.changes.push({ userID, id: decision.id, state: decision.state }),
+      act: async (userID, decision, choice, by) => {
+        calls.push({ userID, id: decision.id, ...(choice.option ? { option: choice.option } : {}), by: by.deviceID })
+        return outcome()
+      },
+    })
+    return { ...s, decisions, calls }
+  }
+  const openActing = (s: ReturnType<typeof acting>, extra: Record<string, unknown> = {}) =>
+    s.decisions.ask(U, asSession("ses_a"), { question: "@alpha asks to approve shell: bun test", options: APPROVE, recommendation: { option: "approve", why: "tests only" }, tier: "tap" }, { action: ACTION, ...extra })
+
+  test("an action is stored on the Decision; the user's answer runs it (as that user), then the asker hears the answer", async () => {
+    const s = acting(async () => "done")
+    const { decision } = await openActing(s)
+    expect(decision.action).toEqual(ACTION)
+    const { decision: answered, reply } = await s.decisions.answer(U, decision.id, { option: "approve" }, cookieUser)
+    expect(s.calls).toEqual([{ userID: U, id: decision.id, option: "approve", by: "d1" }])
+    expect(answered).toMatchObject({ state: "answered", answer: { option: "approve", answeredBy: "user" } })
+    expect(reply!.text).toBe(`Decision ${decision.id}: Approve once [approve]`)
+  })
+
+  test("the action finds the request gone: the Decision closes (not answered), the answer is gone", async () => {
+    const s = acting(async () => "gone")
+    const { decision } = await openActing(s)
+    await expect(s.decisions.answer(U, decision.id, { option: "deny" }, cookieUser)).rejects.toMatchObject({ code: "gone" })
+    const after = (await s.decisions.get(U, decision.id))!
+    expect(after.state).toBe("closed")
+    expect(after.answer).toBeUndefined()
+    expect(s.changes.at(-1)).toEqual({ userID: U, id: decision.id, state: "closed" })
+    const reply = (await s.delivery.messages.list(U, { kind: "user" })).find((m) => m.kind === "reply")!
+    expect(reply.text).toBe(`Decision ${decision.id} closed: The request was answered elsewhere or ended`)
+  })
+
+  test("the action fails: the Decision stays open (the user may try again) and the error goes through", async () => {
+    let fail = true
+    const s = acting(async () => {
+      if (fail) throw new Error("spoke broke")
+      return "done"
+    })
+    const { decision } = await openActing(s)
+    await expect(s.decisions.answer(U, decision.id, { option: "approve" }, cookieUser)).rejects.toThrow("spoke broke")
+    expect((await s.decisions.get(U, decision.id))?.state).toBe("open")
+    fail = false
+    expect((await s.decisions.answer(U, decision.id, { option: "approve" }, cookieUser)).decision.state).toBe("answered")
+  })
+
+  test("the action's tier still holds: tap needs the console cookie, and the action never runs without it", async () => {
+    const s = acting(async () => "done")
+    const { decision } = await openActing(s)
+    await expect(s.decisions.answer(U, decision.id, { option: "approve" }, appUser)).rejects.toMatchObject({ code: "forbidden" })
+    expect(s.calls).toEqual([])
+  })
+
+  test("quiet: opened without a notification (coalesced pushes); still a live change", async () => {
+    const s = acting(async () => "done")
+    const { decision } = await openActing(s, { quiet: true })
+    expect(s.notified).toEqual([])
+    expect(s.changes).toEqual([{ userID: U, id: decision.id, state: "open" }])
+  })
+
+  test("revise: an open Decision's recommendation is replaced (sanitised, must name an option); closed ones stay", async () => {
+    const s = acting(async () => "done")
+    const { decision } = await openActing(s)
+    s.changes.length = 0
+    const revised = await s.decisions.revise(U, decision.id, { recommendation: { option: "approve", why: "now\u202e with lint" } })
+    expect(revised?.recommendation).toEqual({ option: "approve", why: "now with lint" })
+    expect(s.changes).toEqual([{ userID: U, id: decision.id, state: "open" }])
+    await expect(s.decisions.revise(U, decision.id, { recommendation: { option: "nope" } })).rejects.toMatchObject({ code: "invalid" })
+    await s.decisions.answer(U, decision.id, { option: "deny" }, cookieUser)
+    expect(await s.decisions.revise(U, decision.id, { recommendation: { option: "approve" } })).toBeUndefined()
   })
 })
