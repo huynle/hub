@@ -10,6 +10,7 @@ import { migratePins, normalizePrefs, PendingTitles, renameTitle, retitle, setPr
 import { sessionRows, stableRows, type SessionRow } from "../lib/sessions"
 import { LiveFeeds, applyMessage, findSession, initialHub, type HubState } from "../lib/store"
 import { StreamKeeper, type StreamScope } from "../core/stream-core"
+import { applyDecision, openDecisions, parseDecision, type DecisionView } from "../core/decision-core"
 import { api, enc, errorText, getJSON, HttpError, sessionPath, setUnauthorized } from "./api"
 import { navigate, route } from "./router"
 import { toast } from "./toast"
@@ -24,6 +25,8 @@ export const [me, setMe] = createSignal<Me | undefined>()
 export const [authInfo, setAuthInfo] = createSignal<AuthInfo | null | undefined>()
 export const [speechReady, setSpeechReady] = createSignal<SpeechReadyView | null | undefined>()
 export const [enrollments, setEnrollments] = createSignal<Array<{ userCode: string; machineName: string; created: number }>>([])
+/** The user's open Decisions (asks to @me), newest first: GET /api/decisions?state=open, then SSE 'decision'. */
+export const [decisions, setDecisions] = createSignal<DecisionView[]>([])
 
 type Listener = (message: Record<string, any>) => void
 const listeners = new Set<Listener>()
@@ -153,6 +156,7 @@ function openSource(url: string): void {
     void loadViewPrefs()
     void loadReads()
     void loadEnrollments()
+    void loadDecisions()
   }
   es.onerror = async () => {
     if (source !== es) return
@@ -218,11 +222,16 @@ export function dispatch(message: Record<string, any>): void {
     }
     if (live.apply(message) !== undefined) setLiveRev((n) => n + 1)
     if (message.type === "enrollment") void loadEnrollments()
+    if (message.type === "decision") {
+      const decision = parseDecision(message.decision)
+      if (decision) setDecisions((list) => applyDecision(list, decision))
+    }
     // The hub could not replay what this page missed: refresh what is not in the catalog.
     if (message.type === "resync") {
       void loadReads()
       void reloadPrefs()
       void loadEnrollments()
+      void loadDecisions()
     }
     if (message.type === "handoff" && !(route().name === "session" && (route() as { id: string }).id === message.sessionID)) {
       const s = lookup(message.sessionID)
@@ -250,6 +259,30 @@ export async function markRead(id: string): Promise<void> {
   } catch {
     // best effort
   }
+}
+
+// ---------- decisions ----------
+
+/** (Re)loads the open Decisions; an older hub without /api/decisions has none. */
+export async function loadDecisions(): Promise<void> {
+  try {
+    const { decisions: list } = await getJSON<{ decisions?: unknown[] }>("/api/decisions?state=open")
+    setDecisions(openDecisions((list ?? []).map(parseDecision).filter((d): d is DecisionView => !!d)))
+  } catch (e) {
+    if (e instanceof HttpError && e.status === 404) setDecisions([])
+    // otherwise keep what is shown (the next stream open reloads)
+  }
+}
+
+/** A Decision this page answered or found closed: its card goes. */
+export function settleDecision(decision: DecisionView): void {
+  setDecisions((list) => applyDecision(list, decision))
+}
+
+/** A Decision the hub says is gone (answered elsewhere, expired): its card goes, and the list is reloaded. */
+export function dropDecision(id: string): void {
+  setDecisions((list) => list.filter((d) => d.id !== id))
+  void loadDecisions()
 }
 
 // ---------- enrollments, speech ----------

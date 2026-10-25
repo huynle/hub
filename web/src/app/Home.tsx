@@ -3,7 +3,8 @@
 import { For, Show, createMemo, createSignal } from "solid-js"
 import { DEFAULT_TABLE, inactiveRows, parseTable, serializeTable, tableRows, voiceLive, type SessionRow, type SortKey, type TableFilters, type TableState } from "../lib/sessions"
 import { archiveSessions, isRenaming, sessionMenu } from "./actions"
-import { enrollments, hub, live, liveTick, rows, speechReady, me } from "./hub"
+import { decisions, enrollments, hub, live, liveTick, rows, speechReady, me } from "./hub"
+import { DecisionCards } from "./DecisionCard"
 import { isPhone } from "./layout"
 import { Naming, RenameTitle } from "./Rename"
 import { navigate, sessionHref } from "./router"
@@ -110,6 +111,12 @@ export function Home() {
             Set up
           </a>
         </div>
+      </Show>
+      <Show when={decisions().length}>
+        <section class="decisions" aria-label="Decisions">
+          <h2 class="section-title">{decisions().length === 1 ? "A decision waits for you" : `${decisions().length} decisions wait for you`}</h2>
+          <DecisionCards decisions={decisions()} showSession />
+        </section>
       </Show>
       <div class="home-tools">
         <label class="search">

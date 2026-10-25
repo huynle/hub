@@ -1948,6 +1948,86 @@ async function markdownAndTextSize(browser: Browser): Promise<void> {
   await phone.close()
 }
 
+/** Decision cards (hub ask @me): Home and the session view, answer → POST, gone → toast, live updates over SSE. */
+async function decisionCards(browser: Browser): Promise<void> {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+  const page = await context.newPage()
+  current = page
+  const errors: string[] = []
+  page.on("pageerror", (e) => errors.push(e.message))
+  const toast = (text: string | RegExp) => page.locator(".toast").filter({ hasText: text })
+  const answers = async () =>
+    ((await (await fetch(`${BASE}/mock/log`)).json()) as { log: Array<{ method: string; path: string; body?: any }> }).log.filter((e) => e.method === "POST" && /^\/api\/decisions\/[^/]+\/answer$/.test(e.path))
+  const open = async (fields: Record<string, unknown>) => ((await (await mock("/mock/decision", fields)).json()) as { decision: { id: string } }).decision.id
+
+  await check("decisions: a Decision opened live shows on Home (options, safe, recommendation + why, urgency, countdown, session)", async () => {
+    await page.goto(`${BASE}/`)
+    await page.getByRole("heading", { name: "All sessions" }).waitFor()
+    await page.locator(".sessions-table tbody tr").nth(5).waitFor()
+    await open({ urgency: "high", deadline: Date.now() + 5 * 60_000, onTimeout: "hold" })
+    const card = page.getByRole("group", { name: "Decision: Drop column legacy_id?" })
+    await card.waitFor()
+    const text = (await card.textContent()) ?? ""
+    for (const part of ["from @mock", "Urgent", "Proceed", "Hold", "safe", "Recommended", "Why: 3 services still read legacy_id", "then Hold"]) assert(text.includes(part), `card shows ${part}: ${text}`)
+    assert(/Deadline in 4m \d+s/.test(text), `countdown: ${text}`)
+    assert(await card.getByRole("link", { name: "Mock session" }).isVisible(), "links its session")
+    assert((await page.getByRole("heading", { name: "A decision waits for you" }).count()) === 1, "Home heading")
+    await shot(page, "decisions-home")
+  })
+
+  await check("decisions: answering posts the option and a note; the card goes", async () => {
+    const card = page.getByRole("group", { name: "Decision: Drop column legacy_id?" })
+    await card.getByRole("button", { name: "Answer" }).click()
+    await toast("Pick one of the options").waitFor()
+    assert(!(await answers()).length, "nothing posted without an option")
+    await card.getByRole("radio", { name: /Proceed/ }).check()
+    await card.getByRole("textbox", { name: "Note (optional)" }).fill("ship it")
+    await card.getByRole("button", { name: "Answer" }).click()
+    await toast("Answer sent").waitFor()
+    await card.waitFor({ state: "detached" })
+    const sent = (await answers()).at(-1)
+    assert(sent?.path === "/api/decisions/dec_mock1/answer" && sent.body?.option === "go" && sent.body?.text === "ship it", `answer sent: ${JSON.stringify(sent)}`)
+  })
+
+  await check("decisions: in the session view, a push link (?decision=) marks the card; tap tier note; already answered → toast, card goes", async () => {
+    const id = await open({ question: "Restart the API?", tier: "tap", recommendation: undefined })
+    await page.goto(`${BASE}/s/ses_mock?decision=${id}`)
+    const card = page.getByRole("group", { name: "Decision: Restart the API?" })
+    await card.waitFor()
+    assert(await card.evaluate((el) => el.classList.contains("targeted")), "the linked card is marked")
+    assert(((await card.textContent()) ?? "").includes("Answer here (tap)"), "tap tier note")
+    // Answered on another device: the hub says gone.
+    await mock("/mock/decision", { id, state: "answered", silent: true })
+    await card.getByRole("radio", { name: /Hold/ }).check()
+    await card.getByRole("button", { name: "Answer" }).click()
+    await toast("Already answered or expired").waitFor()
+    await card.waitFor({ state: "detached" })
+    await shot(page, "decisions-session")
+  })
+
+  await check("decisions: a free-text Decision is answered with text; one closed elsewhere leaves live; other sessions' are not shown", async () => {
+    const other = await open({ question: "Not about this one?", from: { kind: "session", sessionID: "ses_10", name: "pwa" }, about: ["ses_10"], sessionID: "ses_10" })
+    await open({ question: "Which branch?", options: [], recommendation: undefined })
+    const card = page.getByRole("group", { name: "Decision: Which branch?" })
+    await card.waitFor()
+    assert(!(await page.getByRole("group", { name: "Decision: Not about this one?" }).count()), "another session's Decision is not shown here")
+    await card.getByRole("textbox", { name: "Your answer" }).fill("main")
+    await card.getByRole("button", { name: "Answer" }).click()
+    await toast("Answer sent").waitFor()
+    await card.waitFor({ state: "detached" })
+    assert((await answers()).at(-1)?.body?.text === "main", "text answer")
+    await page.goto(`${BASE}/`)
+    const elsewhere = page.getByRole("group", { name: "Decision: Not about this one?" })
+    await elsewhere.waitFor()
+    await mock("/mock/decision", { id: other, state: "expired" })
+    await elsewhere.waitFor({ state: "detached" })
+    assert(!(await page.locator(".decisions").count()), "no Decisions section when none wait")
+  })
+
+  await check("decisions: no page errors", async () => assert(!errors.length, errors.join("; ")))
+  await context.close()
+}
+
 mkdirSync(SHOTS, { recursive: true })
 if (!existsSync(path.join(ROOT, "web", "dist", "index.html"))) {
   console.error("web/dist is missing: run `npm run build:web` first")
@@ -1969,6 +2049,8 @@ try {
   browser = await chromium.launch({ executablePath, headless: true, args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"] })
   await mock("/mock/reset")
   await desktop(browser)
+  await mock("/mock/reset")
+  await decisionCards(browser)
   await mock("/mock/reset")
   await phone(browser)
   await mock("/mock/reset")
