@@ -37,7 +37,8 @@ const REPO_ROOT = path.join(HERE, "..", "..", "..")
 const REGISTRY = "https://registry.npmjs.org/"
 
 export const run: Run = async (cmd, cwd) => {
-  const p = Bun.spawn([...cmd], { cwd, stdout: "pipe", stderr: "pipe" })
+  // COPYFILE_DISABLE: macOS tar would add AppleDouble ._ files to the bootstrap tarball.
+  const p = Bun.spawn([...cmd], { cwd, env: { ...process.env, COPYFILE_DISABLE: "1" }, stdout: "pipe", stderr: "pipe" })
   const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited])
   if (code !== 0) throw new Error(`${cmd.join(" ")} failed (exit ${code}): ${err.trim().split("\n").slice(-5).join("\n")}`)
   return out
@@ -152,7 +153,7 @@ export async function buildBootstrap(o: BuildOptions & { out?: string }): Promis
   try {
     const { hubVersion } = await stage({ ...o, dir, dockerfile: false })
     const out = path.resolve(o.out ?? bootstrapTarballName(hubVersion, o.arch, o.opencodeVersion))
-    await exec(["tar", "-czf", out, "-C", dir, "bin", "lib"])
+    await exec(["tar", "-czf", out, "--no-xattrs", "-C", dir, "bin", "lib"])
     return { out }
   } finally {
     rmSync(dir, { recursive: true, force: true })

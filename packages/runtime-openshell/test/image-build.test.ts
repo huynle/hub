@@ -160,6 +160,13 @@ describe("buildBootstrap", () => {
     for (const entry of ["bin/opencode", "bin/hub-sandbox-start", "bin/hub-sandbox-entry", "lib/hub/node_modules/@huynle/hub/server.ts"]) expect(list).toContain(entry)
     expect(list).not.toContain("Dockerfile")
   })
+
+  test("without the host's extended attributes (macOS provenance headers warn in GNU tar)", async () => {
+    const f = fakes()
+    await buildBootstrap({ arch: "arm64", repoRoot: ROOT, out: path.join(temp(), "b.tgz"), fetch: f.fetch, run: f.run })
+    const pack = f.calls.find((c) => c[0] === "tar" && c[1] === "-czf")!
+    expect(pack).toContain("--no-xattrs")
+  })
 })
 
 describe("parseArgs", () => {
