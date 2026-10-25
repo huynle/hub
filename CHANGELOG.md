@@ -373,6 +373,23 @@ webhooks. See [docs/launches.md](docs/launches.md) and [docs/multi-user.md](docs
   `opencode serve --service`: `HUB_IT_OPENCODE=1 bun test test/e2e-phase4-live.it.test.ts` (the launched session
   runs in the node's worktree and the model receives the prompt).
 
+### Sandboxed launches
+
+- Launches can run in OpenShell sandboxes (`runtime: {kind: "openshell", profile}`, clone workspaces only): the node
+  clones on the host, creates a labelled sandbox in the OpenShell workspace `hub` with a deny-by-default policy,
+  moves code in and out as git bundles, starts the harness from the sandbox image and collects the work into the
+  host clone ([docs/launches.md](docs/launches.md#sandboxed-launches-openshell-runtime)).
+- Launch-bound tokens (`hlt1`) let a sandboxed plugin connect for one launch only; the hub keeps such connections
+  out of service selection, closes them when the launch ends and gives their sessions no act tokens.
+- The plugin's launch-bound mode reads `$HUB_LAUNCH_CONFIG` (or `/sandbox/.hub/config.json`) and never enrolls,
+  starts a local hub or writes config.
+- node.json `openshell` section (`enabled`, `gateway`, `image`, `profiles`); the node announces the `sandbox`
+  feature, reports its sandboxes after a restart, and falls back to `host` when the CLI cannot be used.
+- Profiles compile to OpenShell policies (hub, optional git remote, extra endpoints, only for the harness binary);
+  profiles asking for mounts or CPU/memory limits are refused.
+- The sandbox image (`packages/runtime-openshell/image/`) with start and entry scripts and an upload fallback.
+- `hub node openshell check [--json]` reports whether a node can run sandboxed launches.
+
 ### Other changes
 
 - **Auto-name**: let OpenCode name a session with its Title agent, from the console. **Auto-name** in every

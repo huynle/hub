@@ -87,7 +87,7 @@ Unknown fields are refused (`400 invalid`), as is anything malformed; the hub fi
 | `workspace.branch` | none | required for `worktree`; a name `git check-ref-format --branch` accepts, printable ASCII, no part starting with `-` or `.`, up to 200 |
 | `workspace.base` | `HEAD` | what a new branch starts from (same rules as `branch`) |
 | `workspace.remote` | none | required for `clone`: `https://host/path`, `ssh://[user@]host/path` or `user@host:path`, no credentials, up to 500 |
-| `runtime` | `{kind: "host"}` | `host` (the machine's own harness service); `openshell` is reserved for sandbox runtimes (clone workspaces only) that no node offers yet |
+| `runtime` | `{kind: "host"}` | `host` (the machine's own harness service) or `openshell` (a sandbox on a node with OpenShell enabled; `clone` workspaces only; `profile` names a node profile, see [Sandboxed launches](#sandboxed-launches-openshell-runtime)) |
 | `placement.labels` | `{}` | node labels to match |
 | `placement.machine` | none | a machine ID or name |
 | `placement.mode` | `require` | `require` (labels and machine must match) or `prefer` (they only rank nodes) |
@@ -226,6 +226,81 @@ The node is careful with your files:
 
 Add `.worktrees/` to the repository's `.gitignore` so the worktrees do not show up as untracked files in the main
 checkout.
+
+### Sandboxed launches (openshell runtime)
+
+A launch with `runtime: {kind: "openshell", profile?}` runs its harness inside an [OpenShell](https://github.com/NVIDIA/OpenShell)
+sandbox instead of on the machine itself. The node drives the `openshell` CLI (0.1.x) in a dedicated OpenShell
+workspace, `hub`; it never touches sandboxes outside it.
+
+How a sandboxed launch runs:
+
+1. **Prepare.** The node clones `remote` on the host (under a workspace root, with its own git credentials), then
+   creates the sandbox `hub-<20 hex of sha256(launchID)>` labelled `hub.launch`, `hub.machine` and `hub.owner`,
+   with the profile's image, policy and providers, waits until it is Ready, uploads a git bundle and clones it inside
+   at `/sandbox/work`. No git credentials ever enter the sandbox.
+2. **Start.** The hub mints a launch-bound token (`hlt1…`) that is valid only for this launch, on this machine, while
+   it is provisioning or running. The node writes `/sandbox/.hub/config.json` (`{hubURL, token, launchID}`),
+   `/sandbox/.hub/node.json` (workspace root `/sandbox/work`) and `/sandbox/.hub/env.json`, touches
+   `/sandbox/.hub/ready` and runs the image's `hub-sandbox-start`, which starts `opencode serve --service` with the
+   hub plugin, offline (`OPENCODE_DISABLE_MODELS_FETCH`, `OPENCODE_DISABLE_AUTOUPDATE`,
+   `OPENCODE_DISABLE_PROJECT_CONFIG`).
+3. **Connect.** Inside, the plugin finds the launch config (`$HUB_LAUNCH_CONFIG`, else `/sandbox/.hub/config.json`)
+   and connects to the hub with the launch token and the launch ID. It never enrolls, never starts a local hub and
+   never writes any config. The hub allows one such connection per launch, closes it when the launch ends or the
+   token expires, never picks it as the machine's service, and never gives its sessions act tokens: a sandboxed
+   session can message and read, but cannot act for you or launch. The hub waits up to 2 minutes for it, then
+   creates the session through it and names, primes and prompts it as usual.
+4. **End.** The session is stopped, the harness is stopped (`/sandbox/.hub/stop`, graceful for `idle` and
+   `needs_user`, kill otherwise), the work is bundled inside, downloaded, verified and fast-forwarded into the host
+   clone (refs `refs/hub/sandbox/<branch>`; a diverged branch is left alone), and the artifacts are reported.
+   Cleanup deletes the sandbox only when nothing would be lost; otherwise it is stopped and the reason says why.
+
+A sandbox spoke may drop for up to 10 minutes without the launch being lost. After a node restart the node reports
+the sandboxes labelled with its machine as launches, and the hub reconnects, restarts or cleans them up.
+
+**Policy.** Egress is denied by default. Each profile compiles to a policy that allows only the hub (a loopback hub
+is reached as `host.openshell.internal`), the git remote when the profile sets `allowGitRemote`, and the profile's
+extra `endpoints`, each only for `/usr/local/bin/opencode` (and what it runs). Model provider endpoints come from
+the OpenShell providers the profile names; their keys stay in OpenShell, and the sandbox only sees placeholders.
+
+**Profiles** live in node.json:
+
+```json
+{
+  "workspaceRoots": ["/Users/you/projects"],
+  "openshell": {
+    "enabled": true,
+    "image": "ghcr.io/you/hub-sandbox:0.6.1-opencode2.1.4",
+    "profiles": {
+      "default": { "providers": ["anthropic"] },
+      "net-off": { "providers": ["anthropic"], "endpoints": [] },
+      "with-git": { "providers": ["anthropic"], "allowGitRemote": true, "endpoints": ["registry.npmjs.org:443"] }
+    }
+  }
+}
+```
+
+| Profile field | Meaning |
+|---|---|
+| `image` | the sandbox image for this profile (else `openshell.image`, else `hub-sandbox:<hub version>-opencode<version>`) |
+| `providers` | OpenShell provider names to attach; create them yourself in the `hub` workspace (`openshell --workspace hub provider create …`) |
+| `endpoints` | extra egress, `"host:port"` or `{host, port}` |
+| `allowGitRemote` | also allow the launch's git remote |
+
+The built-in `default` profile reaches only the hub, so an agent in it cannot reach a model until you define
+`default` with a provider. Profiles that ask for `mounts`, `cpu`, `memoryMB` or `memory` are refused
+(`unsupported`): the microVM backend cannot honour them, and the node never runs a weaker version.
+
+**The image.** `packages/runtime-openshell/image/` builds it (Debian slim, git, bash, ca-certificates, curl,
+procps, a pinned Linux OpenCode from npm, the hub plugin, and the start and entry scripts):
+`bun packages/runtime-openshell/image/build.ts image`. OpenShell's microVM driver pulls images from an HTTPS
+registry and does not use local Docker images, so publish it (for example to `ghcr.io`) and set `openshell.image`.
+
+**Check a node.** `hub node openshell check [--json]` reports whether this machine can run sandboxed launches: the
+`openshell` CLI and its version, the gateway, the `hub` workspace (it prints the command to create it), the
+node.json `openshell` section and profiles, providers that exist, a `default` profile without providers, and an
+image that is not on a registry. It exits 0 when nothing fails (warnings allowed) and 1 otherwise.
 
 ## Webhooks
 

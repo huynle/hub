@@ -150,6 +150,10 @@ export interface OpenShellClient {
   /** Asks for deletion (OpenShell deletes asynchronously: poll get until undefined); a missing sandbox is fine. */
   delete(name: string, options?: CallOptions): Promise<void>
   policySet(name: string, policyFile: string, policy?: PolicySetOptions & CallOptions): Promise<void>
+  /** Optional, read-only: the gateway's workspace names (`hub node openshell check`). */
+  workspaces?(options?: CallOptions): Promise<string[]>
+  /** Optional, read-only: the provider names in the client's workspace (`hub node openshell check`). */
+  providers?(options?: CallOptions): Promise<string[]>
 }
 
 export interface OpenShellCliOptions {
@@ -337,6 +341,14 @@ export class OpenShellCli implements OpenShellClient {
     return { computeDrivers }
   }
 
+  workspaces(options: CallOptions = {}): Promise<string[]> {
+    return this.names(["workspace", "list"], "workspaces", options)
+  }
+
+  providers(options: CallOptions = {}): Promise<string[]> {
+    return this.names(["provider", "list"], "providers", options)
+  }
+
   async create(sandbox: CreateSandboxOptions, options: CallOptions = {}): Promise<Sandbox> {
     checkName(sandbox.name)
     const args = ["sandbox", "create", "--name", sandbox.name]
@@ -465,6 +477,29 @@ export class OpenShellCli implements OpenShellClient {
     }
     args.push(name)
     await this.call(args, { what: "policy set", timeoutMs, ...(policy.signal ? { signal: policy.signal } : {}) })
+  }
+
+  /** The `name`s of a paged `<command> -o json` listing whose items sit under `field`. */
+  private async names(command: readonly string[], field: string, options: CallOptions): Promise<string[]> {
+    const what = command.join(" ")
+    const names: string[] = []
+    let token = ""
+    for (let page = 0; page < 10_000; page++) {
+      const args = [...command, "--page-size", String(this.pageSize)]
+      if (token) args.push("--page-token", token)
+      args.push("-o", "json")
+      const { stdout } = await this.call(args, { what, ...options })
+      const o = parseJSON<Record<string, unknown> | null>(what, stdout)
+      const items = o && typeof o === "object" ? o[field] : undefined
+      if (!Array.isArray(items)) throw new OpenShellError(`openshell ${what}: no ${field} in the output`, "bad_output")
+      for (const item of items) {
+        const name = str((item as { name?: unknown } | null)?.name)
+        if (name) names.push(name)
+      }
+      token = str(o!.next_page_token)
+      if (!token) return names
+    }
+    throw new OpenShellError(`openshell ${what}: too many pages`, "bad_output")
   }
 
   // ---- running ----
