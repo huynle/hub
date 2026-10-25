@@ -530,6 +530,8 @@ export function startCentral(options: CentralOptions): Central {
     now,
     users: () => store.users().map((u) => u.id),
     notify: (userID, decision, reason) => pushUser("decision", userID, decision.sessionID ?? "", `${decision.id}:${reason}`),
+    // The console's live Decision cards: opened, answered (here, by timeout), escalated, expired.
+    changed: (userID, decision) => broadcast({ type: "decision", decision }, { tenant: userID }),
   })
   decisions.start()
   /** The user prompted the session: its message hop chain starts over (never fails the prompt). */
