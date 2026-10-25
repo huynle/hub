@@ -104,6 +104,18 @@ describe("parseServerMessage", () => {
     expect(parseServerMessage(j({ t: "bye", reason: "revoked" }))).toBeDefined()
     expect(parseServerMessage(j({ t: "res", ok: true }))).toBeUndefined()
   })
+
+  test("bye may carry retryAfterMs (draining): a whole number of ms up to MAX_RETRY_AFTER_MS", () => {
+    const bye = { t: "bye", reason: "draining", retryAfterMs: 5000 }
+    expect(parseServerMessage(j(bye))).toEqual(bye as any)
+    expect(parseSpokeMessage(j(bye))).toEqual(bye as any)
+    expect(parseServerMessage(j({ ...bye, retryAfterMs: 0 }))).toBeDefined()
+    expect(parseServerMessage(j({ ...bye, retryAfterMs: protocol.MAX_RETRY_AFTER_MS }))).toBeDefined()
+    expect(parseServerMessage(j({ ...bye, retryAfterMs: protocol.MAX_RETRY_AFTER_MS + 1 }))).toBeUndefined()
+    expect(parseServerMessage(j({ ...bye, retryAfterMs: -1 }))).toBeUndefined()
+    expect(parseServerMessage(j({ ...bye, retryAfterMs: 1.5 }))).toBeUndefined()
+    expect(parseServerMessage(j({ ...bye, retryAfterMs: "5000" }))).toBeUndefined()
+  })
 })
 
 describe("conversation ops", () => {
