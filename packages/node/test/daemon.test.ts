@@ -280,3 +280,25 @@ describe("NodeDaemon with a sandbox runtime", () => {
     await expect(handle(start("s1", sandboxed))).rejects.toThrow(/openshell/)
   })
 })
+
+describe("NodeDaemon: launches found at startup (orphan sandboxes)", () => {
+  const recovered = [
+    { launchID: "o1", phase: "running" as const, sandbox: "hub-o1" },
+    { launchID: "o2", phase: "stopped" as const, sandbox: "hub-o2" },
+  ]
+
+  test("reports them in its hello and holds a slot for each until cleanup", async () => {
+    const { handle, hello, sent } = setupBoth({ recovered })
+    expect(hello().launches).toEqual(recovered)
+    expect(hello().used).toEqual({ slots: 2 })
+    const ws: PreparedWorkspace = { ...sandboxed, runtime: { kind: "openshell", sandbox: "hub-o1" } }
+    await handle({ op: "cleanup", launchID: "o1", workspace: ws, policy: "remove" })
+    expect(hello().launches).toEqual([recovered[1]!])
+    expect(sent.at(-1)).toMatchObject({ t: "capacity", used: { slots: 1 } })
+  })
+
+  test("a prepare for a recovered launch is refused as a duplicate", async () => {
+    const { handle } = setupBoth({ recovered })
+    await expect(handle({ op: "prepare", launchID: "o1", runtime: { kind: "openshell" }, harness: "opencode", workspace: { repo: "/w/r", mode: "clone", remote: "https://x/y.git" } })).rejects.toThrow(/already/)
+  })
+})

@@ -48,6 +48,8 @@ export interface NodeDaemonOptions {
   readonly onState?: (state: NodeConnectionState, error?: string) => void
   /** Backends per runtime kind (e.g. openshell: the gateway's compute drivers), added to the hello's runtimes. */
   readonly backends?: Readonly<Record<string, readonly string[]>>
+  /** Launches found at startup (an earlier run's sandboxes): reported in the hello, each holding a slot until cleanup. */
+  readonly recovered?: readonly NodeLaunchReport[]
 }
 
 interface Tracked {
@@ -78,6 +80,8 @@ export class NodeDaemon {
     this.instanceID = options.instanceID ?? randomUUID()
     const platform = options.platform ?? { os: osPlatform(), arch: osArch() }
     this.labels = { os: platform.os, arch: platform.arch, ...options.config.labels }
+    for (const r of options.recovered ?? [])
+      this.launches.set(r.launchID, { phase: r.phase, ...(r.directory ? { directory: r.directory } : {}), ...(r.sandbox ? { sandbox: r.sandbox } : {}) })
   }
 
   start(): void {
