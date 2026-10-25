@@ -7,6 +7,7 @@ import type { AgentActor } from "../src/central/agent/actor"
 import { Delivery, type DeliveryAlert, type DeliveryRegistry } from "../src/central/agent/delivery"
 import type { DirectoryEntry, Resolved } from "../src/central/agent/directory"
 import { AgentError } from "../src/central/agent/errors"
+import { HOP_CAP, type MessageLimits } from "../src/central/agent/message-limits"
 import { parseAddress } from "../src/central/agent/names"
 import { MemoryCounters } from "../src/central/backend/memory-counters"
 import { MemoryStateStore } from "../src/central/backend/memory-state"
@@ -124,7 +125,7 @@ function world() {
   }
 }
 
-function setup(options: { state?: StateStore; clock?: ReturnType<typeof fakeClock> } = {}) {
+function setup(options: { state?: StateStore; clock?: ReturnType<typeof fakeClock>; limits?: Partial<MessageLimits> } = {}) {
   const clock = options.clock ?? fakeClock()
   const w = world()
   const state = options.state ?? new MemoryStateStore({ now: clock.now })
@@ -141,6 +142,7 @@ function setup(options: { state?: StateStore; clock?: ReturnType<typeof fakeCloc
       timers: clock.timers,
       newID: () => `msg_${String(++n).padStart(4, "0")}`,
       alert: (userID, alert) => alerts.push({ userID, alert }),
+      ...(options.limits ? { limits: options.limits } : {}),
     })
   w.addSession("ses_a", { name: "alpha" })
   w.addSession("ses_b", { name: "beta" })
@@ -292,5 +294,165 @@ describe("pending queue", () => {
     s.connect("c1", ["ses_b"])
     await s.delivery.onSessions("c1")
     expect((await s.delivery.messages.get(U, sent.message.id))?.delivery).toBe("turn")
+  })
+})
+
+describe("roles", () => {
+  const role = (generation: number) => ({ roles: [{ role: "reviewer", generation }] })
+
+  test("a role goes to an idle holder and records its generation", async () => {
+    const s = setup()
+    s.addSession("ses_c", role(1))
+    s.addSession("ses_d", role(2))
+    s.connect("c1", ["ses_c", "ses_d"])
+    s.idle.add("ses_c")
+    s.recency.set("ses_d", 9)
+    const sent = await s.delivery.send(U, asUser, "@@reviewer", "ask", "review?")
+    expect(s.sent[0]!.req.sessionID).toBe("ses_c")
+    expect(sent.message).toMatchObject({ to: "@@reviewer", recipient: { sessionID: "ses_c" }, generation: 1 })
+    expect(s.sent[0]!.req.text).toContain("to @@reviewer → you")
+  })
+
+  test("with no idle holder, the most recently active one", async () => {
+    const s = setup()
+    s.addSession("ses_c", role(1))
+    s.addSession("ses_d", role(2))
+    s.connect("c1", ["ses_c", "ses_d"])
+    s.recency.set("ses_c", 3)
+    s.recency.set("ses_d", 9)
+    const sent = await s.delivery.send(U, asUser, "@@reviewer", "msg", "hi")
+    expect(sent.message).toMatchObject({ recipient: { sessionID: "ses_d" }, generation: 2 })
+  })
+
+  test("with every holder offline, pending for the one seen last", async () => {
+    const s = setup()
+    s.addSession("ses_c", { ...role(1), lastSeen: T0 - 5 * MIN })
+    s.addSession("ses_d", { ...role(2), lastSeen: T0 - MIN })
+    const sent = await s.delivery.send(U, asUser, "@@reviewer", "msg", "hi")
+    expect(sent).toMatchObject({ delivery: "pending", message: { recipient: { sessionID: "ses_d" }, generation: 2 } })
+  })
+
+  test("sendAll reaches every holder, each with its own message", async () => {
+    const s = setup()
+    s.addSession("ses_c", role(1))
+    s.addSession("ses_d", role(2))
+    s.connect("c1", ["ses_c", "ses_d"])
+    const sent = await s.delivery.sendAll(U, asUser, "@@reviewer", "msg", "everyone")
+    expect(sent.map((x) => [x.message.recipient.kind === "session" && x.message.recipient.sessionID, x.message.generation])).toEqual([
+      ["ses_c", 1],
+      ["ses_d", 2],
+    ])
+    expect(new Set(s.sent.map((x) => x.req.messageID)).size).toBe(2)
+  })
+})
+
+describe("loop protection", () => {
+  test("hops grow along a chain; over the cap the message is admitted without waking and the user is alerted", async () => {
+    const s = setup()
+    s.connect("c1", ["ses_a", "ses_b"])
+    let hop = 0
+    for (let i = 0; i < HOP_CAP; i++) {
+      const sent = await s.delivery.send(U, asSession(i % 2 ? "ses_b" : "ses_a"), i % 2 ? "@alpha" : "@beta", "msg", `hop ${i}`)
+      hop = sent.message.hop
+      expect(s.sent.at(-1)!.req.wake).toBe(true)
+    }
+    expect(hop).toBe(HOP_CAP)
+    const over = await s.delivery.send(U, asSession("ses_a"), "@beta", "msg", "one too many")
+    expect(over.message.hop).toBe(HOP_CAP + 1)
+    expect(s.sent.at(-1)!.req.wake).toBe(false)
+    expect(s.alerts).toEqual([{ userID: U, alert: { kind: "hopCap", sessionID: "ses_b", messageID: over.message.id, text: expect.any(String) } }])
+  })
+
+  test("a human turn in the sender's session starts the chain over", async () => {
+    const s = setup()
+    s.connect("c1", ["ses_a", "ses_b"])
+    await s.delivery.send(U, asSession("ses_a"), "@beta", "msg", "1")
+    const second = await s.delivery.send(U, asSession("ses_b"), "@alpha", "msg", "2")
+    expect(second.message.hop).toBe(2)
+    await s.delivery.humanTurn(U, "ses_b")
+    const third = await s.delivery.send(U, asSession("ses_b"), "@alpha", "msg", "3")
+    expect(third.message.hop).toBe(1)
+  })
+
+  test("the user's messages are hop 0", async () => {
+    const s = setup()
+    s.connect("c1", ["ses_b"])
+    expect((await s.delivery.send(U, asUser, "@beta", "msg", "hi")).message.hop).toBe(0)
+  })
+
+  test("the pair limit refuses with rate_limited before anything is stored or sent", async () => {
+    const s = setup({ limits: { pair: 2 } })
+    s.connect("c1", ["ses_b"])
+    await s.delivery.send(U, asUser, "@beta", "msg", "1")
+    await s.delivery.send(U, asUser, "@beta", "msg", "2")
+    const error = await s.delivery.send(U, asUser, "@beta", "msg", "3").catch((cause) => cause)
+    expect(error).toMatchObject({ code: "rate_limited" })
+    expect(s.sent).toHaveLength(2)
+    expect(await s.delivery.messages.list(U, { kind: "user" })).toHaveLength(2)
+  })
+
+  test("a spent wake budget delivers without waking", async () => {
+    const s = setup({ limits: { wake: 1 } })
+    s.connect("c1", ["ses_b"])
+    await s.delivery.send(U, asUser, "@beta", "msg", "1")
+    await s.delivery.send(U, asUser, "@beta", "msg", "2")
+    expect(s.sent.map((x) => x.req.wake)).toEqual([true, false])
+  })
+
+  test("wake:false does not use the wake budget", async () => {
+    const s = setup({ limits: { wake: 1 } })
+    s.connect("c1", ["ses_b"])
+    await s.delivery.send(U, asUser, "@beta", "msg", "1", { wake: false })
+    await s.delivery.send(U, asUser, "@beta", "msg", "2")
+    expect(s.sent.map((x) => x.req.wake)).toEqual([false, true])
+  })
+
+  test("a muted sender is refused (forbidden)", async () => {
+    const s = setup()
+    s.connect("c1", ["ses_b"])
+    await s.delivery.messages.mute(U, { kind: "session", sessionID: "ses_b" }, "ses_a")
+    expect(await s.delivery.send(U, asSession("ses_a"), "@beta", "msg", "hi").catch((cause) => cause)).toMatchObject({ code: "forbidden" })
+    expect(s.sent).toHaveLength(0)
+  })
+})
+
+describe("replies and declines", () => {
+  test("a reply goes to the real sender session, steered, with replyTo", async () => {
+    const s = setup()
+    s.connect("c1", ["ses_a", "ses_b"])
+    const ask = await s.delivery.send(U, asSession("ses_a"), "@beta", "ask", "q?")
+    const reply = await s.delivery.reply(U, asSession("ses_b"), ask.message.id, "a!")
+    expect(reply.original.state).toBe("answered")
+    expect(reply.delivery).toBe("turn")
+    expect(s.sent.at(-1)!.req).toMatchObject({ sessionID: "ses_a", meta: { kind: "reply", from: "@beta", to: "@alpha", replyTo: ask.message.id, delivery: "steer" } })
+    expect(reply.message.hop).toBe(2)
+  })
+
+  test("a decline is delivered too", async () => {
+    const s = setup()
+    s.connect("c1", ["ses_a", "ses_b"])
+    const ask = await s.delivery.send(U, asSession("ses_a"), "@beta", "ask", "q?")
+    const declined = await s.delivery.decline(U, asSession("ses_b"), ask.message.id, "busy")
+    expect(declined.original.state).toBe("declined")
+    expect(s.sent.at(-1)!.req).toMatchObject({ sessionID: "ses_a", meta: { kind: "decline", replyTo: ask.message.id } })
+  })
+
+  test("a reply to the user or an app is stored only", async () => {
+    const s = setup()
+    s.connect("c1", ["ses_b"])
+    const ask = await s.delivery.send(U, asUser, "@beta", "ask", "q?")
+    const reply = await s.delivery.reply(U, asSession("ses_b"), ask.message.id, "a!")
+    expect(reply.delivery).toBeUndefined()
+    expect(s.sent).toHaveLength(1)
+    expect((await s.delivery.messages.inbox(U, { kind: "user" })).messages.map((m) => m.id)).toEqual([reply.message.id])
+  })
+
+  test("a reply to an offline sender waits as pending", async () => {
+    const s = setup()
+    s.connect("c1", ["ses_a", "ses_b"])
+    const ask = await s.delivery.send(U, asSession("ses_a"), "@beta", "ask", "q?")
+    s.conns.get("c1")!.sessions.delete("ses_a")
+    const reply = await s.delivery.reply(U, asSession("ses_b"), ask.message.id, "a!")
+    expect(reply.delivery).toBe("pending")
   })
 })
