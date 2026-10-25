@@ -193,6 +193,31 @@ Tokens, codes and secrets are never logged or audited; app token creation and re
 - Admins manage users, machines and devices but, as on the console, do not read other users' sessions through
   the agent API.
 
+### Messaging tenancy
+
+Agent messages (msg, ask, reply, decline), Decisions, pending deliveries and mutes are per user, like sessions:
+
+- **Senders** are the authenticated actor only (a session, an app token, or the user); a request body cannot name
+  one. Envelope labels come from the hub's own directory, sanitised.
+- **Recipients** resolve within the sender's user. Another user's sessions, names, roles, message ids and Decision
+  ids answer `404 not_found` on every route (msg, ask, reply, decline, messages/:id, decisions, the console's
+  `/api/decisions/:id/answer`), exactly like unknown ones. Only a message's recipient may reply to or decline it.
+- **`@me`** is the actor's own user. A session or app may message or ask it; the user cannot message themselves.
+  No session can take the name `me`.
+- **Decisions** are answered only by their user (console cookie, or a device token for `confirm` Decisions; `tap`
+  needs the cookie), never by a session or app token and never by the asker. The first answer wins.
+- **Scopes** for app tokens: `messages:send` (msg, ask, reply, decline, mute, unmute) and `messages:read` (inbox,
+  messages/:id, decisions, its own `message` watch events). Sessions may send and read their own messages without
+  scopes. A message carries no grants: receiving one gives the recipient no new rights.
+- **Delivery** goes hub → spoke only, to connections of the recipient's user that report the session and announce
+  `deliver`.
+- **Limits** are counted per user (pairs, per-user total, wakes per recipient, hop depth), so one user's agents
+  cannot use up another's.
+- **Messaging switch**: `PUT /api/agent/messaging {enabled}` (users only) turns sending off for that user
+  (`423 paused`); reading keeps working. Audited as `messaging.pause` / `messaging.resume`.
+- **Storage**: messages, asks, Decisions, pending deliveries and mutes live under `<HUB_STATE_DIR>/agent/`, one file
+  per user and collection (mode 0600), not in `state.json`. Admins get no access to them through any route.
+
 ## Speech settings precedence
 
 user settings field → server default (admin, stored in `state.speech`) → `hub.json` → env. A user's
@@ -203,7 +228,8 @@ provider/baseURL drops the stored key of that scope (existing rule).
 
 `signin`, `signin.denied`, `device.pair`, `device.revoke`, `machine.approve`, `machine.deny`,
 `machine.revoke`, `user.role`, `user.disable`, `user.enable`, `speech.default`, `migrate.local`,
-`device.link` (an app link code issued), `app-token.create`, `app-token.revoke`.
+`device.link` (an app link code issued), `app-token.create`, `app-token.revoke`, `messaging.pause`,
+`messaging.resume`, `decision.answer` (the chosen option, or `text`).
 Never include tokens, codes, keys or session content.
 
 ## Implementation notes (server, 0.3.0)
