@@ -2,8 +2,7 @@
 // the TUI's CURRENT session, through the shared SDK with that session's own token (Spoke.shellIdentity), the same
 // identity the hub tool uses (src/spoke/hub-tool.ts). The token is only sent to the hub; it never appears in a
 // result or an error (redacted should the hub echo it). Labels are sanitised here, so the TUI shows them as is.
-import { HubClient, HubError, HubTransportError, type AgentMessage, type DirectoryEntry } from "../../packages/sdk/src/index.ts"
-import { sanitizeLabel } from "../central/agent/envelope"
+import { HubClient, HubError, HubTransportError, sanitizeLabel, type AgentMessage, type DirectoryEntry } from "../../packages/sdk/src/index.ts"
 import type { HubToolSpoke } from "./hub-tool"
 
 /** The RPC error a failure answers with (src/rpc.ts lists them). */

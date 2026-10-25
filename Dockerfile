@@ -42,6 +42,9 @@ COPY src ./src
 # The protocol package (src/protocol.ts re-exports it by relative path).
 COPY packages/protocol/package.json ./packages/protocol/
 COPY packages/protocol/src ./packages/protocol/src
+# The SDK's pure envelope and address helpers (src/central/agent/envelope.ts and names.ts re-export them).
+COPY packages/sdk/package.json ./packages/sdk/
+COPY packages/sdk/src ./packages/sdk/src
 COPY --from=web /build/web/dist ./web/dist
 
 ENV HUB_HOST=0.0.0.0 \

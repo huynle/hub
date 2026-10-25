@@ -2,9 +2,20 @@
 // that talks to the hub's /api/agent as the calling session, through the shared SDK (packages/sdk) with the
 // session's own token (Spoke.shellIdentity). The token is only ever sent to the hub: it never appears in the tool's
 // output or metadata (and is redacted should a hub echo it back). Messages from other sessions are shown in the
-// hub's envelope (src/central/agent/envelope.ts), sanitised, and marked as not coming from the user.
-import { HubClient, HubError, HubTransportError, WAIT_POLL_MAX_S, type AgentMessage, type Asked, type Sent, type SentAll } from "../../packages/sdk/src/index.ts"
-import { renderEnvelope, sanitizeLabel, type EnvelopeInput } from "../central/agent/envelope"
+// hub's envelope (packages/sdk/src/envelope.ts), sanitised, and marked as not coming from the user.
+import {
+  HubClient,
+  HubError,
+  HubTransportError,
+  renderEnvelope,
+  sanitizeLabel,
+  WAIT_POLL_MAX_S,
+  type AgentMessage,
+  type Asked,
+  type EnvelopeInput,
+  type Sent,
+  type SentAll,
+} from "../../packages/sdk/src/index.ts"
 
 export const HUB_TOOL = "hub"
 
