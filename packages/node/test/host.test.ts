@@ -11,8 +11,11 @@ import { RuntimeError } from "../../runtime-sdk/src/index.ts"
 import { HostRuntime, resolveUnderRoots } from "../src/host.ts"
 
 const base = { PATH: process.env.PATH, HOME: tmpdir(), GIT_CONFIG_NOSYSTEM: "1" }
-const gitIn = (cwd: string, ...args: string[]) =>
-  execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd, env: base, encoding: "utf8" }).trim()
+/** Git in a temporary directory; never without one (git would then run in this checkout). */
+function gitIn(cwd: string, ...args: string[]): string {
+  if (!cwd || (!cwd.startsWith(realpathSync(tmpdir())) && !cwd.startsWith(tmpdir()))) throw new Error(`gitIn: refusing to run git outside the temporary directory (cwd ${cwd})`)
+  return execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd, env: base, encoding: "utf8" }).trim()
+}
 
 let root: string // as given in node.json (on macOS under /var, a symlink to /private/var)
 let outside: string
