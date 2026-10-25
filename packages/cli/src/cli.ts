@@ -1,13 +1,13 @@
 // The hub CLI (`hub` / `hubctl`, design §2.2, §4, §8): reads and names sessions through the hub's /api/agent, with
 // the hub SDK (packages/sdk) as its client.
 // `run(argv, io)` is the whole program (main.ts wires it to the process); it returns the exit code.
-import type { HubClient, Sent, SentAll } from "../../sdk/src/index.ts"
+import type { Asked, HubClient, Sent, SentAll } from "../../sdk/src/index.ts"
 import pkg from "../package.json" with { type: "json" }
 import { parse, str, UsageError, type CommandSpec, type Parsed } from "./args"
 import { loginFile, readLogin, removeLogin, resolveCredentials, writeLogin, type Credentials, type Env } from "./credentials"
 import { atName, logText, whoamiText, type Actor, roleText, sessionsText, showText, statusText, whoText } from "./format"
 import { CliError, EXIT, withHub } from "./http"
-import { sentText, textArg } from "./messaging"
+import { ASK_EXPIRES_DEFAULT_S, askOutcome, durationArg, sentText, textArg } from "./messaging"
 import { watch } from "./watch"
 
 export { EXIT } from "./http"
@@ -61,7 +61,8 @@ interface Context {
 }
 
 interface Command extends CommandSpec {
-  handle(context: Context): Promise<void>
+  /** Resolves the exit code when it is not 0. */
+  handle(context: Context): Promise<number | void>
 }
 
 const out = (io: Io, text: string) => io.stdout(text.endsWith("\n") ? text : `${text}\n`)
@@ -177,6 +178,29 @@ const COMMANDS: Record<string, Command> = {
       answer(context, body, (b) => ("sent" in b ? b.sent.map(sentText).join("\n") || "no recipients" : sentText(b)))
     },
   },
+  ask: {
+    args: ["<addr>", "<text>"],
+    flags: { all: "bool", "no-wake": "bool", urgent: "bool", expires: "string", wait: "optional" },
+    async handle(context) {
+      const { flags, args } = context.parsed
+      const text = await textArg(args[1]!, context.io.stdin)
+      const expiresFlag = str(flags, "expires")
+      const expires = expiresFlag === undefined ? undefined : durationArg(expiresFlag, "--expires")
+      const wait = flags.wait === undefined ? undefined : flags.wait === true ? (expires ?? ASK_EXPIRES_DEFAULT_S) : durationArg(String(flags.wait), "--wait")
+      const options = { ...sendFlags(flags), ...(expires !== undefined ? { expires } : {}) }
+      if (flags.all === true) {
+        if (wait !== undefined) throw new UsageError("--wait cannot be combined with --all")
+        const body = await context.hub((hub) => hub.ask(args[0]!, text, { ...options, all: true }))
+        answer(context, body, (b) => b.sent.map(sentText).join("\n") || "no recipients")
+        return
+      }
+      const body = await context.hub<Asked>((hub) => hub.ask(args[0]!, text, { ...options, ...(wait !== undefined ? { wait } : {}) }))
+      const outcome = askOutcome(body, wait)
+      answer(context, body, () => outcome.text)
+      if (outcome.note) context.io.stderr(`hub: ${outcome.note}\n`)
+      return outcome.exit
+    },
+  },
   login: {
     flags: { url: "string", token: "string" },
     async handle(context) {
@@ -265,8 +289,7 @@ export async function run(argv: string[], io: Io): Promise<number> {
       if (!found) throw new CliError(EXIT.unauthorized, "not logged in to a hub", "Run `hub login --url <hub URL>` with an app token, or run inside a hub session's shell (HUB_URL + HUB_SESSION_TOKEN)")
       return found
     }
-    await command.handle({ io, parsed, json, credentials, hub: (use) => withHub(credentials(), use) })
-    return EXIT.ok
+    return (await command.handle({ io, parsed, json, credentials, hub: (use) => withHub(credentials(), use) })) ?? EXIT.ok
   } catch (cause) {
     if (cause instanceof UsageError) {
       io.stderr(`hub ${label}: ${cause.message}\nRun \`hub help\` for usage.\n`)
