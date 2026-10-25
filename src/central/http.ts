@@ -7,7 +7,7 @@ import { diskAssets, type WebAssets } from "./assets"
 import path from "node:path"
 import { promisify } from "node:util"
 import { brotliCompress, constants as zlib, gzip } from "node:zlib"
-import { formAnswerProblem, PROMPT_IMAGE_MIMES, promptImagesProblem, type AvailableModel, type EnrollStart, type FormAnswer, type ModelSelection, type PermissionDecision, type PromptImage } from "../protocol"
+import { formAnswerProblem, PROMPT_IMAGE_MIMES, promptImagesProblem, type AvailableModel, type CoreOp, type EnrollStart, type FormAnswer, type ModelSelection, type PermissionDecision, type PromptImage } from "../protocol"
 import { isLoopbackAddress, isLoopbackHost, isLoopbackURL, loopbackOrigins } from "../loopback"
 import { speakable } from "../speakable"
 import { Auth, RateLimitError, ValidationError } from "./auth"
@@ -38,7 +38,7 @@ import { SessionTokenPush } from "./session-token-push"
 import { TokenKeys } from "./token-keys"
 import { EventLog } from "./events-log"
 import { BusyError, Registry, type RegistryMessage } from "./registry"
-import { createActions } from "./actions"
+import { createActions, type Unsupported, unsupportedMessage } from "./actions"
 import { audioFormat, SpeechError } from "./speech/provider"
 import { SpeechService } from "./speech/service"
 import { NodeRegistry } from "./nodes"
@@ -300,6 +300,9 @@ class HttpError extends Error {
     super(message)
   }
 }
+
+/** A core op the session's spoke does not serve (another harness's spoke): 409 code unsupported, like plugin_outdated. */
+const unsupportedError = (lacking: Pick<Unsupported, "feature" | "harness">) => new HttpError(409, unsupportedMessage(lacking), "unsupported")
 
 const error = (status: number, message: string, code?: string) =>
   Response.json({ error: message, ...(code ? { code } : {}) }, { status })
@@ -1196,7 +1199,7 @@ export function startCentral(options: CentralOptions): Central {
       "/api/sessions/:session/interrupt",
       "session",
       async ({ params }) => {
-        await spokes.request(ownerOf(params.session!), { op: "interrupt", sessionID: params.session! })
+        await spokes.request(ownerOf(params.session!, "interrupt"), { op: "interrupt", sessionID: params.session! })
         registry.cancelTurns(params.session!)
         return new Response(null, { status: 204 })
       },
@@ -1204,6 +1207,7 @@ export function startCentral(options: CentralOptions): Central {
     route("POST", "/api/sessions/:session/stop", "session", async ({ params }) => {
       const stopped = await actions.stop(params.session!)
       if (stopped.outcome === "offline") throw new HttpError(409, NO_OWNER)
+      if (stopped.outcome === "unsupported") throw unsupportedError(stopped)
       return Response.json(stopped.result, { headers: NO_STORE })
     }),
     route("POST", "/api/sessions/:session/rename", "session", ({ request, params }) => rename(request, params.session!)),
@@ -1495,6 +1499,7 @@ export function startCentral(options: CentralOptions): Central {
     server.timeout(request, 0)
     const started = await actions.prompt({ sessionID, text, ...(images ? { images } : {}), resetHops: true })
     if (started.outcome === "offline") throw new HttpError(409, NO_OWNER)
+    if (started.outcome === "unsupported") throw unsupportedError(started)
     if (started.mode === "steer") return Response.json({ mode: "steer", inboxID: started.inboxID }, { status: 202 })
     const result = started.result
     if (!/(^|[\s,])respond-async\b/i.test(request.headers.get("prefer") ?? "")) return Response.json(await result)
@@ -1552,10 +1557,11 @@ export function startCentral(options: CentralOptions): Central {
     }
   }
 
-  /** Connection that owns the session, or a 409. */
-  function ownerOf(sessionID: string): string {
+  /** Connection that owns the session, or a 409; also a 409 (code unsupported) when it lacks the core op `feature`. */
+  function ownerOf(sessionID: string, feature?: CoreOp): string {
     const connID = registry.owner(sessionID)
     if (!connID) throw new HttpError(409, NO_OWNER)
+    if (feature && !registry.supports(connID, feature)) throw unsupportedError({ feature, harness: registry.harnessOf(connID) ?? "unknown" })
     return connID
   }
 
@@ -1565,7 +1571,7 @@ export function startCentral(options: CentralOptions): Central {
     const text = typeof raw === "string" ? raw.trim() : ""
     if (!text) return error(400, "Empty utterance")
     if (text.length > MAX_UTTERANCE_CHARS) return error(400, `Utterance longer than ${MAX_UTTERANCE_CHARS} characters`)
-    const connID = ownerOf(sessionID)
+    const connID = ownerOf(sessionID, "steer")
     await humanTurn(sessionID)
     const { inboxID } = await spokes.request(connID, { op: "steer", sessionID, text })
     registry.trackUtterance(sessionID, inboxID)
@@ -1684,6 +1690,7 @@ export function startCentral(options: CentralOptions): Central {
     const decision = input.decision as PermissionDecision
     if (typeof input.requestID !== "string" || !DECISIONS.has(decision)) return error(400, "Invalid decision")
     const answered = await actions.answerPermission({ rootID, requestID: input.requestID, decision })
+    if (answered.outcome === "unsupported") throw unsupportedError(answered)
     return answered.outcome === "done" ? new Response(null, { status: 204 }) : error(409, PERMISSION_GONE, "gone")
   }
 
@@ -1700,6 +1707,7 @@ export function startCentral(options: CentralOptions): Central {
     const answered = await actions.answerForm(
       cancel ? { rootID, formID: input.formID, cancel: true } : { rootID, formID: input.formID, answer: input.answer as FormAnswer },
     )
+    if (answered.outcome === "unsupported") throw unsupportedError(answered)
     return answered.outcome === "done" ? new Response(null, { status: 204 }) : error(409, PERMISSION_GONE, "gone")
   }
 

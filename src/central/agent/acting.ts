@@ -32,7 +32,7 @@ import {
   type ResultFor,
   type ServerRequest,
 } from "../../protocol"
-import type { Actions } from "../actions"
+import { type Actions, type Unsupported, unsupportedMessage } from "../actions"
 import { BusyError, type Registry } from "../registry"
 import { SpokeError } from "../spoke-ws"
 import type { PermissionRequest } from "../../status"
@@ -50,7 +50,7 @@ import { evaluatePermission, formatPattern, type GrantVerb, parsePattern, type P
 /** What the engine reads from the Registry. */
 export type ActingRegistry = Pick<
   Registry,
-  "sessionTenant" | "session" | "rootOf" | "permissionRequest" | "permissionTargets" | "formTargets" | "owner" | "supports"
+  "sessionTenant" | "session" | "rootOf" | "permissionRequest" | "permissionTargets" | "formTargets" | "owner" | "supports" | "harnessOf"
 >
 
 /** Why a request needs the user, as the policy saw it. */
@@ -274,6 +274,7 @@ export class Acting {
       }),
       run: async (grant) => {
         const answered = await this.deps.actions.answerPermission({ rootID: target.rootID, requestID: input.requestID, decision })
+        if (answered.outcome === "unsupported") throw unsupported(answered)
         if (answered.outcome === "gone") throw gone()
         return { sessionID: target.sessionID, requestID: input.requestID, decision, ...(grant ? { grant: grant.id } : {}) }
       },
@@ -292,6 +293,7 @@ export class Acting {
         const reasonSent = why !== "" && registry.permissionTargets(target.rootID, input.requestID).every((t) => registry.supports(t.connID, "permissionMessage"))
         const message = reasonSent ? bounded(`Denied by ${partyLabel(this.party(caller))}${grant ? ` (grant ${grant.id})` : ""}: ${why}`, PERMISSION_MESSAGE_MAX) : undefined
         const answered = await this.deps.actions.answerPermission({ rootID: target.rootID, requestID: input.requestID, decision: "reject", ...(message ? { message } : {}) })
+        if (answered.outcome === "unsupported") throw unsupported(answered)
         if (answered.outcome === "gone") throw gone()
         return { sessionID: target.sessionID, requestID: input.requestID, ...(grant ? { grant: grant.id } : {}), ...(why ? { reasonSent } : {}) }
       },
@@ -309,6 +311,7 @@ export class Acting {
           ? { rootID: target.rootID, formID: input.formID, cancel: true as const }
           : { rootID: target.rootID, formID: input.formID, answer: input.answer }
         const answered = await this.deps.actions.answerForm(form)
+        if (answered.outcome === "unsupported") throw unsupported(answered)
         if (answered.outcome === "gone") throw gone()
         return { sessionID: target.sessionID, formID: input.formID, ...(grant ? { grant: grant.id } : {}) }
       },
@@ -322,6 +325,7 @@ export class Acting {
       run: async (grant) => {
         const stopped = await this.deps.actions.stop(target.sessionID)
         if (stopped.outcome === "offline") throw offline()
+        if (stopped.outcome === "unsupported") throw unsupported(stopped)
         return { sessionID: target.sessionID, ...(grant ? { grant: grant.id } : {}), result: stopped.result }
       },
     })
@@ -372,6 +376,7 @@ export class Acting {
       throw cause
     }
     if (started.outcome === "offline") throw offline()
+    if (started.outcome === "unsupported") throw unsupported(started)
     if (started.mode === "steer") return { sessionID, mode: "steer", inboxID: started.inboxID }
     // Nobody waits for the turn here: its reply streams to the console.
     void started.result.catch(() => {})
@@ -383,7 +388,10 @@ export class Acting {
     const connID = registry.owner(sessionID)
     if (!connID) throw offline()
     for (const feature of ["deliver", "hubPrompt"] as const) {
-      if (!registry.supports(connID, feature)) throw new AgentError("unsupported", `The session's spoke does not support ${feature}`, { extra: { feature } })
+      if (!registry.supports(connID, feature)) {
+        const harness = registry.harnessOf(connID) ?? "unknown"
+        throw new AgentError("unsupported", unsupportedMessage({ feature, harness }), { extra: { feature, harness } })
+      }
     }
     const messageID = (this.deps.newMessageID ?? newMessageID)()
     const from = this.address(caller)
@@ -562,6 +570,8 @@ function bounded(text: string, max: number): string {
 }
 
 const gone = () => new AgentError("gone", "Already answered, expired or ended")
+/** The spoke lacks the core op: unsupported {feature, harness}, as the read routes answer. */
+const unsupported = ({ feature, harness }: Unsupported) => new AgentError("unsupported", unsupportedMessage({ feature, harness }), { extra: { feature, harness } })
 
 /** An error's audit decision and outcome (shared with the launch routes). */
 export function auditOf(cause: unknown): [AuditDecision, AuditOutcome] {

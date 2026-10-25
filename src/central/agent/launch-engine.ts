@@ -43,7 +43,7 @@ import type { ModelSelection, NodeLaunchPhase, NodeLaunchReport, NodeRequest, No
 import type { Clock, Counters, Locks, StateStore, Timers } from "../backend/types"
 import type { HubLaunches } from "../config"
 import type { Registry } from "../registry"
-import type { Actions } from "../actions"
+import { type Actions, unsupportedMessage } from "../actions"
 import type { Decisions } from "./decisions"
 import type { Delivery } from "./delivery"
 import type { Directory } from "./directory"
@@ -64,7 +64,7 @@ export type EngineNodes = {
 export interface EngineNodeOps {
   requestNode<R extends NodeRequest>(connID: string, req: R): Promise<NodeResultFor[R["op"]]>
 }
-export type EngineRegistry = Pick<Registry, "serviceFor" | "supports" | "connTenant" | "hasSession" | "idle" | "session" | "subscribe" | "onSessions" | "launchConn">
+export type EngineRegistry = Pick<Registry, "serviceFor" | "serviceHarnesses" | "supports" | "connTenant" | "hasSession" | "idle" | "session" | "subscribe" | "onSessions" | "launchConn">
 /** Mints the launch-bound token (hlt1) a sandboxed harness connects back with (LaunchTokens). */
 export interface EngineLaunchTokens {
   mint(machineID: string, launchID: string): Promise<{ readonly token: string; readonly exp: number } | undefined>
@@ -298,10 +298,11 @@ export class LaunchEngine {
       store: this.store,
       nodes: placementNodes(deps.nodes),
       spokes: {
-        launchService: (_userID, machineID) => {
-          const connID = registry.serviceFor(machineID)
-          return connID !== undefined && registry.supports(connID, "launch")
-        },
+        launchHarnesses: (_userID, machineID) =>
+          registry.serviceHarnesses(machineID).filter((harness) => {
+            const connID = registry.serviceFor(machineID, harness)
+            return connID !== undefined && registry.supports(connID, "launch")
+          }),
       },
       counters: deps.counters,
       locks: deps.locks,
@@ -664,8 +665,9 @@ export class LaunchEngine {
       const connected = started ? registry.launchConn(launch.id) : undefined
       return connected ?? this.startHarness(userID, launch, workspace)
     }
-    const connID = registry.serviceFor(launch.machineID!)
-    if (connID === undefined || !registry.supports(connID, "launch")) throw new Error("The machine has no connected service spoke with launch")
+    const { harness } = launch.spec
+    const connID = registry.serviceFor(launch.machineID!, harness)
+    if (connID === undefined || !registry.supports(connID, "launch")) throw new Error(`The machine has no connected ${harness} service spoke with launch`)
     return connID
   }
 
@@ -774,6 +776,7 @@ export class LaunchEngine {
       await this.updateWork(userID, launch.id, { prompted: true })
       const prompted = await actions.prompt({ sessionID, text: spec.prompt, resetHops: false })
       if (prompted.outcome === "offline") throw new Error("The session went offline before its prompt")
+      if (prompted.outcome === "unsupported") throw new Error(unsupportedMessage(prompted))
       if (prompted.mode === "steer") this.sawWorking(userID, launch.id)
       else void prompted.result.then(
         () => this.sawWorking(userID, launch.id),

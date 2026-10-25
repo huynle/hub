@@ -1,7 +1,8 @@
 // Placement (design §6.2, §9; decision znbg8xa5): which of the user's nodes takes a launch.
 // - matchNode is pure: over a snapshot of candidates it applies the hard constraints (the user's own machines only,
 //   not draining, the runtime kind, the harness listed for that runtime, the runtime profile when one is named,
-//   the workspace under one of the node's roots, for host launches a connected service spoke announcing "launch",
+//   the workspace under one of the node's roots, for host launches a connected service spoke of the launch's harness
+//   announcing "launch" (each harness has its own service spoke: a Claude Code one never serves an OpenCode launch),
 //   and for openshell launches the node feature "sandbox" (it starts and stops the harness itself; the sandbox's
 //   launch-bound spoke creates the session, so no service spoke is needed)), then the placement's machine and labels (mode require: hard; prefer: ranking only), then
 //   free slots (capacity minus used minus reservations). The best node has the preference, then most free slots,
@@ -53,8 +54,8 @@ export interface PlacementNode {
 
 /** A node with what the matcher needs besides its own report. */
 export interface Candidate extends PlacementNode {
-  /** The machine has a connected service spoke announcing the "launch" feature (needed for host launches). */
-  readonly launchService: boolean
+  /** The harnesses whose connected service spoke on the machine announces "launch" (host launches need theirs). */
+  readonly launchHarnesses: readonly string[]
   /** Slots taken by launches placed on it that the node does not report yet. */
   readonly reserved: number
 }
@@ -79,7 +80,9 @@ function hardProblem(spec: LaunchSpec, node: Candidate): string | undefined {
   if (!runtime.harnesses?.includes(spec.harness)) return `has no ${spec.harness} harness`
   if (spec.runtime.profile !== undefined && !runtime.profiles?.includes(spec.runtime.profile)) return `has no ${spec.runtime.profile} profile`
   if (!node.workspaceRoots.some((root) => underRoot(spec.workspace.repo, root))) return `does not serve ${spec.workspace.repo}`
-  if (kind === "host" && !node.launchService) return "has no connected service spoke with launch"
+  if (kind === "host" && !node.launchHarnesses.includes(spec.harness)) {
+    return node.launchHarnesses.length ? `has no connected ${spec.harness} service spoke with launch` : "has no connected service spoke with launch"
+  }
   if (kind === "openshell" && !node.features?.includes("sandbox")) return "does not serve sandboxes"
   return undefined
 }
@@ -150,8 +153,8 @@ export interface PlacementNodes {
 
 /** The service spokes (the launch engine adapts the Registry). */
 export interface PlacementSpokes {
-  /** Whether the machine has a connected service spoke announcing the "launch" feature. */
-  launchService(userID: string, machineID: string): boolean | Promise<boolean>
+  /** The harnesses whose connected service spoke on the machine announces the "launch" feature. */
+  launchHarnesses(userID: string, machineID: string): readonly string[] | Promise<readonly string[]>
 }
 
 export interface PlacementDeps {
@@ -287,7 +290,7 @@ export class Placement {
     return Promise.all(
       nodes.map(async (node) => ({
         ...node,
-        launchService: await this.deps.spokes.launchService(userID, node.machineID),
+        launchHarnesses: await this.deps.spokes.launchHarnesses(userID, node.machineID),
         reserved: launches.filter((l) => l.machineID === node.machineID && ACTIVE.includes(l.state) && !node.launchIDs.includes(l.id)).length,
       })),
     )

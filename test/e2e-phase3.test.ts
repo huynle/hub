@@ -6,7 +6,7 @@
 // - Spoke 1: the real Spoke class (fake host: replyPermission, interrupt and synthetic are recorded) on
 //   "laptop-a" with three sessions in /work/hub: LEAD ("Lead agent", @lead-agent, claims @@orchestrator),
 //   WORKER ("Worker bee") and PEER ("Peer review").
-// - Spoke 2: a raw protocol client on "laptop-b" (no features) with GAMMA in /work/hub.
+// - Spoke 2: a raw protocol client on "laptop-b" (a hooks harness serving only the core op permission) with GAMMA in /work/hub.
 // - The user grants @@orchestrator approve/deny/answer/prompt/stop in /work/hub, shell `bun test*` allowed and
 //   `rm -rf*` never; the hub never lets an agent approve `git push*`. An app token holds a grant of its own.
 // - Permission requests are permission.asked events from the fake host; like OpenCode it answers each once and
@@ -166,7 +166,7 @@ beforeAll(async () => {
   await waitFor(() => spokeA.status().connection === "connected", 5000)
   for (const id of [LEAD, WORKER, PEER]) events.push({ type: "session.created", data: { sessionID: id, title: TITLES[id]!, location: { directory: PROJECT }, slug: id } })
 
-  rawB = await rawSpoke(h, { machine: b, processID: "proc_b3", hello: { harness: "fake", harnessVersion: "0.1.0", evidence: "hooks", features: [], directory: PROJECT } })
+  rawB = await rawSpoke(h, { machine: b, processID: "proc_b3", hello: { harness: "fake", harnessVersion: "0.1.0", evidence: "hooks", features: ["permission"], directory: PROJECT } })
   rawB.ws.addEventListener("message", (message) => {
     const frame = JSON.parse(String(message.data))
     if (frame.t !== "req") return

@@ -25,6 +25,10 @@ function fakes(options: {
   /** The cluster's turn locks, shared with another executor (another pod). */
   turnLocks?: Locks
   pod?: string
+  /** Core ops each connection lacks (default: it serves every one, as an OpenCode spoke). */
+  lacks?: Record<string, string[]>
+  /** Each connection's harness (default opencode). */
+  harnesses?: Record<string, string>
 } = {}) {
   const requests: Array<{ connID: string; req: Req }> = []
   const calls: string[] = []
@@ -35,6 +39,8 @@ function fakes(options: {
     formTargets: (rootID, formID) => (calls.push(`formTargets ${rootID} ${formID}`), options.formTargets ?? []),
     dropForm: (formID) => void calls.push(`dropForm ${formID}`),
     owner: () => options.owner,
+    supports: (connID, feature) => !(options.lacks?.[connID] ?? []).includes(feature),
+    harnessOf: (connID) => options.harnesses?.[connID] ?? "opencode",
     running: () => options.running ?? false,
     exposed: () => options.exposed,
     beginTurn: (sessionID, onCancel) => {
@@ -287,5 +293,47 @@ describe("answerPermission message (deny reasons)", () => {
     expect(requests.map((r) => r.req.message)).toEqual(["Denied by @x: no", "Denied by @x: no"])
     await actions.answerPermission({ rootID: "root", requestID: "per_2", decision: "reject" })
     expect("message" in requests[2]!.req).toBe(false)
+  })
+})
+
+describe("unsupported core ops (a spoke of another harness announces the ones it serves)", () => {
+  const cc = { lacks: { cc: ["turn", "steer", "stop", "permission", "form"] }, harnesses: { cc: "claude-code" } }
+
+  test("stop on a spoke without stop: unsupported {feature, harness}, nothing sent, no turn lock released", async () => {
+    const { actions, requests, calls } = fakes({ ...cc, owner: "cc" })
+    expect(await actions.stop("s")).toEqual({ outcome: "unsupported", feature: "stop", harness: "claude-code" })
+    expect(requests).toEqual([])
+    expect(calls).toEqual([])
+  })
+
+  test("a prompt on an idle session needs turn; on a running one steer", async () => {
+    const idle = fakes({ ...cc, owner: "cc" })
+    expect(await idle.actions.prompt({ sessionID: "s", text: "hi", resetHops: true })).toEqual({ outcome: "unsupported", feature: "turn", harness: "claude-code" })
+    expect(idle.requests).toEqual([])
+    expect(idle.locks).toEqual([])
+    expect(idle.hops).toEqual([])
+    const running = fakes({ ...cc, owner: "cc", running: true })
+    expect(await running.actions.prompt({ sessionID: "s", text: "hi", resetHops: true })).toEqual({ outcome: "unsupported", feature: "steer", harness: "claude-code" })
+    expect(running.requests).toEqual([])
+  })
+
+  test("a spoke serving turn but not steer still starts turns", async () => {
+    const { actions, requests } = fakes({ owner: "cc", lacks: { cc: ["steer"] }, harnesses: { cc: "claude-code" }, reply: () => ({ outcome: "done", reply: "" }) })
+    const started = await actions.prompt({ sessionID: "s", text: "hi", resetHops: false })
+    expect(started).toMatchObject({ outcome: "done", mode: "turn" })
+    expect(requests.map((r) => r.req.op)).toEqual(["turn"])
+  })
+
+  test("permission and form answers go only to processes serving them; none: unsupported, the answer not claimed", async () => {
+    const kv = new MemoryKv()
+    const only = fakes({ ...cc, kv, permissionTargets: [{ connID: "cc", sessionID: "child" }], formTargets: [{ connID: "cc", sessionID: "child" }] })
+    expect(await only.actions.answerPermission({ rootID: "root", requestID: "per_1", decision: "once" })).toEqual({ outcome: "unsupported", feature: "permission", harness: "claude-code" })
+    expect(await only.actions.answerForm({ rootID: "root", formID: "frm_1", answer: {} as never })).toEqual({ outcome: "unsupported", feature: "form", harness: "claude-code" })
+    expect(only.requests).toEqual([])
+    expect(only.calls).not.toContain("dropPermission per_1")
+    expect(await kv.get("action:answered:per_1")).toBeUndefined()
+    const mixed = fakes({ ...cc, permissionTargets: [{ connID: "cc", sessionID: "child" }, { connID: "oc", sessionID: "child" }] })
+    expect(await mixed.actions.answerPermission({ rootID: "root", requestID: "per_1", decision: "once" })).toEqual({ outcome: "done" })
+    expect(mixed.requests.map((r) => r.connID)).toEqual(["oc"])
   })
 })
