@@ -14,6 +14,7 @@ import { DECISION_FLAGS, decisionOptions, decisionsText, openedText, stateArg } 
 import { GRANT_FLAGS, GRANT_REQUEST_FLAGS, grantError, grantRequestArg, grantSpecArg, grantsText, grantText, requestedText, userOnly } from "./grants"
 import { answeredText, approvedText, deliveryArg, deniedText, formAnswerArg, needsUserLines, promptedText, stoppedText } from "./acting"
 import { currentProgram, installNode, nodeStatus, nodeStatusText, runNodeCommand, uninstallNode, type NodeIo, type Program } from "./node"
+import { checkOpenShell, openShellCheckText } from "./openshell"
 import { LAUNCH_FLAGS, launchedText, launchesText, launchSpecArg, launchText, stoppedLaunchText } from "./launches"
 
 export { EXIT } from "./http"
@@ -37,6 +38,8 @@ export interface Io {
   platform?: NodeJS.Platform
   uid?: number
   program?: Program
+  /** `hub node openshell check`: the openshell executable (default "openshell" on PATH). */
+  openshellBinary?: string
 }
 
 export const USAGE = `Usage: hub <command> [options]     (also installed as hubctl)
@@ -107,6 +110,9 @@ Node (this machine runs launches; design §6.3)
                                       the commands that load it (never run by hub); --dry-run only prints
   hub node uninstall [--dry-run]      remove it and print the commands that stop it
   hub node status                     the service file, enrolment and node.json
+  hub node openshell check            can this node run sandboxed launches: the openshell CLI (0.1.x), its
+                                      gateway, workspace hub, node.json's openshell section, profiles, image
+                                      and providers (read-only; exit 1 when something is wrong)
 
 MCP
   hub mcp                             an MCP server on stdio: these verbs as tools, with this CLI's credential
@@ -493,6 +499,15 @@ const COMMANDS: Record<string, Command> = {
       else out(context.io, nodeStatusText(status))
     },
   },
+  "node openshell check": {
+    async handle(context) {
+      const { io } = context
+      const report = await checkOpenShell({ env: io.env, home: io.home, ...(io.openshellBinary ? { binary: io.openshellBinary } : {}) })
+      if (context.json) printJSON(io, report)
+      else out(io, openShellCheckText(report))
+      return report.ok ? EXIT.ok : EXIT.other
+    },
+  },
   mcp: {
     async handle({ io, credentials }) {
       if (!io.input) throw new UsageError("needs stdin")
@@ -523,7 +538,9 @@ const COMMANDS: Record<string, Command> = {
 }
 
 /** Commands with sub-verbs (`hub role claim`). */
-const GROUPS: Record<string, string[]> = { role: ["claim", "release"], decisions: ["list"], grant: ["list", "show", "create", "revoke", "request"], launches: ["list", "show", "stop"], node: ["run", "install", "uninstall", "status"] }
+const GROUPS: Record<string, string[]> = { role: ["claim", "release"], decisions: ["list"], grant: ["list", "show", "create", "revoke", "request"], launches: ["list", "show", "stop"], node: ["run", "install", "uninstall", "status", "openshell"], "node openshell": ["check"] }
+
+const groupVerbs = (label: string): string[] | undefined => (Object.hasOwn(GROUPS, label) ? GROUPS[label] : undefined)
 
 function reportError(io: Io, error: CliError, json: boolean) {
   if (json && error.envelope) printJSON(io, { error: error.envelope })
@@ -557,18 +574,18 @@ export async function run(argv: string[], io: Io): Promise<number> {
     return EXIT.ok
   }
   let label = name
-  const verbs = GROUPS[name]
-  if (verbs) {
+  // Groups nest (`hub node openshell check`): each level picks one of its sub-verbs.
+  for (let verbs = groupVerbs(label); verbs; verbs = groupVerbs(label)) {
     const verb = rest.shift()
     if (verb === "--help" || verb === "-h") {
       out(io, USAGE)
       return EXIT.ok
     }
     if (verb === undefined || !verbs.includes(verb)) {
-      io.stderr(`hub ${name}: ${verb === undefined ? "needs" : `unknown subcommand ${verb}; use`} ${verbs.join(" or ")}\n`)
+      io.stderr(`hub ${label}: ${verb === undefined ? "needs" : `unknown subcommand ${verb}; use`} ${verbs.join(" or ")}\n`)
       return EXIT.usage
     }
-    label = `${name} ${verb}`
+    label = `${label} ${verb}`
   }
   const command = COMMANDS[label]
   if (!command) {
