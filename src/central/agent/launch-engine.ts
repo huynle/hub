@@ -1,4 +1,30 @@
-// The launch engine (design §6, §7, §9; decision znbg8xa5): drives a launch from accept to its end.
+// The launch engine (design §6, §7, §9; decision znbg8xa5): drives a launch from accept to its end. Per user
+// (tenancy: every call names its user; another user's launch is not_found).
+// - accept: validateLaunchSpec, then (unless it is an idempotent retry of a key) the name must be free (no session
+//   holds it and no live launch asks for it: name_taken) and placement admits it (caps: rate_limited); the store
+//   creates it queued, the hourly cap counts it, and placement is kicked.
+// - Placement (placement.ts, under the user's fenced lease) moves it to provisioning on a node; the engine then
+//   runs one pipeline per launch: prepare on the node (requestNode) → launch create on the machine's service spoke
+//   (feature "launch": directory, launchID, agent, model) → roles (byUser only for the user's own launches; a refused
+//   role is noted, not fatal) → the name (taken meanwhile: failed) → the primer (Delivery.prime, so roles and name
+//   are in it) → the prompt (actions.prompt, resetHops false; marked prompted first, so at most once) → running.
+//   A stop between steps ends it stopped; the node going away ends it lost; anything else ends it failed.
+// - End watcher (running launches): an idle end only after the prompt was seen working (registry status working,
+//   a steer, or the prompt's turn finishing); then idle by real evidence (Registry.idle) with no blockers, none of
+//   the session's own asks open and none of its Decisions open, unchanged for END_SETTLE_MS. end.when asked also
+//   ends needs_user when a question stays open that long (blocked, or idle with an ask or Decision open); never
+//   ends only by stop or timeout. end.timeout counts from running and stops the session (outcome timeout). A
+//   session unreported for SESSION_LOST_MS is lost. Registry status events, a tick (END_TICK_MS) and settle/lost
+//   timers drive it.
+// - Ending: stop the session when asked (stop, timeout), collect artifacts (once prompted) and clean the workspace
+//   up on the node (policy: needs_user keeps; never prompted removes; else spec.end.cleanup; the node never removes
+//   reused, dirty or unpushed work), then the ended step with artifacts. Node away: its cleanup waits in the work
+//   record and runs when the node reconnects (reconcile).
+// - Work records (StateStore LAUNCH_WORK, per launch): fence, workspace, sessionID, prompted, seenWorking, pending
+//   cleanup, so a restarted hub carries on: queued/placing → placement; provisioning → recover (see recover);
+//   running → watched again (seen working and the timeout survive).
+// - onLaunchChanged gets every change the engine makes (queued, provisioning, running, ended); placement's own
+//   intermediate steps (placing, re-queued) are not reported.
 import type { NodeListener, NodeView } from "../nodes"
 import type { ModelSelection, NodeLaunchPhase, NodeRequest, NodeResultFor, PreparedWorkspace, ServerRequest } from "../../protocol"
 import type { Clock, Counters, Locks, StateStore, Timers } from "../backend/types"
@@ -11,7 +37,7 @@ import type { Directory } from "./directory"
 import { AgentError } from "./errors"
 import { validateLaunchSpec } from "./launch-spec"
 import type { CleanupPolicy, LaunchSpec } from "./launch-spec"
-import { type Launch, type LaunchOutcome, type LaunchState, LaunchStore, LaunchTransitionError } from "./launch-store"
+import { type Launch, type LaunchFilter, type LaunchOutcome, type LaunchState, LaunchStore, LaunchTransitionError } from "./launch-store"
 import { Placement, PlacementLoop, type Placed, type PlacementNode } from "./placement"
 
 /** The NodeRegistry calls the engine needs. */
@@ -241,7 +267,27 @@ export class LaunchEngine {
     return directory !== undefined ? { ...launch, directory } : launch
   }
 
-  /** Starts placement (sweep and kicks on node and spoke changes). */
+  /** The user's launches by creation (filtered), with their directories. */
+  async list(userID: string, filter: LaunchFilter = {}): Promise<LaunchView[]> {
+    const launches = await this.store.list(userID, filter)
+    return Promise.all(
+      launches.map(async (launch) => {
+        const directory = (await this.work(userID, launch.id))?.workspace?.directory
+        return directory !== undefined ? { ...launch, directory } : launch
+      }),
+    )
+  }
+
+  /** The labels of the (latest) launch that started the session, or undefined when no launch did. */
+  async labelsFor(userID: string, sessionID: string): Promise<Readonly<Record<string, string>> | undefined> {
+    const launches = await this.store.list(userID)
+    return launches.reverse().find((l) => l.sessionID === sessionID)?.spec.labels
+  }
+
+  /**
+   * Starts the engine: re-arms running launches, recovers provisioning ones, starts placement (sweep, and kicks
+   * on node and spoke changes) and reconciles nodes that connect.
+   */
   async start(): Promise<void> {
     const { nodes, registry } = this.deps
     this.unsubscribe.push(

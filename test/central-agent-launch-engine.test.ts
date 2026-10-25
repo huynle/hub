@@ -820,3 +820,21 @@ describe("restart recovery", () => {
     w.engine.shutdown()
   })
 })
+
+describe("reading launches", () => {
+  test("list filters by labels and states and adds directories; labelsFor finds a session's launch labels", async () => {
+    const w = world()
+    w.connectNode()
+    await w.engine.start()
+    const brain = await launched(w, { labels: { app: "brain", "brain.task": "abc" } })
+    await w.clock.advance(1_000)
+    const other = await launched(w, { labels: { app: "other" }, workspace: { repo: "/p/web", branch: "feat/y" } })
+    const listed = await w.engine.list(U, { labels: { app: "brain" } })
+    expect(listed.map((l) => [l.id, l.directory])).toEqual([[brain.id, "/p/hub/.worktrees/feat/x"]])
+    expect((await w.engine.list(U, { states: ["running"] })).map((l) => l.id)).toEqual([brain.id, other.id])
+    expect(await w.engine.labelsFor(U, brain.sessionID!)).toEqual({ app: "brain", "brain.task": "abc" })
+    expect(await w.engine.labelsFor(U, "ses_unknown")).toBeUndefined()
+    expect(await w.engine.list("u2")).toEqual([])
+    w.engine.shutdown()
+  })
+})
