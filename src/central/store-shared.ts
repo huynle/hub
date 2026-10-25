@@ -196,17 +196,12 @@ export class SharedRows {
 
   /** A new row key for an audit entry (sorted by time). */
   keyAudit(entry: AuditEntry): string {
-    // After every key the cache holds, so entries keep their order across pods when clocks tie or skew a little:
-    // <time, 15 digits>-<sequence within that time, 6 digits>-<random>.
+    // After every key the cache holds, so entries keep their order across pods when clocks tie or skew a little.
     const last = this.cache.get().audit.reduce<string | undefined>((max, e) => {
       const key = this.auditKeys.get(e)
       return key && (!max || key > max) ? key : max
     }, undefined)
-    const at = Math.max(0, Math.floor(entry.at))
-    const [lastAt, lastSeq] = last ? [Number(last.slice(0, 15)), Number(last.slice(16, 22))] : [-1, -1]
-    const time = Math.max(at, lastAt)
-    const seq = time === lastAt ? lastSeq + 1 : 0
-    const key = `${String(time).padStart(15, "0")}-${String(seq).padStart(6, "0")}-${randomBytes(4).toString("hex")}`
+    const key = nextAuditKey(last, entry.at, randomBytes(4).toString("hex"))
     this.auditKeys.set(entry, key)
     return key
   }
@@ -365,6 +360,48 @@ export class SharedRows {
   }
 }
 
+/**
+ * The row key of an audit entry at `at` that sorts after `last` (the greatest key so far):
+ * <time, 15 digits>-<sequence within that time, 6 digits>-<suffix: 8 hex>.
+ */
+export function nextAuditKey(last: string | undefined, at: number, suffix: string): string {
+  const time0 = Math.max(0, Math.floor(at))
+  const [lastAt, lastSeq] = last ? [Number(last.slice(0, 15)), Number(last.slice(16, 22))] : [-1, -1]
+  const time = Math.max(time0, lastAt)
+  const seq = time === lastAt ? lastSeq + 1 : 0
+  return `${String(time).padStart(15, "0")}-${String(seq).padStart(6, "0")}-${suffix}`
+}
+
+export interface StateRow {
+  readonly collection: Collection
+  readonly key: string
+  readonly value: unknown
+}
+
+/**
+ * Every row a whole StateData is stored as (records, settings, audit with the given keys, then the index rows),
+ * through the same mapping the shared Store writes with (`hub-server import`).
+ */
+export function stateRows(state: StateData, auditKey: (entry: AuditEntry) => string): StateRow[] {
+  const refs: RowRef[] = [
+    ...state.users.map((u) => ({ collection: "users" as const, key: u.id })),
+    ...state.machines.map((m) => ({ collection: "machines" as const, key: m.id })),
+    ...state.devices.map((d) => ({ collection: "devices" as const, key: d.id })),
+    ...state.push.map((p) => ({ collection: "push" as const, key: pushKey(p.endpoint) })),
+    ...SETTINGS.map((key) => ({ collection: "settings" as const, key })),
+    ...state.audit.map((entry) => ({ collection: "audit" as const, key: auditKey(entry) })),
+    ...state.machines.map((m) => ({ collection: "machine-tokens" as const, key: m.tokenHash })),
+    ...state.devices.map((d) => ({ collection: "device-tokens" as const, key: d.tokenHash })),
+    ...state.users.flatMap((u) => (u.email ? [{ collection: "user-emails" as const, key: u.email }] : [])),
+  ]
+  const rows: StateRow[] = []
+  for (const ref of refs) {
+    const value = rowOf(state, ref, { auditKey })
+    if (value !== undefined) rows.push({ ...ref, value })
+  }
+  return rows
+}
+
 const isCollection = (value: string): value is Collection =>
   (["users", "machines", "devices", "push", "settings", "audit", "machine-tokens", "device-tokens", "user-emails"] as const).includes(value as Collection)
 
@@ -389,7 +426,7 @@ function setSetting(state: StateData, key: string, value: unknown): void {
 }
 
 /** The row value the cache holds for `ref` (undefined: the row should not exist). */
-function rowOf(state: StateData, ref: RowRef, rows: SharedRows): unknown {
+function rowOf(state: StateData, ref: RowRef, rows: Pick<SharedRows, "auditKey">): unknown {
   const { collection, key } = ref
   switch (collection) {
     case "users":
