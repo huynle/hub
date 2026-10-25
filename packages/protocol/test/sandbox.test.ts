@@ -47,3 +47,100 @@ describe("prepared workspace runtime", () => {
     expect(P.nodeResultProblem("prepare", { workspace: { ...sandboxed, runtime: { kind: "k8s" } } })).toMatch(/runtime/)
   })
 })
+
+const start = {
+  op: "start",
+  launchID: "lch_1",
+  workspace: sandboxed,
+  harness: "opencode",
+  hub: { url: "https://hub.example", token: "hlt1.eyJsaWQiOiJsY2hfMSJ9.c2ln" },
+  env: { OPENCODE_DISABLE_AUTOUPDATE: "1", HUB_LAUNCH_ID: "lch_1" },
+}
+
+describe("start and stop ops", () => {
+  test("start carries the launch, its prepared workspace, the harness, the hub connection and env; it round-trips", () => {
+    expect(req(start)).toEqual({ t: "req", id: "n1", req: start })
+    const { env: _env, ...bare } = start
+    expect(req(bare)).toBeDefined()
+    expect(req({ ...start, workspace: prepared })).toBeDefined()
+  })
+
+  test("start rejects a bad workspace, harness, hub URL or token", () => {
+    expect(req({ ...start, workspace: { ...sandboxed, runtime: { kind: "openshell", sandbox: "-x" } } })).toBeUndefined()
+    expect(req({ ...start, harness: "Open Code" })).toBeUndefined()
+    expect(req({ ...start, launchID: "a b" })).toBeUndefined()
+    for (const hub of [undefined, {}, { url: "ftp://hub", token: "t" }, { url: "https://hub.example" }, { url: "https://hub.example", token: "" }, { url: "https://hub.example", token: "a b" }, { url: "https://hub.example", token: "x".repeat(4097) }]) {
+      expect(req({ ...start, hub })).toBeUndefined()
+    }
+  })
+
+  test("start env: at most 64 upper-case names with short printable values", () => {
+    expect(P.START_ENV_MAX).toBe(64)
+    expect(req({ ...start, env: {} })).toBeDefined()
+    expect(req({ ...start, env: Object.fromEntries(Array.from({ length: 64 }, (_, i) => [`V${i}`, "x"])) })).toBeDefined()
+    for (const env of [
+      Object.fromEntries(Array.from({ length: 65 }, (_, i) => [`V${i}`, "x"])),
+      { lower: "x" },
+      { "1ABC": "x" },
+      { "A-B": "x" },
+      { A: 1 },
+      { A: "x".repeat(4097) },
+      { A: "a\nb" },
+      "A=1",
+      ["A"],
+    ]) {
+      expect(req({ ...start, env })).toBeUndefined()
+    }
+  })
+
+  test("stop carries the launch, its workspace and optionally graceful or kill", () => {
+    const stop = { op: "stop", launchID: "lch_1", workspace: sandboxed }
+    expect(req(stop)).toEqual({ t: "req", id: "n1", req: stop })
+    expect(req({ ...stop, mode: "graceful" })).toBeDefined()
+    expect(req({ ...stop, mode: "kill" })).toBeDefined()
+    expect(P.STOP_MODES).toEqual(["graceful", "kill"])
+    expect(req({ ...stop, mode: "nuke" })).toBeUndefined()
+    expect(req({ ...stop, workspace: undefined })).toBeUndefined()
+    expect(req({ op: "stop", workspace: sandboxed })).toBeUndefined()
+  })
+
+  test("nodeResultProblem checks start and stop results", () => {
+    expect(P.nodeResultProblem("start", { started: true })).toBeUndefined()
+    expect(P.nodeResultProblem("start", { started: false, reason: "already running" })).toBeUndefined()
+    expect(P.nodeResultProblem("start", {})).toMatch(/started/)
+    expect(P.nodeResultProblem("start", { started: true, reason: "x".repeat(501) })).toMatch(/reason/)
+    expect(P.nodeResultProblem("stop", { stopped: true })).toBeUndefined()
+    expect(P.nodeResultProblem("stop", { stopped: false, reason: "nothing running" })).toBeUndefined()
+    expect(P.nodeResultProblem("stop", { stopped: "yes" })).toMatch(/stopped/)
+    expect(P.nodeResultProblem("stop", null)).toBeDefined()
+  })
+})
+
+describe("launch phases and the sandbox feature", () => {
+  test("a node reports starting, running, stopping and stopped launches, optionally with their sandbox", () => {
+    for (const phase of ["starting", "running", "stopping", "stopped"]) expect(P.NODE_LAUNCH_PHASES).toContain(phase)
+    const node = (m: unknown) => P.parseNodeMessage(j(m))
+    expect(node({ t: "progress", launchID: "lch_1", phase: "running", message: "sandbox hub-1 ready" })).toBeDefined()
+    const hello = {
+      t: "hello", v: protocol.PROTOCOL_VERSION, role: "node", instanceID: "node_1", nodeVersion: "0.7.0", runtimes: [], labels: {},
+      capacity: { slots: 1 }, used: { slots: 1 }, workspaceRoots: ["/r"], draining: false,
+      launches: [{ launchID: "lch_1", phase: "running", directory: "/sandbox/work", sandbox: "hub-0123456789abcdef0123" }],
+    }
+    expect(node(hello)).toEqual(hello)
+    expect(node({ ...hello, launches: [{ launchID: "lch_1", phase: "running", sandbox: "Demo" }] })).toBeUndefined()
+  })
+
+  test("sandbox is a known node feature, not announced until the node serves it; nodeFeatures reads a hello", () => {
+    expect(P.KNOWN_NODE_FEATURES).toContain("sandbox")
+    expect(P.NODE_FEATURES).not.toContain("sandbox")
+    const hello = { features: ["sandbox"] } as any
+    expect(P.nodeFeatures(hello).has("sandbox")).toBe(true)
+    expect(P.nodeFeatures({} as any).has("sandbox")).toBe(false)
+  })
+
+  test("start and stop need the sandbox feature; prepare, collect, cleanup and cancel need none", () => {
+    expect(P.nodeRequestFeature({ op: "start" })).toBe("sandbox")
+    expect(P.nodeRequestFeature({ op: "stop" })).toBe("sandbox")
+    for (const op of ["prepare", "collect", "cleanup", "cancel"]) expect(P.nodeRequestFeature({ op })).toBeUndefined()
+  })
+})

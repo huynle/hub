@@ -11,13 +11,13 @@
 // Modules: launch.ts (launch vocabulary and workspace checks), node.ts (the `hub node` hello, frames and ops on the
 // same socket), webhook.ts (webhook signature format), wire.ts (shared frame primitives). All are re-exported here.
 
-import { featureList, ID, isByeFrame as isBye, isObj, isResFrame as isRes, isWelcomeFrame, MAX_FRAME, nonEmpty, num, parseFrame as parse, str, token, UNSAFE_CHARS } from "./wire.ts"
+import { featureList, HUB_URL_MAX_CHARS, ID, isByeFrame as isBye, isHubURL, isObj, isResFrame as isRes, isWelcomeFrame, MAX_FRAME, nonEmpty, num, parseFrame as parse, str, token, UNSAFE_CHARS } from "./wire.ts"
 import type { NodeMessage, NodeServerMessage } from "./node.ts"
 
 export * from "./launch.ts"
 export * from "./node.ts"
 export * from "./webhook.ts"
-export { MAX_FRAME }
+export { HUB_URL_MAX_CHARS, isHubURL, MAX_FRAME }
 
 export const PROTOCOL_VERSION = 1
 
@@ -394,8 +394,6 @@ export interface SessionToken {
 export const SESSION_TOKENS_MAX = 500
 /** Longest session token: printable ASCII without whitespace. */
 export const SESSION_TOKEN_MAX_CHARS = 4096
-/** Longest hub URL a sessionTokens request carries. */
-export const HUB_URL_MAX_CHARS = 2048
 
 /** Why a spoke did not store a session token: it does not report the session, or the token has expired. */
 export type SessionTokenSkipReason = "unknown" | "expired"
@@ -688,16 +686,6 @@ function isSessionToken(v: unknown): v is SessionToken {
   return isObj(v) && nonEmpty(v.sessionID) && v.sessionID.length <= 300 && str(v.token) && SESSION_TOKEN_TEXT.test(v.token) && num(v.exp)
 }
 
-/** An http(s) URL of at most HUB_URL_MAX_CHARS characters. */
-export function isHubURL(v: unknown): v is string {
-  if (!nonEmpty(v) || v.length > HUB_URL_MAX_CHARS) return false
-  try {
-    const url = new URL(v)
-    return url.protocol === "http:" || url.protocol === "https:"
-  } catch {
-    return false
-  }
-}
 
 /** Characters batchSessionTokens leaves free in a frame for the `{"t":"req","id":…}` envelope around a request. */
 export const SESSION_TOKENS_ENVELOPE_CHARS = 1024

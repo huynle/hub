@@ -84,7 +84,7 @@ describe("node hello", () => {
   })
 
   test("launches name a launch, its phase and optionally its directory", () => {
-    expect(P.NODE_LAUNCH_PHASES).toEqual(["preparing", "prepared", "collecting", "collected", "cleaning", "cleaned", "cancelled", "failed"])
+    expect(P.NODE_LAUNCH_PHASES).toEqual(["preparing", "prepared", "starting", "running", "stopping", "stopped", "collecting", "collected", "cleaning", "cleaned", "cancelled", "failed"])
     expect(node({ ...nodeHello, launches: [] })).toBeDefined()
     for (const launches of [[{ launchID: "", phase: "prepared" }], [{ launchID: "l", phase: "flying" }], [{ launchID: "l", phase: "prepared", directory: "rel" }], "x"]) {
       expect(node({ ...nodeHello, launches })).toBeUndefined()
@@ -106,7 +106,7 @@ describe("node → hub frames", () => {
     expect(node(frame)).toEqual(frame)
     expect(node({ t: "progress", launchID: "lch_1", phase: "failed" })).toBeDefined()
     expect(P.NODE_MESSAGE_MAX).toBe(500)
-    for (const bad of [{ message: "x".repeat(501) }, { message: "a\u001b[31m" }, { phase: "running" }, { launchID: "a b" }]) expect(node({ ...frame, ...bad })).toBeUndefined()
+    for (const bad of [{ message: "x".repeat(501) }, { message: "a\u001b[31m" }, { phase: "flying" }, { launchID: "a b" }]) expect(node({ ...frame, ...bad })).toBeUndefined()
   })
 
   test("res and bye are shared with the spoke protocol; spoke frames are not node frames", () => {
