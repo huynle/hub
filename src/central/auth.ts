@@ -3,9 +3,14 @@
 // - device pairing: short single-use numeric codes, shown in the /hub dialog or logged at startup
 // - login links: long single-use codes opened from the terminal to sign a browser in
 // - app link codes: long single-use codes (QR / hubapp:// deep link) a native app redeems for a device token
-// Pending codes live in memory only; a restart invalidates them.
+// Pending codes, enrollments and the limiters live in the Kv / Counters backends (process memory by default, so a
+// restart invalidates them; Valkey in a cluster, so a code issued on one pod is redeemed on any). Codes are spent
+// with GETDEL: exactly one redeem wins, on any pod.
 import { randomBytes, randomInt } from "node:crypto"
 import type { EnrollPoll, EnrollStart } from "../protocol"
+import { MemoryCounters } from "./backend/memory-counters"
+import { MemoryKv } from "./backend/memory-kv"
+import type { Counters, Kv } from "./backend/types"
 import { LOCAL_USER, newToken, type DeviceRecord, type Store } from "./store"
 
 export class RateLimitError extends Error {
@@ -19,35 +24,6 @@ export class ValidationError extends Error {
   constructor(message: string) {
     super(message)
     this.name = "ValidationError"
-  }
-}
-
-/** Sliding-window counter. */
-export class Limiter {
-  private hits: number[] = []
-
-  constructor(
-    private readonly max: number,
-    private readonly windowMs: number,
-    private readonly now: () => number = Date.now,
-  ) {}
-
-  /** True when another hit is allowed right now (does not record one). */
-  allowed(): boolean {
-    const cutoff = this.now() - this.windowMs
-    this.hits = this.hits.filter((t) => t > cutoff)
-    return this.hits.length < this.max
-  }
-
-  hit(): void {
-    this.hits.push(this.now())
-  }
-
-  /** Records a hit if allowed. */
-  tryHit(): boolean {
-    if (!this.allowed()) return false
-    this.hit()
-    return true
   }
 }
 
@@ -101,17 +77,17 @@ function publicKey(value: unknown): string | undefined {
 }
 
 interface Enrollment {
-  userCode: string
-  deviceCode: string
-  machineName: string
-  created: number
-  expiresAt: number
-  status: "pending" | "approved" | "denied"
+  readonly userCode: string
+  readonly deviceCode: string
+  readonly machineName: string
+  readonly created: number
+  readonly expiresAt: number
+  readonly status: "pending" | "approved" | "denied"
   /** The approver: owner of the machine created on the next poll. */
-  ownerID?: string
+  readonly ownerID?: string
 }
 
-/** A pending pairing code or login link and the user its device will belong to. */
+/** A pending pairing code, login link or app link code and the user its device will belong to. */
 interface Grant {
   readonly expiresAt: number
   readonly ownerID: string
@@ -130,109 +106,167 @@ export interface AuthOptions {
   readonly now?: () => number
   /** oidc: no bootstrap pairing code (devices are created by sign-in or by a machine owner). */
   readonly mode?: "pairing" | "oidc"
+  /** Pending codes and enrollments (default: in this process, on `now`). */
+  readonly kv?: Kv
+  /** The enrollment and pairing-failure limits (default: in this process, on `now`). */
+  readonly counters?: Counters
+}
+
+/** Enrollments started per window (every pod together). */
+const ENROLL_MAX = 5
+const ENROLL_WINDOW_MS = 60_000
+/** Failed pairing attempts per window before /api/pair refuses (every pod together). */
+const PAIR_FAILURES_MAX = 10
+const PAIR_FAILURES_WINDOW_MS = 60_000
+/**
+ * Enrollment slots the pending list reads back: more than the rate limit lets live at once (a fixed window admits
+ * up to twice its limit across a window boundary).
+ */
+const ENROLL_SLOTS = 2 * ENROLL_MAX * (ENROLL_TTL_MS / ENROLL_WINDOW_MS + 1)
+/** The enrollment sequence's window: it never resets in practice. */
+const ENROLL_SEQ_TTL_MS = 100 * 365 * 24 * 3_600_000
+
+type CodeKind = "pair" | "login" | "link"
+
+const KEYS = {
+  enroll: (deviceCode: string) => `auth:enroll:${deviceCode}`,
+  enrollCode: (userCode: string) => `auth:enroll-code:${userCode}`,
+  enrollDecided: (deviceCode: string) => `auth:enroll-decided:${deviceCode}`,
+  enrollSlot: (slot: number) => `auth:enroll-slot:${slot}`,
+  enrollSeq: "auth:enroll-seq",
+  enrollRate: "auth:enroll-rate",
+  pairFailures: "auth:pair-failures",
+  code: (kind: CodeKind, code: string) => `auth:${kind}:${code}`,
+}
+
+function parse<T>(raw: string | undefined): T | undefined {
+  if (raw === undefined) return undefined
+  try {
+    return JSON.parse(raw) as T
+  } catch {
+    return undefined
+  }
 }
 
 export class Auth {
   private readonly store: Store
   private readonly publicURL: string
   private readonly now: () => number
-  private readonly enrollments = new Map<string, Enrollment>() // by deviceCode
-  private readonly pairCodes = new Map<string, Grant>()
-  private readonly loginCodes = new Map<string, Grant>()
-  private readonly linkCodes = new Map<string, Grant>()
   private readonly mode: "pairing" | "oidc"
-  private readonly enrollLimiter: Limiter
-  private readonly pairFailures: Limiter
+  private readonly kv: Kv
+  private readonly counters: Counters
+  /** Pairing codes this process issued and their expiry: a new code never repeats one of them. */
+  private readonly issuedPairCodes = new Map<string, number>()
+  /** Code writes in flight (codes are issued synchronously); a redeem here waits for them. */
+  private readonly writes = new Set<Promise<void>>()
 
   constructor(options: AuthOptions) {
     this.store = options.store
     this.publicURL = options.publicURL
     this.now = options.now ?? Date.now
     this.mode = options.mode ?? "pairing"
-    this.enrollLimiter = new Limiter(5, 60_000, this.now)
-    this.pairFailures = new Limiter(10, 60_000, this.now)
+    this.kv = options.kv ?? new MemoryKv({ now: this.now })
+    this.counters = options.counters ?? new MemoryCounters({ now: this.now })
   }
 
   // ---------- machine enrollment ----------
 
-  startEnrollment(machineName: unknown): EnrollStart {
+  async startEnrollment(machineName: unknown): Promise<EnrollStart> {
     const machine = name(machineName, "machine name")
-    if (!this.enrollLimiter.tryHit()) throw new RateLimitError("Too many enrollment requests; try again in a minute")
-    this.sweep()
-    const taken = new Set([...this.enrollments.values()].map((e) => e.userCode))
-    let code = userCode()
-    while (taken.has(code)) code = userCode()
-    const created = this.now()
-    const enrollment: Enrollment = {
-      userCode: code,
-      deviceCode: newToken(),
-      machineName: machine,
-      created,
-      expiresAt: created + ENROLL_TTL_MS,
-      status: "pending",
+    if ((await this.counters.incr(KEYS.enrollRate, ENROLL_WINDOW_MS)) > ENROLL_MAX) {
+      throw new RateLimitError("Too many enrollment requests; try again in a minute")
     }
-    this.enrollments.set(enrollment.deviceCode, enrollment)
+    const created = this.now()
+    const expiresAt = created + ENROLL_TTL_MS
+    const px = ENROLL_TTL_MS + 1
+    const deviceCode = newToken()
+    let code = userCode()
+    while (!(await this.kv.set(KEYS.enrollCode(code), deviceCode, { px, nx: true }))) code = userCode()
+    const enrollment: Enrollment = { userCode: code, deviceCode, machineName: machine, created, expiresAt, status: "pending" }
+    await this.kv.set(KEYS.enroll(deviceCode), JSON.stringify(enrollment), { px })
+    const slot = await this.counters.incr(KEYS.enrollSeq, ENROLL_SEQ_TTL_MS)
+    await this.kv.set(KEYS.enrollSlot(slot), deviceCode, { px })
     return {
       userCode: code,
-      deviceCode: enrollment.deviceCode,
+      deviceCode,
       approveURL: `${this.publicURL}/approve?code=${code}`,
       intervalMs: ENROLL_INTERVAL_MS,
-      expiresAt: enrollment.expiresAt,
+      expiresAt,
     }
   }
 
-  /** Approved and denied results are delivered once; afterwards the code reads as expired. */
+  /** Approved and denied results are delivered once (GETDEL); afterwards the code reads as expired. */
   async pollEnrollment(deviceCode: unknown): Promise<EnrollPoll> {
-    this.sweep()
-    const enrollment = typeof deviceCode === "string" ? this.enrollments.get(deviceCode) : undefined
+    const enrollment = typeof deviceCode === "string" ? await this.enrollment(deviceCode) : undefined
     if (!enrollment) return { status: "expired" }
     if (enrollment.status === "pending") return { status: "pending" }
-    this.enrollments.delete(enrollment.deviceCode)
-    if (enrollment.status === "denied") return { status: "denied" }
-    const { machine, token } = await this.store.addMachine(enrollment.machineName, enrollment.ownerID ?? LOCAL_USER)
+    const taken = parse<Enrollment>(await this.kv.getdel(KEYS.enroll(enrollment.deviceCode)))
+    if (!taken || taken.status === "pending") return { status: "expired" }
+    await this.kv.del(KEYS.enrollCode(taken.userCode))
+    if (taken.status === "denied") return { status: "denied" }
+    const { machine, token } = await this.store.addMachine(taken.machineName, taken.ownerID ?? LOCAL_USER)
     return { status: "approved", machineID: machine.id, machineToken: token }
   }
 
-  pendingEnrollments(): PendingEnrollment[] {
-    this.sweep()
-    return [...this.enrollments.values()]
-      .filter((e) => e.status === "pending")
+  /** Pending enrollments, oldest first. */
+  async pendingEnrollments(): Promise<PendingEnrollment[]> {
+    const last = await this.counters.get(KEYS.enrollSeq)
+    const slots: number[] = []
+    for (let slot = Math.max(1, last - ENROLL_SLOTS + 1); slot <= last; slot++) slots.push(slot)
+    const deviceCodes = await Promise.all(slots.map((slot) => this.kv.get(KEYS.enrollSlot(slot))))
+    const unique = [...new Set(deviceCodes.filter((code): code is string => code !== undefined))]
+    const enrollments = await Promise.all(unique.map((code) => this.enrollment(code)))
+    return enrollments
+      .filter((e): e is Enrollment => e?.status === "pending")
       .map(({ userCode, machineName, created, expiresAt }) => ({ userCode, machineName, created, expiresAt }))
   }
 
   /** Approves a pending enrollment; `ownerID` (the approver) will own the machine. */
-  approveEnrollment(code: string, ownerID: string = LOCAL_USER): boolean {
-    return this.decide(code, "approved", ownerID) !== undefined
+  async approveEnrollment(code: string, ownerID: string = LOCAL_USER): Promise<boolean> {
+    return (await this.decide(code, "approved", ownerID)) !== undefined
   }
 
-  denyEnrollment(code: string): boolean {
-    return this.decide(code, "denied") !== undefined
+  async denyEnrollment(code: string): Promise<boolean> {
+    return (await this.decide(code, "denied")) !== undefined
   }
 
-  /** Approves or denies a pending enrollment; the machine name, or undefined when no such code is pending. */
-  decide(code: string, status: "approved" | "denied", ownerID: string = LOCAL_USER): string | undefined {
-    this.sweep()
-    const wanted = normalizeUserCode(code)
-    for (const enrollment of this.enrollments.values()) {
-      if (enrollment.userCode === wanted && enrollment.status === "pending") {
-        enrollment.status = status
-        if (status === "approved") enrollment.ownerID = ownerID
-        return enrollment.machineName
-      }
-    }
-    return undefined
+  /**
+   * Approves or denies a pending enrollment; the machine name, or undefined when no such code is pending. The
+   * first decision wins (SET NX), on any pod.
+   */
+  async decide(code: string, status: "approved" | "denied", ownerID: string = LOCAL_USER): Promise<string | undefined> {
+    const deviceCode = await this.kv.get(KEYS.enrollCode(normalizeUserCode(code)))
+    const enrollment = deviceCode === undefined ? undefined : await this.enrollment(deviceCode)
+    if (!enrollment || enrollment.status !== "pending") return undefined
+    const px = this.remaining(enrollment.expiresAt)
+    if (!(await this.kv.set(KEYS.enrollDecided(enrollment.deviceCode), status, { px, nx: true }))) return undefined
+    const decided: Enrollment = { ...enrollment, status, ...(status === "approved" ? { ownerID } : {}) }
+    await this.kv.set(KEYS.enroll(enrollment.deviceCode), JSON.stringify(decided), { px })
+    return enrollment.machineName
+  }
+
+  /** The enrollment of a device code, unless it expired. */
+  private async enrollment(deviceCode: string): Promise<Enrollment | undefined> {
+    const enrollment = parse<Enrollment>(await this.kv.get(KEYS.enroll(deviceCode)))
+    return enrollment && this.remaining(enrollment.expiresAt) > 0 ? enrollment : undefined
+  }
+
+  /** Milliseconds a record expiring at `expiresAt` is still valid for (valid through expiresAt itself). */
+  private remaining(expiresAt: number): number {
+    return expiresAt - this.now() + 1
   }
 
   // ---------- device pairing ----------
 
   /** A pairing code; the device it pairs belongs to `ownerID`. */
   issuePairCode(ownerID: string = LOCAL_USER): { code: string; expiresAt: number } {
-    this.sweep()
+    const t = this.now()
+    for (const [code, expiresAt] of this.issuedPairCodes) if (expiresAt < t) this.issuedPairCodes.delete(code)
     let code = String(randomInt(1_000_000)).padStart(6, "0")
-    while (this.pairCodes.has(code)) code = String(randomInt(1_000_000)).padStart(6, "0")
-    const expiresAt = this.now() + PAIR_TTL_MS
-    this.pairCodes.set(code, { expiresAt, ownerID })
-    return { code, expiresAt }
+    while (this.issuedPairCodes.has(code)) code = String(randomInt(1_000_000)).padStart(6, "0")
+    const issued = this.issue("pair", code, ownerID, PAIR_TTL_MS)
+    this.issuedPairCodes.set(code, issued.expiresAt)
+    return issued
   }
 
   /** A pairing code for the first device (pairing mode only), or undefined once any device exists. */
@@ -245,15 +279,12 @@ export class Auth {
    * is gone or disabled counts as invalid.
    */
   async pair(code: unknown, deviceName: unknown): Promise<{ device: DeviceRecord; token: string } | undefined> {
-    if (!this.pairFailures.allowed()) throw new RateLimitError()
-    this.sweep()
-    const key = typeof code === "string" ? code.trim() : ""
-    const grant = this.pairCodes.get(key)
+    if ((await this.counters.get(KEYS.pairFailures)) >= PAIR_FAILURES_MAX) throw new RateLimitError()
+    const grant = await this.redeem("pair", typeof code === "string" ? code.trim() : "")
     if (!grant) {
-      this.pairFailures.hit()
+      await this.counters.incr(KEYS.pairFailures, PAIR_FAILURES_WINDOW_MS)
       return undefined
     }
-    this.pairCodes.delete(key)
     if (!this.active(grant.ownerID)) return undefined
     return await this.store.addDevice(name(deviceName, "device name", "Device"), grant.ownerID)
   }
@@ -262,34 +293,24 @@ export class Auth {
 
   /** A single-use login link code; it signs a browser in as `ownerID`. */
   issueLoginCode(ownerID: string = LOCAL_USER): { code: string; expiresAt: number } {
-    const code = randomBytes(32).toString("base64url")
-    const expiresAt = this.now() + LOGIN_TTL_MS
-    this.loginCodes.set(code, { expiresAt, ownerID })
-    return { code, expiresAt }
+    return this.issue("login", randomBytes(32).toString("base64url"), ownerID, LOGIN_TTL_MS)
   }
 
   /** Redeems a login code: the user to sign in as, or undefined (unknown, used, expired, or owner disabled). */
-  redeemLogin(code: unknown): string | undefined {
-    this.sweep()
-    const grant = typeof code === "string" ? this.loginCodes.get(code) : undefined
-    if (!grant) return undefined
-    this.loginCodes.delete(code as string)
-    return this.active(grant.ownerID) ? grant.ownerID : undefined
+  async redeemLogin(code: unknown): Promise<string | undefined> {
+    const grant = await this.redeem("login", code)
+    return grant && this.active(grant.ownerID) ? grant.ownerID : undefined
   }
 
-  redeemLoginCode(code: unknown): boolean {
-    return this.redeemLogin(code) !== undefined
+  async redeemLoginCode(code: unknown): Promise<boolean> {
+    return (await this.redeemLogin(code)) !== undefined
   }
 
   // ---------- app link codes ----------
 
   /** A single-use app link code; the device it links belongs to `ownerID`. Never valid at /login or /api/pair. */
   issueLinkCode(ownerID: string = LOCAL_USER): { code: string; expiresAt: number } {
-    this.sweep()
-    const code = randomBytes(32).toString("base64url")
-    const expiresAt = this.now() + LINK_TTL_MS
-    this.linkCodes.set(code, { expiresAt, ownerID })
-    return { code, expiresAt }
+    return this.issue("link", randomBytes(32).toString("base64url"), ownerID, LINK_TTL_MS)
   }
 
   /**
@@ -301,24 +322,53 @@ export class Auth {
   async redeemLink(code: unknown, deviceName: unknown, key?: unknown): Promise<{ device: DeviceRecord; token: string } | undefined> {
     const label = deviceLabel(deviceName, "App")
     const pk = publicKey(key)
-    this.sweep()
-    const grant = typeof code === "string" ? this.linkCodes.get(code) : undefined
-    if (!grant) return undefined
-    this.linkCodes.delete(code as string)
-    if (!this.active(grant.ownerID)) return undefined
+    const grant = await this.redeem("link", code)
+    if (!grant || !this.active(grant.ownerID)) return undefined
     return await this.store.addDevice(label, grant.ownerID, pk ? { publicKey: pk } : {})
+  }
+
+  // ---------- pending codes ----------
+
+  /**
+   * Issues a code at once and stores it in the background (callers are synchronous); a redeem in this process
+   * waits for the write, and another pod's redeem comes after a person typed or opened the code. Should the
+   * code already exist (another pod issued the same pairing code), both are dropped: a code never signs anyone
+   * in as someone else.
+   */
+  private issue(kind: CodeKind, code: string, ownerID: string, ttlMs: number): { code: string; expiresAt: number } {
+    const expiresAt = this.now() + ttlMs
+    const key = KEYS.code(kind, code)
+    const grant: Grant = { expiresAt, ownerID }
+    this.track(
+      this.kv.set(key, JSON.stringify(grant), { px: ttlMs + 1, nx: true }).then(async (stored) => {
+        if (stored) return
+        await this.kv.del(key)
+        console.warn(`[hub] a new ${kind} code collided with a pending one; both were dropped`)
+      }),
+    )
+    return { code, expiresAt }
+  }
+
+  /** Spends a code (GETDEL): its grant, or undefined (unknown, used, expired). */
+  private async redeem(kind: CodeKind, code: unknown): Promise<Grant | undefined> {
+    if (typeof code !== "string" || !code) return undefined
+    if (this.writes.size) await Promise.all([...this.writes])
+    const grant = parse<Grant>(await this.kv.getdel(KEYS.code(kind, code)))
+    return grant && this.remaining(grant.expiresAt) > 0 ? grant : undefined
+  }
+
+  private track(write: Promise<unknown>): void {
+    const tracked: Promise<void> = write
+      .then(
+        () => {},
+        (cause: unknown) => console.error(`[hub] pending code not stored: ${cause instanceof Error ? cause.message : cause}`),
+      )
+      .finally(() => this.writes.delete(tracked))
+    this.writes.add(tracked)
   }
 
   private active(userID: string): boolean {
     const user = this.store.user(userID)
     return user !== undefined && !user.disabled
-  }
-
-  private sweep(): void {
-    const t = this.now()
-    for (const [key, e] of this.enrollments) if (e.expiresAt < t) this.enrollments.delete(key)
-    for (const [key, grant] of this.pairCodes) if (grant.expiresAt < t) this.pairCodes.delete(key)
-    for (const [key, grant] of this.loginCodes) if (grant.expiresAt < t) this.loginCodes.delete(key)
-    for (const [key, grant] of this.linkCodes) if (grant.expiresAt < t) this.linkCodes.delete(key)
   }
 }

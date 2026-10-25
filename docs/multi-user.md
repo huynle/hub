@@ -29,8 +29,8 @@ The redirect URI to register with the provider is `<publicURL>/auth/callback`.
 Authorization code flow with PKCE (S256), `state` and `nonce`, scope `openid email profile`.
 
 1. `GET /auth/login?next=/path` → stores `{state, nonce, verifier, next, expires(10 min)}` server-side
-   (in memory, keyed by state; also a short-lived `voice_oidc` cookie holding the state, HttpOnly,
-   SameSite=Lax) → 302 to the provider's authorization endpoint.
+   (in the hub's Kv, keyed by state: process memory, or Valkey in cluster mode so the callback may reach
+   any pod; also a short-lived `voice_oidc` cookie holding the state, HttpOnly, SameSite=Lax) → 302 to the provider's authorization endpoint.
 2. `GET /auth/callback?code&state` → state must match the cookie and an unexpired pending entry
    (single use). Exchange the code at the token endpoint (confidential client, `client_secret_post`)
    over TLS. Validate the ID token claims (the token comes straight from the token endpoint over TLS, so

@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { DEFAULT_PUSH_PREFS, inQuietHours, NOTIFICATION_LABELS, Push, PUSH_COOLDOWN_MS, pushPayload, SAY_COOLDOWN_MS, sendOptionsFor, TEST_COOLDOWN_MS, URGENT_TTL_SECONDS, type PushSender } from "../src/central/push"
+import { MemoryKv } from "../src/central/backend/memory-kv"
 import { PUSH_PREF_KEYS } from "../src/central/store"
 import { Store } from "../src/central/store"
 
@@ -395,6 +396,25 @@ describe("notify", () => {
     expect(await push.test(tablet)).toMatchObject({ sent: 1 })
     clock += TEST_COOLDOWN_MS
     expect(await push.test(phone)).toMatchObject({ sent: 1 })
+  })
+
+  // Cluster mode (P6-T8): cooldowns are Kv keys (SET NX PX), so two pods never both push the same (session, kind).
+  test("cooldowns hold across pods sharing a Kv: notifications and test notifications", async () => {
+    await setup()
+    const kv = new MemoryKv({ now })
+    const a = new Push({ store, subject: "mailto:a@b.c", sender: fake.sender, now, kv })
+    const b = new Push({ store, subject: "mailto:a@b.c", sender: fake.sender, now, kv })
+    expect(await a.notify("permission", "ses_1", "t")).toBe(2)
+    clock += 10_000
+    expect(await b.notify("permission", "ses_1", "t")).toBe(0)
+    expect(await b.notify("question", "ses_1", "t")).toBe(2)
+    clock += PUSH_COOLDOWN_MS
+    expect(await b.notify("permission", "ses_1", "t")).toBe(2)
+    expect(await a.test(phone)).toMatchObject({ sent: 1 })
+    clock += 4_000
+    expect(await b.test(phone)).toEqual({ limited: true, retryAfter: Math.ceil((TEST_COOLDOWN_MS - 4_000) / 1000) })
+    clock += TEST_COOLDOWN_MS
+    expect(await b.test(phone)).toMatchObject({ sent: 1 })
   })
 
   test("a test of a chosen kind looks like that kind (label, urgency), marked as a test", async () => {

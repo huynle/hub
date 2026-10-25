@@ -2,7 +2,9 @@ import { beforeEach, describe, expect, test } from "bun:test"
 import { mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { Auth, LINK_TTL_MS, Limiter, RateLimitError, ValidationError } from "../src/central/auth"
+import { Auth, LINK_TTL_MS, RateLimitError, ValidationError } from "../src/central/auth"
+import { MemoryCounters } from "../src/central/backend/memory-counters"
+import { MemoryKv } from "../src/central/backend/memory-kv"
 import { Store } from "../src/central/store"
 
 let now = 1_000_000
@@ -15,75 +17,64 @@ beforeEach(() => {
   auth = new Auth({ store, publicURL: "https://voice.example.com", now: () => now })
 })
 
-describe("Limiter", () => {
-  test("allows max hits per sliding window", () => {
-    const limiter = new Limiter(2, 1000, () => now)
-    expect(limiter.tryHit()).toBe(true)
-    expect(limiter.tryHit()).toBe(true)
-    expect(limiter.tryHit()).toBe(false)
-    now += 1001
-    expect(limiter.tryHit()).toBe(true)
-  })
-})
-
 describe("machine enrollment", () => {
-  test("start returns a user code, device code and approve URL", () => {
-    const start = auth.startEnrollment("laptop")
+  test("start returns a user code, device code and approve URL", async () => {
+    const start = await auth.startEnrollment("laptop")
     expect(start.userCode).toMatch(/^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/)
     expect(start.deviceCode).toMatch(/^[A-Za-z0-9_-]{43}$/)
     expect(start.approveURL).toBe(`https://voice.example.com/approve?code=${start.userCode}`)
     expect(start.intervalMs).toBe(2000)
     expect(start.expiresAt).toBe(now + 10 * 60_000)
-    expect(auth.pendingEnrollments()).toEqual([
+    expect(await auth.pendingEnrollments()).toEqual([
       { userCode: start.userCode, machineName: "laptop", created: now, expiresAt: start.expiresAt },
     ])
   })
 
-  test("rejects an empty or oversized machine name", () => {
-    expect(() => auth.startEnrollment("")).toThrow(/machine name/i)
-    expect(() => auth.startEnrollment("x".repeat(65))).toThrow(/machine name/i)
+  test("rejects an empty or oversized machine name", async () => {
+    await expect(auth.startEnrollment("")).rejects.toThrow(/machine name/i)
+    await expect(auth.startEnrollment("x".repeat(65))).rejects.toThrow(/machine name/i)
   })
 
   test("happy path: pending → approved, token returned exactly once", async () => {
-    const start = auth.startEnrollment("laptop")
+    const start = await auth.startEnrollment("laptop")
     expect(await auth.pollEnrollment(start.deviceCode)).toEqual({ status: "pending" })
-    expect(auth.approveEnrollment(start.userCode.toLowerCase().replace("-", ""))).toBe(true)
+    expect(await auth.approveEnrollment(start.userCode.toLowerCase().replace("-", ""))).toBe(true)
     const poll = await auth.pollEnrollment(start.deviceCode)
     expect(poll.status).toBe("approved")
     if (poll.status !== "approved") throw new Error("unreachable")
     expect((await store.findMachine(poll.machineToken))?.id).toBe(poll.machineID)
     expect((await store.findMachine(poll.machineToken))?.name).toBe("laptop")
     expect(await auth.pollEnrollment(start.deviceCode)).toEqual({ status: "expired" })
-    expect(auth.pendingEnrollments()).toEqual([])
+    expect(await auth.pendingEnrollments()).toEqual([])
   })
 
   test("deny", async () => {
-    const start = auth.startEnrollment("laptop")
-    expect(auth.denyEnrollment(start.userCode)).toBe(true)
+    const start = await auth.startEnrollment("laptop")
+    expect(await auth.denyEnrollment(start.userCode)).toBe(true)
     expect(await auth.pollEnrollment(start.deviceCode)).toEqual({ status: "denied" })
     expect(await auth.pollEnrollment(start.deviceCode)).toEqual({ status: "expired" })
     expect(store.machines()).toHaveLength(0)
   })
 
   test("expiry", async () => {
-    const start = auth.startEnrollment("laptop")
+    const start = await auth.startEnrollment("laptop")
     now += 10 * 60_000 + 1
-    expect(auth.approveEnrollment(start.userCode)).toBe(false)
+    expect(await auth.approveEnrollment(start.userCode)).toBe(false)
     expect(await auth.pollEnrollment(start.deviceCode)).toEqual({ status: "expired" })
-    expect(auth.pendingEnrollments()).toEqual([])
+    expect(await auth.pendingEnrollments()).toEqual([])
   })
 
   test("unknown codes", async () => {
     expect(await auth.pollEnrollment("nope")).toEqual({ status: "expired" })
-    expect(auth.approveEnrollment("BBBB-BBBB")).toBe(false)
-    expect(auth.denyEnrollment("BBBB-BBBB")).toBe(false)
+    expect(await auth.approveEnrollment("BBBB-BBBB")).toBe(false)
+    expect(await auth.denyEnrollment("BBBB-BBBB")).toBe(false)
   })
 
-  test("start is rate limited to 5 per minute", () => {
-    for (let i = 0; i < 5; i++) auth.startEnrollment(`m${i}`)
-    expect(() => auth.startEnrollment("m6")).toThrow(RateLimitError)
+  test("start is rate limited to 5 per minute", async () => {
+    for (let i = 0; i < 5; i++) await auth.startEnrollment(`m${i}`)
+    await expect(auth.startEnrollment("m6")).rejects.toThrow(RateLimitError)
     now += 60_001
-    expect(auth.startEnrollment("m7").userCode).toBeTruthy()
+    expect((await auth.startEnrollment("m7")).userCode).toBeTruthy()
   })
 })
 
@@ -127,19 +118,19 @@ describe("device pairing", () => {
 })
 
 describe("login links", () => {
-  test("32-byte code, 2 minutes, single use", () => {
+  test("32-byte code, 2 minutes, single use", async () => {
     const { code, expiresAt } = auth.issueLoginCode()
     expect(code).toMatch(/^[A-Za-z0-9_-]{43}$/)
     expect(expiresAt).toBe(now + 2 * 60_000)
-    expect(auth.redeemLoginCode(code)).toBe(true)
-    expect(auth.redeemLoginCode(code)).toBe(false)
+    expect(await auth.redeemLoginCode(code)).toBe(true)
+    expect(await auth.redeemLoginCode(code)).toBe(false)
   })
 
-  test("expired login codes fail", () => {
+  test("expired login codes fail", async () => {
     const { code } = auth.issueLoginCode()
     now += 2 * 60_000 + 1
-    expect(auth.redeemLoginCode(code)).toBe(false)
-    expect(auth.redeemLoginCode("")).toBe(false)
+    expect(await auth.redeemLoginCode(code)).toBe(false)
+    expect(await auth.redeemLoginCode("")).toBe(false)
   })
 })
 
@@ -219,7 +210,7 @@ describe("app link codes", () => {
   test("link codes are purpose-bound: not pairing codes or login codes, and vice versa", async () => {
     const link = auth.issueLinkCode().code
     expect(await auth.pair(link, "phone")).toBeUndefined()
-    expect(auth.redeemLogin(link)).toBeUndefined()
+    expect(await auth.redeemLogin(link)).toBeUndefined()
     expect(await auth.redeemLink(link, "phone")).toBeDefined()
     expect(await auth.redeemLink(auth.issueLoginCode().code, "phone")).toBeUndefined()
     expect(await auth.redeemLink(auth.issuePairCode().code, "phone")).toBeUndefined()
@@ -230,5 +221,66 @@ describe("app link codes", () => {
   test("failed redeems do not touch the pairing rate limiter", async () => {
     for (let i = 0; i < 50; i++) expect(await auth.redeemLink(`bad${i}`, "x")).toBeUndefined()
     expect(await auth.pair(auth.issuePairCode().code, "phone")).toBeDefined()
+  })
+})
+
+// Cluster mode (P6-T8): pending codes, enrollments and the limiters live in the shared Kv / Counters, so a code
+// issued by one pod is redeemed on another. Two Auth instances on one Kv + Counters stand for two pods.
+describe("on shared Kv and Counters (two pods)", () => {
+  let a: Auth
+  let b: Auth
+  beforeEach(() => {
+    const kv = new MemoryKv({ now: () => now })
+    const counters = new MemoryCounters({ now: () => now })
+    a = new Auth({ store, publicURL: "https://voice.example.com", now: () => now, kv, counters })
+    b = new Auth({ store, publicURL: "https://voice.example.com", now: () => now, kv, counters })
+  })
+
+  test("an enrollment started on A is listed, approved and polled on B; the token is delivered once", async () => {
+    const start = await a.startEnrollment("laptop")
+    expect(await b.pendingEnrollments()).toEqual([{ userCode: start.userCode, machineName: "laptop", created: now, expiresAt: start.expiresAt }])
+    expect(await b.pollEnrollment(start.deviceCode)).toEqual({ status: "pending" })
+    expect(await b.approveEnrollment(start.userCode)).toBe(true)
+    expect(await a.approveEnrollment(start.userCode)).toBe(false)
+    const poll = await b.pollEnrollment(start.deviceCode)
+    expect(poll.status).toBe("approved")
+    expect(await a.pollEnrollment(start.deviceCode)).toEqual({ status: "expired" })
+    expect(await a.pendingEnrollments()).toEqual([])
+    expect(store.machines()).toHaveLength(1)
+  })
+
+  test("a denial on A reaches the poll on B", async () => {
+    const start = await b.startEnrollment("laptop")
+    expect(await a.denyEnrollment(start.userCode)).toBe(true)
+    expect(await b.pollEnrollment(start.deviceCode)).toEqual({ status: "denied" })
+    expect(await a.pollEnrollment(start.deviceCode)).toEqual({ status: "expired" })
+  })
+
+  test("the enrollment limit counts both pods", async () => {
+    for (let i = 0; i < 3; i++) await a.startEnrollment(`a${i}`)
+    for (let i = 0; i < 2; i++) await b.startEnrollment(`b${i}`)
+    await expect(a.startEnrollment("a3")).rejects.toThrow(RateLimitError)
+    await expect(b.startEnrollment("b2")).rejects.toThrow(RateLimitError)
+    expect((await a.pendingEnrollments()).map((e) => e.machineName)).toEqual(["a0", "a1", "a2", "b0", "b1"])
+  })
+
+  test("pairing, login and link codes issued on A are redeemed once on B", async () => {
+    const pair = a.issuePairCode()
+    expect(await b.pair(pair.code, "phone")).toBeDefined()
+    expect(await a.pair(pair.code, "phone")).toBeUndefined()
+    const login = a.issueLoginCode()
+    expect(await b.redeemLogin(login.code)).toBe("local")
+    expect(await a.redeemLogin(login.code)).toBeUndefined()
+    const link = a.issueLinkCode()
+    expect(await b.redeemLink(link.code, "app")).toBeDefined()
+    expect(await a.redeemLink(link.code, "app")).toBeUndefined()
+    // Purpose-bound across pods too.
+    expect(await b.redeemLogin(a.issueLinkCode().code)).toBeUndefined()
+  })
+
+  test("failed pairing attempts on both pods share one limit", async () => {
+    for (let i = 0; i < 5; i++) await a.pair("bad", "x")
+    for (let i = 0; i < 5; i++) await b.pair("bad", "x")
+    await expect(a.pair(b.issuePairCode().code, "phone")).rejects.toThrow(RateLimitError)
   })
 })

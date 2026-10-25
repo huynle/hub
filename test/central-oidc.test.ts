@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
-import { deviceName, safeNext } from "../src/central/oidc"
+import { MemoryCounters } from "../src/central/backend/memory-counters"
+import { MemoryKv } from "../src/central/backend/memory-kv"
+import { centralConfig } from "../src/central/config"
+import { deviceName, OidcClient, OidcError, safeNext } from "../src/central/oidc"
 import { LOCAL_USER } from "../src/central/store"
 import { harness, PUBLIC, type Harness } from "./central-harness"
 import { fakeProvider, oidcEnv, setCookie, signIn, unsignedJWT, type FakeProvider } from "./oidc-fake"
@@ -295,5 +298,46 @@ describe("helpers", () => {
 
   test("PKCE challenge format sanity", () => {
     expect(createHash("sha256").update("x").digest("base64url")).toMatch(/^[A-Za-z0-9_-]{43}$/)
+  })
+})
+
+// Cluster mode (P6-T8): pending sign-ins (state, nonce, PKCE verifier, next) live in the shared Kv, consumed with
+// GETDEL, so the callback may land on another pod than /auth/login. Two OidcClients on one Kv stand for two pods.
+describe("pending sign-ins on a shared Kv (two pods)", () => {
+  function pods(now: () => number = Date.now) {
+    idp = fakeProvider()
+    const config = centralConfig({ HUB_PORT: "0", HUB_PUBLIC_URL: PUBLIC, HUB_STATE_DIR: "/nonexistent", ...oidcEnv(idp) })
+    const auth = config.auth
+    if (auth.mode !== "oidc") throw new Error("expected oidc")
+    const kv = new MemoryKv({ now })
+    const counters = new MemoryCounters({ now })
+    const make = () => new OidcClient({ config: auth, publicURL: PUBLIC, now, kv, counters })
+    return { a: make(), b: make(), kv }
+  }
+
+  test("a sign-in started on A finishes on B, once", async () => {
+    const { a, b } = pods()
+    const { location, state } = await a.login("/s/ses_1")
+    const { code } = idp!.authorize(location, { claims: { email: "alice@example.com" } })
+    const params = new URLSearchParams({ code, state })
+    const done = await b.callback(params, state)
+    expect(done).toEqual({ identity: expect.objectContaining({ email: "alice@example.com" }), next: "/s/ses_1" })
+    // The PKCE verifier made on A reached B's token request.
+    expect(idp!.tokenRequests).toHaveLength(1)
+    await expect(a.callback(params, state)).rejects.toThrow(OidcError)
+    await expect(b.callback(params, state)).rejects.toThrow(OidcError)
+  })
+
+  test("the pending entry is in the Kv with a 10-minute expiry, and a cookie mismatch leaves it", async () => {
+    let t = 5_000
+    const { a, b, kv } = pods(() => t)
+    const { location, state } = await a.login(null)
+    expect(await kv.get(`oidc:pending:${state}`)).toBeDefined()
+    const { code } = idp!.authorize(location, { claims: { email: "alice@example.com" } })
+    await expect(b.callback(new URLSearchParams({ code, state }), "other")).rejects.toThrow(OidcError)
+    expect(await kv.get(`oidc:pending:${state}`)).toBeDefined()
+    t += 10 * 60_000 + 1
+    expect(await kv.get(`oidc:pending:${state}`)).toBeUndefined()
+    await expect(b.callback(new URLSearchParams({ code, state }), state)).rejects.toThrow(OidcError)
   })
 })
