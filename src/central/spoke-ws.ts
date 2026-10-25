@@ -509,7 +509,8 @@ export class SpokeHub {
   private nodeHello(ws: Socket, hello: NodeHello): void {
     if (hello.v !== PROTOCOL_VERSION) return this.bye(ws, `unsupported protocol version ${hello.v}; server speaks version ${PROTOCOL_VERSION}`)
     const { nodes } = this.options
-    const existing = nodes.forMachine(ws.data.machineID)
+    // This pod's node of the machine only: a stale entry of another pod expires with its slice.
+    const existing = nodes.localForMachine(ws.data.machineID)
     if (existing) {
       // One node per machine. The same daemon run reconnecting (its old socket may be half-open) replaces it.
       if (existing.instanceID !== hello.instanceID) return this.bye(ws, "another node is already connected for this machine")
