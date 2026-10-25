@@ -131,3 +131,26 @@ describe("normalizeNodeConfig: the openshell section", () => {
     expect(problems).toEqual(["openshell must be an object"])
   })
 })
+
+describe("node.json harnesses", () => {
+  test("a map of harness → on/off: true offers a harness detection missed, false withholds a detected one", () => {
+    const { config, problems } = normalizeNodeConfig({ harnesses: { "claude-code": false, codex: true } })
+    expect(problems).toEqual([])
+    expect(config.harnesses).toEqual({ "claude-code": false, codex: true })
+  })
+
+  test("absent: no overrides (the field is left out)", () => {
+    expect(normalizeNodeConfig({}).config.harnesses).toBeUndefined()
+  })
+
+  test("bad harness names and non-boolean values are dropped, each with a problem; a non-object is a problem", () => {
+    const { config, problems } = normalizeNodeConfig({ harnesses: { "Bad Name": true, codex: "yes", "claude-code": true } })
+    expect(config.harnesses).toEqual({ "claude-code": true })
+    expect(problems.length).toBe(2)
+    expect(problems.join("\n")).toContain("Bad Name")
+    expect(problems.join("\n")).toContain("codex")
+    const list = normalizeNodeConfig({ harnesses: ["claude-code"] })
+    expect(list.config.harnesses).toBeUndefined()
+    expect(list.problems).toEqual(["harnesses must be an object of harness names to true or false"])
+  })
+})
