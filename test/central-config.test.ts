@@ -242,3 +242,28 @@ describe("agents.never (hub-wide agent never rules, design §5, §7)", () => {
     expect(warnings).toEqual([expect.stringContaining('unknown key "agents.allow"')])
   })
 })
+
+describe("agents.launches (per-user launch caps, design §6.2, §7)", () => {
+  test("hub.json agents.launches: maxQueued, maxActive, perHour; centralConfig carries only what is set", () => {
+    const { file: hub, warnings } = readHubFile(file({ agents: { launches: { maxQueued: 20, maxActive: 3, perHour: 40 } } }))
+    expect(warnings).toEqual([])
+    expect(hub).toEqual({ agents: { launches: { maxQueued: 20, maxActive: 3, perHour: 40 } } })
+    expect(centralConfig({}, HOME, hub).launchCaps).toEqual({ maxQueued: 20, maxActive: 3, perHour: 40 })
+    const partial = readHubFile(file({ agents: { never: ["shell:rm*"], launches: { maxActive: 2 } } })).file
+    expect(partial).toEqual({ agents: { never: ["shell:rm*"], launches: { maxActive: 2 } } })
+    expect(centralConfig({}, HOME, partial).launchCaps).toEqual({ maxActive: 2 })
+    expect(centralConfig({}, HOME)).not.toHaveProperty("launchCaps")
+  })
+
+  test("invalid agents.launches values fail; unknown keys warn", () => {
+    expect(() => readHubFile(file({ agents: { launches: [] } }))).toThrow(/agents\.launches must be an object/)
+    for (const bad of [0, -1, 1.5, "3", 100_001, null]) {
+      expect(() => readHubFile(file({ agents: { launches: { maxQueued: bad } } }))).toThrow(/agents\.launches\.maxQueued must be a whole number from 1 to 100000/)
+    }
+    expect(() => readHubFile(file({ agents: { launches: { perHour: 0 } } }))).toThrow(/agents\.launches\.perHour/)
+    expect(() => readHubFile(file({ agents: { launches: { maxActive: "x" } } }))).toThrow(/agents\.launches\.maxActive/)
+    const { file: hub, warnings } = readHubFile(file({ agents: { launches: { maxActive: 1, burst: 3 } } }))
+    expect(hub).toEqual({ agents: { launches: { maxActive: 1 } } })
+    expect(warnings).toEqual([expect.stringContaining('unknown key "agents.launches.burst"')])
+  })
+})
