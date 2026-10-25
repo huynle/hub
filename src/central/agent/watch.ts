@@ -14,11 +14,14 @@
 //   {type: "message", id, kind, state, from, to, sessionID?, senderID?, replyTo?, delivery?}   an agent message was
 //     stored (no text): sessionID is the recipient session, senderID the sending one. The user sees all of them,
 //     a session or app (messages:read) only those it sent or received; ?session= matches either session.
+//   {type: "launch", id, state, reason, outcome?, sessionID?, name?, labels}   a launch changed (the user sees all of
+//     theirs, an app or session those it started); ?session= matches its session.
 // A `ping` event every heartbeat (default 20 s). Only status messages of the caller's tenant are read; catalog
 // changes are diffed against the caller's own sessions.
 import type { LiveStatus, RegistryMessage } from "../registry"
 import { partyKey } from "./envelope"
 import { addressOf, type Message } from "./messages"
+import type { Launch } from "./launch-store"
 import type { ReadRegistry } from "./read-routes"
 
 export const WATCH_HEARTBEAT_MS = 20_000
@@ -32,6 +35,25 @@ export interface MessageSource {
   subscribe(listener: (userID: string, message: Message) => void): () => void
 }
 
+/** Launch changes as the engine makes them (LaunchFeed). */
+export interface LaunchSource {
+  subscribe(listener: (userID: string, launch: Launch) => void): () => void
+}
+
+/** The compact watch event of a launch change (never its prompt). */
+function launchEvent(launch: Launch): WatchEvent {
+  return {
+    type: "launch",
+    id: launch.id,
+    state: launch.state,
+    reason: launch.reason,
+    ...(launch.outcome !== undefined ? { outcome: launch.outcome } : {}),
+    ...(launch.sessionID !== undefined ? { sessionID: launch.sessionID } : {}),
+    ...(launch.name !== undefined ? { name: launch.name } : {}),
+    labels: launch.spec.labels,
+  }
+}
+
 export interface WatchOptions {
   readonly registry: WatchRegistry
   readonly userID: string
@@ -42,6 +64,8 @@ export interface WatchOptions {
   readonly sessions?: ReadonlySet<string>
   /** Message events: from this feed, only those of the party key (undefined: all of the user's). */
   readonly messages?: { readonly feed: MessageSource; readonly party?: string }
+  /** Launch events: from this feed, only those launched by `by` (undefined: all of the user's). */
+  readonly launches?: { readonly feed: LaunchSource; readonly by?: string }
   readonly heartbeatMs?: number
   readonly now?: () => number
 }
@@ -153,12 +177,19 @@ export function watchStream(options: WatchOptions): Response {
         const event = messageEvent(message)
         if (wanted(event)) send(event)
       })
+      const launches = options.launches
+      const unsubscribeLaunches = launches?.feed.subscribe((user, launch) => {
+        if (user !== userID || (launches.by !== undefined && launch.by !== launches.by)) return
+        const event = launchEvent(launch)
+        if (wanted(event)) send(event)
+      })
       // A named event (not a comment) so clients can tell a live stream from a dead one.
       const heartbeat = setInterval(() => write("event: ping\ndata: 0\n\n"), options.heartbeatMs ?? WATCH_HEARTBEAT_MS)
       cleanup = () => {
         clearInterval(heartbeat)
         unsubscribe()
         unsubscribeMessages?.()
+        unsubscribeLaunches?.()
       }
       options.signal.addEventListener("abort", () => cleanup(), { once: true })
       send({ type: "ready" })
