@@ -12,7 +12,7 @@
 // target and counts, but writes nothing. The source directory is only read; stop the single-process hub first, so
 // its files are complete.
 import { createHash } from "node:crypto"
-import { existsSync, readdirSync, readFileSync } from "node:fs"
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
 import path from "node:path"
 import { AGENT_STATE_DIR, FileStateStore } from "./backend/file-state"
 import type { StateStore } from "./backend/types"
@@ -29,7 +29,10 @@ export interface ImportOptions {
   readonly dryRun?: boolean
   /** Overwrite rows (and claims) that exist with different contents. */
   readonly force?: boolean
-  /** The clock of the state.json upgrade (default Date.now). */
+  /**
+   * The clock of the state.json upgrade (default: state.json's modification time, so records the upgrade adds, like
+   * the local owner, come out the same on every run).
+   */
   readonly now?: () => number
 }
 
@@ -89,7 +92,8 @@ export async function importState(options: ImportOptions): Promise<ImportReport>
 
   const items: Item[] = []
   // Store rows: state.json upgraded by the Store's own code, mapped by the shared Store's own row layout.
-  const data = Store.read(stateDir, options.now ?? Date.now)
+  const stateMtime = stateFile ? Math.floor(statSync(path.join(stateDir, "state.json")).mtimeMs) : 0
+  const data = Store.read(stateDir, options.now ?? (() => stateMtime))
   if (data) {
     const keys = auditKeys(data.audit)
     for (const row of stateRows(data, (entry) => keys.get(entry)!)) items.push(rowItem(target, row.collection, HUB_ROWS, row.collection, row.key, row.value))
@@ -274,4 +278,41 @@ function canonical(value: unknown): string {
     return v
   }
   return JSON.stringify(sort(JSON.parse(JSON.stringify(value ?? null))))
+}
+
+/** The report as lines for the terminal (no secrets: key ids only). */
+export function formatImportReport(report: ImportReport): string[] {
+  const lines = [
+    `Import from ${report.stateDir}${report.dryRun ? " (dry run: nothing written)" : ""}${report.force ? " with --force" : ""}`,
+    `  state.json: ${report.stateFile ? "read" : "none"}; agent files: ${report.agentFiles}`,
+  ]
+  const columns = ["rows", "new", "same", "conflict", "overwritten", "failed"] as const
+  const names = Object.keys(report.collections)
+  const width = Math.max(10, ...names.map((name) => name.length))
+  const row = (name: string, cells: readonly (string | number)[]) => `  ${name.padEnd(width)}  ${cells.map((cell) => String(cell).padStart(11)).join("")}`
+  lines.push(row("collection", columns))
+  const totals = [0, 0, 0, 0, 0, 0]
+  for (const name of names) {
+    const c = report.collections[name]!
+    const cells = [c.rows, c.created, c.unchanged, c.conflicts, c.overwritten, c.failed]
+    cells.forEach((n, i) => (totals[i]! += n))
+    lines.push(row(name, cells))
+  }
+  lines.push(row("total", totals))
+  if (report.conflicts.length) {
+    lines.push(`Conflicts (rows already there with other contents; ${report.force ? "overwritten" : "skipped, rerun with --force to overwrite"}):`)
+    for (const conflict of report.conflicts) lines.push(`  ${conflict}`)
+  }
+  if (report.failures.length) {
+    lines.push("Failed:")
+    for (const failure of report.failures) lines.push(`  ${failure.row}: ${failure.error}`)
+  }
+  if (report.tokenKeys) {
+    lines.push(
+      `Signing keys (token-keys.json): ${report.tokenKeys.kids.join(", ")} (active ${report.tokenKeys.active}); not stored. Put them in the HUB_TOKEN_KEYS Secret so signed-in sessions stay valid: rerun with --print-token-keys to print the value.`,
+    )
+  } else {
+    lines.push("Signing keys: no token-keys.json; set a new HUB_TOKEN_KEYS (browsers and apps sign in again; machines and devices keep their tokens).")
+  }
+  return lines
 }
