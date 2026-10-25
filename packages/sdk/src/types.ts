@@ -215,7 +215,8 @@ export interface DecisionOption {
 export type DecisionUrgency = "low" | "normal" | "high"
 /** confirm: any of the user's devices; tap: only the signed-in console. */
 export type DecisionTier = "confirm" | "tap"
-export type DecisionState = "open" | "answered" | "expired"
+/** closed: ended without an answer because what it asked about went away (answered elsewhere, ended). */
+export type DecisionState = "open" | "answered" | "expired" | "closed"
 
 /** What an ask to @me opens (design §12.1); only the user answers it. */
 export interface Decision {
@@ -238,6 +239,8 @@ export interface Decision {
   readonly expiresAt: number
   readonly escalatedAt?: number
   readonly answer?: { readonly option?: string; readonly text?: string; readonly answeredBy: "user" | "timeout"; readonly at: number; readonly deviceID?: string }
+  /** Why it closed without an answer (state closed). */
+  readonly closed?: { readonly at: number; readonly reason: string }
 }
 
 /** POST /api/decisions/:id/answer. */
@@ -358,4 +361,16 @@ export interface Grant {
   readonly updated?: number
   readonly revokedAt?: number
   readonly state: GrantState
+}
+
+/** POST /api/agent/grants/requests: what an agent asks the user for (the holder defaults to the requester). */
+export type GrantRequestSpec = Omit<GrantSpec, "holder"> & {
+  /** Only the requester itself (ses_…, its @name, app:<own token id>) or a reserved @@role the session holds. */
+  readonly holder?: string
+}
+
+/** POST /api/agent/grants/requests: the ask to @me and the tap Decision it opened (approve creates the grant). */
+export interface GrantRequested {
+  readonly message: AgentMessage
+  readonly decision: Decision
 }
