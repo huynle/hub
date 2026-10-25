@@ -53,7 +53,7 @@ export const SEED_BUNDLE = `${HUB_DIR}/seed.bundle`
 export const OUT_BUNDLE = `${HUB_DIR}/out.bundle`
 /** Where collected branches land in the host clone before the fast-forward. */
 const COLLECTED_REFS = "refs/hub/sandbox"
-/** The spoke's config inside: { server, launchToken, launchID, machineName, autoStartLocalHub: false }. */
+/** The spoke's launch config inside (src/config.ts parseLaunchConfig): { hubURL, token, launchID }. */
 export const HUB_CONFIG_FILE = `${HUB_DIR}/config.json`
 /** node.json next to it: { workspaceRoots: [SANDBOX_WORKDIR] }. */
 export const HUB_NODE_FILE = `${HUB_DIR}/node.json`
@@ -70,7 +70,7 @@ export const SANDBOX_ENV: Readonly<Record<string, string>> = {
   OPENCODE_DISABLE_AUTOUPDATE: "1",
   OPENCODE_DISABLE_MODELS_FETCH: "1",
   OPENCODE_DISABLE_PROJECT_CONFIG: "1",
-  HUB_SPOKE_CONFIG: `${SANDBOX_HOME}/${HUB_DIR}/config.json`,
+  HUB_LAUNCH_CONFIG: `${SANDBOX_HOME}/${HUB_DIR}/config.json`,
 }
 export const READY_TIMEOUT_MS = 300_000
 const POLL_MS = 1_000
@@ -249,7 +249,7 @@ export class OpenShellRuntime implements Runtime {
     if (sandbox.phase !== "Ready") throw new RuntimeError(`sandbox ${name} is ${sandbox.phase}, not Ready`)
     if (await this.exists(name, READY_FILE, ctx)) return { ...handle, started: false, reason: "the harness is already started" }
     const hide = [input.hub.token]
-    const config = { server: sandboxHubEndpoint(input.hub.url).url, launchToken: input.hub.token, launchID: input.launchID, machineName: name, autoStartLocalHub: false }
+    const config = { hubURL: sandboxHubEndpoint(input.hub.url).url, token: input.hub.token, launchID: input.launchID }
     ctx.progress?.("starting the harness")
     await this.upload(name, { [HUB_CONFIG_FILE]: config, [HUB_NODE_FILE]: { workspaceRoots: [SANDBOX_WORKDIR] }, [HUB_ENV_FILE]: input.env ?? {} }, ctx, hide)
     await this.mustExec(name, ["touch", READY_FILE], ctx, hide)

@@ -25,7 +25,8 @@ describe("start", () => {
     const ws = await rt.prepare(input())
     const handle = await rt.start(ws, start({ env: { HUB_LABEL: "x" } }))
     expect(handle).toEqual({ launchID: "l1", workspace: ws, started: true })
-    expect(read(HUB_CONFIG_FILE)).toEqual({ server: "http://host.openshell.internal:4096/", launchToken: TOKEN, launchID: "l1", machineName: sandboxName("l1"), autoStartLocalHub: false })
+    // The spoke's launch config (src/config.ts parseLaunchConfig): exactly {hubURL, token, launchID}.
+    expect(read(HUB_CONFIG_FILE)).toEqual({ hubURL: "http://host.openshell.internal:4096/", token: TOKEN, launchID: "l1" })
     expect(read(HUB_NODE_FILE)).toEqual({ workspaceRoots: [SANDBOX_WORKDIR] })
     expect(read(HUB_ENV_FILE)).toEqual({ HUB_LABEL: "x" })
     expect(existsSync(file(READY_FILE))).toBe(true)
@@ -38,7 +39,7 @@ describe("start", () => {
     const rt = setup({}, { hubURL: "https://hub.example.com" })
     const ws = await rt.prepare(input())
     await rt.start(ws, start({ hub: { url: "https://hub.example.com", token: TOKEN } }))
-    expect(read(HUB_CONFIG_FILE).server).toBe("https://hub.example.com/")
+    expect(read(HUB_CONFIG_FILE).hubURL).toBe("https://hub.example.com/")
   })
 
   test("a repeated start leaves the running harness alone", async () => {
@@ -48,7 +49,7 @@ describe("start", () => {
     const again = await rt.start(ws, start({ hub: { url: "http://127.0.0.1:4096", token: "hlt1.other.sig" } }))
     expect(again.started).toBe(false)
     expect(again.reason).toMatch(/already/)
-    expect(read(HUB_CONFIG_FILE).launchToken).toBe(TOKEN)
+    expect(read(HUB_CONFIG_FILE).token).toBe(TOKEN)
   })
 
   test("refuses a handle that is not this launch's sandbox, a missing sandbox, and other harnesses", async () => {
