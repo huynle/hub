@@ -67,6 +67,8 @@ export function setup(fakeOptions: FakeOpenShellOptions = {}, options: Partial<O
     owner: "u1",
     git: { baseEnv: base, env },
     pollMs: 1,
+    // The fake runs exec locally: a stand-in for the image's start script that leaves a trace.
+    startCommand: ["touch", ".hub/started"],
     ...options,
   })
   return rt

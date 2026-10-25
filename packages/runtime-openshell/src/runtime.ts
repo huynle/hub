@@ -39,6 +39,8 @@ import {
 } from "../../runtime-sdk/src/index.ts"
 import { GitError, runGit, type GitOptions } from "../../node/src/git.ts"
 import { HostRuntime, LAUNCH_MARKER, resolveUnderRoots } from "../../node/src/host.ts"
+import pkg from "../package.json" with { type: "json" }
+import { imageTag, startCommand } from "../image/image.ts"
 import { OpenShellError, redact, type ExecResult, type OpenShellClient, type Sandbox } from "./cli.ts"
 import { compilePolicy, sandboxHubEndpoint } from "./policy.ts"
 import { normalizeOpenShellProfiles, profileNames, selectProfile, type OpenShellProfiles } from "./profiles.ts"
@@ -64,7 +66,10 @@ export const READY_FILE = `${HUB_DIR}/ready`
 /** Written by stop with the mode ("graceful" or "kill"). */
 export const STOP_FILE = `${HUB_DIR}/stop`
 /** The image a profile without `image` gets (built by packages/runtime-openshell/image). */
-export const DEFAULT_SANDBOX_IMAGE = "hub-sandbox:latest"
+/** The image build/image.ts tags for this package's version (it must be published to an HTTPS registry). */
+export const DEFAULT_SANDBOX_IMAGE = imageTag(pkg.version)
+/** The image's start script: starts the harness detached once .hub/config.json and .hub/ready exist. */
+export const DEFAULT_START_COMMAND: readonly string[] = startCommand()
 /** Non-secret environment every sandbox gets: the harness stays offline but for the hub and its providers. */
 export const SANDBOX_ENV: Readonly<Record<string, string>> = {
   OPENCODE_DISABLE_AUTOUPDATE: "1",
@@ -87,6 +92,8 @@ export interface OpenShellRuntimeOptions {
   readonly profiles?: OpenShellProfiles
   /** The image for profiles without one (default DEFAULT_SANDBOX_IMAGE). */
   readonly image?: string
+  /** The argv that starts the harness after the ready file (default DEFAULT_START_COMMAND). */
+  readonly startCommand?: readonly string[]
   /** Harnesses the image runs (default opencode). */
   readonly harnesses?: readonly string[]
   /** Label values: this machine and its owner (hub.machine, hub.owner). */
@@ -253,6 +260,7 @@ export class OpenShellRuntime implements Runtime {
     ctx.progress?.("starting the harness")
     await this.upload(name, { [HUB_CONFIG_FILE]: config, [HUB_NODE_FILE]: { workspaceRoots: [SANDBOX_WORKDIR] }, [HUB_ENV_FILE]: input.env ?? {} }, ctx, hide)
     await this.mustExec(name, ["touch", READY_FILE], ctx, hide)
+    await this.mustExec(name, [...(this.options.startCommand ?? DEFAULT_START_COMMAND)], ctx, hide)
     return { ...handle, started: true }
   }
 
