@@ -36,6 +36,10 @@ export interface DecisionView {
   readonly expiresAt: number
   readonly escalatedAt?: number
   readonly answer?: { readonly option?: string; readonly text?: string; readonly answeredBy: "user" | "timeout"; readonly at: number }
+  /** Why it closed without an answer (state closed). */
+  readonly closed?: { readonly at: number; readonly reason: string }
+  /** Set by the hub only: an escalation (an agent's approval outside its grant) replies to this permission. */
+  readonly action?: { readonly kind: string; readonly requestID?: string; readonly sessionID?: string; readonly rootID?: string; readonly always?: boolean }
 }
 
 const STATES = new Set(["open", "answered", "expired", "closed"])
