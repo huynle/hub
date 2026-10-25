@@ -20,7 +20,9 @@
 // published before it has reached this instance's subscribers and their handlers settled (a marker through each
 // subscriber connection: Redis keeps per-connection order). Do not await sync() inside a handler.
 //
-// A dropped connection is not resubscribed here: Bun's autoReconnect reopens it (see open questions in P6-T5).
+// Reconnects: Bun reconnects a dropped connection by itself, but the server has forgotten its subscriptions while
+// the client keeps its listeners and leaves subscriber mode (Bun 1.3.5). On a subscriber connection's onconnect the
+// bus closes it and subscribes its channels on a fresh duplicate. Messages sent while it was down are lost.
 import { randomUUID } from "node:crypto"
 import { realTimers } from "./memory-bus"
 import { BusNoResponderError, BusRemoteError, BusTimeoutError, type Bus, type BusHandler, type BusResponder, type Data, type RequestOptions, type Timers, type Unsubscribe } from "./types"
@@ -34,6 +36,8 @@ export interface BusRedis {
   unsubscribe(channel: string, listener?: Listener): Promise<void>
   duplicate(): Promise<BusRedis>
   close(): void
+  /** Runs when the client (re)connects. */
+  onconnect: (() => void) | null
 }
 
 export interface ValkeyBusOptions {
@@ -51,12 +55,17 @@ export interface ValkeyBusOptions {
   readonly syncTimeoutMs?: number
 }
 
+/** A subscriber connection slot; its connection is replaced after a reconnect. */
 interface SubscriberConnection {
-  readonly client: Promise<BusRedis>
-  readonly topics: Set<string>
-  readonly syncChannel: string
-  /** The connection once it is open (close() closes it at once). */
+  /** The current connection, once it listens on every channel the slot had when it opened. */
+  client: Promise<BusRedis>
+  /** The current connection once it is open (close() closes it at once). */
   open?: BusRedis
+  /** The topics subscribed on this slot (each at most once). */
+  readonly topics: Set<string>
+  /** Every channel the slot listens on, with its one listener (what a replacement connection subscribes). */
+  readonly channels: Map<string, Listener>
+  readonly syncChannel: string
 }
 
 interface PendingRequest {
@@ -97,6 +106,8 @@ export class ValkeyBus implements Bus {
   private readonly subscribers = new Map<number, SubscriberConnection>()
   private readonly inFlight = new Set<Promise<void>>()
   private readonly syncWaiters = new Map<string, () => void>()
+  /** The SUBSCRIBE sent per connection and channel (so a channel is never subscribed twice on one connection). */
+  private readonly subscribed = new WeakMap<BusRedis, Map<string, Promise<unknown>>>()
   private closed = false
 
   constructor(url: string, options: ValkeyBusOptions = {}) {
@@ -120,21 +131,22 @@ export class ValkeyBus implements Bus {
     const subscriber = this.subscriber(index)
     subscriber.topics.add(topic)
     const channel = this.topicChannel(topic)
-    const listener: Listener = (raw) => this.dispatch(topic, raw, handler)
-    let client: BusRedis
+    let done = false
+    // The guard covers a channel given up while its connection was being replaced.
+    const listener: Listener = (raw) => {
+      if (!done) this.dispatch(topic, raw, handler)
+    }
     try {
-      client = await subscriber.client
-      await client.subscribe(channel, listener)
+      await this.listen(subscriber, channel, listener)
     } catch (error) {
       subscriber.topics.delete(topic)
       throw error
     }
-    let done = false
     return async () => {
       if (done) return
       done = true
       subscriber.topics.delete(topic)
-      if (!this.closed) await client.unsubscribe(channel, listener)
+      await this.unlisten(subscriber, channel, listener)
     }
   }
 
@@ -144,10 +156,9 @@ export class ValkeyBus implements Bus {
     this.responders.set(topic, responder)
     const channel = this.rpcChannel(topic)
     const listener: Listener = (raw) => this.answer(topic, raw, responder)
-    let client: BusRedis
+    const subscriber = this.subscriber(0)
     try {
-      client = await this.subscriber(0).client
-      await client.subscribe(channel, listener)
+      await this.listen(subscriber, channel, listener)
     } catch (error) {
       if (this.responders.get(topic) === responder) this.responders.delete(topic)
       throw error
@@ -157,7 +168,7 @@ export class ValkeyBus implements Bus {
       if (done) return
       done = true
       if (this.responders.get(topic) === responder) this.responders.delete(topic)
-      if (!this.closed) await client.unsubscribe(channel, listener)
+      await this.unlisten(subscriber, channel, listener)
     }
   }
 
@@ -260,8 +271,7 @@ export class ValkeyBus implements Bus {
   /** Subscribes this instance's reply channel (once). */
   private listenForReplies(): Promise<void> {
     this.replies ??= (async () => {
-      const client = await this.subscriber(0).client
-      await client.subscribe(this.replyChannel, (raw) => this.receiveReply(raw))
+      await this.listen(this.subscriber(0), this.replyChannel, (raw) => this.receiveReply(raw))
     })().catch((error) => {
       this.replies = undefined
       throw error
@@ -303,27 +313,106 @@ export class ValkeyBus implements Bus {
     return (this.main ??= this.makeClient())
   }
 
+  /** Listens on a channel through a subscriber slot (one listener per channel and slot). */
+  private async listen(subscriber: SubscriberConnection, channel: string, listener: Listener): Promise<void> {
+    subscriber.channels.set(channel, listener)
+    for (;;) {
+      const current = subscriber.client
+      try {
+        const client = await current
+        if (current !== subscriber.client) continue
+        await this.subscribeOnce(client, channel, listener)
+        return
+      } catch (error) {
+        // Replaced meanwhile: the new connection subscribes what the slot has; make sure of it on that one.
+        if (current !== subscriber.client) continue
+        if (subscriber.channels.get(channel) === listener) subscriber.channels.delete(channel)
+        throw error
+      }
+    }
+  }
+
+  private subscribeOnce(client: BusRedis, channel: string, listener: Listener): Promise<unknown> {
+    let sent = this.subscribed.get(client)
+    if (!sent) this.subscribed.set(client, (sent = new Map()))
+    const existing = sent.get(channel)
+    if (existing) return existing
+    const subscribing = client.subscribe(channel, listener).catch((error) => {
+      sent.delete(channel)
+      throw error
+    })
+    sent.set(channel, subscribing)
+    return subscribing
+  }
+
+  /**
+   * Stops listening on a channel. An UNSUBSCRIBE that fails (the connection is down or being replaced) is not an
+   * error: the replacement connection subscribes only what the slot still has.
+   */
+  private async unlisten(subscriber: SubscriberConnection, channel: string, listener: Listener): Promise<void> {
+    if (subscriber.channels.get(channel) !== listener) return
+    subscriber.channels.delete(channel)
+    const client = subscriber.open
+    if (!client || this.closed) return
+    this.subscribed.get(client)?.delete(channel)
+    await client.unsubscribe(channel, listener).catch(() => {})
+  }
+
   private subscriber(index: number): SubscriberConnection {
     const existing = this.subscribers.get(index)
     if (existing) return existing
     const syncChannel = `${this.prefix}sync:${this.instanceID}:${index}`
-    const client = this.connection()
-      .duplicate()
-      .then(async (duplicate) => {
-        if (this.closed) {
-          duplicate.close()
-          throw new Error("bus closed")
-        }
-        subscriber.open = duplicate
-        await duplicate.subscribe(syncChannel, (token) => this.syncWaiters.get(token)?.())
-        return duplicate
-      })
-    const subscriber: SubscriberConnection = { client, topics: new Set(), syncChannel }
+    const sync: Listener = (token) => this.syncWaiters.get(token)?.()
+    const subscriber: SubscriberConnection = { client: Promise.resolve(undefined!), topics: new Set(), channels: new Map([[syncChannel, sync]]), syncChannel }
     this.subscribers.set(index, subscriber)
-    client.catch(() => {
-      if (this.subscribers.get(index) === subscriber) this.subscribers.delete(index)
-    })
+    this.openSubscriber(subscriber, index)
     return subscriber
+  }
+
+  /** Opens the slot's connection (a duplicate of the command connection) and subscribes the slot's channels. */
+  private openSubscriber(subscriber: SubscriberConnection, index: number): void {
+    const replacing = subscriber.open !== undefined
+    subscriber.open = undefined
+    subscriber.client = (async () => {
+      const client = await this.connection().duplicate()
+      if (this.closed) {
+        client.close()
+        throw new Error("bus closed")
+      }
+      subscriber.open = client
+      client.onconnect = () => void this.checkSubscriber(subscriber, client, index)
+      await Promise.all([...subscriber.channels].map(([channel, listener]) => this.subscribeOnce(client, channel, listener)))
+      return client
+    })()
+    subscriber.client.catch((error) => {
+      if (this.closed || this.subscribers.get(index) !== subscriber) return
+      // Later calls open a new slot; what this one carried is gone.
+      this.subscribers.delete(index)
+      subscriber.open?.close()
+      if (replacing) this.onError(error, `subscriber connection ${index}`)
+    })
+  }
+
+  /**
+   * On a subscriber connection's onconnect (Bun runs it for the first connection too, and after reconnecting a
+   * dropped one): once the slot has opened, a PUBLISH on its sync channel reaching nobody means the server forgot
+   * the subscriptions (a reconnect). The client is then in no state to redo them cleanly (it keeps its listeners
+   * but left subscriber mode): close it and subscribe the slot's channels on a fresh connection.
+   */
+  private async checkSubscriber(subscriber: SubscriberConnection, client: BusRedis, index: number): Promise<void> {
+    try {
+      await subscriber.client
+      if (this.closed || subscriber.open !== client) return
+      if ((await this.connection().publish(subscriber.syncChannel, "probe")) > 0) return
+    } catch (error) {
+      if (this.closed || subscriber.open !== client) return
+      this.onError(error, `subscriber connection ${index}`)
+      return
+    }
+    if (this.closed || subscriber.open !== client) return
+    client.onconnect = null
+    client.close()
+    this.openSubscriber(subscriber, index)
   }
 
   private topicChannel(topic: string): string {

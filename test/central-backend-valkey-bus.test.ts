@@ -1,6 +1,8 @@
 // ValkeyBus against an in-process fake of Valkey pub/sub (test/fake-redis.ts): two bus instances stand for two
-// pods. The shared Bus contract runs against real Valkey with HUB_IT_CLUSTER=1 (test/cluster-impls/valkey-bus.ts).
-import { describe, expect, test } from "bun:test"
+// pods. The shared Bus contract runs against real Valkey with HUB_IT_CLUSTER=1 (test/cluster-impls/valkey-bus.ts),
+// and so does the reconnect test at the end of this file.
+import { afterAll, afterEach, describe, expect, test } from "bun:test"
+import { cluster } from "./backend-impls"
 import { BusNoResponderError, BusRemoteError, BusTimeoutError, type Timers } from "../src/central/backend/types"
 import { ValkeyBus, type ValkeyBusOptions } from "../src/central/backend/valkey-bus"
 import { FakeRedisServer } from "./fake-redis"
@@ -251,5 +253,94 @@ describe("ValkeyBus request/reply", () => {
     expect(error).toBeInstanceOf(Error)
     expect((error as Error).message).toBe("bus closed")
     expect(clock.pending()).toEqual([])
+  })
+})
+
+describe("ValkeyBus reconnects", () => {
+  test("after the server drops its subscriber connections, subscriptions, responders and replies work again, once each", async () => {
+    const errors: unknown[] = []
+    const { server, buses } = pods(2, { timers: fakeTimers().timers, onError: (error) => void errors.push(error) })
+    const [a, b] = buses as [ValkeyBus, ValkeyBus]
+    const got: unknown[] = []
+    await b.subscribe("t", (m) => void got.push(m))
+    await b.subscribe("t", (m) => void got.push(`second ${m}`))
+    await b.serve("rpc", (m) => m)
+    expect(await a.request<number>("rpc", 1, { timeoutMs: 1000 })).toBe(1)
+
+    server.killSubscribers()
+    expect(server.numsub("hub:bus:t:t")).toBe(0)
+    await Bun.sleep(10)
+
+    expect(server.numsub("hub:bus:t:t")).toBe(2)
+    expect(await a.publish("t", 2)).toBe(2)
+    await b.sync()
+    expect(got.sort()).toEqual([2, "second 2"])
+    expect(await a.request<number>("rpc", 3, { timeoutMs: 1000 })).toBe(3)
+    expect(errors).toEqual([])
+  })
+
+  test("the dropped connection is replaced by a fresh one; a subscription ended meanwhile gets nothing", async () => {
+    const { server, buses } = pods(2)
+    const [a, b] = buses as [ValkeyBus, ValkeyBus]
+    const got: unknown[] = []
+    const off = await b.subscribe("t", (m) => void got.push(m))
+    await b.subscribe("u", () => {})
+    const opened = server.opened
+    server.killSubscribers()
+    const ending = off()
+    await Bun.sleep(10)
+    await ending
+    // b's command connection and its fresh subscriber connection (a has opened none yet).
+    expect(server.opened).toBe(opened + 1)
+    expect(server.connections.size).toBe(2)
+    await a.publish("t", 1)
+    await b.sync()
+    expect(got).toEqual([])
+    expect(server.numsub("hub:bus:t:u")).toBe(1)
+  })
+
+  test("a channel given up while the connection was down is not subscribed again", async () => {
+    const { server, buses } = pods(1)
+    const [a] = buses as [ValkeyBus]
+    const off = await a.subscribe("t", () => {})
+    server.killSubscribers()
+    await off()
+    await Bun.sleep(10)
+    expect(server.numsub("hub:bus:t:t")).toBe(0)
+  })
+})
+
+afterAll(() => cluster?.stop())
+
+describe.skipIf(!cluster)("ValkeyBus on real Valkey (HUB_IT_CLUSTER=1)", () => {
+  const open: Array<{ close(): void }> = []
+  afterEach(() => {
+    for (const client of open.splice(0)) client.close()
+  })
+
+  test("after CLIENT KILL TYPE pubsub, subscriptions, responders and replies work again", async () => {
+    const url = await cluster!.freshValkey()
+    const a = new ValkeyBus(url, { instanceID: "pod-a" })
+    const b = new ValkeyBus(url, { instanceID: "pod-b" })
+    const admin = new Bun.RedisClient(url)
+    open.push(a, b, admin)
+    const got: unknown[] = []
+    await b.subscribe("t", (m) => void got.push(m))
+    await b.serve("rpc", (m) => m)
+    expect(await a.request<string>("rpc", "x", { timeoutMs: 2000 })).toBe("x")
+
+    await admin.send("CLIENT", ["KILL", "TYPE", "pubsub"])
+    let count = 0
+    for (let i = 0; i < 100 && count === 0; i++) {
+      await Bun.sleep(50)
+      count = await a.publish("t", "probe")
+    }
+    expect(count).toBe(1)
+    await b.sync()
+    got.length = 0
+    expect(await a.publish("t", 2)).toBe(1)
+    await b.sync()
+    expect(got).toEqual([2])
+    expect(await a.request<string>("rpc", "y", { timeoutMs: 2000 })).toBe("y")
   })
 })
