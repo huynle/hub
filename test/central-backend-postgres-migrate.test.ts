@@ -1,7 +1,7 @@
 // Postgres schema migrations (decision vkxkqiuf §3, design §10): ordered, recorded in hub_schema, applied under a
 // session advisory lock so concurrent `hub-server migrate` runs (or pods) apply each migration exactly once.
 // The list checks always run; the database checks need HUB_IT_CLUSTER=1 and docker (test/cluster-it.ts).
-import { afterAll, describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { MIGRATION_LOCK_KEY, MIGRATIONS, migrate, SCHEMA_VERSION, schemaVersion, type Migration } from "../src/central/backend/postgres-migrate"
 import { dockerAvailable, ItCluster, itClusterEnabled } from "./cluster-it"
 
@@ -18,6 +18,10 @@ describe("postgres migrations list", () => {
 const enabled = itClusterEnabled() && (await dockerAvailable())
 const cluster = enabled ? new ItCluster({ log: (line) => console.log(`[cluster-it] ${line}`) }) : undefined
 const clients: Bun.SQL[] = []
+// Start the container before the tests: under load it can take longer than one test's timeout.
+beforeAll(async () => {
+  await cluster?.postgres()
+}, 120_000)
 afterAll(async () => {
   await Promise.all(clients.splice(0).map((sql) => sql.close().catch(() => {})))
   await cluster?.stop()
