@@ -21,7 +21,7 @@ describe("protocol workspace package", () => {
   })
 
   test("is a workspace of the hub, next to the SDK, the CLI, the runtime SDK, the node, the OpenShell runtime, the spoke SDK, the testkit, the Claude Code spoke and the conformance suite (the shim stays outside)", () => {
-    expect(main.workspaces).toEqual(["packages/protocol", "packages/sdk", "packages/cli", "packages/runtime-sdk", "packages/node", "packages/runtime-openshell", "packages/spoke-sdk", "packages/testkit", "packages/claude-code", "packages/conformance"])
+    expect(main.workspaces).toEqual(["packages/protocol", "packages/sdk", "packages/cli", "packages/runtime-sdk", "packages/node", "packages/runtime-openshell", "packages/spoke-sdk", "packages/testkit", "packages/claude-code", "packages/conformance", "packages/codex"])
   })
 
   test("is shipped in the hub's npm package", () => {
