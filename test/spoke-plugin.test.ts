@@ -208,6 +208,18 @@ describe("plugin setup", () => {
     expect(again).toMatchObject({ ok: true, result: { gone: true } })
   })
 
+  test("a reject's message (deny reason) reaches OpenCode's permission reply", async () => {
+    const server = fakeCentral()
+    cleanups.push(() => stopServer(server))
+    tempConfig({ server: server.url, mode: "always", token: "tok" })
+    const fake = fakeContext({ directory: "/a", pending: { per_1: "ses_a" } })
+    cleanups.push((await plugin.setup(fake.ctx as any)) as () => void)
+    await until(() => server.frames.some((f) => f.t === "sessions"))
+    const res = await server.request({ op: "permission", sessionID: "ses_a", requestID: "per_1", decision: "reject", message: "Only tests may run here" })
+    expect(res).toMatchObject({ ok: true, result: {} })
+    expect(fake.replies).toEqual([{ sessionID: "ses_a", requestID: "per_1", decision: "reject", message: "Only tests may run here" }])
+  })
+
   test("hub messages are admitted through OpenCode's session.synthetic; deliver is announced only when it exists", async () => {
     const server = fakeCentral()
     cleanups.push(() => stopServer(server))

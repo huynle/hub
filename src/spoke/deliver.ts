@@ -3,8 +3,10 @@
 //
 // Messages go in through OpenCode's native session.synthetic with a client id (decision 52aqsopo): OpenCode
 // keeps them in the session's inbox (busy sessions, open forms, interrupts) and deduplicates the id, even across
-// restarts. The model sees only the text (the hub-rendered envelope), never the metadata.
+// restarts. The model sees only the text (the hub-rendered envelope), never the metadata. An agent's prompt (kind
+// "prompt") gets its provenance envelope here, from the hub's meta, and is the hub's in the inbox (never a human turn).
 import { createHash } from "node:crypto"
+import { sanitizeLabel, sanitizeText } from "../../packages/sdk/src/envelope.ts"
 import type { DeliverMeta, DeliverResult, Delivered, DeliveryMode, InboxOrigin } from "../protocol"
 import { PROMPT_SOURCE } from "./conversation"
 
@@ -62,8 +64,32 @@ export function harnessMessageID(messageID: string): string {
 
 /** metadata stored with a delivered message (for timelines; the model does not see it). */
 export function deliverMetadata(req: { readonly messageID: string; readonly meta: DeliverMeta }): Record<string, unknown> {
-  const { kind, from, to, replyTo } = req.meta
-  return { source: PROMPT_SOURCE, messageID: req.messageID, kind, from, to, ...(replyTo !== undefined ? { replyTo } : {}) }
+  const { kind, from, to, replyTo, grant } = req.meta
+  return { source: PROMPT_SOURCE, messageID: req.messageID, kind, from, to, ...(replyTo !== undefined ? { replyTo } : {}), ...(grant !== undefined ? { grant } : {}) }
+}
+
+/** Body lines that could pass for a header or boundary (or an escaped one): escaped with a leading backslash. */
+const FORGEABLE = /^\s*\\*(?:\[hub\]|-{3,}|↩)/i
+
+/**
+ * The text a session sees for an agent's prompt (kind "prompt"): a provenance header naming the sender and the
+ * grant, then the sanitised body between two boundaries (the same shape as the hub's message envelope, so
+ * timelines read the body back). The header comes from the hub's meta, never from the body.
+ */
+export function renderPromptEnvelope(input: { readonly messageID: string; readonly from: string; readonly grant: string; readonly text: string }): string {
+  const id = sanitizeLabel(input.messageID)
+  const boundary = `----- ${id} -----`
+  const body = sanitizeText(input.text)
+    .split("\n")
+    .map((line) => (FORGEABLE.test(line) ? `\\${line}` : line))
+    .join("\n")
+  return [`[hub] prompt from ${sanitizeLabel(input.from)} · grant ${sanitizeLabel(input.grant)} · ${id}`, boundary, body, boundary].join("\n")
+}
+
+/** What OpenCode gets for a deliver: a prompt wrapped in its provenance envelope, other kinds as the hub rendered them. */
+export function deliverText(req: { readonly messageID: string; readonly text: string; readonly meta: DeliverMeta }): string {
+  if (req.meta.kind !== "prompt") return req.text
+  return renderPromptEnvelope({ messageID: req.messageID, from: req.meta.from, grant: req.meta.grant ?? "", text: req.text })
 }
 
 const record = (v: unknown): Record<string, any> => (typeof v === "object" && v !== null ? (v as Record<string, any>) : {})
@@ -102,8 +128,9 @@ export class InboxOrigins {
     if (typeof data.inboxID !== "string" || this.origins.get(data.inboxID) === "hub") return
     const item = record(data.item)
     const metadata = record(record(item.payload).metadata)
-    if (item.type === "user") this.origins.set(data.inboxID, "user")
-    else if (item.type === "synthetic" && metadata.source === PROMPT_SOURCE && typeof metadata.messageID === "string") this.origins.set(data.inboxID, "hub")
+    // A hub message (hub metadata with its messageID) is never the user's, whatever item type OpenCode gives it.
+    if (metadata.source === PROMPT_SOURCE && typeof metadata.messageID === "string" && (item.type === "synthetic" || item.type === "user")) this.origins.set(data.inboxID, "hub")
+    else if (item.type === "user") this.origins.set(data.inboxID, "user")
   }
 
   /** Marks an inbox item the spoke delivered for the hub. */
