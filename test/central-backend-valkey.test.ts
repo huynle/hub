@@ -5,6 +5,7 @@ import { afterAll, afterEach, describe, expect, test } from "bun:test"
 import { ValkeyConnection, type ValkeyClient } from "../src/central/backend/valkey-client"
 import { ValkeyCounters } from "../src/central/backend/valkey-counters"
 import { ValkeyKv } from "../src/central/backend/valkey-kv"
+import { ValkeyLocks } from "../src/central/backend/valkey-locks"
 import { cluster } from "./backend-impls"
 
 const open: Array<{ close(): void | Promise<void> }> = []
@@ -108,5 +109,72 @@ describe.skipIf(!cluster)("Valkey (real server)", () => {
     open.push(counters)
     for (const ttl of [0, -1, 1.5, Number.NaN]) await expect(counters.incr("k", ttl)).rejects.toThrow(/ttl/)
     expect(await counters.get("k")).toBe(0)
+  })
+
+  test("ValkeyLocks: a lease expires server-side; the next holder gets a higher fence and the old one can neither renew nor release", async () => {
+    const locks = new ValkeyLocks(await url())
+    open.push(locks)
+    const first = await locks.acquire("leader", "pod_a", 200)
+    expect(first).toMatchObject({ key: "leader", owner: "pod_a", fence: 1 })
+    expect(await locks.acquire("leader", "pod_b", 200)).toBeUndefined()
+    await Bun.sleep(350)
+    expect(await locks.holder("leader")).toBeUndefined()
+    expect(await locks.acquire("leader", "pod_b", 60_000)).toMatchObject({ owner: "pod_b", fence: 2 })
+    expect(await locks.renew("leader", "pod_a", 60_000)).toBeUndefined()
+    expect(await locks.release("leader", "pod_a")).toBe(false)
+    expect(await locks.holder("leader")).toMatchObject({ owner: "pod_b", fence: 2 })
+  })
+
+  test("ValkeyLocks: renew extends the server-side expiry and keeps the fence; expiresAt comes from the clock", async () => {
+    let t = 1_000
+    const at = await url()
+    const locks = new ValkeyLocks(at, { now: () => t })
+    open.push(locks)
+    expect(await locks.acquire("k", "a", 300)).toEqual({ key: "k", owner: "a", fence: 1, expiresAt: 1_300 })
+    t = 1_200
+    await Bun.sleep(200)
+    expect(await locks.renew("k", "a", 60_000)).toEqual({ key: "k", owner: "a", fence: 1, expiresAt: 61_200 })
+    expect(Number(await raw(at).send("PTTL", ["lock:k"]))).toBeGreaterThan(50_000)
+    await Bun.sleep(200)
+    expect(await locks.holder("k")).toEqual({ key: "k", owner: "a", fence: 1, expiresAt: 61_200 })
+  })
+
+  test("ValkeyLocks: fences only grow, across releases; owners round-trip whatever their characters", async () => {
+    const locks = new ValkeyLocks(await url())
+    open.push(locks)
+    const owners = ["pod:a|1", 'quote"and\\slash/', "héllo ✓ 🚀", ""]
+    let fence = 0
+    for (const owner of owners) {
+      const lease = await locks.acquire("k", owner, 60_000)
+      expect(lease).toMatchObject({ owner, fence: ++fence })
+      expect(await locks.holder("k")).toEqual(lease!)
+      expect(await locks.release("k", owner + "x")).toBe(false)
+      expect(await locks.release("k", owner)).toBe(true)
+      expect(await locks.release("k", owner)).toBe(false)
+    }
+  })
+
+  test("ValkeyLocks: concurrent acquires from separate connections: exactly one wins", async () => {
+    const at = await url()
+    const pods = ["a", "b", "c", "d", "e"].map((owner) => {
+      const locks = new ValkeyLocks(at)
+      open.push(locks)
+      return { owner, locks }
+    })
+    const leases = await Promise.all(pods.map(({ owner, locks }) => locks.acquire("k", owner, 60_000)))
+    const won = leases.filter((lease) => lease !== undefined)
+    expect(won.length).toBe(1)
+    expect(won[0]!.fence).toBe(1)
+    expect(await pods[0]!.locks.holder("k")).toEqual(won[0]!)
+  })
+
+  test("ValkeyLocks: invalid ttls are refused", async () => {
+    const locks = new ValkeyLocks(await url())
+    open.push(locks)
+    for (const ttl of [0, -1, 1.5, Number.NaN]) {
+      await expect(locks.acquire("k", "a", ttl)).rejects.toThrow(/ttl/)
+      await expect(locks.renew("k", "a", ttl)).rejects.toThrow(/ttl/)
+    }
+    expect(await locks.holder("k")).toBeUndefined()
   })
 })
