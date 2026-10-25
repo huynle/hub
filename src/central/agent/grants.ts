@@ -15,6 +15,7 @@ import type { AuditEntry, Store } from "../store"
 import type { Directory } from "./directory"
 import { AgentError } from "./errors"
 import { type GrantSpec, type GrantVerb, validateGrant } from "./policy"
+import { updateVersioned } from "./versioned"
 
 /** Active (unexpired, unrevoked) grants per user. */
 export const GRANTS_ACTIVE_MAX = 50
@@ -42,6 +43,10 @@ export interface Grant {
   readonly expiresAt: number
   readonly updated?: number
   readonly revokedAt?: number
+}
+
+export interface GrantView extends Grant {
+  readonly state: GrantState
 }
 
 export interface GrantsDeps {
@@ -87,6 +92,48 @@ export class Grants {
     const found = await this.deps.state.get<Grant>(owner, COLLECTION, id)
     if (!found) throw notFound()
     return found.value
+  }
+
+  /** The owner's grants (every state), newest first. */
+  async list(owner: string): Promise<GrantView[]> {
+    const at = this.now()
+    return (await this.all(owner)).sort((a, b) => b.created - a.created || (a.id < b.id ? -1 : 1)).map((g) => ({ ...g, state: grantState(g, at) }))
+  }
+
+  /**
+   * Replaces an active grant with a new spec (its expiry restarts now); id, holder (and its pin) and created
+   * stay. Changing the holder is invalid (revoke and create instead); an ended grant is gone.
+   */
+  async update(owner: string, id: string, input: unknown): Promise<Grant> {
+    const spec = validateGrant(input)
+    return this.change(owner, id, "grant.update", (grant, at) => {
+      if (spec.holder !== grant.holder) throw new AgentError("invalid", "A grant's holder cannot change: revoke it and create another")
+      return { ...grant, ...fields(spec, at), updated: at }
+    })
+  }
+
+  /** Ends an active grant now; an ended one is gone. */
+  async revoke(owner: string, id: string): Promise<Grant> {
+    return this.change(owner, id, "grant.revoke", (grant, at) => ({ ...grant, revokedAt: at }))
+  }
+
+  /** A version-checked change of an active grant. */
+  private async change(owner: string, id: string, action: string, apply: (grant: Grant, at: number) => Grant): Promise<Grant> {
+    await this.get(owner, id)
+    let missing = false
+    const next = await updateVersioned<Grant>(this.deps.state, owner, COLLECTION, id, (current) => {
+      if (!current) {
+        missing = true
+        return undefined
+      }
+      const at = this.now()
+      const state = grantState(current, at)
+      if (state !== "active") throw new AgentError("gone", `The grant is ${state}`)
+      return apply(current, at)
+    })
+    if (missing || !next) throw notFound()
+    this.deps.admin?.audit({ actor: owner, action, target: id })
+    return next
   }
 
   private owner(owner: string): void {

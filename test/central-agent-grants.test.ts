@@ -9,7 +9,7 @@ import path from "node:path"
 import type { AgentActor } from "../src/central/agent/actor"
 import { Directory, type ReportedSession } from "../src/central/agent/directory"
 import { AgentError } from "../src/central/agent/errors"
-import { GRANTS_ACTIVE_MAX, Grants } from "../src/central/agent/grants"
+import { GRANTS_ACTIVE_MAX, GRANTS_KEPT, Grants } from "../src/central/agent/grants"
 import { MemoryCounters } from "../src/central/backend/memory-counters"
 import { MemoryStateStore } from "../src/central/backend/memory-state"
 import { Store } from "../src/central/store"
@@ -126,5 +126,84 @@ describe("Grants.create", () => {
     const { grants, alice, summaries } = setup()
     const grant = await grants.create(alice, spec("@@orchestrator"))
     expect(summaries).toEqual([{ actor: alice, action: "grant.create", target: grant.id }])
+  })
+})
+
+describe("Grants.list, get, update and revoke", () => {
+  test("lists the owner's grants newest first, with their state; other users see none", async () => {
+    const { grants, alice, bob, advance } = setup()
+    const first = await grants.create(alice, spec("@@orchestrator", { expires: "1h" }))
+    advance(1)
+    const second = await grants.create(alice, spec("@@concierge"))
+    advance(HOUR)
+    const listed = await grants.list(alice)
+    expect(listed.map((g) => [g.id, g.state])).toEqual([
+      [second.id, "active"],
+      [first.id, "expired"],
+    ])
+    expect(await grants.list(bob)).toEqual([])
+  })
+
+  test("another user's grant, or a malformed id, is not_found", async () => {
+    const { grants, alice, bob } = setup()
+    const grant = await grants.create(alice, spec("@@orchestrator"))
+    expect((await failure(grants.get(bob, grant.id))).code).toBe("not_found")
+    expect((await failure(grants.get(alice, "../x"))).code).toBe("not_found")
+    expect((await failure(grants.revoke(bob, grant.id))).code).toBe("not_found")
+  })
+
+  test("update replaces the grant (expiry restarts), keeping id, holder, pin and created", async () => {
+    const { grants, directory, alice, report, advance, now } = setup()
+    report(alice, "ses_aaa", "ses_bbb")
+    directory.setName(alice, "ses_aaa", "orch")
+    const grant = await grants.create(alice, spec("@orch", { expires: "2d" }))
+    // The name moves to another session (after the old name's alias ran out): an edit keeps the original pin.
+    directory.setName(alice, "ses_aaa", "old")
+    advance(25 * HOUR)
+    directory.setName(alice, "ses_bbb", "orch")
+    const edited = await grants.update(alice, grant.id, spec("@orch", { allow: ["answer"], expires: "30m" }))
+    expect(edited).toMatchObject({ id: grant.id, holder: "@orch", holderSessionID: "ses_aaa", allow: ["answer"], created: grant.created, updated: now(), expiresAt: now() + 30 * MIN })
+    expect(await grants.get(alice, grant.id)).toEqual(edited)
+  })
+
+  test("update cannot change the holder, and rejects invalid grants", async () => {
+    const { grants, alice } = setup()
+    const grant = await grants.create(alice, spec("@@orchestrator"))
+    expect((await failure(grants.update(alice, grant.id, spec("@@concierge")))).code).toBe("invalid")
+    expect((await failure(grants.update(alice, grant.id, spec("@@orchestrator", { allow: [] })))).code).toBe("invalid")
+  })
+
+  test("revoke ends a grant (kept as revoked); revoking or editing an ended grant is gone", async () => {
+    const { grants, alice, now, summaries } = setup()
+    const grant = await grants.create(alice, spec("@@orchestrator"))
+    const revoked = await grants.revoke(alice, grant.id)
+    expect(revoked).toMatchObject({ id: grant.id, revokedAt: now() })
+    expect((await grants.list(alice))[0]!.state).toBe("revoked")
+    expect((await failure(grants.revoke(alice, grant.id))).code).toBe("gone")
+    expect((await failure(grants.update(alice, grant.id, spec("@@orchestrator")))).code).toBe("gone")
+    expect(summaries.map((s) => s.action)).toEqual(["grant.create", "grant.revoke"])
+  })
+
+  test("an expired grant cannot be edited (gone)", async () => {
+    const { grants, alice, advance } = setup()
+    const grant = await grants.create(alice, spec("@@orchestrator", { expires: "1m" }))
+    advance(MIN)
+    expect((await failure(grants.update(alice, grant.id, spec("@@orchestrator")))).code).toBe("gone")
+  })
+
+  test("ended grants beyond GRANTS_KEPT are dropped, oldest first", async () => {
+    const { grants, alice, advance } = setup()
+    const ids: string[] = []
+    for (let i = 0; i < GRANTS_KEPT + 2; i++) {
+      advance(1)
+      const grant = await grants.create(alice, spec("@@orchestrator"))
+      await grants.revoke(alice, grant.id)
+      ids.push(grant.id)
+    }
+    await grants.create(alice, spec("@@orchestrator"))
+    const listed = (await grants.list(alice)).map((g) => g.id)
+    expect(listed.length).toBe(GRANTS_KEPT + 1)
+    expect(listed).not.toContain(ids[0])
+    expect(listed).not.toContain(ids[1])
   })
 })
