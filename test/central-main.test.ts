@@ -275,6 +275,15 @@ describe("runImport", () => {
     noSecrets([...down.out, ...down.err].join("\n"))
   })
 
+  test("an unreachable or outdated database fails once, before any row (one line, no report)", async () => {
+    const dir = await fixture()
+    const unreachable = Object.assign(new MemoryStateStore(), { close: async () => {}, ping: async () => Promise.reject(new Error("Connection closed")) })
+    const run = io()
+    expect(await runImport({ stateDir: dir, dryRun: true, force: false, printTokenKeys: false }, { ...run.io, openState: () => unreachable })).toBe(1)
+    expect(run.out).toEqual([])
+    expect(run.err).toEqual(["[hub] import failed: Connection closed"])
+  })
+
   test("HUB_DATABASE_URL falls back to hub.json cluster.database", async () => {
     const dir = await fixture()
     const home = mkdtempSync(path.join(tmpdir(), "hub-home-"))

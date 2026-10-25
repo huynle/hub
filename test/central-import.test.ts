@@ -207,6 +207,7 @@ describe("formatImportReport", () => {
     await backends.state.put(HUB_ROWS, "users", "u_bob", { id: "u_bob", role: "admin", created: 3, lastSeen: 99 })
     const text = formatImportReport(await importState({ stateDir: dir, state: backends.state, dryRun: true })).join("\n")
     expect(text).toContain("dry run")
+    expect(text).toMatch(/conflict\s+overwritten\s+failed/)
     expect(text).toMatch(/users\s+3\s+0\s+2\s+1\s+0\s+0/)
     expect(text).toMatch(/agent:messages\s+2\s+0\s+2/)
     expect(text).toContain(`users ${HUB_ROWS}/u_bob`)

@@ -316,6 +316,8 @@ export async function runImport(
   try {
     url = databaseURL(io)
     state = (io.openState ?? ((u: string) => new PostgresStateStore({ url: u, max: 2 })))(url)
+    // Reachable and migrated (a schema error says to run migrate), before any row is read or counted.
+    await state.ping?.()
     const result = await importState({ stateDir: args.stateDir, state, dryRun: args.dryRun, force: args.force })
     for (const line of formatImportReport(result)) report(redact(line, url))
     if (args.printTokenKeys) {

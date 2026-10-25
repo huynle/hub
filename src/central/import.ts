@@ -289,7 +289,7 @@ export function formatImportReport(report: ImportReport): string[] {
   const columns = ["rows", "new", "same", "conflict", "overwritten", "failed"] as const
   const names = Object.keys(report.collections)
   const width = Math.max(10, ...names.map((name) => name.length))
-  const row = (name: string, cells: readonly (string | number)[]) => `  ${name.padEnd(width)}  ${cells.map((cell) => String(cell).padStart(11)).join("")}`
+  const row = (name: string, cells: readonly (string | number)[]) => `  ${name.padEnd(width)}  ${cells.map((cell) => String(cell).padStart(12)).join("")}`
   lines.push(row("collection", columns))
   const totals = [0, 0, 0, 0, 0, 0]
   for (const name of names) {
