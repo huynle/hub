@@ -82,7 +82,8 @@
     "packages/runtime-openshell",
     "packages/spoke-sdk",
     "packages/testkit",
-    "packages/claude-code"
+    "packages/claude-code",
+    "packages/conformance"
   ],
   "engines": {
     "bun": ">=1.3"
