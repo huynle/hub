@@ -18,14 +18,20 @@
 //   each REWAKE_BACKOFF_MS delay with a short reminder (its own id), then the user is alerted once. Busy,
 //   offline or pending recipients push the wait back. State lives in the StateStore (survives restarts); the
 //   loop looks at users seen since start (a send or a sessions frame of theirs).
+// - Primer (design §2.3, decision jswt9p22 #7): once per session, a short identity note (renderPrimer) is
+//   admitted without waking (wake:false, steer, meta.kind "primer") just before the first message the session
+//   gets, or when it is explicitly named (Directory.onNamed; derived names never prime). Only through
+//   deliver-capable spokes: an offline session is primed when its pending message is flushed. The directory
+//   persists the primed flag on the session record; a primer no spoke takes is tried again with the next
+//   message and never holds the message back.
 // - Loop protection (./message-limits): pair/user rate limits before storing, hop per message, human turns
 //   (console, voice, typed in the harness) reset a session's chain (humanTurn).
 import type { DeliverRequest, DeliverResult, DeliveryMode, MessageKind as WireKind } from "../../protocol"
 import { isDeliverResult } from "../../protocol"
 import type { Clock, Counters, StateStore, Timers } from "../backend/types"
 import type { AgentActor } from "./actor"
-import type { DirectoryEntry, Resolved } from "./directory"
-import { type Party, type PartyInfo, partyFromActor, partyKey, partyLabel, renderEnvelope } from "./envelope"
+import type { DirectoryEntry, NamedListener, Resolved } from "./directory"
+import { type Party, type PartyInfo, partyFromActor, partyKey, partyLabel, renderEnvelope, renderPrimer } from "./envelope"
 import { AgentError } from "./errors"
 import { HOP_CAP, HopTracker, MessageLimiter, type MessageLimits, overHopCap } from "./message-limits"
 import { parseAddress } from "./names"
@@ -43,9 +49,13 @@ export interface DeliveryRegistry {
   recency(sessionID: string): number
 }
 
-/** Address resolution (Directory.resolve). */
+/** Address resolution (Directory.resolve) and the primer flag (without primed/markPrimed: no primer). */
 export interface DeliveryDirectory {
   resolve(userID: string, addr: string): Resolved
+  primed?(userID: string, sessionID: string): boolean
+  markPrimed?(userID: string, sessionID: string): void
+  /** Explicit names (Directory.onNamed): an unprimed session is primed then. */
+  onNamed?(listener: NamedListener): () => void
 }
 
 /** Hub → spoke deliver request (SpokeHub.request). */
@@ -166,6 +176,8 @@ export class Delivery {
   private readonly newID: () => string
   /** Per user: the flush in progress (flushes run one at a time). */
   private readonly flushing = new Map<string, Promise<void>>()
+  /** Per user and session: the primer in flight (one at a time). */
+  private readonly priming = new Map<string, Promise<void>>()
   /** Users seen since start (sent a message, or one of their spokes reported sessions): the loop looks at these. */
   private readonly users = new Set<string>()
   private timer: unknown
@@ -179,6 +191,22 @@ export class Delivery {
     this.messages = new Messages({ state: deps.state, now, newID: this.newID })
     this.hops = new HopTracker({ state: deps.state, now })
     this.limiter = new MessageLimiter({ counters: deps.counters, now, ...(deps.limits ? { limits: deps.limits } : {}) })
+    deps.directory.onNamed?.((userID, sessionID) => void this.prime(userID, sessionID))
+  }
+
+  /**
+   * Primes the session once (see the header): no-op when it is primed, unknown, or no deliver-capable spoke of
+   * the user reports it. Never throws.
+   */
+  prime(userID: string, sessionID: string): Promise<void> {
+    const key = `${userID}\u0000${sessionID}`
+    const running = this.priming.get(key)
+    if (running) return running
+    const run = this.primeNow(userID, sessionID)
+      .catch((cause) => console.error(`[hub] primer failed: ${cause instanceof Error ? cause.message : String(cause)}`))
+      .finally(() => this.priming.delete(key))
+    this.priming.set(key, run)
+    return run
   }
 
   /**
@@ -261,6 +289,24 @@ export class Delivery {
   }
 
   // ---- internals ----------------------------------------------------------------------------------------
+
+  private async primeNow(userID: string, sessionID: string): Promise<void> {
+    const { directory } = this.deps
+    if (!directory.primed || !directory.markPrimed || directory.primed(userID, sessionID)) return
+    if (!this.targets(userID, sessionID).length) return
+    const entry = directory.resolve(userID, sessionID).sessions[0]
+    if (!entry) return
+    const roles = entry.roles.map((r) => (r.project === undefined ? r.role : `${r.role}.${r.project}`))
+    const req: DeliverRequest = {
+      op: "deliver",
+      sessionID,
+      messageID: this.newID(),
+      text: renderPrimer({ ...(entry.name ? { name: entry.name } : {}), sessionID, roles }),
+      wake: false,
+      meta: { kind: "primer", from: "hub", to: entry.name ? `@${entry.name}` : sessionID, delivery: "steer" },
+    }
+    if (await this.request(userID, sessionID, req)) directory.markPrimed(userID, sessionID)
+  }
 
   private async sendTo(userID: string, from: Party, addr: string, resolved: Resolved, entry: DirectoryEntry, kind: "msg" | "ask", text: string, options: SendOptions): Promise<Sent> {
     const sessionID = entry.sessionID
@@ -456,6 +502,7 @@ export class Delivery {
 
   /** Tries each deliver-capable connection in turn (same message id: the harness dedupes it). */
   private async attempt(userID: string, message: Message, sessionID: string, wake: boolean, urgent: boolean): Promise<Sent | undefined> {
+    await this.prime(userID, sessionID)
     const result = await this.request(userID, sessionID, this.deliverRequest(message, sessionID, wake, urgent))
     if (!result) return undefined
     const updated = (await this.messages.setDelivery(userID, message.id, result.delivered)) ?? message

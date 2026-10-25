@@ -55,7 +55,8 @@ async function start() {
     if (frame.req.op === "deliver") client.send({ t: "res", id: frame.id, ok: true, result: { delivered: frame.req.wake ? "turn" : "queued" } })
   })
   await waitFor(() => (h.store.agentData(USER).names?.length ?? 0) === 3)
-  return { client, delivers: () => requests.filter((r) => r.op === "deliver") }
+  // Identity primers (P2-T11) precede a session's first message; these tests look at the messages.
+  return { client, delivers: () => requests.filter((r) => r.op === "deliver" && r.meta.kind !== "primer") }
 }
 
 describe("POST /api/agent/msg", () => {
