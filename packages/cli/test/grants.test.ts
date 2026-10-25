@@ -162,6 +162,15 @@ describe("hub grant create", () => {
     expect(hub.seen[0]!.body).toEqual({ holder: "@api", scope: { projects: ["/p"] }, allow: ["stop"] })
   })
 
+  test("launch is a verb (phase 4); a missing --allow lists it", async () => {
+    hub.routes["POST /api/agent/grants"] = ok({ grant: grant() }, 201)
+    expect((await cli(["grant", "create", "--holder", "app:0123456789abcdef", "--project", "/p", "--allow", "launch"])).code).toBe(0)
+    expect(hub.seen[0]!.body).toEqual({ holder: "app:0123456789abcdef", scope: { projects: ["/p"] }, allow: ["launch"] })
+    const r = await cli(["grant", "create", "--holder", "@a", "--project", "/p"])
+    expect(r.code).toBe(EXIT.usage)
+    expect(r.stderr).toContain("approve, deny, answer, prompt, stop, roles, launch")
+  })
+
   test("--json '{…}' (or --json -) is the spec as JSON", async () => {
     hub.routes["POST /api/agent/grants"] = ok({ grant: grant() }, 201)
     const spec = { holder: "@api", scope: { projects: ["/p"] }, allow: ["approve"], expires: "2h" }
