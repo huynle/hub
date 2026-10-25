@@ -13,6 +13,7 @@ import { watch } from "./watch"
 import { DECISION_FLAGS, decisionOptions, decisionsText, openedText, stateArg } from "./decisions"
 import { GRANT_FLAGS, GRANT_REQUEST_FLAGS, grantError, grantRequestArg, grantSpecArg, grantsText, grantText, requestedText, userOnly } from "./grants"
 import { answeredText, approvedText, deliveryArg, deniedText, formAnswerArg, needsUserLines, promptedText, stoppedText } from "./acting"
+import { currentProgram, installNode, nodeStatus, nodeStatusText, runNodeCommand, uninstallNode, type NodeIo, type Program } from "./node"
 import { LAUNCH_FLAGS, launchedText, launchesText, launchSpecArg, launchText, stoppedLaunchText } from "./launches"
 
 export { EXIT } from "./http"
@@ -32,6 +33,10 @@ export interface Io {
   input?: AsyncIterable<Uint8Array | string>
   /** The working directory (`hub launch` defaults --repo to it); default process.cwd(). */
   cwd?: string
+  /** `hub node install`: the platform (default process.platform), user ID and what runs this CLI. */
+  platform?: NodeJS.Platform
+  uid?: number
+  program?: Program
 }
 
 export const USAGE = `Usage: hub <command> [options]     (also installed as hubctl)
@@ -95,6 +100,14 @@ Launching (users; agents and app tokens with sessions:launch under a grant with 
   hub launches list [--state S[,S]] [--label k=v]...   your launches (agents: the ones they started)
   hub launches show <launchID> · hub launches stop <launchID>   (stop: exit 8 when it already ended)
 
+Node (this machine runs launches; design §6.3)
+  hub node run                        the node daemon until Ctrl-C/SIGTERM (needs an enrolled machine and
+                                      ~/.config/hub/node.json with "workspaceRoots")
+  hub node install [--dry-run]        write the launchd agent (macOS) or systemd user unit (Linux) and print
+                                      the commands that load it (never run by hub); --dry-run only prints
+  hub node uninstall [--dry-run]      remove it and print the commands that stop it
+  hub node status                     the service file, enrolment and node.json
+
 MCP
   hub mcp                             an MCP server on stdio: these verbs as tools, with this CLI's credential
 
@@ -150,6 +163,19 @@ const whyOf = (flags: Parsed["flags"]) => {
 
 /** --no-wake and --urgent as SDK send options. */
 const sendFlags = (flags: Parsed["flags"]) => ({ ...(flags["no-wake"] === true ? { wake: false } : {}), ...(flags.urgent === true ? { urgent: true } : {}) })
+
+const nodeIo = (io: Io): NodeIo => ({
+  env: io.env,
+  home: io.home,
+  platform: io.platform ?? process.platform,
+  uid: io.uid ?? process.getuid?.() ?? 0,
+  program: io.program ?? currentProgram(),
+})
+
+const nodeOutput = (io: Io, output: { stdout: string; warnings: readonly string[] }) => {
+  for (const warning of output.warnings) io.stderr(`hub: warning: ${warning}\n`)
+  out(io, output.stdout)
+}
 
 const COMMANDS: Record<string, Command> = {
   whoami: {
@@ -443,6 +469,30 @@ const COMMANDS: Record<string, Command> = {
       answer(context, body, (b) => stoppedLaunchText(b.launch))
     },
   },
+  "node run": {
+    async handle({ io }) {
+      return runNodeCommand(io)
+    },
+  },
+  "node install": {
+    flags: { "dry-run": "bool" },
+    async handle(context) {
+      nodeOutput(context.io, installNode(nodeIo(context.io), { dryRun: context.parsed.flags["dry-run"] === true }))
+    },
+  },
+  "node uninstall": {
+    flags: { "dry-run": "bool" },
+    async handle(context) {
+      nodeOutput(context.io, uninstallNode(nodeIo(context.io), { dryRun: context.parsed.flags["dry-run"] === true }))
+    },
+  },
+  "node status": {
+    async handle(context) {
+      const status = nodeStatus(nodeIo(context.io))
+      if (context.json) printJSON(context.io, status)
+      else out(context.io, nodeStatusText(status))
+    },
+  },
   mcp: {
     async handle({ io, credentials }) {
       if (!io.input) throw new UsageError("needs stdin")
@@ -473,7 +523,7 @@ const COMMANDS: Record<string, Command> = {
 }
 
 /** Commands with sub-verbs (`hub role claim`). */
-const GROUPS: Record<string, string[]> = { role: ["claim", "release"], decisions: ["list"], grant: ["list", "show", "create", "revoke", "request"], launches: ["list", "show", "stop"] }
+const GROUPS: Record<string, string[]> = { role: ["claim", "release"], decisions: ["list"], grant: ["list", "show", "create", "revoke", "request"], launches: ["list", "show", "stop"], node: ["run", "install", "uninstall", "status"] }
 
 function reportError(io: Io, error: CliError, json: boolean) {
   if (json && error.envelope) printJSON(io, { error: error.envelope })

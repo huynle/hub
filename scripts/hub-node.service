@@ -1,15 +1,19 @@
-# Template: keep `hub node` running on Linux (systemd user unit). Not installed by anything.
+# Template: keep `hub node` running on Linux (systemd user unit).
 # The node prepares launch workspaces for the hub. It needs an enrolled machine (the plugin's /hub dialog writes the
 # machine token to ~/.config/hub/config.json, which the node only reads) and ~/.config/hub/node.json with at least
 # {"workspaceRoots": ["/home/you/projects"]} (optional: "labels", "slots", "memoryMB").
-# Install (replace __REPO__ and __HOME__ first):
+# Install: `hub node install` writes this unit to ~/.config/systemd/user with the real paths (the runtime running the
+# CLI and the CLI's entry) and prints the systemctl commands to enable it; it never runs them (--dry-run: only print).
+# By hand (replace __RUNTIME__, __ENTRY__ and __HOME__ first):
 #   mkdir -p ~/.config/systemd/user
-#   sed -e "s|__REPO__|$PWD|g" -e "s|__HOME__|$HOME|g" scripts/hub-node.service > ~/.config/systemd/user/hub-node.service
+#   sed -e "s|__RUNTIME__|$HOME/.bun/bin/bun|" -e "s|__ENTRY__|$PWD/packages/cli/src/main.ts|" -e "s|__HOME__|$HOME|g" \
+#     scripts/hub-node.service > ~/.config/systemd/user/hub-node.service
 #   systemctl --user daemon-reload && systemctl --user enable --now hub-node
 #   loginctl enable-linger "$USER"   # keep it running while you are logged out
 # Logs: journalctl --user -u hub-node
-# Remove: systemctl --user disable --now hub-node && rm ~/.config/systemd/user/hub-node.service
+# Remove: `hub node uninstall`, or systemctl --user disable --now hub-node && rm ~/.config/systemd/user/hub-node.service
 # Exit 78 means node.json gives the node nothing to do (no workspaceRoots): fix it, then restart the unit.
+# BUN_BE_BUN=1 lets an OpenCode binary act as bun; the CLI removes it from its own environment.
 [Unit]
 Description=Hub node (prepares launch workspaces for the hub)
 After=network-online.target
@@ -17,8 +21,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=__HOME__/.bun/bin/bun __REPO__/packages/node/src/main.ts
+ExecStart=__RUNTIME__ __ENTRY__ node run
 Environment=PATH=__HOME__/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=BUN_BE_BUN=1
 Restart=on-failure
 RestartSec=30
 RestartPreventExitStatus=78
