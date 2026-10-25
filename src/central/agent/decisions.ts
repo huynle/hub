@@ -13,9 +13,10 @@
 //   looks at every user's open Decisions, so deadlines survive restarts.
 // - Text is sanitised (question by the message store; labels, ids and reasons here). Notifications carry only
 //   the Decision (the push layer sends a generic body).
-// - Actions (P3-T8): the hub (never an asker) may attach an action (an escalated permission request); the user's
-//   answer runs it through `act` as that user after the answer wins. Its subject gone → the Decision closes and
-//   the answer is gone; it fails → the Decision opens again.
+// - Actions (P3-T8, P3-T9): the hub (never an asker) may attach an action (an escalated permission request, a grant
+//   request); the user's answer runs it through `act` as that user after the answer wins (its note, e.g. the grant
+//   id, joins the asker's reply). Its subject gone → the Decision closes and the answer is gone; it fails → the
+//   Decision opens again.
 // - close(): a Decision whose subject went away (a permission answered elsewhere) is closed, not answered; the asker
 //   hears why.
 // - Every open and change (answer, timeout, escalation, expiry, close) goes to `changed` (the console's 'decision' event).
@@ -68,8 +69,11 @@ export interface DecisionAnswer {
   readonly deviceID?: string
 }
 
-/** What answering a Decision does besides replying (an escalated permission request, P3-T8). */
-export interface DecisionAction {
+/** What answering a Decision does besides replying: an escalated permission request (P3-T8) or a grant request (P3-T9). */
+export type DecisionAction = PermissionAction | GrantRequestAction
+
+/** An escalated permission request: the answer replies to it as the user. */
+export interface PermissionAction {
   readonly kind: "permission"
   readonly requestID: string
   /** The tree the request is pending in. */
@@ -78,6 +82,15 @@ export interface DecisionAction {
   readonly sessionID: string
   /** The agent asked to approve it always. */
   readonly always: boolean
+}
+
+/** A grant an agent requested (grant-requests.ts): approving creates it as the user. */
+export interface GrantRequestAction {
+  readonly kind: "grant"
+  /** The requester (partyKey). */
+  readonly requester: string
+  /** The grant body (validated when requested; validated again, as the user's, on approval). */
+  readonly grant: Readonly<Record<string, unknown>>
 }
 
 export interface Decision {
@@ -139,8 +152,14 @@ export interface AnswerInput {
 
 export type NotifyReason = "opened" | "escalated"
 
-/** Runs a Decision's action for the user's choice: gone when its subject went away first. */
-export type DecisionActor = (userID: string, decision: Decision, choice: { readonly option?: string; readonly text?: string }, by: UserActor) => Promise<"done" | "gone">
+/**
+ * What running an action came to: done (optionally with a note appended to the asker's reply), or gone when its
+ * subject went away first (optionally with the reason the Decision closes with).
+ */
+export type ActOutcome = "done" | "gone" | { readonly outcome: "done"; readonly note: string } | { readonly outcome: "gone"; readonly reason: string }
+
+/** Runs a Decision's action for the user's choice. */
+export type DecisionActor = (userID: string, decision: Decision, choice: { readonly option?: string; readonly text?: string }, by: UserActor) => Promise<ActOutcome>
 
 export interface DecisionsDeps {
   readonly state: StateStore
@@ -315,10 +334,11 @@ export class Decisions {
     const answer: DecisionAnswer = { ...choice, answeredBy: "user", at, deviceID: by.deviceID }
     const decision = await this.settle(userID, id, answer)
     if (!decision) throw gone()
-    if (decision.action) await this.runAction(userID, decision, choice, by)
+    const note = decision.action ? await this.runAction(userID, decision, choice, by) : undefined
     this.emit(userID, decision)
     const option = decision.options.find((o) => o.id === choice.option)
-    const text = option ? `Decision ${id}: ${option.label} [${option.id}]${choice.text ? `\n${choice.text}` : ""}` : `Decision ${id}: ${choice.text}`
+    const said = option ? `Decision ${id}: ${option.label} [${option.id}]${choice.text ? `\n${choice.text}` : ""}` : `Decision ${id}: ${choice.text}`
+    const text = note ? `${said}\n${note}` : said
     return { decision, ...(await this.replyTo(userID, decision, text, by)) }
   }
 
@@ -414,11 +434,12 @@ export class Decisions {
   }
 
   /**
-   * Runs the answered Decision's action. Its subject gone: the Decision closes instead (throws gone). It fails:
-   * the Decision opens again (the user may retry) and the error goes through.
+   * Runs the answered Decision's action; answers its note (sanitised) for the asker's reply. Its subject gone: the
+   * Decision closes instead (throws gone). It fails: the Decision opens again (the user may retry) and the error
+   * goes through.
    */
-  private async runAction(userID: string, decision: Decision, choice: { option?: string; text?: string }, by: UserActor): Promise<void> {
-    let outcome: "done" | "gone"
+  private async runAction(userID: string, decision: Decision, choice: { option?: string; text?: string }, by: UserActor): Promise<string | undefined> {
+    let outcome: ActOutcome
     try {
       if (!this.deps.act) throw new Error("This decision's action cannot run on this hub")
       outcome = await this.deps.act(userID, decision, choice, by)
@@ -430,8 +451,9 @@ export class Decisions {
       })
       throw cause
     }
-    if (outcome === "done") return
-    const why = "The request was answered elsewhere or ended"
+    if (outcome === "done") return undefined
+    if (typeof outcome === "object" && outcome.outcome === "done") return sanitizeLabel(outcome.note, WHY_MAX) || undefined
+    const why = (typeof outcome === "object" && sanitizeLabel(outcome.reason, WHY_MAX)) || "The request was answered elsewhere or ended"
     const closed = await updateVersioned<Decision>(this.deps.state, userID, DECISIONS, decision.id, (current) => {
       if (current?.state !== "answered") return undefined
       const { answer: _answer, ...rest } = current

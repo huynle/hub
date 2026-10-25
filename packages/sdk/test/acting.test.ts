@@ -2,7 +2,7 @@
 // /api/agent routes expect (acting-routes.ts, grant-routes.ts) and answers the hub's body unchanged; needs_user
 // keeps its evaluation.
 import { afterAll, afterEach, describe, expect, test } from "bun:test"
-import { HubClient, HubError, needsUserOf, type Approved, type Evaluation, type Grant } from "../src/index.ts"
+import { HubClient, HubError, needsUserOf, type Approved, type Decision, type DecisionState, type Evaluation, type Grant, type GrantRequested } from "../src/index.ts"
 import { fakeHub } from "./fake-hub.ts"
 
 const hub = fakeHub()
@@ -94,5 +94,26 @@ describe("grants (user credentials only)", () => {
       { method: "PUT", path: "/api/agent/grants/g_1", body: spec },
       { method: "DELETE", path: "/api/agent/grants/g_1" },
     ])
+  })
+})
+
+describe("grant requests (sessions and app tokens with messages:send)", () => {
+  test("requestGrant: POST /api/agent/grants/requests {grant, why}; the holder defaults to the requester", async () => {
+    const decision = { id: "dec_1", messageID: "msg_1", state: "open", tier: "tap", urgency: "high" } as unknown as Decision
+    const body = { message: { id: "msg_1" }, decision } as unknown as GrantRequested
+    answer("POST /api/agent/grants/requests", body, 201)
+    const grant = { scope: { projects: ["/p"] }, allow: ["approve" as const], permissions: { allow: ["read"], never: ["shell:git push*"] }, expires: "8h" }
+    expect(await client().requestGrant(grant, "to unblock the workers")).toEqual(body)
+    await client().requestGrant({ ...grant, holder: "@@orchestrator" }, "as the role")
+    expect(seen()).toEqual([
+      { method: "POST", path: "/api/agent/grants/requests", body: { grant, why: "to unblock the workers" } },
+      { method: "POST", path: "/api/agent/grants/requests", body: { grant: { ...grant, holder: "@@orchestrator" }, why: "as the role" } },
+    ])
+  })
+
+  test("a Decision may be closed (its subject went away)", () => {
+    const closed: DecisionState = "closed"
+    const decision = { state: closed, closed: { at: 1, reason: "gone" } } as Pick<Decision, "state" | "closed">
+    expect(decision.state).toBe("closed")
   })
 })

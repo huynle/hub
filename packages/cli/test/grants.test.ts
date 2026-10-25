@@ -222,6 +222,58 @@ describe("hub grant revoke", () => {
   test("grant needs a subcommand", async () => {
     const r = await cli(["grant"])
     expect(r.code).toBe(EXIT.usage)
-    expect(r.stderr).toContain("list or show or create or revoke")
+    expect(r.stderr).toContain("list or show or create or revoke or request")
+  })
+})
+
+describe("hub grant request (agents ask the user)", () => {
+  const decision = { id: "dec_1", messageID: "msg_1", state: "open", tier: "tap", urgency: "high", question: "…", options: [], from: { kind: "session", sessionID: "ses_o" }, about: [], at: 0, expiresAt: 1 }
+  const requested = () => Response.json({ message: { id: "msg_1" }, decision }, { status: 201 })
+
+  test("flags become {grant, why} (holder defaults to the requester); prints the Decision it waits on", async () => {
+    hub.routes["POST /api/agent/grants/requests"] = requested
+    const r = await cli(
+      ["grant", "request", "--project", "/Users/huy/projects/hub", "--allow", "approve,deny", "--permission-allow", "read", "--never", "shell:git push*", "--expires", "8h", "--why", "the workers keep asking to read"],
+      { session: true },
+    )
+    expect(r.code).toBe(0)
+    expect(hub.seen).toEqual([
+      {
+        method: "POST",
+        path: "/api/agent/grants/requests",
+        body: {
+          grant: { scope: { projects: ["/Users/huy/projects/hub"] }, allow: ["approve", "deny"], permissions: { allow: ["read"], never: ["shell:git push*"] }, expires: "8h" },
+          why: "the workers keep asking to read",
+        },
+      },
+    ])
+    expect(r.stdout).toBe("requested; waiting for the user (Decision dec_1)\n")
+  })
+
+  test("--holder, --max-per-hour, --allow-always and --permit pass through; --json prints the raw answer", async () => {
+    hub.routes["POST /api/agent/grants/requests"] = requested
+    const r = await cli(["grant", "request", "--holder", "@@orchestrator", "--project", "/p", "--allow", "stop", "--permit", "edit", "--max-per-hour", "10", "--allow-always", "--why", "x", "--json"], { session: true })
+    expect(r.code).toBe(0)
+    expect(hub.seen[0]!.body).toEqual({ grant: { holder: "@@orchestrator", scope: { projects: ["/p"] }, allow: ["stop"], permissions: { allow: ["edit"] }, maxActionsPerHour: 10, allowAlways: true }, why: "x" })
+    expect(JSON.parse(r.stdout).decision.id).toBe("dec_1")
+  })
+
+  test("--why is required; --project and --allow too (usage, without asking the hub)", async () => {
+    for (const argv of [
+      ["grant", "request", "--project", "/p", "--allow", "stop"],
+      ["grant", "request", "--allow", "stop", "--why", "x"],
+      ["grant", "request", "--project", "/p", "--why", "x"],
+    ]) {
+      const r = await cli(argv, { session: true })
+      expect(r.code).toBe(EXIT.usage)
+    }
+    expect(hub.seen).toEqual([])
+  })
+
+  test("an open request already waiting is rate limited (6), with the hub's message", async () => {
+    hub.routes["POST /api/agent/grants/requests"] = () => Response.json({ error: { code: "rate_limited", message: "Your grant request dec_1 still waits for the user", decisionID: "dec_1", retryAfter: 60 } }, { status: 429 })
+    const r = await cli(["grant", "request", "--project", "/p", "--allow", "stop", "--why", "x"], { session: true })
+    expect(r.code).toBe(EXIT.rateLimited)
+    expect(r.stderr).toContain("dec_1 still waits")
   })
 })
