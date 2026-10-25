@@ -107,6 +107,8 @@ export interface SpokeSocketData {
   drained?: boolean
   /** A non-OpenCode spoke's harness (set with the hello): its events are checked against the harness subset. */
   checkedHarness?: string
+  /** Events of a non-OpenCode spoke dropped as outside the harness subset. */
+  droppedEvents?: number
 }
 
 type Socket = ServerWebSocket<SpokeSocketData>
@@ -599,8 +601,12 @@ export class SpokeHub {
       case "event": {
         const problem = ws.data.checkedHarness === undefined ? undefined : harnessEventProblem(message.event)
         if (problem) {
-          const type = typeof message.event.type === "string" ? message.event.type.slice(0, 100) : "?"
-          console.warn(`[hub] dropped a ${ws.data.checkedHarness} spoke's ${type} event (${connID}): ${problem}`)
+          // Logged for the first few and then every 100th, so a misbehaving spoke cannot flood the log.
+          const dropped = (ws.data.droppedEvents = (ws.data.droppedEvents ?? 0) + 1)
+          if (dropped <= 5 || dropped % 100 === 0) {
+            const type = typeof message.event.type === "string" ? message.event.type.slice(0, 100) : "?"
+            console.warn(`[hub] dropped a ${ws.data.checkedHarness} spoke's ${type} event (${connID}, ${dropped} so far): ${problem}`)
+          }
           return
         }
         return registry.observe(connID, message.event)
