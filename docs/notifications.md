@@ -35,7 +35,7 @@ fires at most once per settled run: about 32 times for this session.
 |---|---|---|---|
 | `question` | Question | `form.created` anywhere in the tree (once per form) | on |
 | `permission` | Needs permission | `permission.asked` anywhere in the tree (once per request; Allow/Reject from the notification) | on |
-| `decision` | Decision | a session or app asked you (`hub ask @me`): a Decision opened, or passed its deadline without a safe `onTimeout` (once more); body generic ("A decision waits for you. Tap to answer."), opens the session it is about at the Decision's card (`?decision=<id>`). An agent's approval outside its grant opens one too (one per agent and request; several within a minute push once): the service worker then fetches it and shows the agent's recommendation ("@orchestrator recommends Approve once: …"), which the permission's blocker also carries | on |
+| `decision` | Decision | a session or app asked you (`hub ask @me`): a Decision opened, or passed its deadline without a safe `onTimeout` (once more); body generic ("A decision waits for you. Tap to answer."), opens the session it is about at the Decision's card (`?decision=<id>`). An agent's approval outside its grant opens one too (one per agent and request; several within a minute push once): the service worker then fetches it and shows the agent's recommendation ("@orchestrator recommends Approve once: …"), which the permission's blocker also carries. A grant request (an agent asking for a grant, `hub grant request`) opens one as well, always `tap` tier; an escalation's tier is the hub's (`tap` for shell, external directories, MCP and unknown tools and anything near a never rule, else `confirm`). A `decision` notification never has quick answers: it opens the card | on |
 | `message` | Message | agent messaging needs you: a `msg` to `@me`, an ask an idle session left unanswered after every re-wake, or sessions messaging each other past the hop cap; body generic ("Tap to see it.") | on |
 | `done` | All done | the root's last turn succeeded and the whole tree stayed settled for 15 s (see below); once per run | on |
 | `failed` | Failed | `session.execution.failed` of the root; body: the error message | on |
@@ -66,6 +66,11 @@ Delivery: `question`, `permission`, `failed`, `decision`, `message` are high urg
 `subagentFailed`, `jobFailed` normal urgency, one hour; the progress kinds normal urgency, 5 minutes; `say` and
 `handoff` high urgency, 5 minutes. At most one notification per session and kind every 30 s (`say`: 10 s);
 subagent, script and long-tool notifications count per subagent / job / tool call.
+
+A permission an agent escalated keeps its own `permission` notification, but without Allow/Reject when the
+service worker sees it was escalated to a `tap` Decision (or cannot read the Decision): answer it in the console.
+Its blocker names the agent's recommendation. When the request is answered elsewhere or ends, the Decision closes (state `closed`) and drops out
+of the console's open list.
 
 Nothing but questions, permissions, hand-offs, spoken replies, decisions and messages is sent while a device shows
 the session's tree (presence, 45 s), and a subagent finishing never counts as the root finishing. Decisions and
