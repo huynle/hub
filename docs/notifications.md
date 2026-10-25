@@ -33,7 +33,7 @@ fires at most once per settled run: about 32 times for this session.
 
 | Kind (pref key) | Label in the title | Trigger | Default |
 |---|---|---|---|
-| `question` | Question | `form.created` anywhere in the tree (once per form) | on |
+| `question` | Question | `form.created` anywhere in the tree (once per form); also agent messaging: an ask an idle session left unanswered after every re-wake ("Unanswered ask"), or sessions messaging each other past the hop cap ("Message loop") | on |
 | `permission` | Needs permission | `permission.asked` anywhere in the tree (once per request; Allow/Reject from the notification) | on |
 | `done` | All done | the root's last turn succeeded and the whole tree stayed settled for 15 s (see below); once per run | on |
 | `failed` | Failed | `session.execution.failed` of the root; body: the error message | on |
