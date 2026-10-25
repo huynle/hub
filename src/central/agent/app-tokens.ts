@@ -14,8 +14,11 @@ import type { AppActor, BearerVerifier } from "./actor"
 import { AgentError } from "./errors"
 import type { AgentRoute } from "./routes"
 
-/** Scopes an app token may hold: reading sessions; sending (msg, ask, reply, decline, mute) and reading messages. */
-export const APP_SCOPES: readonly string[] = ["sessions:read", "messages:send", "messages:read"]
+/**
+ * Scopes an app token may hold: reading sessions; sending (msg, ask, reply, decline, mute) and reading messages;
+ * acting on sessions (approve, deny, answer, prompt, stop), which still needs a grant held by the token.
+ */
+export const APP_SCOPES: readonly string[] = ["sessions:read", "messages:send", "messages:read", "sessions:act"]
 export const DEFAULT_APP_SCOPES: readonly string[] = ["sessions:read"]
 export const MAX_APP_TOKENS = 50
 export const MAX_APP_TOKEN_LABEL = 100
