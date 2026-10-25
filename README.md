@@ -383,7 +383,7 @@ reading still works.
 
 ## hub CLI
 
-`hub` (also installed as `hubctl`) reads, names and messages your sessions through the hub's [`/api/agent` API](#agent-identity-agent-api),
+`hub` (also installed as `hubctl`) reads, names, messages and acts on your sessions through the hub's [`/api/agent` API](#agent-identity-agent-api),
 for agents and scripts. The OpenCode plugin writes both launchers into the hub bin dir (`$HUB_STATE_DIR/bin`, default
 `~/.local/state/hub/bin`) at start and puts that dir first on PATH in every shell it prepares, so inside a
 session `hub` just works. A launcher runs the CLI bundle shipped in this package (`packages/cli/dist/hub-cli.js`)
@@ -413,6 +413,14 @@ hub ask @me "question" [--option id=label[:safe]]... [--recommend id [--why "…
 hub decisions list [--state open|answered|expired]   the Decisions you asked
 hub inbox                                 asks to answer, your open asks, recent messages, mutes
 hub mute <addr> · hub unmute <addr>       refuse (or accept again) messages from a session
+hub approve <addr> <requestID> [--always] [--why "…"]   answer a permission request (once, or always)
+hub deny <addr> <requestID> [--why "…"]   reject it; the reason reaches the harness
+hub answer <addr> <formID> key=value… | --json '{…}' | --json - | --cancel [--why "…"]
+hub prompt <addr> "text" [--delivery queue|steer] [--why "…"]
+hub stop <addr> [--why "…"]               stop its running turn
+hub grant list · hub grant show <id> · hub grant revoke <id>
+hub grant create --holder <h> --project <path>... --allow approve,deny,… [--permit <pattern>]... [--never <pattern>]...
+         [--expires 8h] [--max-per-hour N] [--allow-always] | --json '{…}'
 hub mcp                                   an MCP server on stdio (see below)
 hub login [--url URL] [--token APP_TOKEN] · hub logout
 hub help · hub --version
@@ -436,6 +444,21 @@ with its `hub reply` / `hub decline` line. A recipient whose spoke cannot receiv
 feature `deliver`: update the plugin there), messaging switched off by the user exits 5 (`paused`), sending too
 much exits 6 (`rate_limited`), and answering an ask that is already answered or expired exits 8 (`gone`). Sessions
 message with their session token; an app token needs the `messages:send` (and `messages:read` for `inbox`) scopes.
+
+**Acting.** `approve`, `deny`, `answer`, `prompt` and `stop` act on another session: the user's credential always
+may (its own sessions); an app token needs scope `sessions:act` **and** a grant; a session's shell token
+(`HUB_SESSION_TOKEN`) never acts — agents act through the OpenCode `hub` tool, which holds the session's separate
+act token. Outside the grant the hub answers `needs_user`: the CLI exits 4 and prints the evaluation (verdict,
+tier, reason, the grants checked) and the Decision opened for the user, if any. `answer` takes `key=value` pairs (a
+repeated key becomes a list), or the whole answer as JSON (`--json '{…}'`, or `--json -` from stdin; a bare
+`--json` still means raw output), or `--cancel`. `--why` is recorded in the agent audit; for `deny` it is passed to
+the harness. An already-answered request is `gone` (8), an offline machine `offline` (7).
+
+**Grants.** `hub grant list | show | create | revoke` manage what a holder (`ses_…`, `@name` — pinned to that
+session at creation —, a reserved `@@orchestrator…`/`@@concierge…` role, or `app:<token id>`) may do: which verbs,
+in which projects, which permission patterns (`--permit`, `--never`; never wins), for how long and how often. Only
+the user manages grants (the console, or `hub login` with a device token): from a session's shell `create` and
+`revoke` exit 5 without asking the hub, and any credential the hub refuses exits 5.
 
 **Credentials.** `HUB_URL` + `HUB_SESSION_TOKEN` (the spoke sets them in each session's shells; the CLI then
 acts as that session) win over the login file. Outside a session, `hub login --url https://hub.example` stores
@@ -467,8 +490,10 @@ OpenCode (Claude Desktop, Cursor, other agents). It speaks JSON-RPC 2.0, one mes
 transport; protocol revisions `2025-06-18`, `2025-03-26` and `2024-11-05`), and answers `initialize`, `ping`,
 `tools/list` and `tools/call`; notifications (`notifications/initialized`, `notifications/cancelled`, which aborts
 the call) get no answer, other methods answer `-32601`. Its tools are the CLI's verbs: `whoami`, `status`,
-`sessions`, `show`, `log`, `who`, `msg`, `ask`, `reply`, `decline` and `inbox`, with the same arguments
-(`to`, `text`, `addr`, `id`, `why`, `n`, `wake`, `urgent`, `all`, `project`, `role`, …). `ask` takes `wait` of at
+`sessions`, `show`, `log`, `who`, `msg`, `ask`, `reply`, `decline`, `inbox` and the act verbs `approve`, `deny`,
+`answer` (`answer` object or `cancel`), `prompt` (`delivery`) and `stop`, with the same arguments
+(`to`, `text`, `addr`, `id`, `requestID`, `formID`, `why`, `n`, `wake`, `urgent`, `all`, `project`, `role`, …). The act
+tools need an app token with scope `sessions:act` and a grant; `needs_user` results include the evaluation. `ask` takes `wait` of at
 most 60 s (one long poll; a longer wait is cut to 60) and `expires` in seconds or as `2h`. Answers are the CLI's
 short text; messages and answers from other sessions come in the hub's envelope and are marked as not from the
 user. Hub errors are tool results with `isError: true` and the hub's `code: message` (plus candidates and hint),

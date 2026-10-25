@@ -3,6 +3,7 @@
 import { envelopeOf, HubError, HubTransportError } from "./errors.ts"
 import { sseEvents } from "./sse.ts"
 import type {
+  Approved,
   AppTokenView,
   Asked,
   CreatedAppToken,
@@ -12,10 +13,17 @@ import type {
   DecisionState,
   DecisionTier,
   DecisionUrgency,
+  Denied,
   DirectoryEntry,
+  FormAnswer,
+  FormAnswered,
+  Grant,
+  GrantSpec,
   Inbox,
   LogRow,
   Named,
+  PromptDelivery,
+  Prompted,
   Replied,
   RoleClaim,
   RoleRelease,
@@ -24,6 +32,7 @@ import type {
   SessionDetail,
   SessionView,
   Status,
+  Stopped,
   WatchEvent,
   Whoami,
 } from "./types.ts"
@@ -126,6 +135,27 @@ const decisionFields = (options: AskOptions) => {
   for (const key of ["options", "recommendation", "urgency", "tier", "deadline", "onTimeout", "about"] as const) if (options[key] !== undefined) out[key] = options[key]
   return out
 }
+
+/** Options of the act verbs: the reason, recorded in the agent audit (deny passes it to the harness). */
+export interface ActOptions extends CallOptions {
+  readonly why?: string
+}
+
+export interface ApproveOptions extends ActOptions {
+  /** Approve for good (OpenCode saves the rule); agents need a grant with allowAlways. */
+  readonly always?: boolean
+}
+
+export interface PromptOptions extends ActOptions {
+  readonly delivery?: PromptDelivery
+  /** Agents' prompts always wake the session (false is refused). */
+  readonly wake?: boolean
+  /** Users only. */
+  readonly images?: readonly { readonly mime: string; readonly data: string; readonly name?: string }[]
+}
+
+/** The why of an act verb, when given. */
+const whyField = (options: ActOptions) => (options.why !== undefined ? { why: options.why } : {})
 
 const signalOf = (options: CallOptions) => (options.signal ? { signal: options.signal } : {})
 /** The wake and urgent fields of a send, when given. */
@@ -336,6 +366,72 @@ export class HubClient {
   answerDecision(id: string, answer: CallOptions & { readonly option?: string; readonly text?: string }): Promise<DecisionAnswered> {
     const { signal: _signal, ...body } = answer
     return this.call("POST", `/api/decisions/${segment(id)}/answer`, { body, ...signalOf(answer) })
+  }
+
+  // Acting (users; sessions through their act token; app tokens with sessions:act). Outside the caller's grant the
+  // hub answers needs_user (HubError; needsUserOf reads its evaluation).
+
+  /** Approves a pending permission request in a session's tree. */
+  approve(addr: string, requestID: string, options: ApproveOptions = {}): Promise<Approved> {
+    const body = { requestID, ...(options.always ? { always: true } : {}), ...whyField(options) }
+    return this.call("POST", `${AGENT}/sessions/${segment(addr)}/approve`, { body, ...signalOf(options) })
+  }
+
+  /** Rejects a pending permission request; the why reaches the harness (with who denied it). */
+  deny(addr: string, requestID: string, options: ActOptions = {}): Promise<Denied> {
+    return this.call("POST", `${AGENT}/sessions/${segment(addr)}/deny`, { body: { requestID, ...whyField(options) }, ...signalOf(options) })
+  }
+
+  /** Answers a pending form (question). */
+  answer(addr: string, formID: string, answer: FormAnswer, options: ActOptions = {}): Promise<FormAnswered> {
+    return this.call("POST", `${AGENT}/sessions/${segment(addr)}/answer`, { body: { formID, answer, ...whyField(options) }, ...signalOf(options) })
+  }
+
+  /** Dismisses a pending form without an answer. */
+  cancelForm(addr: string, formID: string, options: ActOptions = {}): Promise<FormAnswered> {
+    return this.call("POST", `${AGENT}/sessions/${segment(addr)}/answer`, { body: { formID, cancel: true, ...whyField(options) }, ...signalOf(options) })
+  }
+
+  /** Prompts a session (agents' prompts carry the hub's provenance). */
+  prompt(addr: string, text: string, options: PromptOptions = {}): Promise<Prompted> {
+    const body = {
+      text,
+      ...(options.images ? { images: options.images } : {}),
+      ...(options.delivery ? { delivery: options.delivery } : {}),
+      ...(options.wake !== undefined ? { wake: options.wake } : {}),
+      ...whyField(options),
+    }
+    return this.call("POST", `${AGENT}/sessions/${segment(addr)}/prompt`, { body, ...signalOf(options) })
+  }
+
+  /** Stops a session's running turn. */
+  stop(addr: string, options: ActOptions = {}): Promise<Stopped> {
+    return this.call("POST", `${AGENT}/sessions/${segment(addr)}/stop`, { body: whyField(options), ...signalOf(options) })
+  }
+
+  // Grants (user credentials only: a session or app token is forbidden).
+
+  /** The user's grants, newest first. */
+  grants(options: CallOptions = {}): Promise<{ grants: Grant[] }> {
+    return this.call("GET", `${AGENT}/grants`, signalOf(options))
+  }
+
+  grant(id: string, options: CallOptions = {}): Promise<{ grant: Grant }> {
+    return this.call("GET", `${AGENT}/grants/${segment(id)}`, signalOf(options))
+  }
+
+  createGrant(spec: GrantSpec, options: CallOptions = {}): Promise<{ grant: Grant }> {
+    return this.call("POST", `${AGENT}/grants`, { body: spec, ...signalOf(options) })
+  }
+
+  /** Replaces a grant (its holder stays). */
+  updateGrant(id: string, spec: GrantSpec, options: CallOptions = {}): Promise<{ grant: Grant }> {
+    return this.call("PUT", `${AGENT}/grants/${segment(id)}`, { body: spec, ...signalOf(options) })
+  }
+
+  /** Revokes a grant (gone when it already ended). */
+  revokeGrant(id: string, options: CallOptions = {}): Promise<{ grant: Grant }> {
+    return this.call("DELETE", `${AGENT}/grants/${segment(id)}`, signalOf(options))
   }
 
   // App tokens (user credentials only).

@@ -91,7 +91,7 @@ describe("JSON-RPC core", () => {
   })
 })
 
-const VERBS = ["whoami", "status", "sessions", "show", "log", "who", "msg", "ask", "reply", "decline", "inbox"]
+const VERBS = ["whoami", "status", "sessions", "show", "log", "who", "msg", "ask", "reply", "decline", "inbox", "approve", "deny", "answer", "prompt", "stop"]
 
 describe("tools/list", () => {
   test("lists one tool per CLI verb, each with a description and an object input schema", async () => {
