@@ -11,6 +11,9 @@ import {
   HARNESS_OPENCODE,
   SEED_JOBS_MAX,
   SPOKE_FEATURES,
+  type DeliverRequest,
+  type DeliverResult,
+  type DeliveryMode,
   type JobInfo,
   type HerdrWorkspace,
   type FormAnswer,
@@ -30,6 +33,7 @@ import { TurnTracker } from "../turns"
 import { TimelineCache, boundedTimelinePart, newestPage, timelineFile, timelineItems } from "./timeline"
 import { SpokeConnection, type Backoff, type ConnectionState } from "./client"
 import { PROMPT_SOURCE, VOICE_AGENT } from "./conversation"
+import { DeliveryLedger, deliverMetadata, harnessMessageID, InboxOrigins, planDelivery } from "./deliver"
 import { pollEnrollment, startEnrollment } from "./enroll"
 import { HerdrWatcher, openInHerdr, type HerdrRunner } from "./herdr"
 import type { LocalHubResult } from "./localhub"
@@ -85,7 +89,14 @@ export interface SpokeHost {
   readonly directory: string
   readonly opencodeVersion: string
   events(signal: AbortSignal): AsyncIterable<EventLike>
-  prompt(input: { sessionID: string; text: string; files?: readonly PromptFile[]; metadata: Record<string, unknown>; delivery?: "steer" }): Promise<{ id: string }>
+  /** `id`: a client message id (msg_…, OpenCode applies it once); `resume: false` admits without waking. */
+  prompt(input: { sessionID: string; text: string; files?: readonly PromptFile[]; metadata: Record<string, unknown>; delivery?: DeliveryMode; id?: string; resume?: boolean }): Promise<{ id: string }>
+  /**
+   * Admits text as a synthetic user message (OpenCode's session.synthetic): the model sees only `text`; the
+   * prompt hook does not run. `id` (msg_…) makes it idempotent; `resume: false` admits without waking.
+   * Absent: this OpenCode cannot take hub messages (no "deliver" feature).
+   */
+  synthetic?(input: { sessionID: string; id: string; text: string; metadata: Record<string, unknown>; delivery: DeliveryMode; resume: boolean }): Promise<{ id?: string }>
   context(sessionID: string): Promise<ReadonlyArray<unknown>>
   listModels?(): Promise<ReadonlyArray<unknown>>
   getSession(sessionID: string): Promise<HostSession>
@@ -267,6 +278,10 @@ export class Spoke {
   private readonly timelines = new TimelineCache()
   private readonly voiceTurns = new Map<string, number>()
   private readonly running = new Set<string>()
+  /** Hub messages applied (by messageID), so a retry is not admitted again. */
+  private readonly deliveries = new DeliveryLedger()
+  /** Who put each inbox item into a session (forwarded with session.inbox.delivered). */
+  private readonly origins = new InboxOrigins()
   private readonly infoTried = new Map<string, number>()
   /** Sessions in conversation mode → the agent to restore when it ends (undefined: the default agent). */
   private readonly conversations = new Map<string, { previous?: string; previousModel?: ModelRef; voiceModel?: ModelRef }>()
@@ -761,7 +776,7 @@ export class Spoke {
         // Hubs that predate `harness` require opencodeVersion; newer ones read harness, harnessVersion, evidence.
         opencodeVersion: this.host.opencodeVersion,
         pluginVersion: this.options.pluginVersion,
-        features: [...SPOKE_FEATURES],
+        features: SPOKE_FEATURES.filter((f) => f !== "deliver" || this.host.synthetic !== undefined),
         harness: HARNESS_OPENCODE,
         harnessVersion: this.host.opencodeVersion,
         evidence: "native",
@@ -995,7 +1010,32 @@ export class Spoke {
       }
       case "conversation":
         return this.setConversation(req.sessionID, req.on)
+      case "deliver":
+        return this.deliver(req)
     }
+  }
+
+  /**
+   * Admits a hub message as a synthetic message (plan in ./deliver). Never touches the session's voice
+   * settings, model or agent, and takes no turn lock: OpenCode queues it for busy sessions and open forms.
+   */
+  private async deliver(req: DeliverRequest): Promise<DeliverResult> {
+    const synthetic = this.host.synthetic?.bind(this.host)
+    if (!synthetic) throw new Error("This OpenCode process cannot take hub messages")
+    return this.deliveries.run(req.messageID, req.wake, async () => {
+      const subagent = (this.tracker.parentOf(req.sessionID) ?? (await this.host.getSession(req.sessionID).catch(() => undefined))?.parentID) !== undefined
+      const plan = planDelivery(req, {
+        busy: this.running.has(req.sessionID) || this.tracker.isBusy(req.sessionID),
+        formOpen: this.tracker.formOpenIn(req.sessionID),
+        subagent,
+      })
+      const id = harnessMessageID(req.messageID)
+      // Marked before sending: OpenCode may report it delivered before the call returns.
+      this.origins.hub(id)
+      const admitted = await synthetic({ sessionID: req.sessionID, id, text: req.text, metadata: deliverMetadata(req), delivery: plan.delivery, resume: plan.resume })
+      this.timelines.invalidate(req.sessionID)
+      return { result: { delivered: plan.delivered, inboxID: typeof admitted?.id === "string" && admitted.id ? admitted.id : id }, resumed: plan.resume }
+    })
   }
 
   /**
@@ -1352,6 +1392,7 @@ export class Spoke {
       if (typeof sessionID === "string") this.timelines.invalidate(sessionID)
       this.turns.observe(event)
       this.observeModel(event)
+      this.origins.observe(event)
       if (event.type === "session.deleted" && typeof sessionID === "string") this.tokens.delete(sessionID)
       if (event.type === "form.replied" || event.type === "form.cancelled") {
         const formID = (event.data as Record<string, unknown> | undefined)?.id
@@ -1373,12 +1414,22 @@ export class Spoke {
       if (this.connection?.state === "connected" && (FORWARDED_EVENTS.has(event.type) || COMPACTED_EVENTS.has(event.type))) {
         // Activity events go out compact: tool inputs become a short summary, outputs are dropped; job exits
         // get their session from the job.
-        const compact = compactActivity({ type: event.type, data: (event.data ?? {}) as Record<string, unknown> }, (id) => this.tracker.jobSession(id))
+        const compact = this.withOrigin(compactActivity({ type: event.type, data: (event.data ?? {}) as Record<string, unknown> }, (id) => this.tracker.jobSession(id)))
         if (compact && shouldForward(this.config, this.tracker, compact)) this.connection.send({ t: "event", event: compact })
       }
     } catch (cause) {
       console.error("[hub] event handling failed", cause)
     }
+  }
+
+  /**
+   * Adds who put the item in the inbox (user or hub) to session.inbox.delivered, for hubs that route messages
+   * (they reset reply-chain hops on a user's turn); when unknown, the event goes out unchanged.
+   */
+  private withOrigin<E extends { type: string; data: Record<string, unknown> }>(event: E | undefined): E | undefined {
+    if (event?.type !== "session.inbox.delivered" || typeof event.data.inboxID !== "string") return event
+    const origin = this.origins.take(event.data.inboxID)
+    return origin && this.hubSupports("messaging") ? { ...event, data: { ...event.data, origin } } : event
   }
 
   /** Keeps the remembered session models current from OpenCode's events. */

@@ -262,6 +262,17 @@ export class SessionTracker {
     }
   }
 
+  /** The session itself has a run in progress or OpenCode reports it busy or retrying. */
+  isBusy(sessionID: string): boolean {
+    return this.running.has(sessionID) || this.busy.has(sessionID)
+  }
+
+  /** A form (question) is open in the session itself. */
+  formOpenIn(sessionID: string): boolean {
+    for (const [key, id] of this.waiting) if (id === sessionID && key.startsWith("frm ")) return true
+    return false
+  }
+
   /** A form (question) this process saw asked and not yet replied or cancelled. */
   formPending(formID: string): boolean {
     return this.waiting.has(`frm ${formID}`)

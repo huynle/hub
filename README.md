@@ -1295,7 +1295,9 @@ Console development: `bun test/web-mock-hub.ts 4311` fakes a hub with fixtures (
 and a second spoke of another harness, and the `hub` CLI as a session token, an app token, a linked device and a
 second user. The opt-in `HUB_IT_OPENCODE=1 bun test test/spoke-env-inject.it.test.ts` starts a private
 `opencode serve` (own port, password and XDG dirs) with a local stub model and checks a real shell: its
-`HUB_SESSION_TOKEN`, and that `hub whoami` there prints the session.
+`HUB_SESSION_TOKEN`, and that `hub whoami` there prints the session. `HUB_IT_OPENCODE=1 bun test
+test/spoke-deliver.it.test.ts` does the same for hub messages: the model sees the delivered envelope, a repeated
+message id is applied once, `wake: false` waits for the next turn, and inbox deliveries carry their origin.
 
 Point a project's `.opencode/opencode.jsonc` at your checkout to try changes:
 `{ "plugins": [{ "package": "/path/to/hub" }] }`. If the plugin is also installed globally,

@@ -23,7 +23,7 @@ afterEach(async () => {
   for (const c of cleanups.splice(0).reverse()) await c()
 })
 
-function fakeContext(overrides: { hookThrows?: boolean; registerThrows?: boolean; directory?: string; pending?: Record<string, string> } = {}) {
+function fakeContext(overrides: { hookThrows?: boolean; registerThrows?: boolean; directory?: string; pending?: Record<string, string>; synthetic?: boolean } = {}) {
   const queue = new EventQueue<{ type: string; data: Record<string, unknown> }>()
   const hooks: Array<(event: any) => void> = []
   const toolHooks: Record<string, (event: any) => void> = {}
@@ -36,6 +36,7 @@ function fakeContext(overrides: { hookThrows?: boolean; registerThrows?: boolean
   let handlers: Record<string, (input: unknown, rpc: unknown) => Promise<unknown>> | undefined
   const registered: string[] = []
   const replies: unknown[] = []
+  const synthetics: unknown[] = []
   const ctx = {
     location: { directory: overrides.directory ?? "/work/project" },
     app: { name: "opencode", version: "2.0.25", channel: "latest" },
@@ -59,6 +60,15 @@ function fakeContext(overrides: { hookThrows?: boolean; registerThrows?: boolean
         hooks.push(fn)
       },
       prompt: async () => ({ id: "msg_1" }),
+      // Wrapped like the HTTP API (the plugin unwraps both shapes).
+      ...(overrides.synthetic
+        ? {
+            synthetic: async (input: { sessionID: string; id: string }) => {
+              synthetics.push(input)
+              return { location: {}, data: { id: input.id, sessionID: input.sessionID, type: "synthetic", time: { created: 1 } } }
+            },
+          }
+        : {}),
       context: async () => [],
       get: async (input: { sessionID: string }) => {
         const agent = sessionAgents.get(input.sessionID)
@@ -111,7 +121,7 @@ function fakeContext(overrides: { hookThrows?: boolean; registerThrows?: boolean
     },
   }
   const rpc = { signal: new AbortController().signal, error: (type: string, message: string, data: unknown) => ({ type, message, data }) }
-  return { ctx, hooks, toolHooks, shellHooks, transforms, tools, interrupts, switches, rpc, registered, replies, queue, call: (name: string, input: unknown = {}) => handlers![name]!(input, rpc) }
+  return { ctx, hooks, toolHooks, shellHooks, transforms, tools, interrupts, switches, rpc, registered, replies, synthetics, queue, call: (name: string, input: unknown = {}) => handlers![name]!(input, rpc) }
 }
 
 function tempConfig(config: Partial<ReturnType<typeof defaults>>) {
@@ -194,6 +204,33 @@ describe("plugin setup", () => {
     expect(a.replies).toEqual([])
     const again = await server.request({ op: "permission", sessionID: "ses_child", requestID: "per_1", decision: "once" })
     expect(again).toMatchObject({ ok: true, result: { gone: true } })
+  })
+
+  test("hub messages are admitted through OpenCode's session.synthetic; deliver is announced only when it exists", async () => {
+    const server = fakeCentral()
+    cleanups.push(() => stopServer(server))
+    tempConfig({ server: server.url, mode: "always", token: "tok" })
+    const fake = fakeContext({ synthetic: true })
+    cleanups.push((await plugin.setup(fake.ctx as any)) as () => void)
+    await until(() => server.frames.some((f) => f.t === "sessions"))
+    expect((server.frames.find((f) => f.t === "hello") as any).features).toContain("deliver")
+    fake.queue.push({ type: "session.created", data: { sessionID: "ses_a", title: "A" } })
+    await until(() => server.frames.some((f) => f.t === "sessions" && (f as any).sessions.some((s: any) => s.id === "ses_a")))
+    const res = await server.request({ op: "deliver", sessionID: "ses_a", messageID: "msg_abc", text: "[hub] hi", wake: true, meta: { kind: "msg", from: "@x", to: "@y" } })
+    expect(res).toMatchObject({ ok: true, result: { delivered: "turn", inboxID: "msg_abc" } })
+    expect(fake.synthetics).toEqual([
+      { sessionID: "ses_a", id: "msg_abc", text: "[hub] hi", metadata: { source: "hub", messageID: "msg_abc", kind: "msg", from: "@x", to: "@y" }, delivery: "queue", resume: true },
+    ])
+  })
+
+  test("an OpenCode without session.synthetic does not announce deliver", async () => {
+    const server = fakeCentral()
+    cleanups.push(() => stopServer(server))
+    tempConfig({ server: server.url, mode: "always", token: "tok" })
+    const fake = fakeContext()
+    cleanups.push((await plugin.setup(fake.ctx as any)) as () => void)
+    await until(() => server.frames.some((f) => f.t === "sessions"))
+    expect((server.frames.find((f) => f.t === "hello") as any).features).not.toContain("deliver")
   })
 
   test("formActions RPC hands relayed form replies to a polling TUI", async () => {
