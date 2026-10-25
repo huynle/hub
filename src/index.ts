@@ -12,6 +12,7 @@ import { checkServer, parseServerInput } from "./setup"
 import { defineVoiceAgent, orchestratorParts, STOP_TOOL, STOP_TOOL_DESCRIPTION } from "./spoke/conversation"
 import { envInjector, hubBinDir, ShellCorrelator, stripInheritedHubEnv } from "./spoke/env-inject"
 import { herdrRunner } from "./spoke/herdr"
+import { HUB_TOOL, HUB_TOOL_DESCRIPTION, HUB_TOOL_INPUT, runHubTool } from "./spoke/hub-tool"
 import { cliEntry, installLaunchers } from "./spoke/launchers"
 import { listServiceSessions } from "./spoke/listing"
 import { ensureLocalHub } from "./spoke/localhub"
@@ -284,6 +285,22 @@ export default Plugin.define({
       )
     } catch (cause) {
       console.error("[hub] could not register the task stop tool", cause)
+    }
+
+    try {
+      // Agents message and ask other sessions as themselves (the session's own hub token; src/spoke/hub-tool.ts).
+      await (ctx as any).tool?.transform?.((editor: any) =>
+        editor.add({
+          name: HUB_TOOL,
+          description: HUB_TOOL_DESCRIPTION,
+          input: HUB_TOOL_INPUT,
+          options: { codemode: false },
+          execute: (value: unknown, context: { sessionID: string; signal?: AbortSignal }) =>
+            runHubTool(() => membership.active(), value, { sessionID: context.sessionID, ...(context.signal ? { signal: context.signal } : {}) }),
+        }),
+      )
+    } catch (cause) {
+      console.error("[hub] could not register the hub tool", cause)
     }
 
     await registerShellEnv(ctx, (sessionID) => membership.active()?.shellIdentity(sessionID))

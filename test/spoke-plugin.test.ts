@@ -346,6 +346,64 @@ describe("plugin setup", () => {
     expect(plain.system).toEqual([])
   })
 
+  describe("hub tool (agents message other sessions as themselves)", () => {
+    const toolContext = (sessionID: string) => ({ sessionID, signal: new AbortController().signal })
+
+    test("is registered as one hub tool with a verb input, outside code mode", async () => {
+      tempConfig({ mode: "off" })
+      const fake = fakeContext()
+      cleanups.push((await plugin.setup(fake.ctx as any)) as () => void)
+      const tool = fake.tools.find((t) => t.name === "hub") as any
+      expect(tool).toBeDefined()
+      expect(tool.description).toMatch(/not from the user/i)
+      expect(tool.input.properties.verb.enum).toContain("ask")
+      expect(tool.options).toEqual({ codemode: false })
+      // No session token without a connected hub: a readable error.
+      const result = await tool.execute({ verb: "whoami" }, toolContext("ses_a"))
+      expect(result.content).toMatch(/no hub token yet/i)
+    })
+
+    async function connected(hubFeatures: readonly string[]) {
+      const auth: Array<string | null> = []
+      const server = fakeCentral({
+        hubFeatures,
+        http: (req) => {
+          if (new URL(req.url).pathname !== "/api/agent/whoami") return undefined
+          auth.push(req.headers.get("authorization"))
+          return Response.json({ actor: { kind: "session", userID: "u_1", machineID: "m_1", sessionID: "ses_a" }, user: { id: "u_1" } })
+        },
+      })
+      cleanups.push(() => stopServer(server))
+      tempConfig({ server: server.url, mode: "always", token: "tok" })
+      const fake = fakeContext()
+      cleanups.push((await plugin.setup(fake.ctx as any)) as () => void)
+      await until(() => server.frames.some((f) => f.t === "sessions"))
+      fake.queue.push({ type: "session.created", data: { sessionID: "ses_a", title: "A" } })
+      await until(() => server.frames.some((f) => f.t === "sessions" && (f as any).sessions.some((s: any) => s.id === "ses_a")))
+      const res = await server.request({ op: "sessionTokens", tokens: [{ sessionID: "ses_a", token: "hst.a-secret", exp: Date.now() + 60_000 }] })
+      expect(res).toMatchObject({ ok: true, result: { applied: ["ses_a"] } })
+      return { auth, tool: fake.tools.find((t) => t.name === "hub")! }
+    }
+
+    test("acts with the calling session's token and never shows it", async () => {
+      const { auth, tool } = await connected(["harness", "messaging"])
+      const result = await tool.execute({ verb: "whoami" }, toolContext("ses_a"))
+      expect(result.content).toContain("ses_a")
+      expect(auth).toEqual(["Bearer hst.a-secret"])
+      expect(JSON.stringify(result)).not.toContain("hst.a-secret")
+      // Another session of this process has no token of its own: it never borrows ses_a's.
+      const other = await tool.execute({ verb: "whoami" }, toolContext("ses_b"))
+      expect(other.content).toMatch(/no hub token yet/i)
+      expect(auth).toHaveLength(1)
+    })
+
+    test("refuses messaging verbs when the hub does not announce messaging", async () => {
+      const { tool } = await connected(["harness"])
+      const result = await tool.execute({ verb: "msg", to: "@bob", text: "hi" }, toolContext("ses_a"))
+      expect(result.content).toMatch(/does not support messaging/i)
+    })
+  })
+
   describe("hub_task_stop (the voice agent stops one of its workers)", () => {
     async function setupWorkers() {
       tempConfig({ mode: "always" })

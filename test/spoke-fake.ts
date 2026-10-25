@@ -23,6 +23,8 @@ export function fakeCentral(
     enrollExtra?: Record<string, unknown>
     /** Features the welcome lists (none by default, like a hub that predates them). */
     hubFeatures?: readonly string[]
+    /** Answers other HTTP requests (e.g. /api/agent/*) before the 404. */
+    http?: (req: Request) => Response | Promise<Response> | undefined
   } = {},
 ): FakeCentral {
   let reqID = 0
@@ -65,7 +67,7 @@ export function fakeCentral(
         const reply = fake.pollReplies.length > 1 ? fake.pollReplies.shift()! : fake.pollReplies[0]!
         return Response.json(reply)
       }
-      if (path !== "/spoke/ws") return new Response("not found", { status: 404 })
+      if (path !== "/spoke/ws") return (await options.http?.(req)) ?? new Response("not found", { status: 404 })
       fake.auth.push(req.headers.get("authorization"))
       return srv.upgrade(req, { data: undefined }) ? undefined : new Response("upgrade failed", { status: 400 })
     },
