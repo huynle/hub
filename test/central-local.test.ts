@@ -109,7 +109,7 @@ describe("first machine on a local hub", () => {
     const c = await enroll(h)
     expect(c.autoApproved).toBeUndefined()
     expect((await poll(h, c.deviceCode)).status).toBe("pending")
-    expect(h.auth.pendingEnrollments().map((e) => e.userCode).sort()).toEqual([b.userCode, c.userCode].sort())
+    expect((await h.auth.pendingEnrollments()).map((e) => e.userCode).sort()).toEqual([b.userCode, c.userCode].sort())
   })
 
   test("not when a device is already paired", async () => {

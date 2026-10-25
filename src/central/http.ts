@@ -364,7 +364,7 @@ export function startCentral(options: CentralOptions): Central {
   const origins = loopbackOrigins(publicURL)
   const secure = publicURL.startsWith("https:")
 
-  auth = new Auth({ store, publicURL, now, mode: config.auth.mode })
+  auth = new Auth({ store, publicURL, now, mode: config.auth.mode, kv: backends.kv, counters: backends.counters })
   // options.fetch is for speech providers only; sign-in always talks to the real issuer.
   const oidc = config.auth.mode === "oidc" ? new OidcClient({ config: config.auth, publicURL, now }) : undefined
   /** Speech settings scope of a user: "local" (pairing mode) uses the server default directly. */
@@ -721,7 +721,7 @@ export function startCentral(options: CentralOptions): Central {
       // A shared (cluster) store loads its records on first use; the file store is ready at once.
       await store.ready()
       if (method === "POST" && pathname === "/spoke/enroll") {
-        const start = auth.startEnrollment((await body(request)).machineName)
+        const start = await auth.startEnrollment((await body(request)).machineName)
         const auto = config.auth.mode === "pairing" && localAutoApprove({
           host: config.host,
           publicURL,
@@ -731,7 +731,7 @@ export function startCentral(options: CentralOptions): Central {
           devices: store.devices().length,
           used: autoApproved,
         })
-        if (auto && auth.approveEnrollment(start.userCode)) {
+        if (auto && (await auth.approveEnrollment(start.userCode))) {
           autoApproved = true
           console.log(`[hub] local hub: approved the first machine (code ${start.userCode}) without confirmation; later machines need approval`)
           return Response.json({ ...start, autoApproved: true } satisfies EnrollStart)
@@ -762,7 +762,7 @@ export function startCentral(options: CentralOptions): Central {
   async function login(request: Request, url: URL): Promise<Response> {
     const next = url.searchParams.get("next") ?? "/"
     if (!LOGIN_NEXT.test(next)) return error(400, "Invalid next path")
-    const ownerID = auth.redeemLogin(url.searchParams.get("code"))
+    const ownerID = await auth.redeemLogin(url.searchParams.get("code"))
     if (!ownerID) {
       return new Response("This sign-in link has expired or was already used. Run /hub again.", {
         status: 401,
@@ -1077,7 +1077,7 @@ export function startCentral(options: CentralOptions): Central {
     route("DELETE", "/api/machines/:machine", "machine", ({ params, user }) => revokeMachine(params.machine!, user)),
 
     // admins: users, machines, devices, audit, enrollments, the server speech default
-    route("GET", "/api/enrollments", "admin", () => Response.json({ enrollments: auth.pendingEnrollments() })),
+    route("GET", "/api/enrollments", "admin", async () => Response.json({ enrollments: await auth.pendingEnrollments() })),
     route("GET", "/api/admin/users", "admin", () => Response.json(store.users().map(userRow))),
     route("PUT", "/api/admin/users/:id", "admin", async ({ request, params, user }) => updateUser(params.id!, await body(request), user)),
     route("GET", "/api/admin/machines", "admin", () => {
@@ -1204,7 +1204,7 @@ export function startCentral(options: CentralOptions): Central {
   }
 
   async function decideEnrollment(code: string, status: "approved" | "denied", user: UserRecord): Promise<Response> {
-    const machineName = auth.decide(code, status, user.id)
+    const machineName = await auth.decide(code, status, user.id)
     if (machineName === undefined) return error(404, "No pending enrollment with that code")
     await store.audit({ actor: user.id, action: status === "approved" ? "machine.approve" : "machine.deny", detail: machineName })
     broadcast({ type: "enrollment" }, { admins: true })
