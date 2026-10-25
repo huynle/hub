@@ -396,3 +396,88 @@ describe("provisioning", () => {
     w.engine.shutdown()
   })
 })
+
+describe("provisioning failures", () => {
+  test("a failed prepare ends the launch failed with the node's reason; nothing is created", async () => {
+    const w = world()
+    w.nodeAnswers.prepare = () => {
+      throw new Error("git worktree add failed")
+    }
+    w.connectNode()
+    await w.engine.start()
+    const launch = await launched(w)
+    expect(launch).toMatchObject({ state: "ended", outcome: "failed" })
+    expect(launch.reason).toContain("git worktree add failed")
+    expect(w.spokeCalls).toEqual([])
+    expect(w.changes.at(-1)).toMatchObject({ id: launch.id, state: "ended" })
+    w.engine.shutdown()
+  })
+
+  test("the node going away during prepare ends the launch lost", async () => {
+    const w = world()
+    const hold = deferred<unknown>()
+    w.nodeHolds.set("prepare", hold)
+    w.connectNode()
+    await w.engine.start()
+    const launch = await launched(w)
+    expect(launch.state).toBe("provisioning")
+    w.disconnectNode()
+    hold.reject(new Error("The node disconnected"))
+    await settle()
+    expect(await w.launch(launch.id)).toMatchObject({ state: "ended", outcome: "lost" })
+    w.engine.shutdown()
+  })
+
+  test("a refused launch create fails the launch and removes the fresh workspace", async () => {
+    const w = world()
+    w.spokeAnswers.create = () => {
+      throw new Error("Unknown agent build")
+    }
+    w.connectNode()
+    await w.engine.start()
+    const launch = await launched(w, { agent: "build" })
+    expect(launch).toMatchObject({ state: "ended", outcome: "failed" })
+    expect(launch.reason).toContain("Unknown agent build")
+    const cleanup = w.nodeCalls.find((r) => r.op === "cleanup")
+    expect(cleanup).toMatchObject({ op: "cleanup", launchID: launch.id, policy: "remove", workspace: { directory: "/p/hub/.worktrees/feat/x" } })
+    w.engine.shutdown()
+  })
+
+  test("the service spoke going away before create fails the launch", async () => {
+    const w = world()
+    const hold = deferred<unknown>()
+    w.nodeHolds.set("prepare", hold)
+    w.connectNode()
+    await w.engine.start()
+    const launch = await launched(w)
+    w.setService(undefined)
+    hold.resolve(w.nodeAnswers.prepare!(w.nodeCalls[0]))
+    await settle()
+    const ended = (await w.launch(launch.id))!
+    expect(ended).toMatchObject({ state: "ended", outcome: "failed" })
+    expect(ended.reason).toContain("service spoke")
+    w.engine.shutdown()
+  })
+
+  test("a name taken meanwhile fails the launch; the session is never prompted", async () => {
+    const w = world()
+    w.connectNode()
+    await w.engine.start()
+    const { launch } = await w.engine.accept(U, body({ name: "api" }))
+    w.names.set("api", "ses_other")
+    await settle()
+    expect(await w.launch(launch.id)).toMatchObject({ state: "ended", outcome: "failed" })
+    expect(w.prompts).toEqual([])
+    w.engine.shutdown()
+  })
+
+  test("a session offline at prompt time fails the launch", async () => {
+    const w = world()
+    w.setPrompt("offline")
+    w.connectNode()
+    await w.engine.start()
+    const launch = await launched(w)
+    expect(launch).toMatchObject({ state: "ended", outcome: "failed" })
+    w.engine.shutdown()
+  })
+})

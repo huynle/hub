@@ -10,7 +10,8 @@ import type { Delivery } from "./delivery"
 import type { Directory } from "./directory"
 import { AgentError } from "./errors"
 import { validateLaunchSpec } from "./launch-spec"
-import { type Launch, type LaunchState, LaunchStore } from "./launch-store"
+import type { CleanupPolicy } from "./launch-spec"
+import { type Launch, type LaunchOutcome, type LaunchState, LaunchStore, LaunchTransitionError } from "./launch-store"
 import { Placement, PlacementLoop, type Placed, type PlacementNode } from "./placement"
 
 /** The NodeRegistry calls the engine needs. */
@@ -110,6 +111,8 @@ export class LaunchEngine {
   readonly loop: PlacementLoop
   private readonly now: Clock
   private readonly unsubscribe: (() => void)[] = []
+  /** Ends in progress, by launch ID. */
+  private readonly ending = new Map<string, Promise<Launch | undefined>>()
 
   constructor(private readonly deps: LaunchEngineDeps) {
     this.now = deps.now ?? Date.now
@@ -201,7 +204,8 @@ export class LaunchEngine {
       const sessionID = await this.create(userID, launch, workspace)
       await this.identify(userID, launch, sessionID)
     } catch (cause) {
-      console.error(`[hub] launch ${launch.id} failed: ${errorText(cause)}`)
+      const gone = this.deps.nodes.forMachine(launch.machineID!) === undefined
+      await this.end(userID, launch.id, gone ? "lost" : "failed", gone ? "The node went away while preparing the launch" : `Failed: ${errorText(cause)}`)
     }
   }
 
@@ -255,7 +259,8 @@ export class LaunchEngine {
     await delivery.prime(userID, sessionID)
     if (spec.prompt !== undefined) {
       await this.updateWork(userID, launch.id, { prompted: true })
-      await actions.prompt({ sessionID, text: spec.prompt, resetHops: false })
+      const prompted = await actions.prompt({ sessionID, text: spec.prompt, resetHops: false })
+      if (prompted.outcome === "offline") throw new Error("The session went offline before its prompt")
     }
     const running = await this.store.transition(userID, launch.id, "running", {
       reason: ["Running", ...notes].join("; "),
@@ -264,6 +269,64 @@ export class LaunchEngine {
       from: ["provisioning"],
     })
     this.changed(running)
+  }
+
+  // ---- the end ---------------------------------------------------------------------------------------------
+
+  /**
+   * Ends a live launch once (concurrent calls share the first): stops its session when asked, collects artifacts
+   * and cleans the workspace up on the node, then records the ended step. Resolves with the launch as it is then.
+   */
+  private end(userID: string, id: string, outcome: LaunchOutcome, reason: string, options: { readonly stopSession?: boolean } = {}): Promise<Launch | undefined> {
+    const running = this.ending.get(id)
+    if (running) return running
+    const run = this.endNow(userID, id, outcome, reason, options).finally(() => this.ending.delete(id))
+    this.ending.set(id, run)
+    return run
+  }
+
+  private async endNow(userID: string, id: string, outcome: LaunchOutcome, reason: string, options: { readonly stopSession?: boolean }): Promise<Launch | undefined> {
+    const launch = await this.store.get(userID, id)
+    if (!launch || launch.state === "ended") return launch
+    const work = await this.work(userID, id)
+    if (options.stopSession && work?.sessionID) {
+      await this.deps.actions.stop(work.sessionID).catch((cause) => console.error(`[hub] launch ${id}: stopping its session failed: ${errorText(cause)}`))
+    }
+    const notes: string[] = []
+    let artifacts: Record<string, unknown> | undefined
+    if (work?.workspace) {
+      const policy: CleanupPolicy = outcome === "needs_user" ? "keep" : !work.prompted ? "remove" : launch.spec.end.cleanup
+      const node = launch.machineID !== undefined ? this.deps.nodes.forMachine(launch.machineID) : undefined
+      if (node) {
+        if (work.prompted) {
+          try {
+            artifacts = { ...(await this.deps.nodeOps.requestNode(node.connID, { op: "collect", launchID: id, workspace: work.workspace })).artifacts }
+          } catch (cause) {
+            notes.push(`artifacts not collected: ${errorText(cause)}`)
+          }
+        }
+        try {
+          const cleaned = await this.deps.nodeOps.requestNode(node.connID, { op: "cleanup", launchID: id, workspace: work.workspace, policy })
+          notes.push(cleaned.removed ? "workspace removed" : `workspace kept${cleaned.reason ? ` (${cleaned.reason})` : ""}`)
+        } catch (cause) {
+          notes.push(`workspace cleanup failed: ${errorText(cause)}`)
+        }
+      }
+    }
+    try {
+      const ended = await this.store.transition(userID, id, "ended", {
+        reason: [reason, ...notes].join("; "),
+        outcome,
+        ...(artifacts ? { artifacts } : {}),
+        from: LIVE,
+      })
+      this.changed(ended)
+      void this.loop.kick(userID)
+      return ended
+    } catch (cause) {
+      if (cause instanceof LaunchTransitionError) return this.store.get(userID, id)
+      throw cause
+    }
   }
 
   // ---- work records -------------------------------------------------------------------------------------
