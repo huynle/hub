@@ -28,7 +28,8 @@ import { Escalations } from "./agent/escalation"
 import { GrantRequests } from "./agent/grant-requests"
 import { partyFromActor } from "./agent/envelope"
 import { Delivery } from "./agent/delivery"
-import { AgentError } from "./agent/errors"
+import { AgentError, type AgentErrorCode } from "./agent/errors"
+import type { Launch } from "./agent/launch-store"
 import { decisionStateQuery, MessageFeed } from "./agent/message-routes"
 import { hubDirectory } from "./agent/directory-routes"
 import { agentApi, agentRoutes, agentVerifiers, isAgentPath, wellKnown, type AgentRoute } from "./agent/routes"
@@ -44,6 +45,7 @@ import { NodeRegistry } from "./nodes"
 import { ConnDirectory } from "./cluster/directory"
 import { PodRpc } from "./cluster/rpc"
 import { ClusterView } from "./cluster/view"
+import { LeaderLoop, NoLeaderError } from "./cluster/leader"
 import { randomBytes, randomUUID } from "node:crypto"
 import { LaunchEngine } from "./agent/launch-engine"
 import { LaunchTokens } from "./agent/launch-tokens"
@@ -95,6 +97,10 @@ export interface CentralOptions {
     /** Cluster mode: the cluster view's heartbeat and slice TTL (see VIEW_HEARTBEAT_MS, VIEW_TTL_MS). */
     readonly viewHeartbeatMs?: number
     readonly viewTtlMs?: number
+    /** Leader leases of the timed jobs (see LEADER_TTL_MS). */
+    readonly leaderTtlMs?: number
+    /** How often the decision deadline and message re-wake loops run (see DECISION_TICK_MS, REWAKE_TICK_MS). */
+    readonly loopTickMs?: number
   }
 }
 
@@ -184,6 +190,10 @@ const NO_STORE = { "cache-control": "no-store" }
 export const COOKIE = "voice_device"
 const COOKIE_MAX_AGE = 400 * 24 * 60 * 60
 const SSE_HEARTBEAT_MS = 20_000
+/** Cluster mode: how much longer than the turn timeout a turn's cluster-wide lease lasts (it is released at its end). */
+const TURN_LEASE_SLACK_MS = 120_000
+/** Cluster mode: how long a stop sent to the launches leader may take (it waits for the node's collect and cleanup). */
+const LAUNCH_STOP_TIMEOUT_MS = 180_000
 /**
  * `POST …/turn` with `Prefer: respond-async`: a turn that has not settled after this long is answered 202 and
  * finishes in the background (result as an SSE `turn` event). Long enough for the quick refusals (busy, unknown
@@ -578,6 +588,28 @@ export function startCentral(options: CentralOptions): Central {
   }
 
   const directory = hubDirectory({ registry, store, now })
+  /** This process as owner of leases (leader loops, flushes, turns): `<pod>:<pid>-<random>`. */
+  const leaseOwner = `${config.cluster?.podID ?? "hub"}:${process.pid}-${randomBytes(4).toString("hex")}`
+  /** Every stored user (the leader loops look at all of them). */
+  const allUsers = async () => {
+    await store.ready()
+    return store.users().map((u) => u.id)
+  }
+  const loopTickMs = options.timing?.loopTickMs
+  // Timed jobs run on one pod at a time, under a fenced leader lease (design §9; a single hub always leads).
+  const leaders: LeaderLoop[] = []
+  const leader = (name: string, handlers: Pick<ConstructorParameters<typeof LeaderLoop>[0], "onElected" | "onDeposed" | "onKick" | "onRequest">) => {
+    const loop = new LeaderLoop({
+      locks: backends.locks,
+      bus: backends.bus,
+      name,
+      owner: leaseOwner,
+      ...(options.timing?.leaderTtlMs !== undefined ? { ttlMs: options.timing.leaderTtlMs } : {}),
+      ...handlers,
+    })
+    leaders.push(loop)
+    return loop
+  }
   // Agent messages (design §3): delivered through spokes that announce "deliver"; pending ones flush on every
   // sessions frame; human turns (console turn/utterance, prompts typed in the harness) reset hop chains.
   const delivery = new Delivery({
@@ -598,6 +630,9 @@ export function startCentral(options: CentralOptions): Central {
     },
     // Push kind "message": a msg to @me, an ask left unanswered, a message loop (sent even while watched).
     alert: (userID, alert) => pushUser("message", userID, alert.sessionID, `${alert.kind}:${alert.messageID}`),
+    ...(loopTickMs !== undefined ? { tickMs: loopTickMs } : {}),
+    // Cluster mode: the re-wake loop (leader) looks at every user; each pending flush holds a (user, session) lease.
+    ...(config.cluster ? { users: allUsers, locks: backends.locks, owner: leaseOwner } : {}),
   })
   /** Message events (watch, waiters), shared by the agent routes and the console's Decision answers. */
   const feed = new MessageFeed()
@@ -613,8 +648,9 @@ export function startCentral(options: CentralOptions): Central {
     // Escalations' Decisions reply to the permission as the user; grant requests' create the grant as the user
     // (both are set up below).
     act: (userID, decision, choice, by) => (decision.action?.kind === "grant" ? grantRequests.act(userID, decision, choice, by) : escalations.act(userID, decision, choice, by)),
+    ...(loopTickMs !== undefined ? { tickMs: loopTickMs } : {}),
   })
-  decisions.start()
+  leader("decisions", { onElected: () => decisions.start(), onDeposed: () => decisions.stop() })
   /** The user prompted the session: its message hop chain starts over (never fails the prompt). */
   const humanTurn = async (sessionID: string): Promise<void> => {
     const tenant = registry.sessionTenant(sessionID)
@@ -624,8 +660,15 @@ export function startCentral(options: CentralOptions): Central {
   registry.onSessions((connID) => void delivery.onSessions(connID).catch((cause) => console.error(`[hub] message flush failed: ${(cause as Error).message}`)))
   registry.onHumanTurn((sessionID) => void humanTurn(sessionID))
   /** Permission, form, prompt and stop execution, shared by the console routes and the agent act verbs. */
-  const actions = createActions({ registry, spokes, humanTurn, kv: backends.kv })
-  delivery.start()
+  const actions = createActions({
+    registry,
+    spokes,
+    humanTurn,
+    kv: backends.kv,
+    // Cluster mode: a turn also holds the session's lease, so two pods never start turns in it at once.
+    ...(config.cluster ? { turns: { locks: backends.locks, owner: leaseOwner, ttlMs: config.turnTimeoutMs + TURN_LEASE_SLACK_MS } } : {}),
+  })
+  leader("delivery", { onElected: () => delivery.start(), onDeposed: () => delivery.stop() })
   // Launches (design §6): placement onto the user's nodes, prepare on the node, the session through the machine's
   // service spoke, then its end; restart recovery runs on start. Every change goes to launchFeed: the owner's
   // console streams get it as a 'launch' event.
@@ -651,13 +694,49 @@ export function startCentral(options: CentralOptions): Central {
     users: () => store.users().map((u) => u.id),
     now,
     onLaunchChanged: (launch) => launchFeed.publish(launch.owner, launch),
+    // Cluster mode: the supervisor runs on the launches leader; other pods kick it and send it their stops.
+    ...(config.cluster
+      ? {
+          supervisor: {
+            kick: (userID: string) => void launchLeader.kick({ userID }).catch((cause) => console.error(`[hub] launch kick failed: ${(cause as Error).message}`)),
+            stop: async (userID: string, id: string, reason: string) => {
+              let reply: { launch?: Launch; error?: { code: AgentErrorCode; message: string } }
+              try {
+                reply = await launchLeader.request({ op: "stop", userID, id, reason }, { timeoutMs: LAUNCH_STOP_TIMEOUT_MS })
+              } catch (cause) {
+                if (cause instanceof NoLeaderError) return undefined
+                throw cause
+              }
+              if (reply.error) throw new AgentError(reply.error.code, reply.error.message)
+              return reply.launch
+            },
+          },
+        }
+      : {}),
   })
   // A launch-bound connection lives only while its launch is provisioning or running: it is closed (and refused from
   // then on) when the launch ends. Not on queued: that would refuse the sandbox's spoke before it ever connects.
   launchFeed.subscribe((_userID, launch) => {
     if (launch.state === "ended") spokes.closeLaunch(launch.id)
   })
-  void launches.start().catch((cause) => console.error(`[hub] launches did not start: ${(cause as Error).message}`))
+  const launchLeader = leader("launches", {
+    onElected: () => launches.start().catch((cause) => console.error(`[hub] launches did not start: ${(cause as Error).message}`)),
+    onDeposed: () => launches.shutdown(),
+    onKick: (message) => {
+      const userID = (message as { userID?: unknown } | undefined)?.userID
+      if (typeof userID === "string") launches.kick(userID)
+    },
+    onRequest: async (message) => {
+      const { op, userID, id, reason } = (message ?? {}) as { op?: unknown; userID?: unknown; id?: unknown; reason?: unknown }
+      if (op !== "stop" || typeof userID !== "string" || typeof id !== "string" || typeof reason !== "string") throw new Error("Invalid launch supervisor request")
+      try {
+        return { launch: await launches.stop(userID, id, reason) }
+      } catch (cause) {
+        if (cause instanceof AgentError) return { error: { code: cause.code, message: cause.message } }
+        throw cause
+      }
+    },
+  })
   // Webhooks (P4-T10): launch changes go to the owner's matching registrations through the durable outbox; URLs
   // are checked again at every send; private targets only with hub.json agents.webhooks.allowPrivate.
   const webhooks = new Webhooks({
@@ -672,9 +751,18 @@ export function startCentral(options: CentralOptions): Central {
     userAgent: `hub/${options.version ?? "0.0.0"}`,
   })
   launchFeed.subscribe((userID, launch) => {
-    void webhooks.onLaunch(userID, launch, launchInfo(launch)).catch((cause) => console.error(`[hub] webhook queue failed: ${(cause as Error).message}`))
+    void webhooks
+      .onLaunch(userID, launch, launchInfo(launch))
+      // Queued here, sent by the webhooks leader (kicked when that is another pod).
+      .then((queued) => (queued && !webhookLeader.isLeader() ? webhookLeader.kick() : undefined))
+      .catch((cause) => console.error(`[hub] webhook queue failed: ${(cause as Error).message}`))
   })
-  webhooks.start()
+  const webhookLeader = leader("webhooks", {
+    onElected: () => webhooks.start(),
+    onDeposed: () => webhooks.stop(),
+    onKick: () => void webhooks.drain().catch((cause) => console.error(`[hub] webhook delivery failed: ${(cause as Error).message}`)),
+  })
+  for (const loop of leaders) void loop.start()
 
   // One credential resolver for every /api request: device cookie, device token, session and app tokens.
   // Every stored agent message also goes to the user's console streams (live transcript rows).
@@ -1656,6 +1744,8 @@ export function startCentral(options: CentralOptions): Central {
     webhooks,
     routes: [...routes.map(({ method, path, access }) => ({ method, path, access })), ...agent.routes.map(({ method, path }) => ({ method, path, access: "agent" as const }))],
     async stop() {
+      // Step down first (releasing the leases), so another pod takes the timed jobs over at once.
+      await Promise.allSettled(leaders.map((loop) => loop.stop()))
       launches.shutdown()
       webhooks.stop()
       tokenPush.stop()

@@ -173,6 +173,12 @@ class LostError extends Error {}
 /** How long the engine waits for a started sandbox harness to connect back (its launch-bound connection). */
 export const LAUNCH_CONNECT_MS = 120_000
 
+/**
+ * How long the engine waits for a created session to be reported before it names and prompts it (cluster mode: the
+ * spoke may be on another pod, whose report reaches this one a moment after the create answer). It carries on after.
+ */
+export const SESSION_REPORT_MS = 10_000
+
 /** How long a restarted hub waits for a provisioning launch's node to (re)connect or let the launch go. */
 export const NODE_RETURN_MS = 5 * 60_000
 
@@ -711,6 +717,24 @@ export class LaunchEngine {
     })
   }
 
+  /** Resolves once some connection reports the session, or after SESSION_REPORT_MS (or a stop) all the same. */
+  private waitForSession(sessionID: string): Promise<void> {
+    const { registry } = this.deps
+    if (registry.hasSession(sessionID)) return Promise.resolve()
+    return new Promise((resolve) => {
+      const off = registry.subscribe(() => {
+        if (registry.hasSession(sessionID)) done()
+      })
+      const timer = this.timers.set(done, SESSION_REPORT_MS)
+      function done() {
+        off()
+        clear()
+        resolve()
+      }
+      const clear = () => this.timers.clear(timer)
+    })
+  }
+
   private async create(userID: string, launch: Launch, workspace: PreparedWorkspace, connID: string): Promise<string> {
     const { registry, spokes } = this.deps
     if (!registry.supports(connID, "launch")) throw new Error("The launch's spoke does not create launch sessions")
@@ -731,6 +755,8 @@ export class LaunchEngine {
   private async identify(userID: string, launch: Launch, sessionID: string, checkpoint: () => void = () => {}): Promise<void> {
     const { directory, delivery, actions } = this.deps
     const { spec } = launch
+    await this.waitForSession(sessionID)
+    checkpoint()
     await directory.sync(userID)
     const notes: string[] = []
     const byUser = launch.by === undefined || launch.by === "user"

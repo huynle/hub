@@ -101,6 +101,8 @@ export interface DeliveryDeps {
   readonly locks?: Locks
   /** This process, as lease owner (default: a random one). */
   readonly owner?: string
+  /** How often the re-wake loop runs (default REWAKE_TICK_MS). */
+  readonly tickMs?: number
 }
 
 export interface SendOptions {
@@ -401,7 +403,7 @@ export class Delivery {
       void this.tick().finally(() => {
         if (this.running && this.timer === undefined) this.schedule()
       })
-    }, REWAKE_TICK_MS)
+    }, this.deps.tickMs ?? REWAKE_TICK_MS)
   }
 
   /** Re-wakes the user's idle recipients of due open asks; after the last re-wake, tells the user. */
