@@ -5,12 +5,16 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
+import { sandboxName } from "../../runtime-openshell/src/runtime.ts"
+import { createFakeOpenShell, type FakeOpenShell } from "../../runtime-openshell/test/fake-openshell.ts"
 import { EXIT_CONFIG, runNode } from "../src/run.ts"
 
 let servers: { stop(force?: boolean): void }[] = []
+const fakes: FakeOpenShell[] = []
 afterEach(() => {
   for (const s of servers) s.stop(true)
   servers = []
+  for (const f of fakes.splice(0)) f.cleanup()
 })
 
 function fakeHub(features = ["harness", "messaging", "nodes"]) {
@@ -91,6 +95,69 @@ describe("runNode", () => {
     const env = configDir({ server: hub.url, token: "mt" }, { workspaceRoots: [tmpdir()] })
     const done = runNode({ env, home: "/nowhere", log: (l) => lines.push(l), signal: controller.signal })
     await until(() => lines.some((l) => l.includes("does not serve nodes")))
+    controller.abort()
+    expect(await done).toBe(0)
+  })
+})
+
+describe("runNode with openshell", () => {
+  function openshellFake() {
+    const fake = createFakeOpenShell()
+    fakes.push(fake)
+    const name = sandboxName("l_left")
+    fake.update((s) => {
+      s.sandboxes[`hub/${name}`] = { id: "x", name, workspace: "hub", labels: { "hub.launch": "l_left", "hub.machine": "m1" }, phase: "Ready", pendingGets: 0, createdAt: "2026-10-25T00:00:00Z", providers: [], env: {}, command: [], exitCode: null }
+      s.sandboxes["hub/demo"] = { id: "y", name: "demo", workspace: "hub", labels: {}, phase: "Ready", pendingGets: 0, createdAt: "2026-10-25T00:00:00Z", providers: [], env: {}, command: [], exitCode: null }
+    })
+    return { fake, name }
+  }
+
+  test("enabled: offers the openshell runtime with its profiles and backends, announces sandbox, reports this machine's sandboxes", async () => {
+    const hub = fakeHub()
+    const { fake, name } = openshellFake()
+    const controller = new AbortController()
+    const lines: string[] = []
+    const env = { ...configDir({ server: hub.url, token: "mt", machineID: "m1" }, { workspaceRoots: [tmpdir()], openshell: { enabled: true, gateway: "lab", profiles: { web: {} } } }), PATH: process.env.PATH }
+    const done = runNode({ env, home: "/nowhere", log: (l) => lines.push(l), signal: controller.signal, openshellBinary: fake.binary })
+    await until(() => hub.hellos.length > 0)
+    const hello = hub.hellos[0]!
+    expect(hello.features).toEqual(["sandbox"])
+    expect(hello.runtimes).toEqual([
+      { kind: "host", harnesses: ["opencode"] },
+      { kind: "openshell", harnesses: ["opencode"], profiles: ["default", "web"], backends: ["vm"] },
+    ])
+    expect(hello.launches).toEqual([{ launchID: "l_left", phase: "running", sandbox: name }])
+    expect(fake.calls().every((c) => c.workspace === "hub" && c.gateway === "lab")).toBe(true)
+    expect(fake.sandbox("demo")).toBeDefined()
+    controller.abort()
+    expect(await done).toBe(0)
+    expect(lines.join("\n")).toContain("openshell")
+  })
+
+  test("not enabled: host only, no sandbox feature, the openshell CLI is never called", async () => {
+    const hub = fakeHub()
+    const { fake } = openshellFake()
+    const controller = new AbortController()
+    const env = configDir({ server: hub.url, token: "mt", machineID: "m1" }, { workspaceRoots: [tmpdir()], openshell: { enabled: false } })
+    const done = runNode({ env, home: "/nowhere", log: () => {}, signal: controller.signal, openshellBinary: fake.binary })
+    await until(() => hub.hellos.length > 0)
+    expect(hub.hellos[0]!.features).toBeUndefined()
+    expect(hub.hellos[0]!.runtimes).toEqual([{ kind: "host", harnesses: ["opencode"] }])
+    expect(fake.calls()).toEqual([])
+    controller.abort()
+    expect(await done).toBe(0)
+  })
+
+  test("enabled but the openshell CLI is unusable: logs why and runs host only", async () => {
+    const hub = fakeHub()
+    const controller = new AbortController()
+    const lines: string[] = []
+    const env = configDir({ server: hub.url, token: "mt", machineID: "m1" }, { workspaceRoots: [tmpdir()], openshell: { enabled: true } })
+    const done = runNode({ env, home: "/nowhere", log: (l) => lines.push(l), signal: controller.signal, openshellBinary: "/nonexistent/openshell" })
+    await until(() => hub.hellos.length > 0)
+    expect(hub.hellos[0]!.runtimes).toEqual([{ kind: "host", harnesses: ["opencode"] }])
+    expect(hub.hellos[0]!.features).toBeUndefined()
+    expect(lines.join("\n")).toMatch(/openshell.*(not available|unusable|cannot)/i)
     controller.abort()
     expect(await done).toBe(0)
   })
