@@ -179,6 +179,10 @@ describe("route table", () => {
       "GET /api/agent/launches",
       "GET /api/agent/launches/:id",
       "DELETE /api/agent/launches/:id",
+      "POST /api/agent/webhooks",
+      "GET /api/agent/webhooks",
+      "GET /api/agent/webhooks/:id",
+      "DELETE /api/agent/webhooks/:id",
     ]) {
       expect(keys).toContain(required)
     }
@@ -894,5 +898,24 @@ describe("admin API", () => {
   test("/api/me has the contract shape", async () => {
     const me = await json(await as(bob, "/api/me"))
     expect(me).toMatchObject({ device: { id: expect.any(String), name: expect.any(String) }, user: { id: bob.id, email: "bob@example.com", role: "user" }, auth: "oidc" })
+  })
+})
+
+describe("bob cannot reach alice's webhooks", () => {
+  test("GET and DELETE of alice's webhook are not_found for bob and the admin, like an unknown id; their lists are empty", async () => {
+    const created = await as(alice, "/api/agent/webhooks", { method: "POST", json: { url: "https://hooks.example.com/alice" } })
+    expect(created.status).toBe(201)
+    const id = (await json(created)).webhook.id
+    for (const who of [bob, admin]) {
+      for (const target of [id, "wh_0000000000000000"]) {
+        for (const method of ["GET", "DELETE"]) {
+          const res = await as(who, `/api/agent/webhooks/${target}`, { method })
+          expect({ method, target, status: res.status }).toEqual({ method, target, status: 404 })
+          expect((await json(res)).error.code).toBe("not_found")
+        }
+      }
+      expect((await json(await as(who, "/api/agent/webhooks"))).webhooks).toEqual([])
+    }
+    expect((await json(await as(alice, "/api/agent/webhooks"))).webhooks.map((w: any) => w.id)).toEqual([id])
   })
 })
