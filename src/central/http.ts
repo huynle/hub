@@ -861,6 +861,14 @@ export function startCentral(options: CentralOptions): Central {
         throw cause
       }
     }),
+    // Agent messages the session sent or received (newest first), merged into the timeline by `at` (+ watch events).
+    route("GET", "/api/sessions/:session/messages", "session", async ({ params, url, user }) => {
+      const raw = url.searchParams.get("limit")
+      const limit = raw === null ? undefined : Number(raw)
+      if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 200)) return error(400, "limit must be 1–200")
+      const messages = await delivery.messages.list(user.id, { kind: "session", sessionID: params.session! }, limit === undefined ? {} : { limit })
+      return Response.json({ messages }, { headers: NO_STORE })
+    }),
     route("GET", "/api/sessions/:session/timeline/messages/:message/parts/:part", "session", async ({ params }) =>
       Response.json(await spokes.request(ownerOf(params.session!), { op: "timelinePart", sessionID: params.session!, messageID: params.message!, partID: params.part! }), { headers: NO_STORE })),
     route("GET", "/api/sessions/:session/timeline/messages/:message/files/:index", "session", ({ params }) => timelineFile(params.session!, params.message!, params.index!)),

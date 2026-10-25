@@ -331,6 +331,20 @@ describe("GET /api/agent/watch: message events", () => {
   })
 })
 
+describe("GET /api/sessions/:session/messages (console)", () => {
+  test("what the session sent and received, newest first, with a limit", async () => {
+    await start()
+    const out = await json(await as("ses_1", "/api/agent/msg", { to: "@web-work", text: "out" }))
+    const back = await json(await as("ses_2", "/api/agent/msg", { to: "@api-refactor", text: "back" }))
+    await as("ses_3", "/api/agent/msg", { to: "@web-work", text: "not ses_1's" })
+    const res = await h.api("/api/sessions/ses_1/messages")
+    expect(res.status).toBe(200)
+    expect((await json(res)).messages.map((m: any) => m.id)).toEqual([back.message.id, out.message.id])
+    expect((await json(await h.api("/api/sessions/ses_1/messages?limit=1"))).messages.map((m: any) => m.id)).toEqual([back.message.id])
+    for (const limit of ["0", "201", "x"]) expect((await h.api(`/api/sessions/ses_1/messages?limit=${limit}`)).status).toBe(400)
+  })
+})
+
 describe("the per-user messaging switch", () => {
   test("off: every send, reply and decline is paused; reading still works; only the user flips it", async () => {
     await start()
