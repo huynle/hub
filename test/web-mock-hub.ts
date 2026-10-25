@@ -66,6 +66,13 @@
 // {option?, text?} (409 gone unless open; emits SSE {type:"decision"}). Control: POST /mock/decision {id?, silent?,
 // …fields} opens or patches one (defaults: from @mock about ses_mock, options Proceed / Hold (safe), Hold
 // recommended) and emits it as an SSE 'decision' unless `silent` (e.g. answered elsewhere, for the 409 path).
+// Agents (P3-T12, /api/agent/*, one set for every user): GET/POST /api/agent/grants, PUT/DELETE …/:id (the hub's
+// {error: {code, message}} envelope: 400 invalid for a bad holder/project/verb/expiry/cap, 404 for holder @ghost,
+// 400 when an edit changes the holder, 410 gone for an ended grant); GET/PUT /api/agent/acting {enabled, hubEnabled};
+// admin GET/PUT /api/admin/agents/acting {enabled}; GET /api/agent/audit?limit&before (newest first, `next`).
+// Control: POST /mock/agent-entry {…entry fields} records an audit entry (seq, at filled in; default @orchestrator
+// approved per_1 in ses_mock under g_mock) and emits it as SSE {type:"agent", entry}; POST /mock/agent-entries
+// {count} records that many filler entries (paging); GET /mock/log lists `grants` and `agentAudit`.
 // MOCK_WEB_DIST serves another built console instead of web/dist (to measure an older build).
 import { existsSync, readFileSync, statSync } from "node:fs"
 import path from "node:path"
@@ -841,6 +848,68 @@ let order = { messages: ORDER_LIVE[0] as number, run: 0 }
 
 // ---------- decisions (hub ask @me) ----------
 let mockDecisions: Array<Record<string, any>> = []
+
+// ---------- agents (grants, switches, the agent audit) ----------
+type MockGrant = Record<string, any> & { id: string; holder: string; created: number; expiresAt: number; revokedAt?: number }
+let grants: MockGrant[] = []
+let grantSeq = 0
+let actingPaused = false
+let hubActingPaused = false
+let agentAudit: Array<Record<string, any>> = []
+const agentError = (status: number, code: string, message: string) => Response.json({ error: { code, message } }, { status })
+const grantState = (g: MockGrant) => (g.revokedAt !== undefined ? "revoked" : Date.now() >= g.expiresAt ? "expired" : "active")
+const grantView = (g: MockGrant) => ({ ...g, state: grantState(g) })
+const DURATION_MS: Record<string, number> = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }
+const VERBS = ["approve", "deny", "answer", "prompt", "stop", "roles"]
+/** The hub's grant validation, roughly (src/central/agent/policy.ts validateGrant): a Response when invalid. */
+function grantSpec(body: Record<string, any>): Response | Record<string, any> {
+  const holder = body.holder
+  if (typeof holder !== "string" || !/^(@@(orchestrator|concierge)[\w.-]*|@[a-z0-9][\w-]*|ses_\w+|app:[0-9a-f]{16})$/.test(holder)) {
+    return agentError(400, "invalid", "holder is @@role, @name, ses_… or app:<token id>")
+  }
+  if (holder === "@ghost") return agentError(404, "not_found", "No session named @ghost")
+  const projects = body.scope?.projects
+  if (!Array.isArray(projects) || !projects.length) return agentError(400, "invalid", "scope.projects lists 1–20 project directories")
+  const bad = projects.find((x: unknown) => typeof x !== "string" || !x.startsWith("/"))
+  if (bad !== undefined) return agentError(400, "invalid", `scope.projects: ${bad} is not an absolute project directory`)
+  if (!Array.isArray(body.allow) || !body.allow.length) return agentError(400, "invalid", `allow lists the verbs: ${VERBS.join(", ")}`)
+  const verb = body.allow.find((v: unknown) => !VERBS.includes(v as string))
+  if (verb !== undefined) return agentError(400, "invalid", `allow: unknown verb ${verb}`)
+  const never = body.permissions?.never ?? []
+  const nonsense = never.find((x: string) => /\s$|^\s|^:/.test(x))
+  if (nonsense !== undefined) return agentError(400, "invalid", `permissions.never: ${nonsense} is not an action[:glob] pattern`)
+  const match = /^(\d+)(s|m|h|d)?$/.exec(String(body.expires ?? "8h"))
+  const ms = match ? Number(match[1]) * DURATION_MS[match[2] ?? "s"]! : NaN
+  if (!(ms >= 60_000 && ms <= 30 * 86_400_000)) return agentError(400, "invalid", "expires is 1 minute to 30 days (seconds, or 30m, 8h, 2d)")
+  const cap = body.maxActionsPerHour ?? 60
+  if (!Number.isInteger(cap) || cap < 1 || cap > 1000) return agentError(400, "invalid", "maxActionsPerHour is a whole number 1–1000")
+  return {
+    holder,
+    scope: { projects: [...projects] },
+    allow: [...body.allow],
+    permissions: { allow: [...(body.permissions?.allow ?? [])], never: [...never] },
+    allowAlways: body.allowAlways === true,
+    maxActionsPerHour: cap,
+    expiresAt: Date.now() + ms,
+  }
+}
+function recordAgent(patch: Record<string, any>): Record<string, any> {
+  const seq = (agentAudit[agentAudit.length - 1]?.seq ?? 0) + 1
+  const entry = {
+    seq,
+    at: Date.now(),
+    actor: { kind: "session", sessionID: "ses_orch", name: "orchestrator" },
+    verb: "approve",
+    target: { sessionID: SESSION, requestID: "per_1" },
+    grant: "g_mock",
+    decision: "allow",
+    outcome: "ok",
+    ...patch,
+  }
+  for (const key of Object.keys(entry)) if ((entry as Record<string, unknown>)[key] === null) delete (entry as Record<string, unknown>)[key]
+  agentAudit.push(entry)
+  return entry
+}
 let decisionSeq = 0
 function mockDecision(body: Record<string, any>): Record<string, any> {
   const { silent: _silent, ...patch } = body
@@ -1231,7 +1300,17 @@ const server = Bun.serve({
       emitCatalog()
       return Response.json({ mode: authMode, as: loginAs })
     }
-    if (p === "/mock/log") return Response.json({ log, textEnded, transcripts, conversation, pushPrefs, quietHours, activityMinutes, pushEndpoints, mutedSessions, pushTests, pushTestKinds, speech, keys, users, audit, enrollments, userSpeech: Object.fromEntries(userSpeech), viewPrefs: Object.fromEntries(viewPrefs), herdr })
+    if (p === "/mock/agent-entry" && m === "POST") {
+      const entry = recordAgent(await json())
+      emit({ type: "agent", entry })
+      return Response.json({ entry })
+    }
+    if (p === "/mock/agent-entries" && m === "POST") {
+      const { count = 0 } = await json()
+      for (let i = 0; i < count; i++) recordAgent({ verb: "stop", target: { sessionID: SESSION }, grant: null, actor: { kind: "app", tokenID: "0123456789abcdef", label: `filler ${i + 1}` } })
+      return Response.json({ entries: agentAudit.length })
+    }
+    if (p === "/mock/log") return Response.json({ grants, agentAudit, log, textEnded, transcripts, conversation, pushPrefs, quietHours, activityMinutes, pushEndpoints, mutedSessions, pushTests, pushTestKinds, speech, keys, users, audit, enrollments, userSpeech: Object.fromEntries(userSpeech), viewPrefs: Object.fromEntries(viewPrefs), herdr })
     if (p === "/mock/reset" && m === "POST") {
       scenarioRun++
       big = { on: false, messages: 900, delayMs: 0, failOlder: false, rows: [] }
@@ -1258,6 +1337,10 @@ const server = Bun.serve({
       enrollments = seedEnrollments()
       userSpeech = new Map()
       mockDecisions = []
+      grants = []
+      actingPaused = false
+      hubActingPaused = false
+      agentAudit = []
       speech = seedSpeech()
       keys = { stt: "sk-or-v1-mock-stt-1234", tts: undefined }
       pushPrefs = { ...DEFAULT_PUSH_PREFS, say: false }
@@ -1352,6 +1435,53 @@ const server = Bun.serve({
         return Response.json({ decision })
       }
     }
+    // ---------- agents ----------
+    if (p === "/api/agent/grants" && m === "GET") return Response.json({ grants: [...grants].sort((a, b) => b.created - a.created).map(grantView) })
+    if (p === "/api/agent/grants" && m === "POST") {
+      const body = await json()
+      last().body = body
+      const spec = grantSpec(body)
+      if (spec instanceof Response) return spec
+      const grant = { id: `g_${String(++grantSeq).padStart(16, "0")}`, ...spec, ...(spec.holder.startsWith("@") && !spec.holder.startsWith("@@") ? { holderSessionID: SESSION } : {}), created: Date.now() } as MockGrant
+      grants.push(grant)
+      return Response.json({ grant: grantView(grant) }, { status: 201 })
+    }
+    if ((match0 = /^\/api\/agent\/grants\/([^/]+)$/.exec(p))) {
+      const grant = grants.find((g) => g.id === decodeURIComponent(match0![1]!))
+      if (!grant) return agentError(404, "not_found", "No such grant")
+      if (m === "GET") return Response.json({ grant: grantView(grant) })
+      if (m === "PUT" || m === "DELETE") {
+        const body = m === "PUT" ? await json() : {}
+        if (m === "PUT") last().body = body
+        if (grantState(grant) !== "active") return agentError(410, "gone", `The grant is ${grantState(grant)}`)
+        if (m === "DELETE") {
+          grant.revokedAt = Date.now()
+          return Response.json({ grant: grantView(grant) })
+        }
+        const spec = grantSpec(body)
+        if (spec instanceof Response) return spec
+        if (spec.holder !== grant.holder) return agentError(400, "invalid", "A grant's holder cannot change: revoke it and create another")
+        Object.assign(grant, spec, { updated: Date.now() })
+        return Response.json({ grant: grantView(grant) })
+      }
+    }
+    if (p === "/api/agent/acting") {
+      if (m === "PUT") {
+        const body = await json()
+        last().body = body
+        if (typeof body.enabled !== "boolean") return agentError(400, "invalid", "enabled must be true or false")
+        actingPaused = !body.enabled
+        recordAgent({ actor: { kind: "user" }, verb: body.enabled ? "acting.resume" : "acting.pause", target: {}, grant: null })
+      }
+      return Response.json({ enabled: !actingPaused, hubEnabled: !hubActingPaused })
+    }
+    if (p === "/api/agent/audit" && m === "GET") {
+      const limit = Number(url.searchParams.get("limit") ?? 100)
+      const before = url.searchParams.has("before") ? Number(url.searchParams.get("before")) : Infinity
+      const older = [...agentAudit].reverse().filter((e) => e.seq < before)
+      const entries = older.slice(0, limit)
+      return Response.json({ entries, ...(older.length > limit ? { next: entries[entries.length - 1]!.seq } : {}) })
+    }
     if (p === "/api/enrollments") return admin ? Response.json({ enrollments }) : forbidden()
     if ((match0 = /^\/api\/enrollments\/([^/]+)\/(approve|deny)$/.exec(p)) && m === "POST") {
       const code = decodeURIComponent(match0[1]!).toUpperCase()
@@ -1411,6 +1541,16 @@ const server = Bun.serve({
       return new Response(null, { status: 204 })
     }
     if (p === "/api/admin/audit" && m === "GET") return Response.json([...audit].reverse().slice(0, 200))
+    if (p === "/api/admin/agents/acting") {
+      if (m === "PUT") {
+        const body = await json()
+        last().body = body
+        if (typeof body.enabled !== "boolean") return Response.json({ error: "enabled must be true or false" }, { status: 400 })
+        hubActingPaused = !body.enabled
+        record(user.id, body.enabled ? "agents.acting.resume" : "agents.acting.pause")
+      }
+      return Response.json({ enabled: !hubActingPaused })
+    }
     if ((match0 = /^\/api\/machines\/([^/]+)$/.exec(p)) && m === "DELETE") {
       const id = decodeURIComponent(match0[1]!)
       if (!extraMachines.some((x) => x.id === id && x.ownerID === user.id)) return notFound()

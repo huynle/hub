@@ -2028,6 +2028,150 @@ async function decisionCards(browser: Browser): Promise<void> {
   await context.close()
 }
 
+/** Settings → Agents (grants CRUD, switches, Activity) and agents in the session view (recommendation, who answered, escalations). */
+async function agentsConsole(browser: Browser): Promise<void> {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+  const page = await context.newPage()
+  current = page
+  const errors: string[] = []
+  page.on("pageerror", (e) => errors.push(e.message))
+  const toast = (text: string | RegExp) => page.locator(".toast").filter({ hasText: text })
+  const apiLog = async () => ((await (await fetch(`${BASE}/mock/log`)).json()) as { log: Array<{ method: string; path: string; body?: any }> }).log
+  const calls = async (method: string, path: RegExp) => (await apiLog()).filter((e) => e.method === method && path.test(e.path))
+  const row = () => page.locator(".grant-row", { hasText: "@@orchestrator" })
+
+  await check("agents: create a grant (form errors, the hub's validation at its field), then its row: state, projects, verbs, never, countdown", async () => {
+    await page.goto(`${BASE}/settings#agents`)
+    await page.getByRole("heading", { name: "Agents" }).waitFor()
+    await page.getByText("No grants.").waitFor()
+    await page.getByRole("button", { name: "New grant" }).click()
+    const dialog = page.getByRole("dialog", { name: "New grant" })
+    await dialog.waitFor()
+    await dialog.getByRole("button", { name: "Create grant" }).click()
+    for (const field of ["holder", "projects", "allow"]) await dialog.locator(`[data-error="${field}"]`).waitFor()
+    assert(!(await calls("POST", /^\/api\/agent\/grants$/)).length, "nothing posted while the form is incomplete")
+    await dialog.getByRole("textbox", { name: "Holder" }).fill("@@nobody")
+    await dialog.getByRole("textbox", { name: "Projects" }).fill("/home/user/projects/webshop")
+    await dialog.getByRole("checkbox", { name: "approve" }).check()
+    await dialog.getByRole("checkbox", { name: "deny" }).check()
+    await dialog.getByRole("textbox", { name: "Never" }).fill("shell:rm *")
+    await dialog.getByRole("button", { name: "Create grant" }).click()
+    const holderError = dialog.locator('[data-error="holder"]')
+    await holderError.filter({ hasText: "holder is @@role" }).waitFor()
+    await dialog.getByRole("textbox", { name: "Holder" }).fill("@@orchestrator")
+    await dialog.getByRole("button", { name: "Create grant" }).click()
+    await toast("Grant created").waitFor()
+    await dialog.waitFor({ state: "detached" })
+    const text = (await row().textContent()) ?? ""
+    for (const part of ["@@orchestrator", "Active", "/home/user/projects/webshop", "approve, deny", "shell:rm *", "60 actions an hour"]) assert(text.includes(part), `row shows ${part}: ${text}`)
+    assert(/Expires in (7h 59m|8h 0m)/.test(text), `countdown: ${text}`)
+    const sent = (await calls("POST", /^\/api\/agent\/grants$/)).at(-1)?.body
+    assert(sent?.holder === "@@orchestrator" && sent.scope?.projects?.[0] === "/home/user/projects/webshop" && sent.allow?.join() === "approve,deny" && sent.permissions?.never?.[0] === "shell:rm *" && sent.expires === "8h", `body: ${JSON.stringify(sent)}`)
+    await shot(page, "agents-grants")
+  })
+
+  await check("agents: edit a grant (holder fixed, verbs and expiry change), then revoke it", async () => {
+    await row().getByRole("button", { name: "Edit grant of @@orchestrator" }).click()
+    const dialog = page.getByRole("dialog", { name: "Edit grant of @@orchestrator" })
+    await dialog.waitFor()
+    assert(await dialog.getByRole("textbox", { name: "Holder" }).isDisabled(), "the holder cannot change")
+    assert((await dialog.getByRole("textbox", { name: "Projects" }).inputValue()) === "/home/user/projects/webshop", "prefilled projects")
+    await dialog.getByRole("checkbox", { name: "stop" }).check()
+    await dialog.getByRole("textbox", { name: "Expires after" }).fill("2h")
+    await dialog.getByRole("button", { name: "Save" }).click()
+    await toast("Grant updated").waitFor()
+    await dialog.waitFor({ state: "detached" })
+    await row().filter({ hasText: "approve, deny, stop" }).waitFor()
+    assert(/Expires in (1h 59m|2h 0m)/.test((await row().textContent()) ?? ""), `the countdown restarted: ${await row().textContent()}`)
+    assert((await calls("PUT", /^\/api\/agent\/grants\/g_/)).at(-1)?.body?.allow?.join() === "approve,deny,stop", "PUT sent")
+    page.once("dialog", (d) => void d.accept())
+    await row().getByRole("button", { name: "Revoke grant of @@orchestrator" }).click()
+    await toast("Grant of @@orchestrator revoked").waitFor()
+    await row().filter({ hasText: "Revoked" }).waitFor()
+    assert(!(await row().getByRole("button", { name: /Edit grant/ }).count()), "a revoked grant cannot be edited")
+    assert((await calls("DELETE", /^\/api\/agent\/grants\/g_/)).length === 1, "DELETE sent")
+  })
+
+  await check("agents: my acting switch and the admin's hub switch save and say what they mean", async () => {
+    const mine = page.locator("input[data-acting]")
+    const hubWide = page.locator("input[data-hub-acting]")
+    await hubWide.waitFor()
+    assert((await mine.isChecked()) && (await hubWide.isChecked()), "both on")
+    await mine.uncheck()
+    await page.locator("[data-acting-note]").filter({ hasText: "cannot act for you" }).waitFor()
+    assert((await calls("PUT", /^\/api\/agent\/acting$/)).at(-1)?.body?.enabled === false, "PUT acting off")
+    await mine.check()
+    await page.locator("[data-acting-note]").waitFor({ state: "detached" })
+    page.once("dialog", (d) => void d.accept())
+    await hubWide.uncheck()
+    await page.locator("[data-acting-note]").filter({ hasText: "admin" }).waitFor()
+    assert((await calls("PUT", /^\/api\/admin\/agents\/acting$/)).at(-1)?.body?.enabled === false, "PUT hub acting off")
+    await hubWide.check()
+    await page.locator("[data-acting-note]").waitFor({ state: "detached" })
+  })
+
+  await check("agents: Activity lists the agent audit newest first, Load older pages, a live entry comes on top", async () => {
+    await mock("/mock/agent-entries", { count: 60 })
+    await page.getByRole("button", { name: "Activity", exact: true }).click()
+    const rows = page.locator(".agent-audit .audit-row")
+    await rows.nth(49).waitFor()
+    assert((await rows.count()) === 50, `first page: ${await rows.count()}`)
+    await page.getByRole("button", { name: "Load older" }).click()
+    // 60 fillers and the two switch changes above (acting off, on).
+    await rows.nth(61).waitFor()
+    assert(!(await page.getByRole("button", { name: "Load older" }).count()), "no more pages")
+    assert(((await rows.last().textContent()) ?? "").includes("you turned agent actions off"), `oldest: ${await rows.last().textContent()}`)
+    await mock("/mock/agent-entry", {})
+    await rows.first().filter({ hasText: "@orchestrator approve per_1 in ses_mock" }).waitFor()
+    assert(((await rows.first().textContent()) ?? "").includes("grant g_mock"), "names the grant")
+    await shot(page, "agents-activity")
+  })
+
+  await check("agents: a permission blocker shows the agent's recommendation; once an agent answers it, who and under which grant", async () => {
+    const blocker = { kind: "permission", id: "per_rec", summary: "shell: bun test", recommendation: { by: "@orchestrator", recommends: "approve", why: "only runs tests", decisionID: "dec_mock1" } }
+    await page.goto(`${BASE}/s/ses_mock`)
+    await page.locator(".msg.user .pill").first().waitFor()
+    await mock("/mock/status", { sessions: [{ id: "ses_mock", title: "Mock session", state: "blocked", blockers: [blocker] }] })
+    const card = page.getByRole("group", { name: "Permission request: shell: bun test" })
+    await card.locator("[data-recommendation]").filter({ hasText: "@orchestrator recommends Approve: only runs tests" }).waitFor()
+    await mock("/mock/agent-entry", { target: { sessionID: "ses_mock", requestID: "per_rec" }, grant: "g_0000000000000001" })
+    await card.locator("[data-answered-by]").filter({ hasText: "Approved by @orchestrator · grant g_0000000000000001" }).waitFor()
+    await mock("/mock/status", { sessions: [{ id: "ses_mock", title: "Mock session", state: "idle", blockers: [] }] })
+    await card.waitFor({ state: "detached" })
+    await page.locator('[data-answered-by="per_rec"]').filter({ hasText: "Approved by @orchestrator · grant g_0000000000000001" }).waitFor()
+    await shot(page, "agents-answered")
+  })
+
+  await check("agents: an escalation Decision shows its requester, action and resources; closed, its card goes", async () => {
+    const opened = (await (
+      await mock("/mock/decision", {
+        from: { kind: "session", sessionID: "ses_orch", name: "orchestrator" },
+        question: "@orchestrator asks to approve shell: bun test, bun run lint. Outside its grant: shell:bun run lint is not in its permissions",
+        options: [
+          { id: "approve", label: "Approve once" },
+          { id: "deny", label: "Deny", safe: true },
+        ],
+        recommendation: { option: "approve", why: "lint is harmless" },
+        urgency: "high",
+        action: { kind: "permission", requestID: "per_esc", sessionID: "ses_mock", rootID: "ses_mock" },
+      })
+    ).json()) as { decision: { id: string } }
+    const card = page.locator(`[data-decision="${opened.decision.id}"]`)
+    const details = card.locator("[data-escalation]")
+    await details.waitFor()
+    const text = (await details.textContent()) ?? ""
+    for (const part of ["Requested by", "@orchestrator", "Action", "shell", "Resources", "bun test", "bun run lint", "Outside its grant", "not in its permissions"]) assert(text.includes(part), `escalation shows ${part}: ${text}`)
+    assert(((await card.textContent()) ?? "").includes("Agent request"), "marked as an agent request")
+    await details.scrollIntoViewIfNeeded()
+    await shot(page, "agents-escalation")
+    await mock("/mock/decision", { id: opened.decision.id, state: "closed", closed: { at: Date.now(), reason: "The request was answered elsewhere or ended" } })
+    await card.waitFor({ state: "detached" })
+  })
+
+  await check("agents: no page errors", async () => assert(!errors.length, errors.join("; ")))
+  await context.close()
+}
+
 mkdirSync(SHOTS, { recursive: true })
 if (!existsSync(path.join(ROOT, "web", "dist", "index.html"))) {
   console.error("web/dist is missing: run `npm run build:web` first")
@@ -2051,6 +2195,8 @@ try {
   await desktop(browser)
   await mock("/mock/reset")
   await decisionCards(browser)
+  await mock("/mock/reset")
+  await agentsConsole(browser)
   await mock("/mock/reset")
   await phone(browser)
   await mock("/mock/reset")
