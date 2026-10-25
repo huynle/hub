@@ -267,3 +267,22 @@ describe("agents.launches (per-user launch caps, design §6.2, §7)", () => {
     expect(warnings).toEqual([expect.stringContaining('unknown key "agents.launches.burst"')])
   })
 })
+
+describe("agents.webhooks (P4-T10, decision znbg8xa5 #8)", () => {
+  test("hub.json agents.webhooks.allowPrivate: true opts in to private targets; centralConfig carries it only when true", () => {
+    const { file: hub, warnings } = readHubFile(file({ agents: { webhooks: { allowPrivate: true } } }))
+    expect(warnings).toEqual([])
+    expect(hub).toEqual({ agents: { webhooks: { allowPrivate: true } } })
+    expect(centralConfig({}, HOME, hub).webhooksAllowPrivate).toBe(true)
+    expect(centralConfig({}, HOME, readHubFile(file({ agents: { webhooks: { allowPrivate: false } } })).file).webhooksAllowPrivate).toBeUndefined()
+    expect(centralConfig({}, HOME).webhooksAllowPrivate).toBeUndefined()
+  })
+
+  test("invalid agents.webhooks values fail; unknown keys warn", () => {
+    expect(() => readHubFile(file({ agents: { webhooks: true } }))).toThrow(/agents\.webhooks must be an object/)
+    expect(() => readHubFile(file({ agents: { webhooks: { allowPrivate: "yes" } } }))).toThrow(/agents\.webhooks\.allowPrivate must be true or false/)
+    const { file: hub, warnings } = readHubFile(file({ agents: { webhooks: { allowPrivate: true, retries: 3 } } }))
+    expect(hub).toEqual({ agents: { webhooks: { allowPrivate: true } } })
+    expect(warnings).toEqual([expect.stringContaining('unknown key "agents.webhooks.retries"')])
+  })
+})

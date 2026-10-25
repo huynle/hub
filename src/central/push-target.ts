@@ -1,7 +1,10 @@
-// Push endpoints come from browsers, and the hub POSTs to them: without checks a subscription could make the
-// hub send requests into its own network (SSRF). An endpoint must be https on a public hostname; hosts are
-// resolved at subscribe time and rejected when any address is loopback, private, link-local, CGNAT, ULA,
-// unspecified or multicast. Real push services (FCM, Mozilla, Apple, WNS) are public names on public addresses.
+// URLs users give the hub (push endpoints from browsers, webhook URLs from apps) are URLs the hub POSTs to: without
+// checks a subscription could make the hub send requests into its own network (SSRF). publicURLProblem: https on a
+// public hostname whose every resolved address is public (not loopback, private, link-local, CGNAT, ULA,
+// unspecified or multicast); an admin opt-in (allowPrivate, webhooks only) admits http and private targets.
+// Push checks endpoints at subscribe time (real push services are public names on public addresses); webhooks
+// send through publicFetch, which re-checks (and re-resolves) right before every request, never follows a
+// redirect, times out and reads a bounded body.
 import { lookup } from "node:dns/promises"
 import { isIPv4, isIPv6 } from "node:net"
 
@@ -10,7 +13,7 @@ export type ResolveHost = (host: string) => Promise<readonly string[]>
 /** Every address the system resolver returns for a host. */
 export const resolveHost: ResolveHost = async (host) => (await lookup(host, { all: true, verbatim: true })).map((a) => a.address)
 
-/** IPv4 [network, prefix length] blocks that never reach a public push service. */
+/** IPv4 [network, prefix length] blocks that are never a public service. */
 const V4_BLOCKED: ReadonlyArray<readonly [string, number]> = [
   ["0.0.0.0", 8], // "this network", unspecified
   ["10.0.0.0", 8], // private
@@ -47,7 +50,7 @@ function v6Groups(ip: string): number[] {
   return [...left, ...fill, ...right].map((g) => parseInt(g, 16))
 }
 
-/** True for addresses a push endpoint must not resolve to. Anything that is not an IP counts as private. */
+/** True for addresses a public URL must not resolve to. Anything that is not an IP counts as private. */
 export function isPrivateAddress(address: string): boolean {
   const ip = address.trim().replace(/^\[(.*)\]$/, "$1")
   if (isIPv4(ip)) return privateV4(ip)
@@ -70,28 +73,125 @@ export function isPrivateAddress(address: string): boolean {
 
 const LOCAL_SUFFIXES = [".localhost", ".local", ".internal", ".localdomain", ".home.arpa", ".lan"]
 
-/** Why an endpoint is not acceptable for Web Push, or undefined when it is. */
-export async function pushEndpointProblem(endpoint: string, resolve: ResolveHost): Promise<string | undefined> {
+export interface PublicURLOptions {
+  readonly resolve: ResolveHost
+  /** How problems name the URL (default "URL"). */
+  readonly label?: string
+  /**
+   * The admin opt-in for private targets (hub.json agents.webhooks.allowPrivate): http, loopback, private
+   * addresses and local names pass without a lookup. Other schemes and credentials still fail.
+   */
+  readonly allowPrivate?: boolean
+}
+
+/** Why the hub must not send to a URL (SSRF), or undefined when it may. */
+export async function publicURLProblem(raw: string, options: PublicURLOptions): Promise<string | undefined> {
+  const label = options.label ?? "URL"
   let url: URL
   try {
-    url = new URL(endpoint)
+    url = new URL(raw)
   } catch {
-    return "Push endpoint is not a URL"
+    return `${label} is not a URL`
   }
-  if (url.protocol !== "https:") return "Push endpoint must be https"
-  if (url.username || url.password) return "Push endpoint must not carry credentials"
+  if (options.allowPrivate) {
+    if (url.protocol !== "https:" && url.protocol !== "http:") return `${label} must be http or https`
+  } else if (url.protocol !== "https:") return `${label} must be https`
+  if (url.username || url.password) return `${label} must not carry credentials`
+  if (options.allowPrivate) return undefined
   const host = url.hostname.toLowerCase().replace(/^\[(.*)\]$/, "$1").replace(/\.$/, "")
-  if (isIPv4(host) || isIPv6(host)) return isPrivateAddress(host) ? "Push endpoint is a private or local address" : undefined
+  if (isIPv4(host) || isIPv6(host)) return isPrivateAddress(host) ? `${label} is a private or local address` : undefined
   if (host === "localhost" || !host.includes(".") || LOCAL_SUFFIXES.some((suffix) => host.endsWith(suffix))) {
-    return "Push endpoint is a local hostname"
+    return `${label} is a local hostname`
   }
   let addresses: readonly string[]
   try {
-    addresses = await resolve(host)
+    addresses = await options.resolve(host)
   } catch {
-    return `Push endpoint host ${host} does not resolve`
+    return `${label} host ${host} does not resolve`
   }
-  if (addresses.length === 0) return `Push endpoint host ${host} does not resolve`
-  if (addresses.some(isPrivateAddress)) return "Push endpoint resolves to a private or local address"
+  if (addresses.length === 0) return `${label} host ${host} does not resolve`
+  if (addresses.some(isPrivateAddress)) return `${label} resolves to a private or local address`
   return undefined
+}
+
+/** Why an endpoint is not acceptable for Web Push, or undefined when it is. */
+export async function pushEndpointProblem(endpoint: string, resolve: ResolveHost): Promise<string | undefined> {
+  return publicURLProblem(endpoint, { resolve, label: "Push endpoint" })
+}
+
+/** The URL failed publicURLProblem at send time; nothing was sent. */
+export class PublicURLError extends Error {
+  constructor(readonly problem: string) {
+    super(problem)
+    this.name = "PublicURLError"
+  }
+}
+
+export interface PublicFetchOptions extends PublicURLOptions {
+  /** For the whole exchange, body included. */
+  readonly timeoutMs: number
+  /** Bytes of the response body read at most; the rest is discarded. */
+  readonly maxBytes: number
+  readonly fetch?: typeof globalThis.fetch
+}
+
+export interface PublicFetchResult {
+  readonly status: number
+  /** The first maxBytes of the body (UTF-8, lossy). */
+  readonly body: string
+  readonly truncated: boolean
+}
+
+/**
+ * One request to a user-supplied URL: the URL is checked (and its host re-resolved) right before sending, so a
+ * name that changed to a private address since registration is refused; redirects are never followed (a 3xx is
+ * returned as is); the timeout covers the body; at most maxBytes of the body are read.
+ * A rebinding between this lookup and fetch's own remains possible; private targets need the admin opt-in.
+ */
+export async function publicFetch(
+  url: string,
+  init: { readonly method: string; readonly headers?: Record<string, string>; readonly body: string },
+  options: PublicFetchOptions,
+): Promise<PublicFetchResult> {
+  const problem = await publicURLProblem(url, options)
+  if (problem) throw new PublicURLError(problem)
+  const controller = new AbortController()
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, options.timeoutMs)
+  try {
+    const response = await (options.fetch ?? globalThis.fetch)(url, { ...init, redirect: "manual", signal: controller.signal })
+    const { body, truncated } = await readCapped(response, options.maxBytes)
+    return { status: response.status, body, truncated }
+  } catch (cause) {
+    if (timedOut) throw new Error(`timed out after ${options.timeoutMs} ms`)
+    throw cause
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function readCapped(response: Response, maxBytes: number): Promise<{ body: string; truncated: boolean }> {
+  if (!response.body) return { body: "", truncated: false }
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let size = 0
+  let truncated = false
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    const room = maxBytes - size
+    if (value.byteLength > room) {
+      chunks.push(value.subarray(0, room))
+      size = maxBytes
+      truncated = true
+      await reader.cancel().catch(() => {})
+      break
+    }
+    chunks.push(value)
+    size += value.byteLength
+  }
+  return { body: Buffer.concat(chunks).toString("utf8"), truncated }
 }
