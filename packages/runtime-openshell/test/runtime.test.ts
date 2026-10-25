@@ -9,7 +9,7 @@ import path from "node:path"
 import { RuntimeError } from "../../runtime-sdk/src/index.ts"
 import { OpenShellCli } from "../src/cli.ts"
 import { normalizeOpenShellProfiles, ProfileError } from "../src/profiles.ts"
-import { launchLabel, SANDBOX_WORKDIR, sandboxName } from "../src/runtime.ts"
+import { labelValue, SANDBOX_WORKDIR, sandboxName } from "../src/runtime.ts"
 import { base, fake, gitIn, inside, input, rejection, root, setup } from "./runtime-helpers.ts"
 
 // Every fake call starts a process: a whole launch takes a few seconds.
@@ -25,9 +25,9 @@ describe("names", () => {
   })
 
   test("launch labels keep a label-safe ID and hash any other", () => {
-    expect(launchLabel("01HXYZ-abc_1.2")).toBe("01HXYZ-abc_1.2")
-    expect(launchLabel("a/b:c")).toMatch(/^[0-9a-f]{20}$/)
-    expect(launchLabel("x".repeat(64))).toMatch(/^[0-9a-f]{20}$/)
+    expect(labelValue("01HXYZ-abc_1.2")).toBe("01HXYZ-abc_1.2")
+    expect(labelValue("a/b:c")).toMatch(/^[0-9a-f]{20}$/)
+    expect(labelValue("x".repeat(64))).toMatch(/^[0-9a-f]{20}$/)
   })
 })
 

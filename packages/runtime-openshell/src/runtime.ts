@@ -12,6 +12,11 @@
 //          script waits for before it runs the harness.
 // stop     writes .hub/stop holding the mode (graceful or kill) for the entry script; the sandbox keeps running,
 //          so collect can still read it.
+// collect  bundles the launch's branch inside (only the commits the host clone lacks), downloads and verifies the
+//          bundle and fast-forwards the host clone (never forced: a diverged branch fails collect); dirty means
+//          uncommitted work left in the sandbox. A gone sandbox leaves the host clone as the record.
+// cleanup  deletes the sandbox only when nothing would be lost (policy remove, no uncommitted work, every commit
+//          collected), else stops it and says why; the host clone goes through HostRuntime's rules.
 //
 // Names are deterministic (hub-<20 hex of sha256(launchID)>) and every op checks the sandbox's hub.launch label,
 // so a restarted node finds its own sandboxes again and never touches anyone else's.
@@ -19,7 +24,7 @@ import { createHash } from "node:crypto"
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { launchWorkspaceProblem, preparedWorkspaceProblem, type LaunchArtifacts, type NodeRuntimeInfo, type PreparedWorkspace } from "../../protocol/src/index.ts"
+import { launchWorkspaceProblem, preparedWorkspaceProblem, type CleanupPolicy, type LaunchArtifacts, type NodeRuntimeInfo, type PreparedWorkspace } from "../../protocol/src/index.ts"
 import {
   RuntimeError,
   type CleanupResult,
@@ -45,6 +50,9 @@ export const SANDBOX_WORKDIR = "/sandbox/work"
 /** Hub files inside the sandbox, relative to SANDBOX_HOME. */
 export const HUB_DIR = ".hub"
 export const SEED_BUNDLE = `${HUB_DIR}/seed.bundle`
+export const OUT_BUNDLE = `${HUB_DIR}/out.bundle`
+/** Where collected branches land in the host clone before the fast-forward. */
+const COLLECTED_REFS = "refs/hub/sandbox"
 /** The spoke's config inside: { server, launchToken, launchID, machineName, autoStartLocalHub: false }. */
 export const HUB_CONFIG_FILE = `${HUB_DIR}/config.json`
 /** node.json next to it: { workspaceRoots: [SANDBOX_WORKDIR] }. */
@@ -99,8 +107,14 @@ export function sandboxName(launchID: string): string {
 }
 
 /** A label value for an ID: the ID itself when it is a valid label value, else 20 hex of its sha256. */
-export function launchLabel(id: string): string {
+export function labelValue(id: string): string {
   return LABEL_VALUE.test(id) ? id : sha(id)
+}
+
+/** The host side of a sandboxed workspace: the clone at `repo`, as HostRuntime made it. */
+function hostWorkspace(ws: PreparedWorkspace): PreparedWorkspace {
+  const { runtime: _runtime, ...rest } = ws
+  return { ...rest, directory: ws.repo }
 }
 
 const cut = (s: string) => (s.length > REASON_MAX ? `${s.slice(0, REASON_MAX)}…` : s)
@@ -143,11 +157,11 @@ export class OpenShellRuntime implements Runtime {
     const policy = compilePolicy({ hubURL: this.options.hubURL, profile, ...(input.workspace.remote ? { gitRemote: input.workspace.remote } : {}) })
     const name = sandboxName(input.launchID)
 
-    let sandbox = await this.owned(name, input.launchID, ctx)
+    const existing = await this.owned(name, input.launchID, ctx)
     const host = await this.hostClone(input, ctx)
-    if (!sandbox) {
+    if (!existing) {
       ctx.progress?.(`creating sandbox ${name}`)
-      sandbox = await this.create(name, input.launchID, profile.image ?? this.options.image ?? DEFAULT_SANDBOX_IMAGE, policy.yaml, policy.providers, ctx)
+      await this.create(name, input.launchID, profile.image ?? this.options.image ?? DEFAULT_SANDBOX_IMAGE, policy.yaml, policy.providers, ctx)
     }
     await this.waitReady(name, ctx)
     await this.seed(name, host, ctx)
@@ -158,7 +172,7 @@ export class OpenShellRuntime implements Runtime {
   private async owned(name: string, launchID: string, ctx: RuntimeContext): Promise<Sandbox | undefined> {
     const sandbox = await this.call(() => this.client.get(name, this.signal(ctx)))
     if (!sandbox) return undefined
-    if (sandbox.labels["hub.launch"] !== launchLabel(launchID)) throw new RuntimeError(`sandbox ${name} belongs to another launch`)
+    if (sandbox.labels["hub.launch"] !== labelValue(launchID)) throw new RuntimeError(`sandbox ${name} belongs to another launch`)
     return sandbox
   }
 
@@ -174,9 +188,9 @@ export class OpenShellRuntime implements Runtime {
   }
 
   private async create(name: string, launchID: string, image: string, policyYAML: string, providers: readonly string[], ctx: RuntimeContext): Promise<Sandbox> {
-    const labels: Record<string, string> = { "hub.launch": launchLabel(launchID) }
-    if (this.options.machineID) labels["hub.machine"] = launchLabel(this.options.machineID)
-    if (this.options.owner) labels["hub.owner"] = launchLabel(this.options.owner)
+    const labels: Record<string, string> = { "hub.launch": labelValue(launchID) }
+    if (this.options.machineID) labels["hub.machine"] = labelValue(this.options.machineID)
+    if (this.options.owner) labels["hub.owner"] = labelValue(this.options.owner)
     return this.withTemp(async (dir) => {
       const policyFile = path.join(dir, "policy.yaml")
       writeFileSync(policyFile, policyYAML, { mode: 0o600 })
@@ -282,12 +296,102 @@ export class OpenShellRuntime implements Runtime {
 
   // ---------- collect / cleanup ----------
 
-  async collect(): Promise<LaunchArtifacts> {
-    throw new RuntimeError("not implemented")
+  async collect(handle: RunHandle, ctx: RuntimeContext = {}): Promise<LaunchArtifacts> {
+    const name = this.sandboxOf(handle)
+    const host = hostWorkspace(handle.workspace)
+    const sandbox = await this.owned(name, handle.launchID, ctx)
+    let dirty = false
+    if (sandbox?.phase === "Ready") {
+      dirty = await this.isDirtyInside(name, ctx)
+      await this.fetchBack(name, host, ctx)
+    }
+    const artifacts = await this.host.collect({ launchID: handle.launchID, workspace: host }, ctx)
+    return { ...artifacts, dirty: dirty || artifacts.dirty === true }
   }
 
-  async cleanup(): Promise<CleanupResult> {
-    throw new RuntimeError("not implemented")
+  /** Brings the sandbox's commits on the launch's branch into the host clone, fast-forward only. */
+  private async fetchBack(name: string, host: PreparedWorkspace, ctx: RuntimeContext): Promise<void> {
+    const ref = host.branch ? `refs/heads/${host.branch}` : "HEAD"
+    const insideHead = (await this.exec(name, ["git", "-C", "work", "rev-parse", "--verify", "--quiet", `${ref}^{commit}`], ctx)).stdout.trim()
+    if (!insideHead) throw new RuntimeError(`the sandbox has no ${host.branch ? `branch ${host.branch}` : "HEAD"}`)
+    const hostHead = (await this.git(host.directory, ["rev-parse", "--verify", `${ref}^{commit}`], ctx)).trim()
+    if (insideHead === hostHead) return
+    ctx.progress?.("collecting the sandbox's commits")
+    // Only what the host lacks: the host head is the bundle's prerequisite (when the sandbox has it).
+    const known = (await this.exec(name, ["git", "-C", "work", "cat-file", "-e", `${hostHead}^{commit}`], ctx)).exitCode === 0
+    await this.mustExec(name, ["git", "-C", "work", "bundle", "create", `../${OUT_BUNDLE}`, ref, ...(known ? [`^${hostHead}`] : [])], ctx)
+    const target = `${COLLECTED_REFS}/${host.branch ?? "HEAD"}`
+    await this.withTemp(async (dir) => {
+      await this.call(() => this.client.download(name, `${SANDBOX_HOME}/${OUT_BUNDLE}`, dir, this.signal(ctx)))
+      const bundle = path.join(dir, path.posix.basename(OUT_BUNDLE))
+      if (!existsSync(bundle)) throw new RuntimeError("the sandbox's bundle did not arrive")
+      await this.git(host.directory, ["bundle", "verify", "--quiet", bundle], ctx)
+      // A bundle is read through the file transport; only for this fetch, from the node's own temporary file.
+      await this.git(host.directory, ["fetch", "--quiet", "--no-tags", bundle, `+${ref}:${target}`], ctx, { GIT_ALLOW_PROTOCOL: "file" })
+    })
+    const fetched = (await this.git(host.directory, ["rev-parse", "--verify", `${target}^{commit}`], ctx)).trim()
+    if (fetched !== insideHead) throw new RuntimeError(`the collected bundle holds ${fetched}, not ${insideHead}`)
+    if ((await this.gitOutput(host.directory, ["merge-base", "--is-ancestor", hostHead, fetched], ctx)) === undefined)
+      throw new RuntimeError(`the sandbox's ${host.branch ?? "HEAD"} does not fast-forward the host clone (it diverged)`)
+    const current = (await this.gitOutput(host.directory, ["symbolic-ref", "--quiet", "HEAD"], ctx))?.trim()
+    if (current === ref || ref === "HEAD") await this.git(host.directory, ["merge", "--ff-only", "--quiet", fetched], ctx)
+    else await this.git(host.directory, ["update-ref", ref, fetched, hostHead], ctx)
+  }
+
+  async cleanup(handle: RunHandle, policy: CleanupPolicy, ctx: RuntimeContext = {}): Promise<CleanupResult> {
+    const name = this.sandboxOf(handle)
+    const host = hostWorkspace(handle.workspace)
+    const sandbox = await this.cleanupSandbox(name, handle.launchID, host, policy, ctx)
+    const clone = await this.host.cleanup({ launchID: handle.launchID, workspace: host }, policy, ctx)
+    const reasons = [sandbox.reason && `sandbox: ${sandbox.reason}`, clone.reason && `host clone: ${clone.reason}`].filter(Boolean)
+    return sandbox.removed && clone.removed ? { removed: true } : { removed: false, reason: cut(reasons.join("; ")) }
+  }
+
+  /** Deletes the sandbox when nothing would be lost; else stops it and says why. */
+  private async cleanupSandbox(name: string, launchID: string, host: PreparedWorkspace, policy: CleanupPolicy, ctx: RuntimeContext): Promise<CleanupResult> {
+    const sandbox = await this.owned(name, launchID, ctx)
+    if (!sandbox) return { removed: true }
+    let keep: string | undefined
+    if (policy === "keep") keep = "cleanup policy is keep"
+    else if (sandbox.phase === "Ready") keep = await this.unsaved(name, host, ctx)
+    else if (sandbox.phase !== "Deleting") keep = `the sandbox is ${sandbox.phase}, so its work cannot be checked`
+    if (keep) {
+      if (sandbox.phase === "Ready" || sandbox.phase === "Starting" || sandbox.phase === "Provisioning") {
+        ctx.progress?.(`stopping sandbox ${name}`)
+        await this.call(() => this.client.stop(name, this.signal(ctx)))
+      }
+      return { removed: false, reason: keep }
+    }
+    ctx.progress?.(`deleting sandbox ${name}`)
+    if (sandbox.phase !== "Deleting") await this.call(() => this.client.delete(name, this.signal(ctx)))
+    await this.waitGone(name, ctx)
+    return { removed: true }
+  }
+
+  /** Why deleting the sandbox would lose work (uncommitted changes, commits the host clone lacks), or undefined. */
+  private async unsaved(name: string, host: PreparedWorkspace, ctx: RuntimeContext): Promise<string | undefined> {
+    const work = await this.exec(name, ["git", "-C", "work", "rev-parse", "--verify", "--quiet", "HEAD"], ctx)
+    if (work.exitCode !== 0) return undefined // never seeded: nothing of the launch's in it
+    if (await this.isDirtyInside(name, ctx)) return "the sandbox has uncommitted changes"
+    const heads = (await this.mustExec(name, ["git", "-C", "work", "for-each-ref", "--format=%(objectname)", "refs/heads"], ctx)).stdout.split("\n").map((l) => l.trim())
+    for (const head of [work.stdout.trim(), ...heads].filter(Boolean)) {
+      if ((await this.gitOutput(host.directory, ["cat-file", "-e", `${head}^{commit}`], ctx)) === undefined) return "the sandbox has commits that were not collected"
+    }
+    return undefined
+  }
+
+  private async isDirtyInside(name: string, ctx: RuntimeContext): Promise<boolean> {
+    return (await this.mustExec(name, ["git", "-C", "work", "status", "--porcelain", "--untracked-files=all"], ctx)).stdout.trim().length > 0
+  }
+
+  /** Polls until the sandbox is gone (OpenShell deletes asynchronously). */
+  private async waitGone(name: string, ctx: RuntimeContext): Promise<void> {
+    const deadline = Date.now() + this.readyTimeoutMs
+    while (await this.call(() => this.client.get(name, this.signal(ctx)))) {
+      if (ctx.signal?.aborted) throw new RuntimeError("cleanup cancelled")
+      if (Date.now() > deadline) throw new RuntimeError(`sandbox ${name} was not deleted after ${Math.round(this.readyTimeoutMs / 1000)} s`)
+      await sleep(this.pollMs)
+    }
   }
 
   // ---------- helpers ----------
