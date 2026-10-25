@@ -1,4 +1,5 @@
-import { PROMPT_IMAGE_MIMES, type PromptImage } from "../protocol"
+import { DELIVER_ID_MAX, MESSAGE_KINDS, PROMPT_IMAGE_MIMES, type MessageKind, type PromptImage, type TimelineMessageItem } from "../protocol"
+import { PROMPT_SOURCE } from "./conversation"
 
 /** An attachment of a user message: its position in the message's files (for timelineFile), type and name. */
 export interface TimelineFile {
@@ -12,7 +13,8 @@ export interface TimelineItem {
   readonly messageID: string
   readonly partID?: string
   readonly sessionID: string
-  readonly kind: "user" | "assistant" | "reasoning" | "tool"
+  /** "message": a hub message delivered to the session (TimelineMessageItem). */
+  readonly kind: "user" | "assistant" | "reasoning" | "tool" | "message"
   readonly text?: string
   readonly name?: string
   readonly state?: "running" | "done" | "failed"
@@ -33,6 +35,10 @@ export interface TimelineItem {
   readonly title?: string
   /** Assistant text rows: which text part of the message this is (0, 1, …), as in live text deltas. */
   readonly ordinal?: number
+  /** Message rows: always "in" here (the hub adds the session's sent messages). */
+  readonly direction?: TimelineMessageItem["direction"]
+  /** Message rows: who sent it, how it was addressed, what it answers. */
+  readonly message?: TimelineMessageItem["message"]
 }
 
 /** Parts of one message a position leaves room for (later parts share the last slot). */
@@ -58,6 +64,11 @@ export function timelineItems(sessionID: string, messages: readonly unknown[]): 
       const text = typeof message.text === "string" ? message.text : Array.isArray(message.content) ? message.content.filter((p: any) => p?.type === "text").map((p: any) => p.text).join("") : ""
       const files = userFiles(message.files)
       if (text || files.length) out.push({ key: `${message.id}:text`, messageID: message.id, sessionID, kind: "user", text, ...(at === undefined ? {} : { at }), ...(files.length ? { files } : {}), pos: pos(0) })
+      continue
+    }
+    if (message.type === "synthetic") {
+      const row = hubMessageRow(sessionID, message, at, pos(0))
+      if (row) out.push(row)
       continue
     }
     if (message.type !== "assistant" || !Array.isArray(message.content)) continue
@@ -89,6 +100,46 @@ export function timelineItems(sessionID: string, messages: readonly unknown[]): 
     })
   }
   return out
+}
+
+/** A message the hub delivered (synthetic, with deliverMetadata): a "message" row; other synthetic messages: none. */
+function hubMessageRow(sessionID: string, message: Record<string, any>, at: number | undefined, pos: number): TimelineMessageItem | undefined {
+  const meta = record(message.metadata)
+  const id = meta.messageID
+  if (meta.source !== PROMPT_SOURCE || !isID(id) || !MESSAGE_KINDS.includes(meta.kind) || !isID(meta.from) || !isID(meta.to)) return undefined
+  const text = typeof message.text === "string" ? message.text : ""
+  return {
+    key: `${message.id}:message`,
+    messageID: id,
+    sessionID,
+    kind: "message",
+    text: meta.kind === "primer" ? text : messageBody(text, id),
+    ...(at === undefined ? {} : { at }),
+    pos,
+    direction: "in",
+    message: { kind: meta.kind as MessageKind, from: meta.from, to: meta.to, ...(isID(meta.replyTo) ? { replyTo: meta.replyTo } : {}) },
+  }
+}
+
+const isID = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= DELIVER_ID_MAX
+
+/** A line of the envelope body escaped by renderEnvelope (a leading backslash before a header-like line). */
+const ESCAPED = /^(\s*)\\(\\*(?:\[hub\]|-{3,}|↩))/i
+
+/**
+ * The body of a hub envelope (src/central/agent/envelope.ts renderEnvelope): the lines between its boundaries,
+ * unescaped. Text without boundaries (a reminder) shows its first line without the "[hub]" tag.
+ */
+function messageBody(text: string, id: string): string {
+  const lines = text.split("\n")
+  const boundary = `----- ${id} -----`
+  const start = lines.indexOf(boundary)
+  const end = lines.lastIndexOf(boundary)
+  if (start < 0 || end <= start) return lines[0]!.replace(/^\[hub\]\s*/i, "")
+  return lines
+    .slice(start + 1, end)
+    .map((line) => line.replace(ESCAPED, "$1$2"))
+    .join("\n")
 }
 
 const CHILD_SESSION = /sessionID:?\s*"?(ses_[A-Za-z0-9]+)/
