@@ -41,6 +41,8 @@ import { createActions } from "./actions"
 import { audioFormat, SpeechError } from "./speech/provider"
 import { SpeechService } from "./speech/service"
 import { NodeRegistry } from "./nodes"
+import { ConnDirectory } from "./cluster/directory"
+import { PodRpc } from "./cluster/rpc"
 import { randomBytes, randomUUID } from "node:crypto"
 import { LaunchEngine } from "./agent/launch-engine"
 import { LaunchTokens } from "./agent/launch-tokens"
@@ -383,8 +385,13 @@ export function startCentral(options: CentralOptions): Central {
     broadcast: (message, tenant) => broadcast(message, { tenant }),
     turnTimeoutMs: config.turnTimeoutMs,
     launchTokens,
+    // Cluster mode: connections are found through the shared directory and reached over pod RPC (design §9).
+    ...(config.cluster
+      ? { cluster: { directory: new ConnDirectory({ kv: backends.kv, podID: config.cluster.podID }), rpc: new PodRpc({ bus: backends.bus, podID: config.cluster.podID }) } }
+      : {}),
     ...options.timing,
   })
+  spokes.ready().catch((cause) => console.error(`[hub] cluster routing did not start: ${(cause as Error).message}`))
   // Session tokens (design §1.3): minted for the sessions spokes report, pushed on their sessions frames.
   const sessionTokens = new SessionTokens({ keys: tokenKeys, store, sessions: registry, publicURL, now })
   const tokenPush = new SessionTokenPush({
@@ -1630,7 +1637,7 @@ export function startCentral(options: CentralOptions): Central {
       tokenPush.stop()
       delivery.stop()
       decisions.stop()
-      spokes.stop()
+      await spokes.stop()
       for (const listener of [...listeners]) listeners.delete(listener)
       // Bun 1.3.5 quirk: once the server has closed a WebSocket itself, stop(true)'s promise never
       // resolves even though the listener is closed. Don't wait on it forever.
