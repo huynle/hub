@@ -27,6 +27,16 @@ export interface PrepareInput {
   readonly workspace: LaunchWorkspace
 }
 
+/** What start gets: the launch, its harness, how its spoke connects back to the hub, and extra environment. */
+export interface StartInput {
+  readonly launchID: string
+  readonly harness: string
+  /** The hub URL as the node knows it, and a token bound to this launch (secret: never in errors or argv). */
+  readonly hub: { readonly url: string; readonly token: string }
+  /** Extra non-secret environment for the harness (upper-case names). */
+  readonly env?: Readonly<Record<string, string>>
+}
+
 /** Per-op context: cancellation, and a short human progress line ("cloning …"). */
 export interface RuntimeContext {
   readonly signal?: AbortSignal
@@ -52,7 +62,7 @@ export interface Runtime {
   /** What the node's hello reports for this runtime (kind, harnesses, profiles, backends). */
   info(): NodeRuntimeInfo
   prepare(input: PrepareInput, ctx?: RuntimeContext): Promise<Workspace>
-  start?(workspace: Workspace, input: PrepareInput, ctx?: RuntimeContext): Promise<RunHandle>
+  start?(workspace: Workspace, input: StartInput, ctx?: RuntimeContext): Promise<RunHandle>
   stop?(handle: RunHandle, mode: StopMode): Promise<void>
   collect(handle: RunHandle, ctx?: RuntimeContext): Promise<Artifacts>
   /** Keep, or remove without force: uncommitted or unpushed work, a reused workspace or another launch's keeps it. */
