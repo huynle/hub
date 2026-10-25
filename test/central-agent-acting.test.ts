@@ -51,6 +51,7 @@ function setup(options: {
   answered?: "done" | "gone"
   features?: string[]
   escalate?: ActingDeps["escalate"]
+  stopped?: "done" | "offline"
 } = {}) {
   const sessions = new Map<string, FakeSession>([
     ["ses_target", { tenant: USER, directory: `${PROJECT}/sub`, root: "ses_target", name: "worker" }],
@@ -108,7 +109,7 @@ function setup(options: {
       answerPermission: async (input) => (calls.push({ op: "permission", ...input }), { outcome: options.answered ?? "done" }),
       answerForm: async (input) => (calls.push({ op: "form", ...input }), { outcome: options.answered ?? "done" }),
       prompt: async (input) => (calls.push({ op: "prompt", ...input }), { outcome: "done", mode: "steer", inboxID: "inb_1" }),
-      stop: async (sessionID) => (calls.push({ op: "stop", sessionID }), { outcome: "done", result: {} as any }),
+      stop: async (sessionID) => (calls.push({ op: "stop", sessionID }), options.stopped === "offline" ? { outcome: "offline" } : { outcome: "done", result: { stopped: ["ses_target"] } }),
     },
     spokes: {
       request: async (connID, req) => (calls.push({ connID, ...req }), { delivered: "turn", inboxID: "inb_2" }),
@@ -296,5 +297,106 @@ describe("approve", () => {
     expect(await acting.approve(caller(app), "ses_target", { requestID: "per_1" })).toMatchObject({ decision: "once" })
     expect(calls).toHaveLength(1)
     expect(audits[0]!.actor).toEqual({ kind: "app", tokenID: "0123456789abcdef" })
+  })
+})
+
+describe("deny", () => {
+  test("an agent rejects with its reason, prefixed with who and which grant", async () => {
+    const { acting, calls, audits } = setup()
+    expect(await acting.deny(caller(orchestrator), "ses_target", { requestID: "per_1", why: "not in scope" })).toEqual({
+      sessionID: "ses_target",
+      requestID: "per_1",
+      grant: "g_0000000000000001",
+      reasonSent: true,
+    })
+    expect(calls).toEqual([{ op: "permission", rootID: "ses_target", requestID: "per_1", decision: "reject", message: "Denied by @orch (grant g_0000000000000001): not in scope" }])
+    expect(audits[0]).toMatchObject({ verb: "deny", decision: "allow", outcome: "ok", reason: "not in scope" })
+  })
+
+  test("a reject needs only the verb: even a request a never rule names may be denied", async () => {
+    const { acting, calls } = setup({ request: { action: "shell", resources: ["git push"] } })
+    await acting.deny(caller(orchestrator), "ses_target", { requestID: "per_1" })
+    expect(calls).toEqual([{ op: "permission", rootID: "ses_target", requestID: "per_1", decision: "reject" }])
+  })
+
+  test("the reason is dropped for spokes without permissionMessage, and bounded", async () => {
+    const old = setup({ features: [] })
+    expect(await old.acting.deny(caller(orchestrator), "ses_target", { requestID: "per_1", why: "no" })).toMatchObject({ reasonSent: false })
+    expect("message" in old.calls[0]).toBe(false)
+    const long = setup()
+    await long.acting.deny(caller(orchestrator), "ses_target", { requestID: "per_1", why: "x".repeat(5000) })
+    expect(long.calls[0].message.length).toBe(1000)
+  })
+
+  test("the user's reason names the user; no grant needed", async () => {
+    const { acting, calls } = setup({ grants: [] })
+    await acting.deny(caller(user), "ses_target", { requestID: "per_1", why: "stop that" })
+    expect(calls[0].message).toBe("Denied by the user: stop that")
+  })
+
+  test("the self-tree ban and the deny verb apply", async () => {
+    const own = setup({ grants: [grant({ scope: { projects: ["/work"] } })] })
+    expect((await failure(own.acting.deny(caller(orchestrator), "ses_orch", { requestID: "per_own" }))).code).toBe("forbidden")
+    const verb = setup({ grants: [grant({ allow: ["approve"] })] })
+    expect((await failure(verb.acting.deny(caller(orchestrator), "ses_target", { requestID: "per_1" }))).code).toBe("forbidden")
+    expect([...own.calls, ...verb.calls]).toEqual([])
+  })
+
+  test("gone when answered elsewhere first", async () => {
+    const { acting, audits } = setup({ answered: "gone" })
+    expect((await failure(acting.deny(caller(orchestrator), "ses_target", { requestID: "per_1" }))).code).toBe("gone")
+    expect(audits[0]).toMatchObject({ verb: "deny", outcome: "gone" })
+  })
+})
+
+describe("answer (forms)", () => {
+  test("an agent answers or cancels a form pending in the tree", async () => {
+    const { acting, calls, audits } = setup()
+    expect(await acting.answer(caller(orchestrator), "ses_target", { formID: "form_1", answer: { q: "yes" } })).toEqual({ sessionID: "ses_target", formID: "form_1", grant: "g_0000000000000001" })
+    await acting.answer(caller(orchestrator), "ses_target", { formID: "form_1", cancel: true })
+    expect(calls).toEqual([
+      { op: "form", rootID: "ses_target", formID: "form_1", answer: { q: "yes" } },
+      { op: "form", rootID: "ses_target", formID: "form_1", cancel: true },
+    ])
+    expect(audits[0]).toMatchObject({ verb: "answer", target: { sessionID: "ses_target", formID: "form_1" }, outcome: "ok" })
+  })
+
+  test("not pending in the tree: not_found; own tree: forbidden; race: gone", async () => {
+    const { acting, calls } = setup({ grants: [grant({ scope: { projects: ["/work"] } })] })
+    expect((await failure(acting.answer(caller(orchestrator), "ses_target", { formID: "form_nope", cancel: true }))).code).toBe("not_found")
+    expect((await failure(acting.answer(caller(orchestrator), "ses_orch", { formID: "form_own", cancel: true }))).code).toBe("forbidden")
+    expect(calls).toEqual([])
+    const raced = setup({ answered: "gone" })
+    expect((await failure(raced.acting.answer(caller(orchestrator), "ses_target", { formID: "form_1", cancel: true }))).code).toBe("gone")
+  })
+
+  test("the user answers without a grant", async () => {
+    const { acting, calls } = setup({ grants: [] })
+    await acting.answer(caller(user), "ses_target", { formID: "form_1", answer: { q: "no" } })
+    expect(calls).toHaveLength(1)
+  })
+})
+
+describe("stop", () => {
+  test("an agent stops a session under its grant (also its own tree)", async () => {
+    const { acting, calls, audits } = setup({ grants: [grant({ scope: { projects: ["/work"] } })] })
+    expect(await acting.stop(caller(orchestrator), "ses_target", {})).toEqual({ sessionID: "ses_target", grant: "g_0000000000000001", result: { stopped: ["ses_target"] } })
+    await acting.stop(caller(orchestrator), "ses_orch", { why: "done" })
+    expect(calls).toEqual([
+      { op: "stop", sessionID: "ses_target" },
+      { op: "stop", sessionID: "ses_orch" },
+    ])
+    expect(audits[1]).toMatchObject({ verb: "stop", reason: "done", outcome: "ok" })
+  })
+
+  test("offline when no process owns it; paused and forbidden like the others", async () => {
+    const off = setup({ stopped: "offline" })
+    expect((await failure(off.acting.stop(caller(orchestrator), "ses_target", {}))).code).toBe("offline")
+    expect(off.audits[0]).toMatchObject({ outcome: "offline" })
+    const paused = setup({ paused: () => true })
+    expect((await failure(paused.acting.stop(caller(orchestrator), "ses_target", {}))).code).toBe("paused")
+    const none = setup({ grants: [grant({ allow: ["approve"] })] })
+    expect((await failure(none.acting.stop(caller(orchestrator), "ses_target", {}))).code).toBe("forbidden")
+    expect([...paused.calls, ...none.calls]).toEqual([])
   })
 })

@@ -19,7 +19,7 @@
 // - Every outcome after the address resolves is in the agent audit: decision (allow, needs_user, forbidden,
 //   paused, rate_limited) and outcome (ok, gone, offline, unsupported, escalated, refused, failed).
 // - Races: the request answered elsewhere first is gone (410).
-import type { PermissionDecision, ServerRequest } from "../../protocol"
+import { type FormAnswer, PERMISSION_MESSAGE_MAX, type PermissionDecision, type ResultFor, type ServerRequest } from "../../protocol"
 import type { Actions } from "../actions"
 import type { Registry } from "../registry"
 import type { PermissionRequest } from "../../status"
@@ -28,7 +28,7 @@ import type { AgentActor } from "./actor"
 import type { AgentAudit, AuditDecision, AuditOutcome, AuditTarget } from "./audit"
 import type { Tier } from "./decisions"
 import type { Directory } from "./directory"
-import { type Party, partyFromActor } from "./envelope"
+import { type Party, partyFromActor, partyLabel, sanitizeText } from "./envelope"
 import { AgentError } from "./errors"
 import type { Grant, Grants } from "./grants"
 import { evaluatePermission, formatPattern, type GrantVerb, parsePattern, type Pattern, riskTier } from "./policy"
@@ -100,6 +100,41 @@ export interface Approved {
   readonly requestID: string
   readonly decision: PermissionDecision
   readonly grant?: string
+}
+
+export interface DenyInput {
+  readonly requestID: string
+  /** Why: passed to the harness (prefixed with who denied it) by spokes announcing "permissionMessage". */
+  readonly why?: string
+}
+
+export interface Denied {
+  readonly sessionID: string
+  readonly requestID: string
+  readonly grant?: string
+  /** With a reason: whether the harness got it (older spokes take the reject without it). */
+  readonly reasonSent?: boolean
+}
+
+export type AnswerInput =
+  | { readonly formID: string; readonly answer: FormAnswer; readonly cancel?: undefined; readonly why?: string }
+  | { readonly formID: string; readonly cancel: true; readonly answer?: undefined; readonly why?: string }
+
+export interface Answered {
+  readonly sessionID: string
+  readonly formID: string
+  readonly grant?: string
+}
+
+export interface StopInput {
+  readonly why?: string
+}
+
+export interface StoppedSession {
+  readonly sessionID: string
+  readonly grant?: string
+  /** The spoke's answer. */
+  readonly result: ResultFor["stop"]
 }
 
 /** The addressed session, live in the user's catalog. */
@@ -198,6 +233,53 @@ export class Acting {
         const answered = await this.deps.actions.answerPermission({ rootID: target.rootID, requestID: input.requestID, decision })
         if (answered.outcome === "gone") throw gone()
         return { sessionID: target.sessionID, requestID: input.requestID, decision, ...(grant ? { grant: grant.id } : {}) }
+      },
+    })
+  }
+
+  /** Rejects a pending permission request (any request: a reject is always safe), with an optional reason. */
+  async deny(caller: Caller, addr: string, input: DenyInput): Promise<Denied> {
+    const target = this.locate(caller.userID, addr)
+    this.pendingPermission(target, input.requestID)
+    return this.act(caller, "deny", target, { requestID: input.requestID }, input.why, {
+      selfTree: true,
+      run: async (grant) => {
+        const { registry } = this.deps
+        const why = input.why === undefined ? "" : sanitizeText(input.why).trim()
+        const reasonSent = why !== "" && registry.permissionTargets(target.rootID, input.requestID).every((t) => registry.supports(t.connID, "permissionMessage"))
+        const message = reasonSent ? bounded(`Denied by ${partyLabel(this.party(caller))}${grant ? ` (grant ${grant.id})` : ""}: ${why}`, PERMISSION_MESSAGE_MAX) : undefined
+        const answered = await this.deps.actions.answerPermission({ rootID: target.rootID, requestID: input.requestID, decision: "reject", ...(message ? { message } : {}) })
+        if (answered.outcome === "gone") throw gone()
+        return { sessionID: target.sessionID, requestID: input.requestID, ...(grant ? { grant: grant.id } : {}), ...(why ? { reasonSent } : {}) }
+      },
+    })
+  }
+
+  /** Answers (or cancels) a form pending in the addressed session's tree. */
+  async answer(caller: Caller, addr: string, input: AnswerInput): Promise<Answered> {
+    const target = this.locate(caller.userID, addr)
+    if (!this.deps.registry.formTargets(target.rootID, input.formID).length) throw new AgentError("not_found", `No pending form ${input.formID} in this session's tree`)
+    return this.act(caller, "answer", target, { formID: input.formID }, input.why, {
+      selfTree: true,
+      run: async (grant) => {
+        const form = input.cancel
+          ? { rootID: target.rootID, formID: input.formID, cancel: true as const }
+          : { rootID: target.rootID, formID: input.formID, answer: input.answer }
+        const answered = await this.deps.actions.answerForm(form)
+        if (answered.outcome === "gone") throw gone()
+        return { sessionID: target.sessionID, formID: input.formID, ...(grant ? { grant: grant.id } : {}) }
+      },
+    })
+  }
+
+  /** Stops the addressed session's tree. */
+  async stop(caller: Caller, addr: string, input: StopInput): Promise<StoppedSession> {
+    const target = this.locate(caller.userID, addr)
+    return this.act(caller, "stop", target, {}, input.why, {
+      run: async (grant) => {
+        const stopped = await this.deps.actions.stop(target.sessionID)
+        if (stopped.outcome === "offline") throw offline()
+        return { sessionID: target.sessionID, ...(grant ? { grant: grant.id } : {}), result: stopped.result }
       },
     })
   }
@@ -332,6 +414,17 @@ export class Acting {
     } catch {}
     return partyFromActor(actor, name ? { name } : {})
   }
+}
+
+/** At most `max` UTF-16 units, cut on a character boundary. */
+function bounded(text: string, max: number): string {
+  if (text.length <= max) return text
+  let out = ""
+  for (const char of text) {
+    if (out.length + char.length > max) break
+    out += char
+  }
+  return out
 }
 
 const gone = () => new AgentError("gone", "Already answered, expired or ended")
