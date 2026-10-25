@@ -333,8 +333,8 @@ export const SPOKE_FEATURES: readonly SpokeFeature[] = KNOWN_SPOKE_FEATURES.filt
  */
 export const KNOWN_HUB_FEATURES = ["harness", "messaging", "nodes", "launches"] as const
 export type HubFeature = (typeof KNOWN_HUB_FEATURES)[number]
-/** What this hub announces: "nodes" joins with NodeHub (P4-T4), "launches" with the launch routes (P4-T9). */
-export const HUB_FEATURES: readonly HubFeature[] = ["harness", "messaging"]
+/** What this hub announces: "launches" joins with the launch routes (P4-T9). */
+export const HUB_FEATURES: readonly HubFeature[] = ["harness", "messaging", "nodes"]
 
 /** A spoke's harness, version and evidence level; a hello without `harness` is an OpenCode native spoke. */
 export function helloHarness(hello: Hello): { readonly harness: string; readonly harnessVersion: string; readonly evidence: EvidenceLevel | "unknown" } {
