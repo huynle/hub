@@ -20,6 +20,7 @@ import { createResolver, type BearerVerifier, type CredentialMode } from "./agen
 import { Delivery } from "./agent/delivery"
 import { hubDirectory } from "./agent/directory-routes"
 import { agentApi, agentRoutes, agentVerifiers, isAgentPath, wellKnown, type AgentRoute } from "./agent/routes"
+import { MessageFeed } from "./agent/message-routes"
 import { SessionTokens } from "./agent/session-tokens"
 import { SessionTokenPush } from "./session-token-push"
 import { TokenKeys } from "./token-keys"
@@ -520,7 +521,10 @@ export function startCentral(options: CentralOptions): Central {
   delivery.start()
 
   // One credential resolver for every /api request: device cookie, device token, session and app tokens.
-  const agentDeps = { store, sessionTokens, directory, registry, spokes, delivery, heartbeatMs, now }
+  // Every stored agent message also goes to the user's console streams (live transcript rows).
+  const feed = new MessageFeed()
+  feed.subscribe((userID, message) => broadcast({ type: "message", message }, { tenant: userID }))
+  const agentDeps = { store, sessionTokens, directory, registry, spokes, delivery, feed, heartbeatMs, now }
   const resolveActor = createResolver({
     cookieName: COOKIE,
     findDevice: (token) => store.findDevice(token),
@@ -613,6 +617,11 @@ export function startCentral(options: CentralOptions): Central {
   const ownMachine = (userID: string, machineID: string) =>
     store.machines().find((m) => m.id === machineID && !m.revoked && m.ownerID === userID)
 
+  /** Session routes that also answer for the user's offline sessions the directory knows (hub-side data only). */
+  const OFFLINE_SESSION_ROUTES = new Set(["/api/sessions/:session/messages"])
+  /** No spoke reports the session (for anyone) and the user's directory has a record of it (not deleted). */
+  const knownOffline = (userID: string, sessionID: string) =>
+    registry.sessionTenant(sessionID) === undefined && (store.agentData(userID).sessions ?? []).some((s) => s.sessionID === sessionID && s.deletedAt === undefined)
   const route = (method: string, path: string, access: Access, handle: Handler, exposed = false): Route => {
     const keys: string[] = []
     const pattern = new RegExp(`^${path.replace(/:([a-z]+)/g, (_, key: string) => (keys.push(key), "([^/]+)"))}$`)
@@ -981,7 +990,7 @@ export function startCentral(options: CentralOptions): Central {
         break
       case "session":
         // Foreign and unknown sessions answer alike, so IDs don't leak.
-        if (!registry.owns(user.id, params.session!)) return error(404, "Not found")
+        if (!registry.owns(user.id, params.session!) && !(OFFLINE_SESSION_ROUTES.has(matched.path) && knownOffline(user.id, params.session!))) return error(404, "Not found")
         // Sessions listed for discovery only: nothing but enabling voice (and presence) reaches them.
         if (matched.exposed && registry.exposed(params.session!) === false) return error(403, NOT_EXPOSED, "not_exposed")
         break
