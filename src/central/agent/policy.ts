@@ -311,7 +311,7 @@ function validHolder(value: unknown): string {
   if (typeof value === "string" && APP_HOLDER.test(value)) return value
   const address = typeof value === "string" ? parseAddress(value) : undefined
   if (!address || (address.kind === "name" && isReservedName(address.name))) throw invalid("holder is @@role, @name, ses_… or app:<token id>")
-  if (address.kind === "role" && !isReservedRole(address.role)) throw invalid("A role holder must be a reserved role (orchestrator…, concierge…)")
+  if (address.kind === "role" && !isReservedRole(address.role)) throw invalid("A role holder must be a reserved role (such as @@orchestrator)")
   return value as string
 }
 

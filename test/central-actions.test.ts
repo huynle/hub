@@ -71,6 +71,13 @@ describe("answerPermission", () => {
     expect(calls).not.toContain("dropPermission per_1")
   })
 
+  test("a request answered through the hub is gone for a second answer, even if the harness never reports the reply", async () => {
+    const { actions, requests } = fakes({ permissionTargets: [{ connID: "c1", sessionID: "s" }], reply: () => ({}) })
+    expect(await actions.answerPermission({ rootID: "s", requestID: "per_9", decision: "once" })).toEqual({ outcome: "done" })
+    expect(await actions.answerPermission({ rootID: "s", requestID: "per_9", decision: "once" })).toEqual({ outcome: "gone" })
+    expect(requests).toHaveLength(1)
+  })
+
   test("no process holds it any more: the blocker is dropped and the answer is gone", async () => {
     const { actions, calls } = fakes({
       permissionTargets: [{ connID: "c1", sessionID: "s" }],

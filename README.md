@@ -230,7 +230,7 @@ from the console's routes. Every request resolves to exactly one **actor**:
 |---|---|---|
 | user | the device cookie (browsers) or the same secret as `Authorization: Bearer <device token>` (apps, CLIs; [linked with a code](#multi-user-sign-in-with-google)) | you, on one of your devices |
 | session | a **session token** `hst1.…` the hub mints for each session a spoke reports | that session's shells (`HUB_SESSION_TOKEN`) |
-| app | an **app token** `hat_…` you create (scopes `sessions:read`, `messages:send`, `messages:read`) | a script or tool outside a session (`hub login`) |
+| app | an **app token** `hat_…` you create (scopes `sessions:read`, `messages:send`, `messages:read`, `sessions:act`) | a script or tool outside a session (`hub login`) |
 
 **Session tokens in shells.** The hub mints a 24 h token for every session (subagents included) its spokes report
 for you and pushes it to the spoke, which keeps it in memory only. Every shell an agent starts through OpenCode's
@@ -240,7 +240,8 @@ mch_…`. Tokens are renewed automatically before they expire; a shell started e
 `token_expired` answer means: start a new shell. A token stops working as soon as the session is no longer
 reported by that machine, the machine is revoked or the user is disabled (see
 [docs/multi-user.md](docs/multi-user.md#agent-actors-and-tokens)). Spokes of other harnesses get tokens only
-when they announce the `sessionTokens` feature.
+when they announce the `sessionTokens` feature. Each session also has a separate **act token**, which never goes
+into a shell; see [Agent actions and grants](#agent-actions-and-grants).
 
 **Addressing.** Wherever a route or command takes a session, it takes an address, resolved among the caller's
 own sessions only:
@@ -287,6 +288,8 @@ cookie and a hub bearer token (400).
 | `POST /api/agent/mute {session}` · `…/unmute` | ✓ | ✓ | `messages:send` | refuses (or allows again) messages from a session |
 | `GET` · `PUT /api/agent/messaging {enabled}` | ✓ | – | – | the per-user messaging switch (off: `423 paused`) |
 | `POST /api/agent/app-tokens {label?, scopes?}` · `GET` · `DELETE …/:id` | ✓ | – | – | creates (token shown once), lists, revokes app tokens |
+
+The act verbs, grants, kill switches and the agent audit are in [Agent actions and grants](#agent-actions-and-grants).
 
 **Decisions and `@me`.** `@me` addresses the user: `msg @me` is stored in the user's inbox (push kind `message`);
 `ask @me` opens a Decision `{id: "dec_…", from, about, question, options: [{id, label, safe?}], recommendation:
@@ -369,7 +372,7 @@ sessions or apps; see [Decisions and `@me`](#agent-identity-agent-api) for the r
 **Where agents send from.**
 - In a shell of an OpenCode session: `hub msg @reviewer "…"` acts as that session ([hub CLI](#hub-cli)).
 - The model itself: the plugin's `hub` tool (verbs `msg`, `ask`, `reply`, `decline`, `inbox`, `who`, `status`,
-  `whoami`), as the calling session ([Spoke](#spoke-opencode-plugin)).
+  `whoami`, and the [act verbs](#agent-actions-and-grants)), as the calling session ([Spoke](#spoke-opencode-plugin)).
 - You, in the OpenCode TUI: `/msg @name text` (as the session on screen) and `/who`.
 - Other agents and tools: [`hub mcp`](#hub-mcp-mcp-server), as the app token you logged in with.
 - Scripts: `hub login` with an app token that has the `messages:send` (and `messages:read`) scopes.
@@ -380,6 +383,144 @@ replies between agents may run 8 hops without a human turn; past that, messages 
 you are notified once. Typing into a session (console, Voice, the harness) starts its chain over. You can switch
 messaging off for your account (`PUT /api/agent/messaging {enabled: false}`): sends then answer `paused` (exit 5),
 reading still works.
+
+## Agent actions and grants
+
+Agents can do more than message: a session or a script may **approve** or **deny** a permission request, **answer**
+a form, **prompt** a session or **stop** it, in your sessions and only as far as you allow. You always may (your
+own sessions, any of your credentials); an agent acts only under a **grant** you created, and anything outside it
+comes back to you as a Decision.
+
+**Who can act.**
+
+| Credential | Acts? |
+|---|---|
+| you (device cookie, device token) | always, on your own sessions; no grant, no kill switch |
+| a session's **act token** (held by the OpenCode `hub` tool) | under a grant held by that session (by its ID, its `@name`, or a reserved `@@orchestrator…` role it holds) |
+| an app token with scope `sessions:act` | under a grant held by `app:<token id>` |
+| a session's **shell token** (`HUB_SESSION_TOKEN`) | never: `403 forbidden` |
+
+**Act tokens vs shell tokens.** Every session has two hub tokens. The shell token goes into the shells the session
+starts, so `hub msg` and the other read and message verbs work from any script it runs. The act token (`typ act`)
+is pushed only to spokes that announce `actTokens`, kept apart from the shell tokens, never put in any
+environment and never shown in tool output; only the plugin's `hub` tool uses it, for the act verbs. A command an
+agent runs in a shell therefore cannot act, even with the session's own credential; the model has to call the tool,
+where the call is visible and audited.
+
+**Grants.** A grant says who may do what, where, until when:
+
+```json
+{
+  "holder": "@@orchestrator",
+  "scope": { "projects": ["/home/you/projects/api"] },
+  "allow": ["approve", "deny", "prompt", "stop"],
+  "permissions": { "allow": ["shell:bun test*", "edit:src/*"], "never": ["shell:git push*"] },
+  "expires": "8h",
+  "maxActionsPerHour": 60,
+  "allowAlways": false
+}
+```
+
+- **holder**: `ses_…` or `@name` (pinned to that session when the grant is created; the grant never follows the name
+  to another session), a reserved `@@orchestrator…` role (follows whoever holds it when it is used; only you assign
+  reserved roles), or `app:<token id>` (one of your app tokens).
+- **scope.projects**: 1–20 absolute project directories; a session is in scope when its directory is one of them or
+  inside one (on a path boundary, after resolving `.`/`..`; worktrees inside the project count).
+- **allow**: the verbs (`approve`, `deny`, `answer`, `prompt`, `stop`; `roles` is accepted for role management).
+  `deny`, `answer`, `prompt` and `stop` need only the verb; `approve` also needs the request to pass the patterns.
+- **permissions**: patterns `action[:glob]` in OpenCode's wildcard syntax (`*` any run, `?` one character, a trailing
+  ` *` optional; `bash` is OpenCode's `shell`; the action alone means every resource). A request is allowed only
+  when **every** resource it names matches an allow pattern; any never pattern wins over every allow. In shell allow
+  patterns, `$(`, backticks and `<`/`>` must be written literally (a wildcard never matches them), so
+  `shell:bun test*` does not allow `bun test $(rm -rf ~)`. Never patterns also see the command without leading
+  `VAR=…` assignments and wrappers (`sudo`, `env`, `command`, `exec`, `nohup`, `time`), so `sudo git push` is still
+  a `git push`.
+- **expires**: 1 minute to 30 days (seconds, or `30m`, `8h`, `2d`; default 8 h). **maxActionsPerHour**: 1–1000
+  (default 60), per clock hour; past it `429 rate_limited`. **allowAlways**: lets the holder reply `always` (OpenCode
+  then saves the request's rules), and only when every rule it would save lies inside the allow patterns.
+- At most 50 active grants per user. Editing replaces a grant (its holder stays, its expiry restarts); revoking ends
+  it at once and keeps it listed for the audit.
+
+**hub never rules.** `agents.never` in [hub.json](#hubjson) lists patterns no agent may approve for any user,
+checked before every grant (`{"agents": {"never": ["shell:git push*", "shell:rm -rf*", "external_directory"]}}`).
+The user can still approve such a request themselves.
+
+**The check order** for an agent: the session belongs to you (else `not_found`, like a session that does not
+exist) → kill switches → a usable grant for the verb and the session's project → not its own session tree (a
+session never answers a request or form in its own tree) → the hub's never rules → the grant's never rules → the
+allow patterns (else `needs_user`) → the hourly cap → the kill switches again → the spoke.
+
+| Answer | HTTP | CLI exit | Means |
+|---|---|---|---|
+| ok | 200 | 0 | done (the result names the grant used) |
+| `needs_user` | 403 | 4 | outside the grant: the user decides (a Decision is open) |
+| `forbidden` | 403 | 5 | no grant, a never rule, its own tree, or a shell token |
+| `paused` | 423 | 5 | a kill switch is on |
+| `rate_limited` | 429 | 6 | the grant's hourly cap |
+| `not_found` | 404 | 3 | not your session, or no such pending request or form |
+| `gone` | 410 | 8 | answered elsewhere first, expired or ended |
+| `unsupported` | 422 | 7 | the session's spoke cannot do it (e.g. an agent's prompt without `hubPrompt`) |
+| `offline` | 503 | 7 | no spoke reports the session now |
+
+**Escalation.** An approval outside the grant answers `needs_user` with the evaluation (`verdict`, `reason`, the
+grants checked, and a `tier`) and opens a Decision for you: one per agent and request (asking again updates its
+reason), with Approve once (or Approve always, when asked), Deny (safe), and the agent's `--why` as its
+recommendation. The hub sets the tier, never the agent: `tap` (answered by a tap in the console, not from a
+notification) for shell, `external_directory`, MCP and unknown tools and for anything near a never rule; `confirm`
+otherwise. Your answer replies to the permission **as you** (no grant or kill switch applies to you); if the request
+was answered elsewhere or ended first, the Decision closes and the agent's next try is `not_found`. A request's
+blocker in the console shows the recommendation ("@orchestrator recommends Approve once: …"). Limits: 20 new
+escalations per agent an hour and 20 open at once per user; escalations within a minute of the last push open
+quietly.
+
+**Grant requests.** Agents never create grants. A session (any of its tokens) or an app token with `messages:send`
+may **request** one: `POST /api/agent/grants/requests {grant, why}` (`hub grant request …`). The holder defaults to
+the requester and may only be the requester itself or a reserved role it holds. It opens a tap Decision summarising
+the grant; approving creates it as yours, and the requester is told the grant id in a reply. One open request per
+requester, 5 an hour.
+
+**Prompts.** An agent's prompt reaches the session as the hub's, never as yours: the spoke wraps it in a provenance
+envelope (`[hub] prompt from @lead · grant g_… · msg_…`, the body between boundary lines) and admits it as a hub
+message, so it never resets the loop protection's hop chain the way your own typing does. Agents may prompt root
+sessions only, never themselves, text only, always waking the session (`--delivery queue|steer` picks how it enters
+a busy one).
+
+**Deny reasons.** `deny --why "…"` passes the reason to the harness as the rejection's feedback (prefixed with who
+denied it and under which grant), on spokes that announce `permissionMessage`; an older spoke takes the reject
+without it, and the answer says so (`reasonSent: false`).
+
+**Kill switches.** Settings → Agents (or `PUT /api/agent/acting {enabled: false}`) turns agent actions off for you;
+an admin's `PUT /api/admin/agents/acting {enabled: false}` turns them off for the whole hub. Either one answers
+every act verb `423 paused`; reading and messaging keep working (messaging has its own switch), and your own
+actions and Decision answers still go through.
+
+**Verbs.** The same act verbs are in the [CLI](#hub-cli) (`hub approve | deny | answer | prompt | stop`, `hub grant
+list | show | create | revoke | request`), the OpenCode `hub` tool (verbs `approve`, `deny`, `answer`, `prompt`,
+`stop`, with the session's act token), [`hub mcp`](#hub-mcp-mcp-server) (tools of the same names, as the app token)
+and the SDK. Only you manage grants: the console (Settings → Agents) or the CLI with your device token
+(`hub login --token <device token>`).
+
+| Route | User | Session (act token) | App (`sessions:act`) |
+|---|---|---|---|
+| `POST /api/agent/sessions/:addr/approve {requestID, always?, why?}` | ✓ | under a grant | under a grant |
+| `POST /api/agent/sessions/:addr/deny {requestID, why?}` | ✓ | under a grant | under a grant |
+| `POST /api/agent/sessions/:addr/answer {formID, answer \| cancel: true, why?}` | ✓ | under a grant | under a grant |
+| `POST /api/agent/sessions/:addr/prompt {text, delivery?, why?}` (users: `images?`) | ✓ | under a grant | under a grant |
+| `POST /api/agent/sessions/:addr/stop {why?}` | ✓ | under a grant | under a grant |
+| `POST /api/agent/grants` · `GET` · `GET`/`PUT`/`DELETE …/grants/:id` | ✓ | – | – |
+| `POST /api/agent/grants/requests {grant, why}` | – | ✓ (any token) | `messages:send` |
+| `GET` · `PUT /api/agent/acting {enabled}` | ✓ | – | – |
+| `GET` · `PUT /api/admin/agents/acting {enabled}` | admins | – | – |
+| `GET /api/agent/audit?limit=&before=` | ✓ | – | – |
+
+**Audit.** Every agent action and every attempt (allowed, `needs_user`, `forbidden`, `paused`, `rate_limited`) is in
+your agent audit with who acted, the verb, the session and request, the grant, the reason and the outcome (`ok`,
+`gone`, `offline`, `unsupported`, `escalated`, `refused`, `failed`); so are your answers to escalations, grant
+requests and switch changes. Read it in Settings → Agents → Activity or with `GET /api/agent/audit` (newest first,
+pages of up to 500; the last 2000 entries are kept); new entries stream to your console as SSE `{type: "agent",
+entry}`. Admins see only a summary in the hub audit (the user, `agent.<verb>` and the actor kind; grant changes as
+`grant.create`, `grant.update`, `grant.revoke` with the grant id), never sessions, requests, reasons, holders or
+patterns.
 
 ## hub CLI
 
@@ -410,7 +551,7 @@ hub reply <msgID> "text" [--no-wake]      to the message's real sender, never vi
 hub decline <msgID> --why "reason"
 hub ask @me "question" [--option id=label[:safe]]... [--recommend id [--why "…"]] [--urgency low|normal|high]
         [--deadline 2h [--on-timeout <safe id>]] [--tier confirm|tap] [--about <addr>]...   a Decision for the user
-hub decisions list [--state open|answered|expired]   the Decisions you asked
+hub decisions list [--state open|answered|expired|closed]   the Decisions you asked
 hub inbox                                 asks to answer, your open asks, recent messages, mutes
 hub mute <addr> · hub unmute <addr>       refuse (or accept again) messages from a session
 hub approve <addr> <requestID> [--always] [--why "…"]   answer a permission request (once, or always)
@@ -421,6 +562,8 @@ hub stop <addr> [--why "…"]               stop its running turn
 hub grant list · hub grant show <id> · hub grant revoke <id>
 hub grant create --holder <h> --project <path>... --allow approve,deny,… [--permit <pattern>]... [--never <pattern>]...
          [--expires 8h] [--max-per-hour N] [--allow-always] | --json '{…}'
+hub grant request --project <path>... --allow approve,deny,… [--permission-allow <pattern>]... [--never <pattern>]...
+         [--holder <@@role you hold>] --why "…"     (agents) ask the user for a grant
 hub mcp                                   an MCP server on stdio (see below)
 hub login [--url URL] [--token APP_TOKEN] · hub logout
 hub help · hub --version
@@ -455,10 +598,13 @@ repeated key becomes a list), or the whole answer as JSON (`--json '{…}'`, or 
 the harness. An already-answered request is `gone` (8), an offline machine `offline` (7).
 
 **Grants.** `hub grant list | show | create | revoke` manage what a holder (`ses_…`, `@name` — pinned to that
-session at creation —, a reserved `@@orchestrator…`/`@@concierge…` role, or `app:<token id>`) may do: which verbs,
+session at creation —, a reserved `@@orchestrator…` role, or `app:<token id>`) may do: which verbs,
 in which projects, which permission patterns (`--permit`, `--never`; never wins), for how long and how often. Only
 the user manages grants (the console, or `hub login` with a device token): from a session's shell `create` and
-`revoke` exit 5 without asking the hub, and any credential the hub refuses exits 5.
+`revoke` exit 5 without asking the hub, and any credential the hub refuses exits 5. Agents `hub grant request` one
+instead (a session, or an app token with `messages:send`): the same flags, the holder defaulting to the requester,
+and a `--why` the user reads; it prints the Decision it opened, and the user's answer comes back as a reply. See
+[Agent actions and grants](#agent-actions-and-grants).
 
 **Credentials.** `HUB_URL` + `HUB_SESSION_TOKEN` (the spoke sets them in each session's shells; the CLI then
 acts as that session) win over the login file. Outside a session, `hub login --url https://hub.example` stores
@@ -1323,6 +1469,7 @@ in the file).
 | `speech.stt` | `{provider, model, baseURL?, language?, apiKey?}` |
 | `speech.tts` | `{provider, model, voice, baseURL?, speed?, apiKey?}` |
 | `auth` | `{mode, issuer?, clientId, clientSecret, allowed, admins}`; see [Multi-user](#multi-user-sign-in-with-google) |
+| `agents.never` | permission patterns (`action[:glob]`) no agent may ever approve, for every user, checked before any grant; see [Agent actions and grants](#agent-actions-and-grants) |
 
 Server fields: env vars (`HUB_HOST`, `HUB_PORT`, `HUB_PUBLIC_URL`, `HUB_STATE_DIR`) > hub.json >
 defaults. Speech: phone settings > hub.json > env vars. Values are checked like the phone's speech
@@ -1483,6 +1630,17 @@ Console development: `bun test/web-mock-hub.ts 4311` fakes a hub with fixtures (
 answer any of it, the pair rate limit and the messaging switch. The opt-in `HUB_IT_OPENCODE=1 bun test
 test/e2e-phase2-live.it.test.ts` connects a private `opencode serve` to a real in-process hub: one session's (stub)
 model calls `hub msg` to another session, whose model is then handed the envelope.
+
+`test/e2e-phase3.test.ts` does the same for agent actions: a spoke with `deliver`, `actTokens`, `hubPrompt` and
+`permissionMessage` and a raw spoke without them; a grant to `@@orchestrator` used through the `hub` tool's code
+path (act token) and an app token's grant through the CLI; shell tokens refused, never patterns (the grant's and
+hub.json's), the own-tree ban, `needs_user` escalated to a Decision answered on the console, the user answering
+first, both kill switches, the hourly cap, prompts with provenance, deny reasons, grant requests and the audit
+(admins see summaries only). `test/central-tenancy.test.ts` checks every phase-3 route and CLI verb across two
+users. The opt-in `HUB_IT_OPENCODE=1 bun test test/e2e-phase3-live.it.test.ts` connects a private `opencode serve`
+with shell permissions set to ask: session A's (stub) model runs a shell command, session B's model calls `hub
+approve` under its grant, and OpenCode runs A's command. `HUB_IT_OPENCODE=1 bun test test/spoke-acting.it.test.ts`
+checks hub prompts and deny reasons inside OpenCode.
 
 `test/e2e-phase1.test.ts` (part of `npm test`) runs agent identity end to end in process: a hub, the OpenCode spoke
 and a second spoke of another harness, and the `hub` CLI as a session token, an app token, a linked device and a

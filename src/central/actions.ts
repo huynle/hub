@@ -85,9 +85,22 @@ const GONE: Gone = { outcome: "gone" }
 const OFFLINE: Offline = { outcome: "offline" }
 const STOPPED: TurnResult = { outcome: "interrupted", message: "Stopped", reply: "" }
 
+/** How long a request answered through the hub stays answered when its harness never reports the reply. */
+const ANSWERED_MS = 10 * 60_000
+const ANSWERED_MAX = 1000
+
 export function createActions({ registry, spokes, humanTurn }: ActionDeps): Actions {
+  // Requests this hub answered, so a second answer is gone even before (or without) permission.replied.
+  const answered = new Map<string, number>()
+  const markAnswered = (requestID: string) => {
+    const now = Date.now()
+    for (const [id, at] of answered) if (now - at > ANSWERED_MS || answered.size >= ANSWERED_MAX) answered.delete(id)
+    answered.set(requestID, now)
+  }
   return {
     async answerPermission({ rootID, requestID, decision, message }) {
+      const at = answered.get(requestID)
+      if (at !== undefined && Date.now() - at <= ANSWERED_MS) return GONE
       const targets = registry.permissionTargets(rootID, requestID)
       if (!targets.length) return GONE
       // Try every process that saw the request: only the one (and the location) running the session holds it.
@@ -95,7 +108,10 @@ export function createActions({ registry, spokes, humanTurn }: ActionDeps): Acti
       for (const target of targets) {
         try {
           const result = await spokes.request(target.connID, { op: "permission", sessionID: target.sessionID, requestID, decision, ...(message !== undefined ? { message } : {}) })
-          if (!result?.gone) return DONE
+          if (!result?.gone) {
+            markAnswered(requestID)
+            return DONE
+          }
         } catch (cause) {
           // Older spokes pass OpenCode's "Permission request not found" through as an error.
           if (!/not found/i.test(cause instanceof Error ? cause.message : String(cause))) failure ??= cause
