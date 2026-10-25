@@ -2,7 +2,7 @@
 // keeps the WebSocket to the central server, forwards exposed events, and executes the server's
 // requests (voice turns, permission replies, context reads) through the plugin context.
 import path from "node:path"
-import { readConfig, setSession, withServer, writeConfig, type Mode, type VoiceConfig, explicitVariant, formatModelRef, parseModelRef, plainModelRef, type ModelRef } from "../config"
+import { defaults, readConfig, setSession, withServer, writeConfig, type LaunchConfig, type Mode, type VoiceConfig, explicitVariant, formatModelRef, parseModelRef, plainModelRef, type ModelRef } from "../config"
 import { isLoopbackURL } from "../loopback"
 import {
   compactActivity,
@@ -207,6 +207,12 @@ export interface SpokeOptions {
    * directory must be under one. Absent: no roots, so launch creates are refused.
    */
   readonly workspaceRoots?: () => readonly string[]
+  /**
+   * Launch-bound mode (a spoke inside a launch's sandbox, src/config.ts LaunchConfig): connect to `hubURL` with the
+   * launch token and announce `launchID` in the hello; the machine config is never read, watched or written, and the
+   * spoke never enrols, starts a local hub or reads Herdr.
+   */
+  readonly launch?: LaunchConfig
 }
 
 export type EnrollmentState = "pending" | "approved" | "denied" | "expired" | "error"
@@ -272,6 +278,12 @@ const UNKNOWN_SESSION = "Unknown session"
 const LISTING_EVENTS = new Set(["session.created", "session.renamed", "session.deleted"])
 
 const errorText = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause))
+const LAUNCH_BOUND = "This spoke is bound to a launch; its hub connection is fixed by the launch config"
+
+/** The fixed config of a launch-bound spoke: always shared, no local hub, no Herdr. */
+function launchVoiceConfig(launch: LaunchConfig, machineName: string): VoiceConfig {
+  return { ...defaults(machineName), server: launch.hubURL, mode: "always", token: launch.token, autoStartLocalHub: false, herdr: false }
+}
 
 export class Spoke {
   private config: VoiceConfig
@@ -351,19 +363,14 @@ export class Spoke {
     private readonly host: SpokeHost,
     private readonly options: SpokeOptions,
   ) {
-    this.config = readConfig(options.configFile, options.machineName)
+    this.config = options.launch ? launchVoiceConfig(options.launch, options.machineName) : readConfig(options.configFile, options.machineName)
     this.hub = { pending: false, nextAt: 0, cooldown: options.localHubRetryMs ?? 30_000 }
   }
 
   start(): void {
     if (this.started) return
     this.started = true
-    try {
-      this.watcher = watchConfig(this.options.configFile, this.options.machineName, (c) => this.apply(c), { pollMs: this.options.pollMs })
-      this.config = this.watcher.current()
-    } catch (cause) {
-      console.error("[hub] config watch failed", cause)
-    }
+    if (!this.options.launch) this.watch()
     void this.listen()
     this.apply(this.config)
     this.every(this.options.snapshotIntervalMs ?? 30_000, () => this.sendSnapshot())
@@ -371,6 +378,15 @@ export class Spoke {
     if (this.options.kind === "service" && this.host.listRecent) {
       void this.seed()
       this.every(this.options.seedIntervalMs ?? 60_000, () => void this.seed())
+    }
+  }
+
+  private watch(): void {
+    try {
+      this.watcher = watchConfig(this.options.configFile, this.options.machineName, (c) => this.apply(c), { pollMs: this.options.pollMs })
+      this.config = this.watcher.current()
+    } catch (cause) {
+      console.error("[hub] config watch failed", cause)
     }
   }
 
@@ -645,6 +661,7 @@ export class Spoke {
 
   /** Starts device enrollment; polling continues in the background and stores the token on approval. */
   async enroll(): Promise<EnrollResult> {
+    if (this.options.launch) throw new SpokeError("invalid", LAUNCH_BOUND)
     const { server, machineName, autoStartLocalHub } = this.current()
     this.enrollment?.abort.abort()
     const abort = new AbortController()
@@ -720,6 +737,7 @@ export class Spoke {
    * with autoStartLocalHub off, and reconnects at once when it answers.
    */
   async startLocalHub(): Promise<{ status: "started" | "running" | "busy" }> {
+    if (this.options.launch) throw new SpokeError("invalid", LAUNCH_BOUND)
     const { server } = this.current()
     const starter = this.options.localHub
     if (!isLoopbackURL(server)) throw new SpokeError("invalid", `${server} is not a local hub`)
@@ -760,10 +778,12 @@ export class Spoke {
   }
 
   private current(): VoiceConfig {
+    if (this.options.launch) return this.config
     return this.watcher?.refresh() ?? readConfig(this.options.configFile, this.options.machineName)
   }
 
   private write(config: VoiceConfig): void {
+    if (this.options.launch) throw new SpokeError("invalid", LAUNCH_BOUND)
     writeConfig(this.options.configFile, config)
     if (this.watcher) this.watcher.refresh()
     else this.apply(readConfig(this.options.configFile, this.options.machineName))
@@ -808,6 +828,7 @@ export class Spoke {
         harness: HARNESS_OPENCODE,
         harnessVersion: this.host.opencodeVersion,
         evidence: "native",
+        ...(this.options.launch ? { launchID: this.options.launch.launchID } : {}),
       }),
       handle: (req) => this.handle(req),
       onWelcome: () => {
@@ -835,7 +856,7 @@ export class Spoke {
 
   /** After a failed connection to a loopback server: maybe start the local hub (see SpokeOptions.localHub). */
   private maybeStartLocalHub(server: string): void {
-    const starter = this.options.localHub
+    const starter = this.options.launch ? undefined : this.options.localHub
     if (!starter || !this.config.autoStartLocalHub || !isLoopbackURL(server)) return
     if (this.hub.pending || Date.now() < this.hub.nextAt) return
     this.hub.pending = true

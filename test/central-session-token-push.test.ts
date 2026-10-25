@@ -10,7 +10,7 @@ const LIFETIME = 24 * 60 * 60 * 1000
 const HUB = "http://hub.test"
 
 let clock: number
-let conns: Map<string, { machine: string; sessions: string[]; features: boolean; act?: boolean }>
+let conns: Map<string, { machine: string; sessions: string[]; features: boolean; act?: boolean; launch?: string }>
 let stamps: Map<string, string>
 let refused: Set<string>
 let minted: number
@@ -25,6 +25,7 @@ const registry: PushRegistry = {
     (feature === "sessionTokens" && conns.get(connID)?.features === true) || (feature === "actTokens" && conns.get(connID)?.act === true),
   connMachine: (connID) => conns.get(connID)?.machine,
   reportedSessions: (connID) => conns.get(connID)?.sessions ?? [],
+  launchOf: (connID) => conns.get(connID)?.launch,
 }
 const minter: TokenMinter = {
   lifetimeMs: LIFETIME,
@@ -319,6 +320,18 @@ describe("act tokens", () => {
     clock += LIFETIME
     await push.sessions("c1")
     expect(sent).toHaveLength(1)
+  })
+
+  test("a launch-bound connection (a sandboxed spoke) gets session tokens but never act tokens, even on refresh", async () => {
+    conns.get("c1")!.act = true
+    conns.get("c1")!.launch = "lch_1"
+    await push.sessions("c1")
+    clock += LIFETIME
+    await push.sessions("c1")
+    await push.sweep()
+    expect(ofOp("sessionTokens").length).toBeGreaterThanOrEqual(2)
+    expect(ofOp("actTokens")).toEqual([])
+    expect(JSON.stringify(sent)).not.toContain("act_")
   })
 
   test("a minter without mintAct sends no act tokens", async () => {
