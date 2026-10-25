@@ -302,8 +302,10 @@ export const IMPLIED_OPENCODE_FEATURES = [
  * "sessionTokens": the spoke stores the session tokens the hub sends (sessionTokens op) for its sessions' shells.
  * "deliver": the spoke admits hub messages into its sessions (deliver op).
  */
-export const SPOKE_FEATURES = [...IMPLIED_OPENCODE_FEATURES, "autoName", "sessionTokens", "deliver"] as const
-export type SpokeFeature = (typeof SPOKE_FEATURES)[number]
+export const KNOWN_SPOKE_FEATURES = [...IMPLIED_OPENCODE_FEATURES, "autoName", "sessionTokens", "deliver"] as const
+export type SpokeFeature = (typeof KNOWN_SPOKE_FEATURES)[number]
+/** What this package's OpenCode spoke announces: "deliver" joins once the spoke handles the op (P2-T3). */
+export const SPOKE_FEATURES: readonly SpokeFeature[] = KNOWN_SPOKE_FEATURES.filter((f) => f !== "deliver")
 
 /**
  * Features the hub announces in its welcome. "harness": it reads hello `harness`, `harnessVersion` and `evidence`.

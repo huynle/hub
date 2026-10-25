@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import * as protocol from "../src/index.ts"
-import { encode, featureForOp, HUB_FEATURES, IMPLIED_OPENCODE_FEATURES, MAX_FRAME, parseServerMessage, PROTOCOL_VERSION, SPOKE_FEATURES, spokeFeatures } from "../src/index.ts"
+import { encode, featureForOp, HUB_FEATURES, IMPLIED_OPENCODE_FEATURES, KNOWN_SPOKE_FEATURES, MAX_FRAME, parseServerMessage, PROTOCOL_VERSION, SPOKE_FEATURES, spokeFeatures } from "../src/index.ts"
 
 const j = (v: unknown) => JSON.stringify(v)
 const P = protocol as any
@@ -105,14 +105,16 @@ describe("deliver result", () => {
 
 describe("messaging features", () => {
   test("deliver is a spoke feature that must be announced: old OpenCode spokes do not imply it", () => {
-    expect(SPOKE_FEATURES as readonly string[]).toContain("deliver")
+    expect(KNOWN_SPOKE_FEATURES as readonly string[]).toContain("deliver")
+    // Not announced until the spoke handles the op (P2-T3): a hub must not send deliver to a spoke that drops it.
+    expect(SPOKE_FEATURES as readonly string[]).not.toContain("deliver")
     expect(IMPLIED_OPENCODE_FEATURES as readonly string[]).not.toContain("deliver")
     expect(featureForOp("deliver" as any)).toBe("deliver" as any)
     const oldHello = { t: "hello", v: PROTOCOL_VERSION, processID: "p1", kind: "standalone", directory: "/tmp/x", pid: 1, mode: "always", opencodeVersion: "2.0.25", pluginVersion: "0.1.0" }
     expect(spokeFeatures(oldHello as any).has("deliver")).toBe(false)
     expect(spokeFeatures({ ...oldHello, features: ["autoName"] } as any).has("deliver")).toBe(false)
-    expect(spokeFeatures({ ...oldHello, harness: "opencode", features: [...SPOKE_FEATURES] } as any).has("deliver")).toBe(true)
-    expect(SPOKE_FEATURES.length).toBeLessThanOrEqual(64)
+    expect(spokeFeatures({ ...oldHello, harness: "opencode", features: [...SPOKE_FEATURES, "deliver"] } as any).has("deliver")).toBe(true)
+    expect(KNOWN_SPOKE_FEATURES.length).toBeLessThanOrEqual(64)
   })
 
   test("the hub announces messaging next to harness", () => {
