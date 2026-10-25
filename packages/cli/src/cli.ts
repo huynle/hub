@@ -11,6 +11,7 @@ import { serveMcp } from "./mcp"
 import { ASK_EXPIRES_DEFAULT_S, askOutcome, declinedText, durationArg, inboxText, mutedText, repliedText, sentText, textArg } from "./messaging"
 import { watch } from "./watch"
 import { DECISION_FLAGS, decisionOptions, decisionsText, openedText, stateArg } from "./decisions"
+import { GRANT_FLAGS, grantError, grantSpecArg, grantsText, grantText, userOnly } from "./grants"
 import { answeredText, approvedText, deliveryArg, deniedText, formAnswerArg, needsUserLines, promptedText, stoppedText } from "./acting"
 
 export { EXIT } from "./http"
@@ -69,6 +70,12 @@ Acting (users; agents under a grant, else exit 4 needs user with the evaluation)
   hub prompt <addr> "text" [--delivery queue|steer] [--why "…"]   prompt a session (text "-" reads stdin)
   hub stop <addr> [--why "…"]         stop its running turn
 
+Grants (the user only: the console, or \`hub login\` with a device token; exit 5 otherwise)
+  hub grant list · hub grant show <grantID> · hub grant revoke <grantID>
+  hub grant create --holder <ses_…|@name|@@orchestrator…|app:<id>> --project <path>... --allow approve,deny,…
+         [--permit <pattern>]... [--never <pattern>]... [--expires 8h] [--max-per-hour N] [--allow-always]
+         | --json '{…}' | --json -   what a session or app token may do, in which projects, until when
+
 MCP
   hub mcp                             an MCP server on stdio: these verbs as tools, with this CLI's credential
 
@@ -109,6 +116,12 @@ function crossCheck(io: Io, actor: Actor | undefined) {
 
 /** Prints the raw answer with --json, else its text. */
 const answer = (context: Context, body: unknown, text: (body: any) => string) => (context.json ? printJSON(context.io, body) : out(context.io, text(body)))
+
+/** context.hub for the grant routes: a forbidden says who may manage grants. */
+const grantHub = <T>(context: Context, use: (hub: HubClient) => Promise<T>): Promise<T> =>
+  context.hub(use).catch((error) => {
+    throw grantError(error)
+  })
 
 /** --why as SDK act options. */
 const whyOf = (flags: Parsed["flags"]) => {
@@ -339,6 +352,36 @@ const COMMANDS: Record<string, Command> = {
       answer(context, body, stoppedText)
     },
   },
+  "grant list": {
+    async handle(context) {
+      const body = await grantHub(context, (hub) => hub.grants())
+      answer(context, body, (b) => grantsText(b.grants ?? []))
+    },
+  },
+  "grant show": {
+    args: ["<grantID>"],
+    async handle(context) {
+      const body = await grantHub(context, (hub) => hub.grant(context.parsed.args[0]!))
+      answer(context, body, (b) => grantText(b.grant))
+    },
+  },
+  "grant create": {
+    flags: GRANT_FLAGS,
+    async handle(context) {
+      userOnly(context.credentials().source, "create")
+      const spec = await grantSpecArg(context.parsed.flags, context.io.stdin)
+      const body = await grantHub(context, (hub) => hub.createGrant(spec))
+      answer(context, body, (b) => `created ${grantText(b.grant)}`)
+    },
+  },
+  "grant revoke": {
+    args: ["<grantID>"],
+    async handle(context) {
+      userOnly(context.credentials().source, "revoke")
+      const body = await grantHub(context, (hub) => hub.revokeGrant(context.parsed.args[0]!))
+      answer(context, body, (b) => `revoked ${b.grant.id} (${b.grant.holder})`)
+    },
+  },
   mcp: {
     async handle({ io, credentials }) {
       if (!io.input) throw new UsageError("needs stdin")
@@ -369,7 +412,7 @@ const COMMANDS: Record<string, Command> = {
 }
 
 /** Commands with sub-verbs (`hub role claim`). */
-const GROUPS: Record<string, string[]> = { role: ["claim", "release"], decisions: ["list"] }
+const GROUPS: Record<string, string[]> = { role: ["claim", "release"], decisions: ["list"], grant: ["list", "show", "create", "revoke"] }
 
 function reportError(io: Io, error: CliError, json: boolean) {
   if (json && error.envelope) printJSON(io, { error: error.envelope })

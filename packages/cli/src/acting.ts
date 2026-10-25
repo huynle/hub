@@ -2,7 +2,7 @@
 // the short text of what the hub answers to approve, deny, answer, prompt and stop, and the lines a needs_user
 // failure adds (its evaluation and the Decision it opened). The shapes are packages/sdk's types (acting-routes.ts).
 import type { Approved, Denied, Envelope, Evaluation, FormAnswer, FormAnswered, PromptDelivery, Prompted, Stopped } from "../../sdk/src/index.ts"
-import { UsageError, type Parsed } from "./args"
+import { jsonObjectArg, UsageError, type Parsed } from "./args"
 import { oneLine } from "./format"
 
 const grantText = (grant: string | undefined) => (grant ? `grant ${grant}` : undefined)
@@ -41,7 +41,7 @@ export async function formAnswerArg(pairs: readonly string[], flags: Parsed["fla
   const given = [pairs.length > 0, json !== undefined, flags.cancel === true].filter(Boolean).length
   if (given > 1) throw new UsageError("give either key=value pairs, --json '{…}' or --cancel")
   if (flags.cancel === true) return "cancel"
-  if (json !== undefined) return jsonAnswer(json === "-" ? await readStdin(stdin) : json)
+  if (json !== undefined) return (await jsonObjectArg(json, stdin, "answer")) as FormAnswer
   if (!pairs.length) throw new UsageError("needs key=value pairs (or --json '{…}', or --cancel)")
   const answer: Record<string, string | string[]> = {}
   for (const pair of pairs) {
@@ -53,22 +53,6 @@ export async function formAnswerArg(pairs: readonly string[], flags: Parsed["fla
     answer[key] = before === undefined ? value : [...(Array.isArray(before) ? before : [before]), value]
   }
   return answer
-}
-
-async function readStdin(stdin: (() => Promise<string>) | undefined): Promise<string> {
-  if (!stdin) throw new UsageError("cannot read the answer from stdin here")
-  return stdin()
-}
-
-function jsonAnswer(text: string): FormAnswer {
-  let value: unknown
-  try {
-    value = JSON.parse(text)
-  } catch {
-    throw new UsageError("--json takes the answer as a JSON object")
-  }
-  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new UsageError("--json takes the answer as a JSON object")
-  return value as FormAnswer
 }
 
 /** What a needs_user failure adds: the evaluation, the grants checked and the Decision opened for the user. */

@@ -72,3 +72,20 @@ export function parse(argv: readonly string[], spec: CommandSpec): Parsed {
 }
 
 export const str = (flags: Parsed["flags"], name: string): string | undefined => (typeof flags[name] === "string" ? (flags[name] as string) : undefined)
+
+/** A --json value: a JSON object, or all of stdin for "-"; anything else is a usage error. */
+export async function jsonObjectArg(value: string, stdin: (() => Promise<string>) | undefined, what: string): Promise<Record<string, unknown>> {
+  let text = value
+  if (value === "-") {
+    if (!stdin) throw new UsageError(`cannot read the ${what} from stdin here`)
+    text = await stdin()
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    parsed = undefined
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new UsageError(`--json takes the ${what} as a JSON object`)
+  return parsed as Record<string, unknown>
+}
