@@ -5,7 +5,7 @@ import { For, Match, Show, Switch, batch, createEffect, createMemo, createSignal
 import { blockersOf } from "../core/browser-core"
 import { reconcileSay, statusNotes, type StatusLike } from "../core/conversation-core"
 import { speechSetup, type StatusEntry } from "../core/feedback-core"
-import { Timeline } from "../core/timeline-core"
+import { storedMessageRow, Timeline } from "../core/timeline-core"
 import { HistoryPager, type PageQuery } from "../core/history-core"
 import { composerReducer, composerView, confirmDelivery, initialComposer, turnAnswer, turnOutcomeNote, type ComposerAction, type TurnResultLike } from "../lib/composer"
 import { subtree, treeRunning } from "../lib/store"
@@ -162,6 +162,20 @@ export function SessionView(props: { id: string }) {
     }
   }
 
+  /** Hub messages of the session (its sent ones and those not in its history yet), merged by time. */
+  async function loadMessages() {
+    try {
+      const { messages } = await getJSON<{ messages?: unknown[] }>(`${sessionPath(id)}/messages?limit=200`)
+      for (const raw of messages ?? []) {
+        const row = storedMessageRow(id, raw)
+        if (row) timeline.hubMessage(row)
+      }
+      bump()
+    } catch {
+      // older hubs have no message store: no message rows besides the history's
+    }
+  }
+
   async function loadBacklog() {
     try {
       const info = await getJSON(sessionPath(id))
@@ -179,8 +193,8 @@ export function SessionView(props: { id: string }) {
     // The hub could not replay what this page missed while away: refetch the conversation and status.
     if (m.type === "resync") {
       // The newest page again, merged with the older pages already shown (or, after a gap, instead of them).
-      if (loaded()) void pager.resync().catch((e) => note(`Could not refresh the conversation: ${errorText(e)}`, "err"))
-      else void loadTimeline()
+      if (loaded()) void pager.resync().catch((e) => note(`Could not refresh the conversation: ${errorText(e)}`, "err")).then(loadMessages)
+      else void loadTimeline().then(loadMessages)
       void loadBacklog()
       void loadSummary()
       return
@@ -197,6 +211,13 @@ export function SessionView(props: { id: string }) {
       // Text after reasoning ends that reasoning.
       timeline.appendText({ sessionID: m.sessionID, messageID: m.messageID, ...(Number.isInteger(m.ordinal) ? { ordinal: m.ordinal } : {}), delta: m.text })
       bump()
+    } else if (m.type === "message") {
+      // A hub message this session sent or got (others: nothing).
+      const row = storedMessageRow(id, m.message)
+      if (row) {
+        timeline.hubMessage(row)
+        bump()
+      }
     } else if (m.type === "turn" && m.sessionID === id && awaitingTurn) {
       const { sub, sentAt } = awaitingTurn
       awaitingTurn = undefined
@@ -452,7 +473,7 @@ export function SessionView(props: { id: string }) {
       })
       void submit()
     }
-    void loadTimeline()
+    void loadTimeline().then(loadMessages)
     void loadBacklog()
     void loadSummary()
     void models.load()
