@@ -329,3 +329,70 @@ describe("accept", () => {
     expect((await w.engine.accept(U, body({ key: "k1" }))).launch.id).toBe(first.launch.id)
   })
 })
+
+describe("provisioning", () => {
+  test("prepare on the node → launch create on the service spoke → roles, name, primer → prompt → running", async () => {
+    const w = world()
+    w.connectNode()
+    await w.engine.start()
+    const launch = await launched(w, { name: "api", roles: ["reviewer.hub"], agent: "build", model: "anthropic/claude-x#high", labels: { app: "brain" } })
+    expect(launch).toMatchObject({ state: "running", machineID: MACHINE, sessionID: "ses_1", name: "api" })
+    expect(w.nodeCalls[0]).toEqual({
+      op: "prepare",
+      launchID: launch.id,
+      runtime: { kind: "host" },
+      harness: "opencode",
+      workspace: { repo: "/p/hub", mode: "worktree", branch: "feat/x", base: "main" },
+    })
+    expect(w.spokeCalls[0]).toEqual({
+      op: "create",
+      directory: "/p/hub/.worktrees/feat/x",
+      title: "api",
+      launchID: launch.id,
+      agent: "build",
+      model: { providerID: "anthropic", modelID: "claude-x", variant: "high" },
+    })
+    expect(w.roles).toEqual([{ sessionID: "ses_1", role: "reviewer.hub", byUser: true }])
+    expect(w.primeOrder).toEqual(["role:reviewer.hub", "name:api", "prime:ses_1", "prompt:ses_1"])
+    expect(w.prompts).toEqual([{ sessionID: "ses_1", text: "Do the thing", resetHops: false }])
+    expect(w.changes.map((l) => l.state)).toEqual(["queued", "provisioning", "running"])
+    expect(await w.engine.view(U, launch.id)).toMatchObject({ id: launch.id, directory: "/p/hub/.worktrees/feat/x" })
+    w.engine.shutdown()
+  })
+
+  test("an app's launch claims roles without user powers; no name: primed explicitly", async () => {
+    const w = world()
+    w.connectNode()
+    await w.engine.start()
+    const { launch } = await w.engine.accept(U, body({ roles: ["reviewer"] }), { by: "app:t1" })
+    await settle()
+    expect(await w.launch(launch.id)).toMatchObject({ state: "running", sessionID: "ses_1" })
+    expect(w.roles).toEqual([{ sessionID: "ses_1", role: "reviewer" }])
+    expect(w.primeOrder).toEqual(["role:reviewer", "prime:ses_1", "prompt:ses_1"])
+    w.engine.shutdown()
+  })
+
+  test("waits queued without a node; a node connecting places it", async () => {
+    const w = world()
+    await w.engine.start()
+    const queued = await launched(w)
+    expect(queued.state).toBe("queued")
+    w.connectNode()
+    await settle()
+    expect(await w.launch(queued.id)).toMatchObject({ state: "running" })
+    w.engine.shutdown()
+  })
+
+  test("a role the directory refuses does not fail the launch; it is noted in the reason", async () => {
+    const w = world()
+    w.deps.directory.claimRole = () => {
+      throw new AgentError("name_taken", "@@lead is held exclusively by another session")
+    }
+    w.connectNode()
+    await w.engine.start()
+    const launch = await launched(w, { roles: ["lead"] })
+    expect(launch.state).toBe("running")
+    expect(launch.reason).toContain("@@lead")
+    w.engine.shutdown()
+  })
+})
