@@ -406,6 +406,65 @@ describe("plugin setup", () => {
     })
   })
 
+  describe("TUI /who and /msg (RPC hubWho, hubMsg as the TUI's current session)", () => {
+    async function connected(hubFeatures: readonly string[] = ["harness", "messaging"]) {
+      const seen: Array<{ path: string; auth: string | null; body: any }> = []
+      const server = fakeCentral({
+        hubFeatures,
+        http: (req) => {
+          const { pathname } = new URL(req.url)
+          if (!pathname.startsWith("/api/agent/")) return undefined
+          return agent(req, pathname)
+        },
+      })
+      async function agent(req: Request, pathname: string): Promise<Response> {
+        const text = req.method === "GET" ? "" : await req.text()
+        seen.push({ path: pathname, auth: req.headers.get("authorization"), body: text ? JSON.parse(text) : undefined })
+        if (pathname === "/api/agent/who") return Response.json({ sessions: [{ sessionID: "ses_bob", name: "bob", project: "hub", online: true, state: "idle", roles: [{ role: "reviewer" }] }] })
+        if (pathname === "/api/agent/msg") {
+          const message = { id: "m_1", kind: "msg", from: { kind: "session", sessionID: "ses_a" }, to: "@bob", recipient: { kind: "session", sessionID: "ses_bob", name: "bob" }, text: "x", state: "sent", at: 1, hop: 0 }
+          return Response.json({ message, delivery: "queued" }, { status: 201 })
+        }
+        return Response.json({ error: { code: "not_found", message: "no route" } }, { status: 404 })
+      }
+      cleanups.push(() => stopServer(server))
+      tempConfig({ server: server.url, mode: "always", token: "tok" })
+      const fake = fakeContext()
+      cleanups.push((await plugin.setup(fake.ctx as any)) as () => void)
+      await until(() => server.frames.some((f) => f.t === "sessions"))
+      fake.queue.push({ type: "session.created", data: { sessionID: "ses_a", title: "A" } })
+      await until(() => server.frames.some((f) => f.t === "sessions" && (f as any).sessions.some((s: any) => s.id === "ses_a")))
+      await server.request({ op: "sessionTokens", tokens: [{ sessionID: "ses_a", token: "hst.a-secret", exp: Date.now() + 60_000 }] })
+      return { fake, seen }
+    }
+
+    test("hubMsg sends word for word with the session's own token, which never comes back", async () => {
+      const { fake, seen } = await connected()
+      const text = '  hi   "there"\nline two '
+      const result = await fake.call("hubMsg", { sessionID: "ses_a", to: "@bob", text })
+      expect(result).toEqual({ id: "m_1", to: "@bob", delivery: "queued" })
+      expect(seen).toEqual([{ path: "/api/agent/msg", auth: "Bearer hst.a-secret", body: { to: "@bob", text } }])
+      expect(JSON.stringify(result)).not.toContain("hst.a-secret")
+    })
+
+    test("hubWho lists sessions as the given session", async () => {
+      const { fake, seen } = await connected()
+      expect(await fake.call("hubWho", { sessionID: "ses_a", role: "reviewer" })).toEqual({
+        sessions: [{ sessionID: "ses_bob", name: "bob", project: "hub", state: "idle", online: true, roles: ["reviewer"] }],
+      })
+      expect(seen[0]).toMatchObject({ path: "/api/agent/who", auth: "Bearer hst.a-secret" })
+    })
+
+    test("errors are RPC errors: no session, no token, no messaging", async () => {
+      const { fake, seen } = await connected(["harness"])
+      expect(await fake.call("hubMsg", { to: "@bob", text: "hi" })).toMatchObject({ type: "invalid", message: expect.stringMatching(/session/i) })
+      expect(await fake.call("hubMsg", { sessionID: "ses_b", to: "@bob", text: "hi" })).toMatchObject({ type: "not_connected", message: expect.stringMatching(/no hub token/i) })
+      expect(await fake.call("hubMsg", { sessionID: "ses_a", to: "@bob", text: "hi" })).toMatchObject({ type: "unsupported" })
+      expect(await fake.call("hubWho", {})).toMatchObject({ type: "invalid" })
+      expect(seen).toHaveLength(0)
+    })
+  })
+
   describe("prompt references (design §2.4)", () => {
     test("a prompt hook is registered", async () => {
       tempConfig({ mode: "off" })
