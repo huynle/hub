@@ -30,14 +30,15 @@ export interface DecisionView {
   readonly tier: "confirm" | "tap"
   readonly deadline?: number
   readonly onTimeout?: string
-  readonly state: "open" | "answered" | "expired"
+  /** closed: what it asked about went away (a permission answered elsewhere). */
+  readonly state: "open" | "answered" | "expired" | "closed"
   readonly at: number
   readonly expiresAt: number
   readonly escalatedAt?: number
   readonly answer?: { readonly option?: string; readonly text?: string; readonly answeredBy: "user" | "timeout"; readonly at: number }
 }
 
-const STATES = new Set(["open", "answered", "expired"])
+const STATES = new Set(["open", "answered", "expired", "closed"])
 const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v)
 
 /** A Decision from the hub (list or SSE event); undefined when it is not one. Malformed options are dropped. */
