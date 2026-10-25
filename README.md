@@ -285,7 +285,7 @@ token as a user actor, on console routes and `/api/agent` alike. Revoking the de
 
 ## hub CLI
 
-`hub` (also installed as `hubctl`) reads and names your sessions through the hub's [`/api/agent` API](#agent-identity-agent-api),
+`hub` (also installed as `hubctl`) reads, names and messages your sessions through the hub's [`/api/agent` API](#agent-identity-agent-api),
 for agents and scripts. The OpenCode plugin writes both launchers into the hub bin dir (`$HUB_STATE_DIR/bin`, default
 `~/.local/state/hub/bin`) at start and puts that dir first on PATH in every shell it prepares, so inside a
 session `hub` just works. A launcher runs the CLI bundle shipped in this package (`packages/cli/dist/hub-cli.js`)
@@ -306,6 +306,12 @@ hub who [--project P] [--role R | @@role] named and role-holding sessions
 hub name <@name> [--session <addr>]
 hub role claim <role[.project]> [--exclusive] [--session <addr>]
 hub role release <role[.project]> [--session <addr>]
+hub msg <addr> "text" [--all] [--no-wake] [--urgent]     tell: fire and forget
+hub ask <addr> "text" [--wait [secs]] [--expires 2h] [--all] [--no-wake] [--urgent]
+hub reply <msgID> "text" [--no-wake]      to the message's real sender, never via the role
+hub decline <msgID> --why "reason"
+hub inbox                                 asks to answer, your open asks, recent messages, mutes
+hub mute <addr> · hub unmute <addr>       refuse (or accept again) messages from a session
 hub login [--url URL] [--token APP_TOKEN] · hub logout
 hub help · hub --version
 ```
@@ -313,14 +319,28 @@ hub help · hub --version
 Addresses are `ses_…` (or an unambiguous prefix), `@name`, `@@role` and `@name.project`. Output is short text
 (one session per line: name and ID, state, harness, current activity, blockers); `--json` prints the hub's answer
 unchanged (for errors, the `{error: {code, message, hint?, …}}` envelope on stdout as well). Errors print the
-message, any candidates or retry time, and the hint on stderr.
+message, any candidates or retry time, a missing feature, and the hint on stderr.
+
+**Messaging.** `msg` and `ask` print what was stored and how it reached the recipient (`delivered` into a new or
+the running turn, `queued` for its next turn, `retained` while it has a question open, `pending` while offline, or
+`stored` in a user's or app's inbox); `--all` sends to every session the address names (each holder of a role),
+`--no-wake` admits without starting a turn, `--urgent` steers into a running turn. A text (or `--why`) of `-` is
+read from stdin, so long or quoted bodies need no escaping: `git diff | hub msg @reviewer -`. `--expires` and
+`--wait` take seconds or `30s`, `5m`, `2h`, `1d` (asks expire after 1 minute to 7 days, default 24 h). `ask --wait N`
+waits up to N seconds for the answer (the CLI loops on the hub's 60 s long poll); a bare `--wait` waits until the
+ask expires. A waiting `ask` exits 0 with the answer, 1 when declined (with the reason) or still open when the
+wait is spent, and 8 when it expired; `--wait` cannot be combined with `--all`. `hub inbox` shows each open ask
+with its `hub reply` / `hub decline` line. A recipient whose spoke cannot receive messages exits 7 (`unsupported`,
+feature `deliver`: update the plugin there), messaging switched off by the user exits 5 (`paused`), sending too
+much exits 6 (`rate_limited`), and answering an ask that is already answered or expired exits 8 (`gone`). Sessions
+message with their session token; an app token needs the `messages:send` (and `messages:read` for `inbox`) scopes.
 
 **Credentials.** `HUB_URL` + `HUB_SESSION_TOKEN` (the spoke sets them in each session's shells; the CLI then
 acts as that session) win over the login file. Outside a session, `hub login --url https://hub.example` stores
 an app token in `~/.config/hub/cli.json` (`$XDG_CONFIG_HOME` respected; mode 0600) after checking it with
 `whoami`; the token is read from stdin (or prompted) unless `--token` is given — prefer stdin, since arguments are
 visible to other local users in `ps`. App tokens are created by a signed-in user with
-`POST /api/agent/app-tokens {label?, scopes?}` (scope `sessions:read`; shown once) and revoked with
+`POST /api/agent/app-tokens {label?, scopes?}` (scopes `sessions:read`, `messages:send`, `messages:read`; shown once) and revoked with
 `DELETE /api/agent/app-tokens/:id`; `hub logout` only deletes the file. App tokens can read but not name or
 claim roles (writes are for sessions and users). `whoami` and `status` warn on stderr when `OPENCODE_SESSION_ID`
 is set and the credential is not that session. The CLI removes `BUN_BE_BUN` from its own environment.
@@ -328,14 +348,14 @@ is set and the credential is not that session. The CLI removes `BUN_BE_BUN` from
 | Exit | When |
 |---|---|
 | 0 | ok |
-| 1 | other errors, network failures, a watch stream the hub closed |
+| 1 | other errors, network failures, a watch stream the hub closed, an `ask --wait` declined or not yet answered |
 | 2 | usage (unknown command or option, missing argument; also the hub's `invalid`) |
 | 3 | `not_found`, `ambiguous` (candidates listed), `name_taken` |
 | 4 | `needs_user` |
 | 5 | `forbidden`, `paused` |
 | 6 | `rate_limited` (with `retryAfter`) |
 | 7 | `unsupported`, `offline` |
-| 8 | `gone` |
+| 8 | `gone`; an `ask --wait` that expired |
 | 9 | `unauthorized`, `token_expired` (a session token: start a new shell), or not logged in |
 
 ## Spoke (OpenCode plugin)
