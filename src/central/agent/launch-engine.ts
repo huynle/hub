@@ -31,6 +31,11 @@
 // - Work records (StateStore LAUNCH_WORK, per launch): fence, workspace, sessionID, prompted, seenWorking, pending
 //   cleanup, so a restarted hub carries on: queued/placing → placement; provisioning → recover (see recover);
 //   running → watched again (seen working and the timeout survive).
+// - Cluster mode (design §9, decision vkxkqiuf §7): start() makes the engine the supervisor (placement, pipelines,
+//   end watchers, node reconcile); the hub calls it on the leader pod only and shutdown() when the pod loses the
+//   lease (its provisioning runs stop at their next step and the next leader recovers them from the work records).
+//   accept() works on any pod: a pod that does not supervise kicks the leader (deps.supervisor), and a stop of a
+//   provisioning or running launch goes to the leader, where its pipeline or watch lives.
 // - onLaunchChanged gets every change the engine makes (queued, provisioning, running, ended); placement's own
 //   intermediate steps (placing, re-queued) are not reported.
 import type { NodeListener, NodeView } from "../nodes"
@@ -69,6 +74,16 @@ export interface EngineDelivery {
   readonly messages: Pick<Delivery["messages"], "inbox">
 }
 export type EngineDecisions = Pick<Decisions, "list">
+
+/**
+ * Cluster mode: the supervisor (start()) runs on the leader pod only (../cluster/leader.ts); an engine that does not
+ * supervise hands it work: a queued launch kicks it, a stop of a provisioning or running launch goes to it (its
+ * pipeline and end watcher live there). stop resolves undefined when no supervisor answers: the pod stops it itself.
+ */
+export interface EngineSupervisor {
+  kick(userID: string): void
+  stop(userID: string, id: string, reason: string): Promise<Launch | undefined>
+}
 export type EngineActions = Pick<Actions, "prompt" | "stop">
 
 export interface LaunchEngineDeps {
@@ -96,6 +111,8 @@ export interface LaunchEngineDeps {
   readonly timers?: Timers
   /** Every launch change the engine makes (SSE events and webhooks hang off this). */
   readonly onLaunchChanged?: (launch: Launch) => void
+  /** Cluster mode: the leader's supervisor, for an engine that does not supervise (see EngineSupervisor). */
+  readonly supervisor?: EngineSupervisor
 }
 
 const LIVE: readonly LaunchState[] = ["queued", "placing", "provisioning", "running"]
@@ -132,10 +149,15 @@ interface Pipeline {
   stop?: string
   /** Ends a wait in progress (for the harness's connection) when a stop comes. */
   abort?: () => void
+  /** The engine stopped supervising (shutdown): the run stops at its next checkpoint, leaving the launch as it is. */
+  abandoned?: boolean
 }
 
 /** Thrown at a provisioning checkpoint after a stop. */
 class StopRequested extends Error {}
+
+/** Thrown at a provisioning checkpoint once the engine stopped supervising (the next leader recovers the launch). */
+class Abandoned extends Error {}
 
 /** The node is gone (or never came back): the launch is lost. */
 class LostError extends Error {}
@@ -250,6 +272,8 @@ export class LaunchEngine {
   private readonly seenEarly = new Set<string>()
   private readonly timers: Timers
   private tickTimer: unknown
+  /** start() ran and shutdown() did not: this engine runs placement, pipelines and end watchers. */
+  private supervising = false
 
   constructor(private readonly deps: LaunchEngineDeps) {
     this.now = deps.now ?? Date.now
@@ -295,7 +319,7 @@ export class LaunchEngine {
     if (result.created) {
       await this.placement.recordLaunch(userID)
       this.changed(result.launch)
-      void this.loop.kick(userID)
+      this.kick(userID)
     }
     return result
   }
@@ -330,6 +354,8 @@ export class LaunchEngine {
    * on node and spoke changes) and reconciles nodes that connect.
    */
   async start(): Promise<void> {
+    if (this.supervising) return
+    this.supervising = true
     const { nodes, registry } = this.deps
     this.unsubscribe.push(
       nodes.subscribe((event) => {
@@ -363,7 +389,13 @@ export class LaunchEngine {
     }
   }
 
+  /** Stops supervising: placement, end watchers and listeners stop; provisioning runs stop at their next step. */
   shutdown(): void {
+    this.supervising = false
+    for (const pipeline of this.pipelines.values()) {
+      pipeline.abandoned = true
+      pipeline.abort?.()
+    }
     this.loop.stop()
     if (this.tickTimer !== undefined) this.timers.clear(this.tickTimer)
     this.tickTimer = undefined
@@ -382,6 +414,10 @@ export class LaunchEngine {
     for (;;) {
       const launch = await this.store.get(userID, id)
       if (!launch) throw new AgentError("not_found", `No launch ${id}`)
+      if (!this.supervising && this.deps.supervisor && (launch.state === "provisioning" || launch.state === "running")) {
+        const stopped = await this.deps.supervisor.stop(userID, id, reason)
+        if (stopped) return stopped
+      }
       switch (launch.state) {
         case "ended":
           throw new AgentError("gone", "The launch already ended")
@@ -413,6 +449,12 @@ export class LaunchEngine {
           return (await this.end(userID, id, "stopped", reason, { stopSession: true }))!
       }
     }
+  }
+
+  /** A placement pass for the user: here when this engine supervises, else on the supervisor (leader). */
+  kick(userID: string): void {
+    if (!this.supervising && this.deps.supervisor) this.deps.supervisor.kick(userID)
+    else void this.loop.kick(userID)
   }
 
   /** A placed launch: prepare → create → roles, name, primer → prompt → running. */
@@ -468,12 +510,14 @@ export class LaunchEngine {
     const pipeline: Pipeline = { done: Promise.resolve() }
     this.pipelines.set(launch.id, pipeline)
     const checkpoint = () => {
+      if (pipeline.abandoned) throw new Abandoned()
       if (pipeline.stop !== undefined) throw new StopRequested()
     }
     pipeline.done = (async () => {
       try {
         await steps(checkpoint)
       } catch (cause) {
+        if (pipeline.abandoned) return
         if (pipeline.stop !== undefined) {
           await this.end(userID, launch.id, "stopped", pipeline.stop)
           return
@@ -900,7 +944,7 @@ export class LaunchEngine {
       })
       this.disarm(id)
       this.changed(ended)
-      void this.loop.kick(userID)
+      this.kick(userID)
       return ended
     } catch (cause) {
       if (cause instanceof LaunchTransitionError) return this.store.get(userID, id)

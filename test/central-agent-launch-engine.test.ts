@@ -839,3 +839,72 @@ describe("reading launches", () => {
     w.engine.shutdown()
   })
 })
+
+describe("cluster: the supervisor runs on the leader pod", () => {
+  test("an engine that does not supervise queues an accepted launch and kicks the supervisor instead of placing it", async () => {
+    const kicks: string[] = []
+    const w = world({ deps: { supervisor: { kick: (userID) => void kicks.push(userID), stop: async () => undefined } } })
+    w.connectNode()
+    const queued = await launched(w)
+    expect(queued.state).toBe("queued")
+    expect(kicks).toEqual([U])
+    expect(w.nodeCalls).toEqual([])
+    // Elected: it supervises now and places the launch.
+    await w.engine.start()
+    await settle()
+    expect(await w.launch(queued.id)).toMatchObject({ state: "running" })
+    w.engine.shutdown()
+  })
+
+  test("a stop on a pod that does not supervise goes to the supervisor for provisioning and running launches", async () => {
+    const forwarded: string[] = []
+    const { w, launch, sessionID } = await running()
+    const follower = new LaunchEngine({
+      ...w.deps,
+      supervisor: {
+        kick: () => {},
+        stop: (userID, id, reason) => (forwarded.push(id), w.engine.stop(userID, id, reason)),
+      },
+    })
+    expect(await follower.stop(U, launch.id)).toMatchObject({ state: "ended", outcome: "stopped" })
+    expect(forwarded).toEqual([launch.id])
+    expect(w.stops).toEqual([sessionID])
+    // A queued one ends where it is asked.
+    w.disconnectNode()
+    const queued = (await follower.accept(U, body())).launch
+    expect(await follower.stop(U, queued.id)).toMatchObject({ state: "ended", outcome: "stopped" })
+    expect(forwarded).toEqual([launch.id])
+    // No supervisor answers: the pod ends it itself.
+    w.connectNode()
+    w.engine.shutdown()
+    const alone = new LaunchEngine({ ...w.deps, supervisor: { kick: () => {}, stop: async () => undefined } })
+    await alone.start()
+    const next = await launched({ ...w, engine: alone })
+    expect(next.state).toBe("running")
+    alone.shutdown()
+    const follower2 = new LaunchEngine({ ...w.deps, supervisor: { kick: () => {}, stop: async () => undefined } })
+    expect(await follower2.stop(U, next.id)).toMatchObject({ state: "ended", outcome: "stopped" })
+  })
+
+  test("a deposed engine abandons its provisioning runs (the launch is not ended); the next leader carries on", async () => {
+    const w = world()
+    const hold = deferred<unknown>()
+    w.nodeHolds.set("prepare", hold)
+    w.connectNode()
+    await w.engine.start()
+    const launch = await launched(w)
+    expect(launch.state).toBe("provisioning")
+    w.engine.shutdown()
+    hold.resolve(w.nodeAnswers.prepare!(w.nodeCalls[0]))
+    await settle()
+    expect(await w.launch(launch.id)).toMatchObject({ state: "provisioning" })
+    expect(w.spokeCalls).toEqual([])
+    const next = await restart(w)
+    await settle()
+    expect(await w.launch(launch.id)).toMatchObject({ state: "running" })
+    expect(w.spokeCalls.filter((r) => r.op === "create")).toHaveLength(1)
+    expect(w.prompts).toHaveLength(1)
+    expect(w.nodeCalls.filter((r) => r.op === "prepare")).toHaveLength(1)
+    next.shutdown()
+  })
+})
