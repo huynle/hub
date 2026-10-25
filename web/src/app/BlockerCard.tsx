@@ -3,7 +3,9 @@
 import { For, Match, Show, Switch, createMemo, createSignal } from "solid-js"
 import type { Blocker } from "../core/browser-core"
 import { formAnswer, initialFormValues, validateForm, visibleFields, type FormField, type FormValues } from "../core/form-core"
+import { noteForBlocker, recommendationText } from "../core/agents-core"
 import { api, errorText, HttpError, sessionPath } from "./api"
+import { agentEntries } from "./hub"
 import { toast } from "./toast"
 
 /** A request someone answered elsewhere (terminal, another device) or that expired: say so quietly. */
@@ -29,6 +31,11 @@ export function BlockerCard(props: { sessionID: string; rootID: string; blocker:
         <Switch fallback={<p class="muted small">This question has nothing to fill in here; answer it in the terminal.</p>}>
           <Match when={b().kind === "permission"}>
             <p class="blocker-text mono">{b().summary}</p>
+            <Show when={recommendationText(b().recommendation)}>
+              <p class="blocker-recommendation small" data-recommendation>
+                {recommendationText(b().recommendation)}
+              </p>
+            </Show>
             <PermissionButtons sessionID={props.sessionID} blocker={b()} onGone={() => setGone(true)} />
           </Match>
           <Match when={b().kind === "form" && b().fields?.length}>
@@ -38,6 +45,11 @@ export function BlockerCard(props: { sessionID: string; rootID: string; blocker:
             <FormFields sessionID={props.sessionID} blocker={b()} fields={b().fields as FormField[]} onGone={() => setGone(true)} />
           </Match>
         </Switch>
+        <Show when={noteForBlocker(agentEntries(), b().id)}>
+          <p class="answered-by small muted" data-answered-by>
+            {noteForBlocker(agentEntries(), b().id)}
+          </p>
+        </Show>
       </div>
     </Show>
   )

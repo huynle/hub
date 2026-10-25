@@ -18,7 +18,7 @@ import { api, errorText, getJSON, HttpError, NetworkError, sessionPath } from ".
 import { prepareImage } from "./attach"
 import { takeFirstTurn } from "./first-turn"
 import { Composer, VoiceBar } from "./Composer"
-import { decisions, hub, live, liveTick, lookup, markRead, me, onMessage, rows, speechReady } from "./hub"
+import { agentEntries, decisions, hub, live, liveTick, lookup, markRead, me, onMessage, rows, speechReady } from "./hub"
 import { isPhone, railOpen, setRailOpen, toggleSidebar } from "./layout"
 import { ModelPicker, createModels, modelLabel, type ModelKind } from "./ModelMenu"
 import { PanelHandle } from "./PanelHandle"
@@ -30,6 +30,7 @@ import { VoicePill } from "./VoicePill"
 import { BlockerCard } from "./BlockerCard"
 import { DecisionCards } from "./DecisionCard"
 import { decisionsFor } from "../core/decision-core"
+import { agentNotes } from "../core/agents-core"
 import { Transcript, type TickState } from "./Transcript"
 import { Icon, IconButton, Menu, STATE_LABEL, StatusIcon, ago, now } from "./ui"
 import { formatElapsed } from "../core/feedback-core"
@@ -513,6 +514,10 @@ export function SessionView(props: { id: string }) {
     const next = [...blockerByID().keys()]
     return next.length === prev.length && next.every((k, i) => k === prev[i]) ? prev : next
   })
+  const answeredNotes = () => {
+    const open = new Set(blockers().map((b) => b.id))
+    return agentNotes(agentEntries(), new Set([id, ...tree()]), tick()).filter((n) => !open.has(n.key))
+  }
   const pulse = () => {
     liveTick()
     now()
@@ -646,6 +651,14 @@ export function SessionView(props: { id: string }) {
               {/* Keyed by request ID: catalog updates rebuild the blocker objects, which must not reset half-filled answers. */}
               <DecisionCards decisions={decisionsFor(decisions(), id)} />
               <For each={blockerIDs()}>{(key) => <Show when={blockerByID().get(key)}>{(b) => <BlockerCard sessionID={id} blocker={b()} rootID={id} />}</Show>}</For>
+              {/* Who answered this tree's requests lately (live 'agent' events), once their cards are gone. */}
+              <For each={answeredNotes()}>
+                {(n) => (
+                  <p class="answered-by small muted" data-answered-by={n.key}>
+                    {n.text}
+                  </p>
+                )}
+              </For>
               <Show when={working()}>
                 <p class="working-line muted" role="status">
                   <span class="spinner small" /> {working()}

@@ -25,6 +25,8 @@ export interface Blocker {
   readonly fields?: readonly unknown[]
   readonly sessionID?: string
   readonly sessionTitle?: string
+  /** permission: an agent's recommendation ({by, recommends: "approve", why?, decisionID?}; core/agents-core.ts). */
+  readonly recommendation?: unknown
 }
 
 /** One entry of a root session's status tree (root first). */

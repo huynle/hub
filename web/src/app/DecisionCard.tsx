@@ -4,6 +4,7 @@
 // expired"), and the card goes. A push tap opens /…?decision=<id>, which marks and scrolls to the card.
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import { answerBody, askerLabel, deadlineText, tierNote, type DecisionView } from "../core/decision-core"
+import { escalationOf } from "../core/agents-core"
 import { api, enc, errorText, HttpError } from "./api"
 import { dropDecision, lookup, settleDecision } from "./hub"
 import { location$, sessionHref } from "./router"
@@ -60,6 +61,9 @@ export function DecisionCard(props: { decision: DecisionView; /** Home: link to 
     >
       <p class="blocker-head decision-head">
         <strong>Decision</strong> <span class="muted">from {askerLabel(d())}</span>
+        <Show when={escalationOf(d())}>
+          <span class="badge-pill agent-request" title="An agent asked to act outside its grant">Agent request</span>
+        </Show>
         <Show when={URGENCY_LABEL[d().urgency]}>
           <span class={`badge-pill urgency ${d().urgency}`}>{URGENCY_LABEL[d().urgency]}</span>
         </Show>
@@ -73,6 +77,31 @@ export function DecisionCard(props: { decision: DecisionView; /** Home: link to 
         </Show>
       </p>
       <p class="blocker-text decision-question">{d().question}</p>
+      <Show when={escalationOf(d())}>
+        {(e) => (
+          <dl class="escalation-details small" data-escalation>
+            <dt>Requested by</dt>
+            <dd>{e().requester}</dd>
+            <Show when={e().action}>
+              <dt>Action</dt>
+              <dd class="mono">
+                {e().action}
+                {e().always ? " (always)" : ""}
+              </dd>
+            </Show>
+            <Show when={e().resources.length}>
+              <dt>{e().resources.length === 1 ? "Resource" : "Resources"}</dt>
+              <dd>
+                <For each={e().resources}>{(r) => <code class="escalation-resource">{r}</code>}</For>
+              </dd>
+            </Show>
+            <Show when={e().reason}>
+              <dt>Outside its grant</dt>
+              <dd>{e().reason}</dd>
+            </Show>
+          </dl>
+        )}
+      </Show>
       <Show when={deadlineText(d(), tick())}>
         <p class={`decision-deadline small${d().escalatedAt !== undefined || d().deadline! <= tick() ? " overdue" : ""}`} role="timer">
           {deadlineText(d(), tick())}
