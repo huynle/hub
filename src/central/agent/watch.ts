@@ -11,15 +11,25 @@
 //   {type: "blocker.opened", sessionID, rootID, blocker: {kind, id, summary}}
 //   {type: "blocker.closed", sessionID, rootID, id}         answered, cancelled or gone
 //   {type: "session.added", sessionID, title} / {type: "session.removed", sessionID}   catalog changes
+//   {type: "message", id, kind, state, from, to, sessionID?, senderID?, replyTo?, delivery?}   an agent message was
+//     stored (no text): sessionID is the recipient session, senderID the sending one. The user sees all of them,
+//     a session or app (messages:read) only those it sent or received; ?session= matches either session.
 // A `ping` event every heartbeat (default 20 s). Only status messages of the caller's tenant are read; catalog
 // changes are diffed against the caller's own sessions.
 import type { LiveStatus, RegistryMessage } from "../registry"
+import { partyKey } from "./envelope"
+import { addressOf, type Message } from "./messages"
 import type { ReadRegistry } from "./read-routes"
 
 export const WATCH_HEARTBEAT_MS = 20_000
 
 export interface WatchRegistry extends Pick<ReadRegistry, "catalog" | "sessionTenant"> {
   subscribe(listener: (message: RegistryMessage, tenant?: string) => void): () => void
+}
+
+/** Stored agent messages as they are sent (MessageFeed). */
+export interface MessageSource {
+  subscribe(listener: (userID: string, message: Message) => void): () => void
 }
 
 export interface WatchOptions {
@@ -30,8 +40,27 @@ export interface WatchOptions {
   readonly blocked?: boolean
   /** Only events of these sessions or of trees rooted at them. */
   readonly sessions?: ReadonlySet<string>
+  /** Message events: from this feed, only those of the party key (undefined: all of the user's). */
+  readonly messages?: { readonly feed: MessageSource; readonly party?: string }
   readonly heartbeatMs?: number
   readonly now?: () => number
+}
+
+/** The compact watch event of a message (never its text). */
+function messageEvent(message: Message): WatchEvent {
+  const { id, kind, state, from, recipient, replyTo, delivery } = message
+  return {
+    type: "message",
+    id,
+    kind,
+    state,
+    from: addressOf(from),
+    to: message.to,
+    ...(recipient.kind === "session" ? { sessionID: recipient.sessionID } : {}),
+    ...(from.kind === "session" ? { senderID: from.sessionID } : {}),
+    ...(replyTo ? { replyTo } : {}),
+    ...(delivery ? { delivery } : {}),
+  }
 }
 
 interface Known {
@@ -39,7 +68,7 @@ interface Known {
   blockers: Set<string>
 }
 
-type WatchEvent = { type: string; sessionID?: string; rootID?: string } & Record<string, unknown>
+type WatchEvent = { type: string; sessionID?: string; rootID?: string; senderID?: string } & Record<string, unknown>
 
 export function watchStream(options: WatchOptions): Response {
   const { registry, userID } = options
@@ -72,7 +101,7 @@ export function watchStream(options: WatchOptions): Response {
   const wanted = (event: WatchEvent) => {
     if (options.blocked && !event.type.startsWith("blocker.")) return false
     if (!options.sessions) return true
-    return (event.sessionID !== undefined && options.sessions.has(event.sessionID)) || (event.rootID !== undefined && options.sessions.has(event.rootID))
+    return [event.sessionID, event.rootID, event.senderID].some((id) => id !== undefined && options.sessions!.has(id))
   }
 
   /** Events for a status tree (root first), against what was known. */
@@ -117,11 +146,19 @@ export function watchStream(options: WatchOptions): Response {
         else if (message.type === "status" && tenant === userID) events = statusEvents(message.sessionID, message.sessions)
         for (const event of events) if (wanted(event)) send(event)
       })
+      const messages = options.messages
+      const unsubscribeMessages = messages?.feed.subscribe((user, message) => {
+        if (user !== userID) return
+        if (messages.party !== undefined && partyKey(message.from) !== messages.party && partyKey(message.recipient) !== messages.party) return
+        const event = messageEvent(message)
+        if (wanted(event)) send(event)
+      })
       // A named event (not a comment) so clients can tell a live stream from a dead one.
       const heartbeat = setInterval(() => write("event: ping\ndata: 0\n\n"), options.heartbeatMs ?? WATCH_HEARTBEAT_MS)
       cleanup = () => {
         clearInterval(heartbeat)
         unsubscribe()
+        unsubscribeMessages?.()
       }
       options.signal.addEventListener("abort", () => cleanup(), { once: true })
       send({ type: "ready" })

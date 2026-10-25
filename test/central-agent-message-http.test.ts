@@ -3,7 +3,7 @@
 // announces "deliver"; session and app tokens come from fake verifiers.
 import { afterEach, describe, expect, test } from "bun:test"
 import type { BearerVerifier } from "../src/central/agent/actor"
-import { harness, session, spoke, waitFor, type Harness } from "./central-harness"
+import { harness, session, spoke, sse, waitFor, type Harness } from "./central-harness"
 
 const USER = "local"
 const TOKENS: Record<string, string> = { ses_1: "hst_fake_ses_1", ses_2: "hst_fake_ses_2", ses_3: "hst_fake_ses_3" }
@@ -298,6 +298,36 @@ describe("credentials and scopes", () => {
     for (const path of ["/api/agent/inbox", "/api/agent/messages/msg_x"]) expect((await bearer(path, APP_READ)).status).toBe(403)
     expect((await bearer("/api/agent/msg", APP_SEND, { method: "POST", json: { to: "@web-work", text: "x" } })).status).toBe(201)
     expect((await bearer("/api/agent/inbox", APP_SEND)).status).toBe(200)
+  })
+})
+
+describe("GET /api/agent/watch: message events", () => {
+  test("the user sees every message (no text); a session only its own; an app needs messages:read", async () => {
+    await start()
+    const user = sse(await asUser("/api/agent/watch"))
+    const docs = sse(await as("ses_3", "/api/agent/watch"))
+    const app = sse(await bearer("/api/agent/watch", APP_READ))
+    const scoped = sse(await asUser("/api/agent/watch?session=@docs"))
+    for (const stream of [user, docs, app, scoped]) await stream.next((m) => m.type === "ready")
+    const ask = await json(await as("ses_1", "/api/agent/ask", { to: "@web-work", text: "secret question" }))
+    const event = await user.next((m) => m.type === "message")
+    expect(event).toEqual({ type: "message", id: ask.message.id, kind: "ask", state: "open", from: "@api-refactor", to: "@web-work", sessionID: "ses_2", senderID: "ses_1", delivery: "turn", at: expect.any(Number) })
+    await as("ses_2", "/api/agent/reply", { replyTo: ask.message.id, text: "secret answer" })
+    expect(await user.next((m) => m.type === "message")).toMatchObject({ kind: "reply", replyTo: ask.message.id, sessionID: "ses_1", senderID: "ses_2" })
+    const mine = await json(await as("ses_1", "/api/agent/msg", { to: "@docs", text: "for docs" }))
+    expect((await docs.next((m) => m.type === "message")).id).toBe(mine.message.id)
+    expect((await scoped.next((m) => m.type === "message")).id).toBe(mine.message.id)
+    await expect(app.next((m) => m.type === "message", 300)).rejects.toThrow(/timed out/)
+    for (const stream of [user, docs, app, scoped]) await stream.cancel()
+  })
+
+  test("blocked=1 streams carry no message events", async () => {
+    await start()
+    const blocked = sse(await asUser("/api/agent/watch?blocked=1"))
+    await blocked.next((m) => m.type === "ready")
+    await as("ses_1", "/api/agent/msg", { to: "@web-work", text: "x" })
+    await expect(blocked.next((m) => m.type === "message", 300)).rejects.toThrow(/timed out/)
+    await blocked.cancel()
   })
 })
 

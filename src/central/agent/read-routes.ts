@@ -17,7 +17,8 @@ import type { Directory, DirectoryEntry, RoleView } from "./directory"
 import type { AgentActor } from "./actor"
 import { AgentError } from "./errors"
 import { AGENT_PREFIX, type AgentRoute } from "./routes"
-import { watchStream } from "./watch"
+import { partyFromActor, partyKey } from "./envelope"
+import { watchStream, type MessageSource } from "./watch"
 
 /** What the read routes need from the Registry. */
 export interface ReadRegistry {
@@ -39,6 +40,8 @@ export interface ReadDeps {
   readonly directory: Directory
   readonly registry: ReadRegistry
   readonly spokes?: SpokeRequester
+  /** Agent messages for the watch stream's message events. */
+  readonly feed?: MessageSource
   /** Watch stream heartbeat (default WATCH_HEARTBEAT_MS). */
   readonly heartbeatMs?: number
   readonly now?: () => number
@@ -338,8 +341,11 @@ export function readRoutes(deps: ReadDeps): AgentRoute[] {
       method: "GET",
       path: `${AGENT_PREFIX}/watch`,
       allow: READ,
-      handle: ({ user, url, request }) => {
+      handle: ({ user, url, request, actor }) => {
         const addr = url.searchParams.get("session") || undefined
+        // Message events: the user sees all; a session, or an app with messages:read, those it is a party to.
+        const messageReader = actor.kind === "user" || actor.kind === "session" || actor.scopes.includes("messages:read")
+        const messages = deps.feed && messageReader ? { feed: deps.feed, ...(actor.kind === "user" ? {} : { party: partyKey(partyFromActor(actor)) }) } : undefined
         const sessions = addr ? new Set(deps.directory.resolve(user.id, addr).sessions.map((s) => s.sessionID)) : undefined
         const blocked = ["1", "true"].includes(url.searchParams.get("blocked") ?? "")
         return watchStream({
@@ -348,6 +354,7 @@ export function readRoutes(deps: ReadDeps): AgentRoute[] {
           signal: request.signal,
           blocked,
           ...(sessions ? { sessions } : {}),
+          ...(messages ? { messages } : {}),
           ...(deps.heartbeatMs !== undefined ? { heartbeatMs: deps.heartbeatMs } : {}),
           ...(deps.now ? { now: deps.now } : {}),
         })

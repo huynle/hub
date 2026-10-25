@@ -152,7 +152,7 @@ export function newMessageID(): string {
 }
 
 /** How a reply addresses a party: `@name`, `ses_…`, `@me`, `app:<tokenID>`. */
-function addressOf(party: Party): string {
+export function addressOf(party: Party): string {
   switch (party.kind) {
     case "session":
       return party.name ? `@${party.name}` : party.sessionID
