@@ -137,9 +137,14 @@ What each actor may do:
 
 - **user**: everything on `/api/agent`, and the console routes.
 - **session**: read every session of its user; name, claim and release roles **for its own session only**
-  (`403 forbidden` for another one); no console routes (`403`), no token management.
-- **app**: what its scopes allow; today the only scope is `sessions:read` (status, sessions, show, log, watch,
-  who); `whoami` always. No writes, no console routes, no token management (`403`).
+  (`403 forbidden` for another one); send, answer and read its own messages (never to itself); no console
+  routes (`403`), no token management, no messaging switch.
+- **app**: what its scopes allow: `sessions:read` (status, sessions, show, log, watch, who), `messages:send`
+  (msg, ask, reply, decline, mute, unmute) and `messages:read` (inbox, messages/:id, its own `message` watch
+  events); `whoami` always. No other writes, no console routes, no token management (`403`).
+
+Messages are per user like everything else: another user's session, name, role or message id answers
+`404 not_found` on every message route, exactly like one that does not exist, and admins get no access to them.
 
 **Session token delivery.** The hub mints a token for every session (subagents included) that a spoke reports for
 its own user, and pushes it with the `sessionTokens` op only to spokes that announce the feature; spokes of other
