@@ -49,7 +49,8 @@ async function start(options: { old?: boolean } = {}) {
   client.ws.addEventListener("message", (event) => {
     const frame = JSON.parse(String(event.data))
     if (frame.t !== "req" || frame.req.op !== "deliver") return
-    delivered.push(frame.req)
+    // Primers (sent once before a session's first message) are answered but not counted here.
+    if (frame.req.meta?.kind !== "primer") delivered.push(frame.req)
     client.send({ t: "res", id: frame.id, ok: true, result: { delivered: frame.req.wake ? "turn" : "queued" } })
   })
   let names = 3
