@@ -1,7 +1,7 @@
 // The hub sandbox image (packages/runtime-openshell/image): naming, layout and the generated build and bootstrap
 // commands. Building the image itself is the opt-in docker test (image-docker.it.test.ts).
 import { describe, expect, test } from "bun:test"
-import { readFileSync } from "node:fs"
+import { readFileSync, statSync } from "node:fs"
 import path from "node:path"
 import {
   BOOTSTRAP_ROOT,
@@ -80,6 +80,17 @@ describe("image sources", () => {
   test("are type-checked with the repository", () => {
     const include: string[] = JSON.parse(readFileSync(path.join(root, "tsconfig.json"), "utf8")).include
     expect(include).toContain("packages/runtime-openshell/image")
+  })
+})
+
+describe("scripts", () => {
+  test("the start and entry scripts are executable bash scripts", () => {
+    for (const f of ["start.sh", "entry.sh"]) {
+      const file = path.join(root, "packages/runtime-openshell/image", f)
+      expect(readFileSync(file, "utf8")).toStartWith("#!/usr/bin/env bash\n")
+      expect(statSync(file).mode & 0o111).toBe(0o111)
+      expect(Bun.spawnSync(["bash", "-n", file]).exitCode).toBe(0)
+    }
   })
 })
 
