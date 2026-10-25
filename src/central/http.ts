@@ -17,6 +17,7 @@ import { isNotificationKind, Push, type PushSender } from "./push"
 import { pushEndpointProblem, resolveHost as systemResolveHost, type ResolveHost } from "./push-target"
 import { fileBackends, type Backends } from "./backend"
 import { createResolver, type BearerVerifier, type CredentialMode } from "./agent/actor"
+import { Delivery } from "./agent/delivery"
 import { hubDirectory } from "./agent/directory-routes"
 import { agentApi, agentRoutes, agentVerifiers, isAgentPath, wellKnown, type AgentRoute } from "./agent/routes"
 import { SessionTokens } from "./agent/session-tokens"
@@ -80,6 +81,8 @@ export interface Central {
   readonly speechSettings: SpeechService
   /** Backends for new code (state, bus, event log, counters, locks, catalog). */
   readonly backends: Backends
+  /** Agent messages: store and delivery to sessions (the message routes use it). */
+  readonly delivery: Delivery
   /** The JSON API's route table (method, path, access), for audits and tests. */
   readonly routes: readonly RouteInfo[]
   stop(): Promise<void>
@@ -483,8 +486,41 @@ export function startCentral(options: CentralOptions): Central {
     }
   }
 
+  const directory = hubDirectory({ registry, store, now })
+  // Agent messages (design §3): delivered through spokes that announce "deliver"; pending ones flush on every
+  // sessions frame; human turns (console turn/utterance, prompts typed in the harness) reset hop chains.
+  const delivery = new Delivery({
+    state: backends.state,
+    counters: backends.counters,
+    registry,
+    directory,
+    send: (connID, req) => spokes.request(connID, req),
+    now,
+    describe: (userID, sessionID) => {
+      try {
+        const entry = directory.resolve(userID, sessionID).sessions[0]
+        const machine = entry?.machineID ? store.machines().find((m) => m.id === entry.machineID)?.name : undefined
+        return { ...(entry?.name ? { name: entry.name } : {}), ...(machine ? { machine } : {}) }
+      } catch {
+        return {}
+      }
+    },
+    // No push kind of its own yet: "question" reaches the user even while a device shows the session.
+    alert: (_userID, alert) =>
+      registry.alertUser("question", alert.sessionID, { subject: alert.kind === "hopCap" ? "Message loop" : "Unanswered ask", text: alert.text, key: alert.messageID }),
+  })
+  /** The user prompted the session: its message hop chain starts over (never fails the prompt). */
+  const humanTurn = async (sessionID: string): Promise<void> => {
+    const tenant = registry.sessionTenant(sessionID)
+    if (tenant === undefined) return
+    await delivery.humanTurn(tenant, sessionID).catch((cause) => console.error(`[hub] hop reset failed: ${(cause as Error).message}`))
+  }
+  registry.onSessions((connID) => void delivery.onSessions(connID).catch((cause) => console.error(`[hub] message flush failed: ${(cause as Error).message}`)))
+  registry.onHumanTurn((sessionID) => void humanTurn(sessionID))
+  delivery.start()
+
   // One credential resolver for every /api request: device cookie, device token, session and app tokens.
-  const agentDeps = { store, sessionTokens, directory: hubDirectory({ registry, store, now }), registry, spokes, heartbeatMs, now }
+  const agentDeps = { store, sessionTokens, directory, registry, spokes, heartbeatMs, now }
   const resolveActor = createResolver({
     cookieName: COOKIE,
     findDevice: (token) => store.findDevice(token),
@@ -1022,6 +1058,7 @@ export function startCentral(options: CentralOptions): Central {
     if (text.length > MAX_PROMPT_CHARS) return error(400, `Prompt longer than ${MAX_PROMPT_CHARS} characters`)
     const attached = images ? { images } : {}
     const connID = ownerOf(sessionID)
+    await humanTurn(sessionID)
     // While anything in the tree runs, typed input redirects the current work instead of queueing.
     if (registry.running(sessionID)) {
       const { inboxID } = await spokes.request(connID, { op: "steer", sessionID, text, ...attached })
@@ -1112,7 +1149,9 @@ export function startCentral(options: CentralOptions): Central {
     const text = typeof raw === "string" ? raw.trim() : ""
     if (!text) return error(400, "Empty utterance")
     if (text.length > MAX_UTTERANCE_CHARS) return error(400, `Utterance longer than ${MAX_UTTERANCE_CHARS} characters`)
-    const { inboxID } = await spokes.request(ownerOf(sessionID), { op: "steer", sessionID, text })
+    const connID = ownerOf(sessionID)
+    await humanTurn(sessionID)
+    const { inboxID } = await spokes.request(connID, { op: "steer", sessionID, text })
     registry.trackUtterance(sessionID, inboxID)
     return Response.json({ inboxID }, { status: 202 })
   }
@@ -1403,9 +1442,11 @@ export function startCentral(options: CentralOptions): Central {
     push,
     speechSettings,
     backends,
+    delivery,
     routes: [...routes.map(({ method, path, access }) => ({ method, path, access })), ...agent.routes.map(({ method, path }) => ({ method, path, access: "agent" as const }))],
     async stop() {
       tokenPush.stop()
+      delivery.stop()
       spokes.stop()
       for (const listener of [...listeners]) listeners.delete(listener)
       // Bun 1.3.5 quirk: once the server has closed a WebSocket itself, stop(true)'s promise never
