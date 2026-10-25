@@ -404,7 +404,7 @@ function pick(row: TimelineRow, keys: readonly string[]): Record<string, unknown
 }
 
 /** How a stored message names a party (src/central/agent/messages.ts addressOf; apps by their label). */
-function partyAddress(raw: unknown): string {
+export function partyAddress(raw: unknown): string {
   const party = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {}
   const label = (value: unknown) => (typeof value === "string" && value ? value : undefined)
   if (party.kind === "session") return label(party.name) ? `@${party.name}` : String(party.sessionID ?? "?")
