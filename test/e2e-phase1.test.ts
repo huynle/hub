@@ -71,9 +71,9 @@ const dir = (name: string) => mkdtempSync(path.join(tmp, `${name}-`))
 
 beforeAll(async () => {
   tmp = mkdtempSync(path.join(tmpdir(), "hub-e2e-p1-"))
-  h = harness()
-  const a = h.store.addMachine("laptop-a")
-  const b = h.store.addMachine("laptop-b")
+  h = await harness()
+  const a = await h.store.addMachine("laptop-a")
+  const b = await h.store.addMachine("laptop-b")
   machineA = { id: a.machine.id, token: a.token }
   machineB = { id: b.machine.id, token: b.token }
 
@@ -315,8 +315,8 @@ describe("a second user sees none of it", () => {
   let home: string
   let env: Record<string, string>
   beforeAll(async () => {
-    const bob = h.store.upsertUser({ email: "bob@example.com", role: "user" })
-    const cookie = `voice_device=${h.store.addDevice("bob laptop", bob.id).token}`
+    const bob = await h.store.upsertUser({ email: "bob@example.com", role: "user" })
+    const cookie = `voice_device=${(await h.store.addDevice("bob laptop", bob.id)).token}`
     const { code } = (await (await h.api("/api/devices/link", { method: "POST", json: {}, cookie })).json()) as { code: string }
     const { token } = (await (await h.api("/api/devices/redeem", { method: "POST", json: { code }, cookie: null, origin: null })).json()) as { token: string }
     home = dir("bob-home")

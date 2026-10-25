@@ -13,13 +13,13 @@ const subscription = (n = 1) => ({
   keys: { p256dh: `p256-${n}`, auth: `auth-${n}` },
 })
 
-function pushHarness(failures: Record<string, number> = {}) {
+async function pushHarness(failures: Record<string, number> = {}) {
   const sent: Array<{ endpoint: string; raw: string; payload: any }> = []
   const sender: PushSender = async (target, payload) => {
     if (failures[target.endpoint]) throw Object.assign(new Error("gone"), { statusCode: failures[target.endpoint] })
     sent.push({ endpoint: target.endpoint, raw: payload, payload: JSON.parse(payload) })
   }
-  h = harness({ notifier: undefined, pushSender: sender })
+  h = await harness({ notifier: undefined, pushSender: sender })
   return sent
 }
 
@@ -33,7 +33,7 @@ describe("config", () => {
 
 describe("push API", () => {
   test("GET /api/push/key needs a paired device", async () => {
-    pushHarness()
+    await pushHarness()
     expect((await h.api("/api/push/key", { cookie: null })).status).toBe(401)
     const res = await h.api("/api/push/key")
     expect(res.status).toBe(200)
@@ -43,7 +43,7 @@ describe("push API", () => {
   })
 
   test("subscribe requires cookie and same Origin; validates; dedupes; applies prefs", async () => {
-    pushHarness()
+    await pushHarness()
     const json = { subscription: subscription(), prefs: { turn: true, finished: false } }
     expect((await h.api("/api/push/subscribe", { method: "POST", json, cookie: null })).status).toBe(401)
     expect((await h.api("/api/push/subscribe", { method: "POST", json, origin: null })).status).toBe(403)
@@ -66,10 +66,10 @@ describe("push API", () => {
   })
 
   test("unsubscribe removes only this device's subscription", async () => {
-    pushHarness()
+    await pushHarness()
     await h.api("/api/push/subscribe", { method: "POST", json: { subscription: subscription() } })
-    const other = h.store.addDevice("other").device
-    h.store.addPushSubscription(other.id, subscription(2))
+    const other = (await h.store.addDevice("other")).device
+    await h.store.addPushSubscription(other.id, subscription(2))
     const mine = { endpoint: subscription().endpoint }
     expect((await h.api("/api/push/unsubscribe", { method: "POST", json: mine, origin: null })).status).toBe(403)
     expect((await h.api("/api/push/unsubscribe", { method: "POST", json: mine })).status).toBe(204)
@@ -80,7 +80,7 @@ describe("push API", () => {
   })
 
   test("GET/PUT /api/push/prefs per device", async () => {
-    pushHarness()
+    await pushHarness()
     expect((await h.api("/api/push/prefs", { cookie: null })).status).toBe(401)
     expect(await (await h.api("/api/push/prefs")).json()).toEqual({
       prefs: { handoff: true, question: true, permission: true, done: true, failed: true, turn: false, stopped: false, retry: false, subagentDone: false, subagentFailed: false, jobDone: false, jobFailed: false, longTool: false, say: true, activity: false, decision: true, message: true },
@@ -100,7 +100,7 @@ describe("push API", () => {
   })
 
   test("activity updates: the toggle and the interval (1–60 whole minutes) per device", async () => {
-    pushHarness()
+    await pushHarness()
     const put = (json: unknown) => h.api("/api/push/prefs", { method: "PUT", json })
     expect(await (await put({ activity: true, activityMinutes: 2 })).json()).toMatchObject({ prefs: { activity: true }, activityMinutes: 2 })
     for (const bad of [0, 61, 1.5, "5"]) expect((await put({ activityMinutes: bad })).status).toBe(400)
@@ -108,7 +108,7 @@ describe("push API", () => {
   })
 
   test("quiet hours: set with a time zone, validated, cleared with null", async () => {
-    pushHarness()
+    await pushHarness()
     const quiet = { start: "22:00", end: "07:00", timeZone: "Europe/Berlin" }
     const set = await h.api("/api/push/prefs", { method: "PUT", json: { quietHours: quiet } })
     expect(set.status).toBe(200)
@@ -123,7 +123,7 @@ describe("push API", () => {
 
   test("subscribe rejects endpoints on private or local hosts (SSRF), checked by resolving the host", async () => {
     const lookups: string[] = []
-    h = harness({
+    h = await harness({
       notifier: undefined,
       pushSender: async () => {},
       resolveHost: async (host) => {
@@ -148,19 +148,19 @@ describe("push API", () => {
   })
 
   test("GET /api/push/prefs?endpoint= says whether the hub holds that subscription for this device", async () => {
-    pushHarness()
+    await pushHarness()
     const ep = encodeURIComponent(subscription().endpoint)
     expect(((await (await h.api(`/api/push/prefs?endpoint=${ep}`)).json()) as any).subscribed).toBe(false)
     await h.api("/api/push/subscribe", { method: "POST", json: { subscription: subscription() } })
     expect(await (await h.api(`/api/push/prefs?endpoint=${ep}`)).json()).toMatchObject({ subscribed: true, subscriptions: 1 })
     // Another device's endpoint does not count for this one.
-    const other = h.store.addDevice("other").device
-    h.store.addPushSubscription(other.id, subscription(2))
+    const other = (await h.store.addDevice("other")).device
+    await h.store.addPushSubscription(other.id, subscription(2))
     expect(((await (await h.api(`/api/push/prefs?endpoint=${encodeURIComponent(subscription(2).endpoint)}`)).json()) as any).subscribed).toBe(false)
   })
 
   test("subscribe with oldEndpoint replaces the device's old subscription (pushsubscriptionchange)", async () => {
-    pushHarness()
+    await pushHarness()
     await h.api("/api/push/subscribe", { method: "POST", json: { subscription: subscription() } })
     const res = await h.api("/api/push/subscribe", { method: "POST", json: { subscription: subscription(2), oldEndpoint: subscription().endpoint } })
     expect(res.status).toBe(200)
@@ -168,7 +168,7 @@ describe("push API", () => {
   })
 
   test("PUT /api/push/mute mutes and unmutes a session for the user", async () => {
-    pushHarness()
+    await pushHarness()
     expect((await h.api("/api/push/mute", { method: "PUT", json: { sessionID: "ses_1", muted: true }, origin: null })).status).toBe(403)
     for (const bad of [{ sessionID: "", muted: true }, { sessionID: "ses_1" }, { sessionID: "x".repeat(300), muted: true }]) {
       expect((await h.api("/api/push/mute", { method: "PUT", json: bad })).status).toBe(400)
@@ -179,18 +179,18 @@ describe("push API", () => {
   })
 
   test("POST /api/push/test reaches only the caller's device; other users get nothing; rate limited", async () => {
-    const sent = pushHarness()
+    const sent = await pushHarness()
     expect((await h.api("/api/push/test", { method: "POST", json: {}, cookie: null })).status).toBe(401)
     expect((await h.api("/api/push/test", { method: "POST", json: {}, origin: null })).status).toBe(403)
     // No subscription yet: nothing sent, the answer says so (and it does not use up the rate limit).
     expect(await (await h.api("/api/push/test", { method: "POST", json: {} })).json()).toEqual({ sent: 0, failed: [], subscriptions: 0 })
     await h.api("/api/push/subscribe", { method: "POST", json: { subscription: subscription() } })
     // Another device of the same user, and another user's device.
-    const mine2 = h.store.addDevice("tablet").device
-    h.store.addPushSubscription(mine2.id, subscription(2))
-    const bob = h.store.upsertUser({ email: "bob@example.com", role: "user" })
-    const bobDevice = h.store.addDevice("bob phone", bob.id)
-    h.store.addPushSubscription(bobDevice.device.id, subscription(3))
+    const mine2 = (await h.store.addDevice("tablet")).device
+    await h.store.addPushSubscription(mine2.id, subscription(2))
+    const bob = await h.store.upsertUser({ email: "bob@example.com", role: "user" })
+    const bobDevice = await h.store.addDevice("bob phone", bob.id)
+    await h.store.addPushSubscription(bobDevice.device.id, subscription(3))
     const res = await h.api("/api/push/test", { method: "POST", json: {} })
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({ sent: 1, failed: [], subscriptions: 1 })
@@ -206,7 +206,7 @@ describe("push API", () => {
   })
 
   test("a test of a chosen kind looks like it; an unknown kind is refused", async () => {
-    const sent = pushHarness()
+    const sent = await pushHarness()
     await h.api("/api/push/subscribe", { method: "POST", json: { subscription: subscription() } })
     expect((await h.api("/api/push/test", { method: "POST", json: { kind: "nope" } })).status).toBe(400)
     const res = await h.api("/api/push/test", { method: "POST", json: { kind: "subagentDone" } })
@@ -215,7 +215,7 @@ describe("push API", () => {
   })
 
   test("a failed test push reports the push service status", async () => {
-    pushHarness({ [subscription(4).endpoint]: 403 })
+    await pushHarness({ [subscription(4).endpoint]: 403 })
     await h.api("/api/push/subscribe", { method: "POST", json: { subscription: subscription(4) } })
     expect(await (await h.api("/api/push/test", { method: "POST", json: {} })).json()).toEqual({
       sent: 0,
@@ -227,7 +227,7 @@ describe("push API", () => {
 
 describe("notifications", () => {
   test("handoff from a spoke reports devices notified; payload has no secrets", async () => {
-    const sent = pushHarness({ [subscription(9).endpoint]: 410 })
+    const sent = await pushHarness({ [subscription(9).endpoint]: 410 })
     await h.api("/api/push/subscribe", { method: "POST", json: { subscription: subscription() } })
     await h.api("/api/push/subscribe", { method: "POST", json: { subscription: subscription(9) } })
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true, title: "api-server" })] })
@@ -248,7 +248,7 @@ describe("notifications", () => {
   })
 
   test("a permission asked in a session pushes 'permission' with its request ID, never its summary", async () => {
-    const sent = pushHarness()
+    const sent = await pushHarness()
     await h.api("/api/push/subscribe", { method: "POST", json: { subscription: subscription() } })
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true, title: "api-server" })] })
     client.send({
@@ -261,7 +261,7 @@ describe("notifications", () => {
   })
 
   test("'turn' only when enabled and not for a turn started from the voice page", async () => {
-    const sent = pushHarness()
+    const sent = await pushHarness()
     await h.api("/api/push/subscribe", { method: "POST", json: { subscription: subscription(), prefs: { turn: true } } })
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true, title: "build" })] })
     client.ws.addEventListener("message", (event) => {

@@ -18,12 +18,12 @@ const T0 = 1_700_000_000_000
 const MIN = 60_000
 const HOUR = 60 * MIN
 
-function setup() {
+async function setup() {
   let t = T0
   const now = () => t
   const store = Store.open(mkdtempSync(path.join(tmpdir(), "hub-grants-")), now)
-  const alice = store.upsertUser({ email: "alice@example.test", role: "user" }).id
-  const bob = store.upsertUser({ email: "bob@example.test", role: "user" }).id
+  const alice = (await store.upsertUser({ email: "alice@example.test", role: "user" })).id
+  const bob = (await store.upsertUser({ email: "bob@example.test", role: "user" })).id
   const reported = new Map<string, ReportedSession[]>()
   const directory = new Directory({ store, source: { reported: (u) => reported.get(u) ?? [], archived: () => new Set<string>() }, now })
   const summaries: { actor: string; action: string; target?: string; detail?: string }[] = []
@@ -36,7 +36,7 @@ function setup() {
     )
     directory.resolve(userID, ids[0]!)
   }
-  const appToken = (userID: string, id: string) => store.updateAgentData(userID, (d) => void (d.appTokens = [...(d.appTokens ?? []), { id, tokenHash: "00" }]))
+  const appToken = async (userID: string, id: string) => await store.updateAgentData(userID, (d) => void (d.appTokens = [...(d.appTokens ?? []), { id, tokenHash: "00" }]))
   return { grants, directory, store, state, alice, bob, summaries, report, appToken, now, advance: (ms: number) => void (t += ms) }
 }
 
@@ -57,7 +57,7 @@ const appActor = (userID: string, tokenID: string): AgentActor => ({ kind: "app"
 
 describe("Grants.create", () => {
   test("stores a validated grant with an id, owner, created and an absolute expiry", async () => {
-    const { grants, alice, now } = setup()
+    const { grants, alice, now } = await setup()
     const grant = await grants.create(alice, spec("@@orchestrator", { expires: "2h", maxActionsPerHour: 30, permissions: { allow: ["bash:bun test*"] } }))
     expect(grant.id).toMatch(/^g_[0-9a-f]{16}$/)
     expect(grant).toMatchObject({
@@ -76,13 +76,13 @@ describe("Grants.create", () => {
   })
 
   test("rejects an invalid grant (validateGrant)", async () => {
-    const { grants, alice } = setup()
+    const { grants, alice } = await setup()
     expect((await failure(grants.create(alice, spec("@@orchestrator", { allow: ["delete"] })))).code).toBe("invalid")
     expect((await failure(grants.create(alice, { holder: "@@reviewer", scope: { projects: ["/x"] }, allow: ["approve"] }))).code).toBe("invalid")
   })
 
   test("pins an @name holder to the session holding the name now", async () => {
-    const { grants, directory, alice, report } = setup()
+    const { grants, directory, alice, report } = await setup()
     report(alice, "ses_aaa")
     directory.setName(alice, "ses_aaa", "orch")
     const grant = await grants.create(alice, spec("@orch"))
@@ -90,13 +90,13 @@ describe("Grants.create", () => {
   })
 
   test("pins a ses_ holder (a unique prefix resolves to the full ID)", async () => {
-    const { grants, alice, report } = setup()
+    const { grants, alice, report } = await setup()
     report(alice, "ses_abc123")
     expect(await grants.create(alice, spec("ses_abc"))).toMatchObject({ holder: "ses_abc", holderSessionID: "ses_abc123" })
   })
 
   test("a session or name of another user is not_found", async () => {
-    const { grants, directory, alice, bob, report } = setup()
+    const { grants, directory, alice, bob, report } = await setup()
     report(bob, "ses_bob")
     directory.setName(bob, "ses_bob", "bobs")
     expect((await failure(grants.create(alice, spec("ses_bob")))).code).toBe("not_found")
@@ -104,26 +104,26 @@ describe("Grants.create", () => {
   })
 
   test("an app holder must be one of the owner's app tokens", async () => {
-    const { grants, alice, bob, appToken } = setup()
-    appToken(bob, "0123456789abcdef")
+    const { grants, alice, bob, appToken } = await setup()
+    await appToken(bob, "0123456789abcdef")
     expect((await failure(grants.create(alice, spec("app:0123456789abcdef")))).code).toBe("not_found")
-    appToken(alice, "fedcba9876543210")
+    await appToken(alice, "fedcba9876543210")
     expect(await grants.create(alice, spec("app:fedcba9876543210"))).toMatchObject({ holder: "app:fedcba9876543210" })
   })
 
   test("an unknown owner is not_found", async () => {
-    const { grants } = setup()
+    const { grants } = await setup()
     expect((await failure(grants.create("nobody", spec("@@orchestrator")))).code).toBe("not_found")
   })
 
   test("caps active grants per user (rate_limited)", async () => {
-    const { grants, alice } = setup()
+    const { grants, alice } = await setup()
     for (let i = 0; i < GRANTS_ACTIVE_MAX; i++) await grants.create(alice, spec("@@orchestrator"))
     expect((await failure(grants.create(alice, spec("@@orchestrator")))).code).toBe("rate_limited")
   })
 
   test("leaves the admin audit a summary without holder or permissions", async () => {
-    const { grants, alice, summaries } = setup()
+    const { grants, alice, summaries } = await setup()
     const grant = await grants.create(alice, spec("@@orchestrator"))
     expect(summaries).toEqual([{ actor: alice, action: "grant.create", target: grant.id }])
   })
@@ -131,7 +131,7 @@ describe("Grants.create", () => {
 
 describe("Grants.list, get, update and revoke", () => {
   test("lists the owner's grants newest first, with their state; other users see none", async () => {
-    const { grants, alice, bob, advance } = setup()
+    const { grants, alice, bob, advance } = await setup()
     const first = await grants.create(alice, spec("@@orchestrator", { expires: "1h" }))
     advance(1)
     const second = await grants.create(alice, spec("@@concierge"))
@@ -145,7 +145,7 @@ describe("Grants.list, get, update and revoke", () => {
   })
 
   test("another user's grant, or a malformed id, is not_found", async () => {
-    const { grants, alice, bob } = setup()
+    const { grants, alice, bob } = await setup()
     const grant = await grants.create(alice, spec("@@orchestrator"))
     expect((await failure(grants.get(bob, grant.id))).code).toBe("not_found")
     expect((await failure(grants.get(alice, "../x"))).code).toBe("not_found")
@@ -153,7 +153,7 @@ describe("Grants.list, get, update and revoke", () => {
   })
 
   test("update replaces the grant (expiry restarts), keeping id, holder, pin and created", async () => {
-    const { grants, directory, alice, report, advance, now } = setup()
+    const { grants, directory, alice, report, advance, now } = await setup()
     report(alice, "ses_aaa", "ses_bbb")
     directory.setName(alice, "ses_aaa", "orch")
     const grant = await grants.create(alice, spec("@orch", { expires: "2d" }))
@@ -167,14 +167,14 @@ describe("Grants.list, get, update and revoke", () => {
   })
 
   test("update cannot change the holder, and rejects invalid grants", async () => {
-    const { grants, alice } = setup()
+    const { grants, alice } = await setup()
     const grant = await grants.create(alice, spec("@@orchestrator"))
     expect((await failure(grants.update(alice, grant.id, spec("@@concierge")))).code).toBe("invalid")
     expect((await failure(grants.update(alice, grant.id, spec("@@orchestrator", { allow: [] })))).code).toBe("invalid")
   })
 
   test("revoke ends a grant (kept as revoked); revoking or editing an ended grant is gone", async () => {
-    const { grants, alice, now, summaries } = setup()
+    const { grants, alice, now, summaries } = await setup()
     const grant = await grants.create(alice, spec("@@orchestrator"))
     const revoked = await grants.revoke(alice, grant.id)
     expect(revoked).toMatchObject({ id: grant.id, revokedAt: now() })
@@ -185,14 +185,14 @@ describe("Grants.list, get, update and revoke", () => {
   })
 
   test("an expired grant cannot be edited (gone)", async () => {
-    const { grants, alice, advance } = setup()
+    const { grants, alice, advance } = await setup()
     const grant = await grants.create(alice, spec("@@orchestrator", { expires: "1m" }))
     advance(MIN)
     expect((await failure(grants.update(alice, grant.id, spec("@@orchestrator")))).code).toBe("gone")
   })
 
   test("ended grants beyond GRANTS_KEPT are dropped, oldest first", async () => {
-    const { grants, alice, advance } = setup()
+    const { grants, alice, advance } = await setup()
     const ids: string[] = []
     for (let i = 0; i < GRANTS_KEPT + 2; i++) {
       advance(1)
@@ -212,7 +212,7 @@ describe("Grants.usable (checked on every use)", () => {
   const HUB = { directory: "/Users/huy/projects/hub/.worktrees/x" }
 
   test("a pinned session holder: only that session, only in scope, only granted verbs, only while active", async () => {
-    const { grants, directory, alice, report, advance } = setup()
+    const { grants, directory, alice, report, advance } = await setup()
     report(alice, "ses_aaa", "ses_bbb")
     directory.setName(alice, "ses_aaa", "orch")
     const grant = await grants.create(alice, spec("@orch", { expires: "1h" }))
@@ -226,7 +226,7 @@ describe("Grants.usable (checked on every use)", () => {
   })
 
   test("an @name grant never follows a later holder of the name", async () => {
-    const { grants, directory, alice, report, advance } = setup()
+    const { grants, directory, alice, report, advance } = await setup()
     report(alice, "ses_aaa", "ses_bbb")
     directory.setName(alice, "ses_aaa", "orch")
     await grants.create(alice, spec("@orch", { expires: "2d" }))
@@ -238,7 +238,7 @@ describe("Grants.usable (checked on every use)", () => {
   })
 
   test("a reserved role holder follows the role", async () => {
-    const { grants, directory, alice, report } = setup()
+    const { grants, directory, alice, report } = await setup()
     report(alice, "ses_aaa", "ses_bbb")
     const grant = await grants.create(alice, spec("@@orchestrator"))
     expect(await grants.usable(sessionActor(alice, "ses_aaa"), "approve", HUB)).toEqual([])
@@ -251,17 +251,17 @@ describe("Grants.usable (checked on every use)", () => {
   })
 
   test("an app holder: only that token, only while the owner still has it", async () => {
-    const { grants, store, alice, appToken } = setup()
-    appToken(alice, "fedcba9876543210")
+    const { grants, store, alice, appToken } = await setup()
+    await appToken(alice, "fedcba9876543210")
     await grants.create(alice, spec("app:fedcba9876543210"))
     expect((await grants.usable(appActor(alice, "fedcba9876543210"), "deny", HUB)).length).toBe(1)
     expect(await grants.usable(appActor(alice, "0123456789abcdef"), "deny", HUB)).toEqual([])
-    store.updateAgentData(alice, (d) => void (d.appTokens = []))
+    await store.updateAgentData(alice, (d) => void (d.appTokens = []))
     expect(await grants.usable(appActor(alice, "fedcba9876543210"), "deny", HUB)).toEqual([])
   })
 
   test("another user's session or token never uses the owner's grant; users and revoked grants get none", async () => {
-    const { grants, directory, alice, bob, report } = setup()
+    const { grants, directory, alice, bob, report } = await setup()
     report(alice, "ses_aaa")
     directory.setName(alice, "ses_aaa", "orch")
     const grant = await grants.create(alice, spec("@orch"))
@@ -272,17 +272,17 @@ describe("Grants.usable (checked on every use)", () => {
   })
 
   test("a disabled owner's grants are unusable", async () => {
-    const { grants, store, alice, report } = setup()
+    const { grants, store, alice, report } = await setup()
     report(alice, "ses_aaa")
     await grants.create(alice, spec("ses_aaa"))
-    store.setUser(alice, { disabled: true })
+    await store.setUser(alice, { disabled: true })
     expect(await grants.usable(sessionActor(alice, "ses_aaa"), "approve", HUB)).toEqual([])
   })
 })
 
 describe("Grants.consume (maxActionsPerHour)", () => {
   test("counts actions per grant in the clock hour; past the cap rate_limited with retryAfter", async () => {
-    const { grants, alice, advance } = setup()
+    const { grants, alice, advance } = await setup()
     const a = await grants.create(alice, spec("@@orchestrator", { maxActionsPerHour: 2 }))
     const b = await grants.create(alice, spec("@@orchestrator", { maxActionsPerHour: 2 }))
     await grants.consume(a)

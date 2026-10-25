@@ -26,7 +26,7 @@ const asSession = (pathname: string, init: RequestInit & { json?: unknown } = {}
 const put = (pathname: string, body: unknown) => h.api(pathname, { method: "PUT", json: body })
 
 async function start(extra: Record<string, unknown> = {}) {
-  h = harness({ agent: { verifiers }, ...extra } as any)
+  h = await harness({ agent: { verifiers }, ...extra } as any)
   const client = await spoke(h, {
     hello: { harness: "opencode", harnessVersion: "2.1.4", evidence: "native", features: ["deliver"] },
     sessions: [session("ses_1", { title: "API refactor", owned: true }), session("ses_2", { title: "Web work", owned: true })],

@@ -79,7 +79,7 @@ export interface ClusterConfig {
   readonly podID: string
   /** postgres:// or postgresql:// (non-enumerable). */
   readonly databaseURL: string
-  /** redis:// or rediss:// (non-enumerable). */
+  /** redis://, rediss://, valkey:// or valkeys:// (non-enumerable). */
   readonly valkeyURL: string
 }
 
@@ -422,7 +422,7 @@ function clusterConfig(env: Env, auth: AuthConfig, file: HubCluster = {}): Clust
     throw new Error(`${DATABASE_KEY} and ${VALKEY_KEY} must be set together for cluster mode; only ${database ? DATABASE_KEY : VALKEY_KEY} is set`)
   }
   const databaseURL = serviceURL(database, DATABASE_KEY, ["postgres:", "postgresql:"])
-  const valkeyURL = serviceURL(valkey, VALKEY_KEY, ["redis:", "rediss:"])
+  const valkeyURL = serviceURL(valkey, VALKEY_KEY, ["redis:", "rediss:", "valkey:", "valkeys:"])
   if (!env.HUB_TOKEN_KEYS?.trim()) {
     throw new Error("Cluster mode requires HUB_TOKEN_KEYS: token signing keys every pod shares (the token-keys.json shape)")
   }

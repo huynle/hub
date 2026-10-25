@@ -47,7 +47,7 @@ describe("embeddedAssets", () => {
   test("the hub serves embedded assets like disk ones (app routes → index.html, sw.js headers)", async () => {
     const dir = webFolder()
     writeFileSync(path.join(dir, "sw.js"), "self.x = 1")
-    h = harness({ web: embeddedAssets({ "index.html": path.join(dir, "index.html"), "app.js": path.join(dir, "app.js"), "sw.js": path.join(dir, "sw.js") }) })
+    h = await harness({ web: embeddedAssets({ "index.html": path.join(dir, "index.html"), "app.js": path.join(dir, "app.js"), "sw.js": path.join(dir, "sw.js") }) })
     const page = await h.api("/s/ses_1", { cookie: null })
     expect(page.status).toBe(200)
     expect(await page.text()).toContain("disk")
@@ -82,7 +82,7 @@ describe("webFiles", () => {
 
   test("the hub serves a nested embedded asset (Vite's assets/ folder)", async () => {
     const dir = webFolder()
-    h = harness({ web: embeddedAssets({ "index.html": path.join(dir, "index.html"), "sub/x.js": path.join(dir, "sub", "x.js") }) })
+    h = await harness({ web: embeddedAssets({ "index.html": path.join(dir, "index.html"), "sub/x.js": path.join(dir, "sub", "x.js") }) })
     const res = await h.api("/sub/x.js", { cookie: null })
     expect(res.status).toBe(200)
     expect(await res.text()).toBe("nested")

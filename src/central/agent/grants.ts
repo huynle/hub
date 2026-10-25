@@ -61,7 +61,7 @@ export interface GrantsDeps {
   readonly directory: Pick<Directory, "resolve">
   readonly store: Pick<Store, "user" | "agentData">
   /** The hub-wide admin audit (Store): summaries only. */
-  readonly admin?: { audit(entry: Omit<AuditEntry, "at">): void }
+  readonly admin?: { audit(entry: Omit<AuditEntry, "at">): void | Promise<void> }
   readonly now?: () => number
 }
 
@@ -87,7 +87,7 @@ export class Grants {
     const grant: Grant = { id: `g_${randomBytes(8).toString("hex")}`, owner, ...fields(spec, at), ...(holderSessionID ? { holderSessionID } : {}), created: at }
     await this.deps.state.put(owner, COLLECTION, grant.id, grant)
     await this.prune(owner, all, at)
-    this.deps.admin?.audit({ actor: owner, action: "grant.create", target: grant.id })
+    await this.deps.admin?.audit({ actor: owner, action: "grant.create", target: grant.id })
     return grant
   }
 
@@ -137,7 +137,7 @@ export class Grants {
       return apply(current, at)
     })
     if (missing || !next) throw notFound()
-    this.deps.admin?.audit({ actor: owner, action, target: id })
+    await this.deps.admin?.audit({ actor: owner, action, target: id })
     return next
   }
 

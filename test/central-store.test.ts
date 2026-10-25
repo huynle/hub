@@ -75,56 +75,56 @@ describe("tokens", () => {
 })
 
 describe("Store", () => {
-  test("adds machines, finds them by token, never stores the token", () => {
+  test("adds machines, finds them by token, never stores the token", async () => {
     const dir = tmp()
     const store = Store.open(path.join(dir, "state"))
-    const { machine, token } = store.addMachine("laptop")
+    const { machine, token } = await store.addMachine("laptop")
     expect(machine.name).toBe("laptop")
-    expect(store.findMachine(token)?.id).toBe(machine.id)
-    expect(store.findMachine("wrong")).toBeUndefined()
-    expect(store.findMachine("")).toBeUndefined()
+    expect((await store.findMachine(token))?.id).toBe(machine.id)
+    expect(await store.findMachine("wrong")).toBeUndefined()
+    expect(await store.findMachine("")).toBeUndefined()
     const raw = readFileSync(path.join(dir, "state", "state.json"), "utf8")
     expect(raw).not.toContain(token)
     expect(raw).toContain(hashToken(token))
   })
 
-  test("archived sessions are the stored hiddenSessions list: kept as-is across restarts (no migration), up to 5000", () => {
+  test("archived sessions are the stored hiddenSessions list: kept as-is across restarts (no migration), up to 5000", async () => {
     const dir = path.join(tmp(), "state")
     const store = Store.open(dir)
     // What 0.6 stored as hidden is what 0.7 shows as archived.
     const archived = Array.from({ length: 5000 }, (_, i) => `ses_${i}`)
-    store.setViewPrefs("local", { hiddenSessions: archived, pinnedSessions: ["ses_p"] })
+    await store.setViewPrefs("local", { hiddenSessions: archived, pinnedSessions: ["ses_p"] })
     const again = Store.open(dir)
     expect(again.viewPrefs("local")).toEqual({ hiddenSessions: archived, hiddenWorkspaces: [], pinnedSessions: ["ses_p"], pinnedWorkspaces: [] })
   })
 
-  test("revoked machines no longer authenticate", () => {
+  test("revoked machines no longer authenticate", async () => {
     const store = Store.open(tmp())
-    const { machine, token } = store.addMachine("laptop")
-    expect(store.revokeMachine(machine.id)).toBe(true)
-    expect(store.findMachine(token)).toBeUndefined()
-    expect(store.revokeMachine("missing")).toBe(false)
+    const { machine, token } = await store.addMachine("laptop")
+    expect(await store.revokeMachine(machine.id)).toBe(true)
+    expect(await store.findMachine(token)).toBeUndefined()
+    expect(await store.revokeMachine("missing")).toBe(false)
     expect(store.machines()[0]?.revoked).toBe(true)
   })
 
-  test("devices add, find, remove", () => {
+  test("devices add, find, remove", async () => {
     const store = Store.open(tmp())
-    const { device, token } = store.addDevice("phone")
-    expect(store.findDevice(token)?.id).toBe(device.id)
+    const { device, token } = await store.addDevice("phone")
+    expect((await store.findDevice(token))?.id).toBe(device.id)
     expect(store.devices()).toHaveLength(1)
-    expect(store.removeDevice(device.id)).toBe(true)
-    expect(store.findDevice(token)).toBeUndefined()
-    expect(store.removeDevice(device.id)).toBe(false)
+    expect(await store.removeDevice(device.id)).toBe(true)
+    expect(await store.findDevice(token)).toBeUndefined()
+    expect(await store.removeDevice(device.id)).toBe(false)
   })
 
-  test("persists across reopen with private permissions", () => {
+  test("persists across reopen with private permissions", async () => {
     const dir = path.join(tmp(), "nested", "state")
     const a = Store.open(dir)
-    const { token } = a.addDevice("phone")
-    const { token: mtoken } = a.addMachine("box")
+    const { token } = await a.addDevice("phone")
+    const { token: mtoken } = await a.addMachine("box")
     const b = Store.open(dir)
-    expect(b.findDevice(token)?.name).toBe("phone")
-    expect(b.findMachine(mtoken)?.name).toBe("box")
+    expect((await b.findDevice(token))?.name).toBe("phone")
+    expect((await b.findMachine(mtoken))?.name).toBe("box")
     expect(statSync(dir).mode & 0o777).toBe(0o700)
     expect(statSync(path.join(dir, "state.json")).mode & 0o777).toBe(0o600)
     expect(b.data().push).toEqual([])
@@ -136,46 +136,46 @@ describe("Store", () => {
     expect(() => Store.open(dir)).toThrow(/state\.json/)
   })
 
-  test("touch updates lastSeen", () => {
+  test("touch updates lastSeen", async () => {
     let now = 1000
     const store = Store.open(tmp(), () => now)
-    const { device } = store.addDevice("phone")
+    const { device } = await store.addDevice("phone")
     now = 1000 + 120_000
-    store.touchDevice(device.id)
+    await store.touchDevice(device.id)
     expect(store.devices()[0]?.lastSeen).toBe(now)
   })
 
-  test("persists isolated per-user model preferences by session and bounds old entries", () => {
+  test("persists isolated per-user model preferences by session and bounds old entries", async () => {
     const dir = tmp()
     const store = Store.open(dir)
-    const alice = store.upsertUser({ email: "alice@example.test", role: "user" })
-    const bob = store.upsertUser({ email: "bob@example.test", role: "user" })
+    const alice = await store.upsertUser({ email: "alice@example.test", role: "user" })
+    const bob = await store.upsertUser({ email: "bob@example.test", role: "user" })
     const voice = { providerID: "anthropic", modelID: "claude-haiku", variant: "fast" }
     const worker = { providerID: "anthropic", modelID: "claude-opus", variant: "thinking" }
-    expect(store.setModelPrefs(alice.id, "ses_one", { voice, worker })).toEqual({ voice, worker })
+    expect(await store.setModelPrefs(alice.id, "ses_one", { voice, worker })).toEqual({ voice, worker })
     expect(store.modelPrefs(alice.id, "ses_one")).toEqual({ voice, worker })
     expect(store.modelPrefs(bob.id, "ses_one")).toEqual({})
-    expect(store.setModelPrefs(alice.id, "ses_one", { voice: null })).toEqual({ worker })
+    expect(await store.setModelPrefs(alice.id, "ses_one", { voice: null })).toEqual({ worker })
     expect(Store.open(dir).modelPrefs(alice.id, "ses_one")).toEqual({ worker })
 
     for (let i = 0; i <= MODEL_PREFS_LIMIT; i++) {
-      store.setModelPrefs(alice.id, `ses_${i}`, { voice: { providerID: "p", modelID: `m${i}` } })
+      await store.setModelPrefs(alice.id, `ses_${i}`, { voice: { providerID: "p", modelID: `m${i}` } })
     }
     expect(store.modelPrefs(alice.id, "ses_0")).toEqual({})
     expect(store.modelPrefs(alice.id, `ses_${MODEL_PREFS_LIMIT}`).voice?.modelID).toBe(`m${MODEL_PREFS_LIMIT}`)
     expect(Store.open(dir).modelPrefs(alice.id, `ses_${MODEL_PREFS_LIMIT}`).voice?.modelID).toBe(`m${MODEL_PREFS_LIMIT}`)
   })
 
-  test("read marks are per user, only move forward, persist and are bounded", () => {
+  test("read marks are per user, only move forward, persist and are bounded", async () => {
     const dir = tmp()
     const store = Store.open(dir)
-    const alice = store.upsertUser({ email: "alice@example.test", role: "user" })
-    const bob = store.upsertUser({ email: "bob@example.test", role: "user" })
-    expect(store.markRead(alice.id, "ses_one", 100)).toEqual({ ses_one: 100 })
-    expect(store.markRead(alice.id, "ses_one", 50)).toEqual({ ses_one: 100 })
+    const alice = await store.upsertUser({ email: "alice@example.test", role: "user" })
+    const bob = await store.upsertUser({ email: "bob@example.test", role: "user" })
+    expect(await store.markRead(alice.id, "ses_one", 100)).toEqual({ ses_one: 100 })
+    expect(await store.markRead(alice.id, "ses_one", 50)).toEqual({ ses_one: 100 })
     expect(store.reads(bob.id)).toEqual({})
     expect(Store.open(dir).reads(alice.id)).toEqual({ ses_one: 100 })
-    for (let i = 0; i <= READS_LIMIT; i++) store.markRead(alice.id, `ses_${i}`, 200 + i)
+    for (let i = 0; i <= READS_LIMIT; i++) await store.markRead(alice.id, `ses_${i}`, 200 + i)
     const reads = store.reads(alice.id)
     expect(Object.keys(reads)).toHaveLength(READS_LIMIT)
     expect(reads.ses_one).toBeUndefined()
@@ -186,7 +186,7 @@ describe("Store", () => {
 describe("Store state directory permissions", () => {
   const eperm = () => Object.assign(new Error("EPERM: operation not permitted, chmod"), { code: "EPERM" })
 
-  test("a chmod EPERM on a writable state dir (fresh k8s volume) is a warning, files stay 0600", () => {
+  test("a chmod EPERM on a writable state dir (fresh k8s volume) is a warning, files stay 0600", async () => {
     const dir = tmp()
     const warnings: string[] = []
     const store = Store.open(dir, Date.now, {
@@ -195,7 +195,7 @@ describe("Store state directory permissions", () => {
       },
       warn: (message) => warnings.push(message),
     })
-    store.addMachine("laptop")
+    await store.addMachine("laptop")
     expect(warnings).toHaveLength(1)
     expect(warnings[0]).toContain(dir)
     expect(warnings[0]).not.toContain("\n")
@@ -307,15 +307,15 @@ describe("Store agent data and token epochs", () => {
     expect("tokenEpoch" in raw.machines[0]).toBe(false)
   })
 
-  test("agentData returns a copy; updateAgentData normalises, persists and saves only on real change", () => {
+  test("agentData returns a copy; updateAgentData normalises, persists and saves only on real change", async () => {
     const dir = tmp()
     const store = Store.open(dir)
-    const alice = store.upsertUser({ email: "alice@example.test", role: "user" })
+    const alice = await store.upsertUser({ email: "alice@example.test", role: "user" })
     const copy = store.agentData(alice.id)
     copy.names = [{ name: "x", sessionID: "ses_x" }]
     expect(store.agentData(alice.id)).toEqual({})
 
-    const next = store.updateAgentData(alice.id, (data) => {
+    const next = await store.updateAgentData(alice.id, (data) => {
       data.names = [{ name: "api", sessionID: "ses_1" }, { name: "api", sessionID: "ses_2" }]
       data.sessions = [{ sessionID: "ses_1", machineID: "mch_1" }]
     })
@@ -323,46 +323,46 @@ describe("Store agent data and token epochs", () => {
     expect(Store.open(dir).agentData(alice.id)).toEqual(next!)
 
     const inode = statSync(stateFile(dir)).ino
-    expect(store.updateAgentData(alice.id, () => {})).toEqual(next!)
-    expect(store.updateAgentData(alice.id, (data) => ({ ...data }))).toEqual(next!)
+    expect(await store.updateAgentData(alice.id, () => {})).toEqual(next!)
+    expect(await store.updateAgentData(alice.id, (data) => ({ ...data }))).toEqual(next!)
     expect(statSync(stateFile(dir)).ino).toBe(inode)
 
-    store.updateAgentData(alice.id, (data) => {
+    await store.updateAgentData(alice.id, (data) => {
       data.roles = [{ role: "reviewer", sessionID: "ses_1" }]
     })
     expect(statSync(stateFile(dir)).ino).not.toBe(inode)
     expect(Store.open(dir).agentData(alice.id).roles).toEqual([{ role: "reviewer", sessionID: "ses_1" }])
-    expect(store.updateAgentData("missing", () => ({ names: [] }))).toBeUndefined()
+    expect(await store.updateAgentData("missing", () => ({ names: [] }))).toBeUndefined()
   })
 
-  test("epoch bumps persist", () => {
+  test("epoch bumps persist", async () => {
     const dir = tmp()
     const store = Store.open(dir)
-    const alice = store.upsertUser({ email: "alice@example.test", role: "user" })
-    const { machine } = store.addMachine("box", alice.id)
-    expect(store.bumpUserEpoch(alice.id)).toBe(1)
-    expect(store.bumpUserEpoch(alice.id)).toBe(2)
-    expect(store.bumpMachineEpoch(machine.id)).toBe(1)
-    expect(store.bumpUserEpoch("missing")).toBeUndefined()
-    expect(store.bumpMachineEpoch("missing")).toBeUndefined()
+    const alice = await store.upsertUser({ email: "alice@example.test", role: "user" })
+    const { machine } = await store.addMachine("box", alice.id)
+    expect(await store.bumpUserEpoch(alice.id)).toBe(1)
+    expect(await store.bumpUserEpoch(alice.id)).toBe(2)
+    expect(await store.bumpMachineEpoch(machine.id)).toBe(1)
+    expect(await store.bumpUserEpoch("missing")).toBeUndefined()
+    expect(await store.bumpMachineEpoch("missing")).toBeUndefined()
     const again = Store.open(dir)
     expect(again.userEpoch(alice.id)).toBe(2)
     expect(again.machineEpoch(machine.id)).toBe(1)
   })
 
-  test("migrateLocal moves the local user's agent data to the admin (no duplicates) and bumps epochs", () => {
+  test("migrateLocal moves the local user's agent data to the admin (no duplicates) and bumps epochs", async () => {
     const dir = tmp()
     const store = Store.open(dir)
-    const own = store.addMachine("own").machine
-    const admin = store.upsertUser({ email: "admin@example.test", role: "admin" })
-    const adminMachine = store.addMachine("admin box", admin.id).machine
-    store.updateAgentData(LOCAL_USER, () => ({
+    const own = (await store.addMachine("own")).machine
+    const admin = await store.upsertUser({ email: "admin@example.test", role: "admin" })
+    const adminMachine = (await store.addMachine("admin box", admin.id)).machine
+    await store.updateAgentData(LOCAL_USER, () => ({
       names: [{ name: "api", sessionID: "ses_1" }, { name: "web", sessionID: "ses_2" }],
       appTokens: [{ id: "tok_1", tokenHash: "h1" }],
       future: { a: 1 },
     }))
-    store.updateAgentData(admin.id, () => ({ names: [{ name: "api", sessionID: "ses_1" }], roles: [{ role: "lead", sessionID: "ses_9" }] }))
-    expect(store.migrateLocal(admin.id)).toBe(true)
+    await store.updateAgentData(admin.id, () => ({ names: [{ name: "api", sessionID: "ses_1" }], roles: [{ role: "lead", sessionID: "ses_9" }] }))
+    expect(await store.migrateLocal(admin.id)).toBe(true)
     const expected = {
       names: [{ name: "api", sessionID: "ses_1" }, { name: "web", sessionID: "ses_2" }],
       roles: [{ role: "lead", sessionID: "ses_9" }],
@@ -380,14 +380,14 @@ describe("Store agent data and token epochs", () => {
     expect(again.machineEpoch(own.id)).toBe(1)
   })
 
-  test("downgrade: an older hub keeping only known top-level keys keeps user.agent and epochs", () => {
+  test("downgrade: an older hub keeping only known top-level keys keeps user.agent and epochs", async () => {
     const dir = tmp()
     const store = Store.open(dir)
-    const alice = store.upsertUser({ email: "alice@example.test", role: "user" })
-    const { machine } = store.addMachine("box", alice.id)
-    store.updateAgentData(alice.id, () => ({ names: [{ name: "api", sessionID: "ses_1" }] }))
-    store.bumpUserEpoch(alice.id)
-    store.bumpMachineEpoch(machine.id)
+    const alice = await store.upsertUser({ email: "alice@example.test", role: "user" })
+    const { machine } = await store.addMachine("box", alice.id)
+    await store.updateAgentData(alice.id, () => ({ names: [{ name: "api", sessionID: "ses_1" }] }))
+    await store.bumpUserEpoch(alice.id)
+    await store.bumpMachineEpoch(machine.id)
     // What 0.6's Store.open does: keep only the known top-level keys, persist users/machines as-is, save.
     const raw = readState(dir)
     const known = ["machines", "devices", "vapid", "push", "speech", "users", "audit"]
@@ -400,15 +400,15 @@ describe("Store agent data and token epochs", () => {
 })
 
 describe("Store hub-wide agent acting switch (design §5, §7)", () => {
-  test("off by default; set persists across reopen; saves only on change", () => {
+  test("off by default; set persists across reopen; saves only on change", async () => {
     const dir = tmp()
     const store = Store.open(dir)
     expect(store.actingPaused()).toBe(false)
-    expect(store.setActingPaused(true)).toBe(true)
-    expect(store.setActingPaused(true)).toBe(false)
+    expect(await store.setActingPaused(true)).toBe(true)
+    expect(await store.setActingPaused(true)).toBe(false)
     expect(store.actingPaused()).toBe(true)
     expect(Store.open(dir).actingPaused()).toBe(true)
-    expect(Store.open(dir).setActingPaused(false)).toBe(true)
+    expect(await Store.open(dir).setActingPaused(false)).toBe(true)
     const reopened = Store.open(dir)
     expect(reopened.actingPaused()).toBe(false)
     expect("agentsActingPaused" in JSON.parse(readFileSync(path.join(dir, "state.json"), "utf8"))).toBe(false)

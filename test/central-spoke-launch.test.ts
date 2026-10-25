@@ -66,13 +66,13 @@ function start(): void {
   url = `http://127.0.0.1:${server.port}`
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   const dir = mkdtempSync(path.join(tmpdir(), "hub-spoke-launch-"))
   store = Store.open(dir)
   keys = TokenKeys.open(dir, { env: {} })
   registry = new Registry(Date.now, undefined, ownerOf)
   nodes = new NodeRegistry(ownerOf)
-  const added = store.addMachine("laptop")
+  const added = await store.addMachine("laptop")
   machineID = added.machine.id
   machineToken = added.token
   launches = new Map([[`local/lch_1`, { state: "provisioning", machineID }]])
@@ -174,7 +174,7 @@ describe("refusing launch tokens (loopback is never trusted)", () => {
     expect(await status(token)).toBe(401)
     launches.set("local/lch_1", { state: "running", machineID })
     expect(await status(token)).toBe(426)
-    store.revokeMachine(machineID)
+    await store.revokeMachine(machineID)
     expect(await status(token)).toBe(401)
   })
 

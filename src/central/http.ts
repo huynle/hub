@@ -41,7 +41,7 @@ import { createActions } from "./actions"
 import { audioFormat, SpeechError } from "./speech/provider"
 import { SpeechService } from "./speech/service"
 import { NodeRegistry } from "./nodes"
-import { randomBytes } from "node:crypto"
+import { randomBytes, randomUUID } from "node:crypto"
 import { LaunchEngine } from "./agent/launch-engine"
 import { LaunchTokens } from "./agent/launch-tokens"
 import { LaunchFeed, launchInfo } from "./agent/launch-routes"
@@ -271,9 +271,14 @@ export function startCentral(options: CentralOptions): Central {
   const heartbeatMs = options.timing?.heartbeatMs ?? SSE_HEARTBEAT_MS
   const web: WebAssets = options.web ?? diskAssets(options.webDir ?? path.join(import.meta.dir, "..", "..", "web", "dist"))
   const now = options.now ?? Date.now
-  /** Used only by new code; existing state stays in the store, registry and event log. Selected first: cluster mode fails before touching the state dir. */
+  /** The bundle for the config (or the one given). Cluster mode never touches the state dir. */
+  const ownBackends = !options.backends
   const backends = options.backends ?? hubBackends(config, { now })
-  const store = Store.open(config.stateDir, now, { mode: config.auth.mode })
+  // Cluster mode: the records are rows in the shared StateStore, cached per pod (loaded on first use; no data
+  // migration runs on start). Otherwise state.json in the state dir.
+  const store = config.cluster
+    ? Store.shared({ state: backends.state, bus: backends.bus, now, instanceID: `${config.cluster.podID}-${randomUUID().slice(0, 8)}` })
+    : Store.open(config.stateDir, now, { mode: config.auth.mode })
   // A machine's tenant is its owner (read live: ownership moves on migration).
   const registry = new Registry(now, undefined, (machineID) => store.machines().find((m) => m.id === machineID)?.ownerID)
   const nodes = new NodeRegistry((machineID) => store.machines().find((m) => m.id === machineID)?.ownerID, now)
@@ -446,12 +451,19 @@ export function startCentral(options: CentralOptions): Central {
     `${COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secure ? "; Secure" : ""}`
 
   /** The device of the voice_device cookie and its user; undefined when unknown or the user is disabled. */
-  const deviceFor = (request: Request): { device: DeviceRecord; user: UserRecord } | undefined => {
+  /** The device of a token (cookie value or device token), its owner re-read too (a shared store's security re-check). */
+  const deviceOfToken = async (token: string): Promise<DeviceRecord | undefined> => {
+    const device = await store.findDevice(token)
+    if (device) await store.recheck({ users: [device.ownerID] })
+    return device
+  }
+
+  const deviceFor = async (request: Request): Promise<{ device: DeviceRecord; user: UserRecord } | undefined> => {
     const header = request.headers.get("cookie") ?? ""
     for (const part of header.split(";")) {
       const [name, ...rest] = part.trim().split("=")
       if (name !== COOKIE) continue
-      const device = store.findDevice(rest.join("="))
+      const device = await deviceOfToken(rest.join("="))
       if (!device) continue
       const user = store.user(device.ownerID)
       return user && !user.disabled ? { device, user } : undefined
@@ -479,34 +491,34 @@ export function startCentral(options: CentralOptions): Central {
       result = await oidc!.callback(url.searchParams, cookieValue(request.headers.get("cookie"), OIDC_COOKIE))
     } catch (cause) {
       if (!(cause instanceof OidcError)) throw cause
-      if (cause.audited) store.audit({ actor: "system", action: "signin.denied", detail: cause.reason })
+      if (cause.audited) await store.audit({ actor: "system", action: "signin.denied", detail: cause.reason })
       else console.warn(`[hub] sign-in refused: ${cause.reason}`)
       return deny(cause.status, "Sign-in failed", cause.message)
     }
     const { identity, next } = result
     if (!emailAllowed(settings, identity.email)) {
-      store.audit({ actor: "system", action: "signin.denied", target: identity.email, detail: "not allowed" })
+      await store.audit({ actor: "system", action: "signin.denied", target: identity.email, detail: "not allowed" })
       return deny(403, "Not allowed", `${identity.email} is not allowed to use this hub. Ask its admin to add you.`)
     }
     const role = settings.admins.includes(identity.email) ? "admin" : "user"
     const existing = store.userByEmail(identity.email)
     if (existing?.disabled) {
-      store.audit({ actor: "system", action: "signin.denied", target: identity.email, detail: "disabled" })
+      await store.audit({ actor: "system", action: "signin.denied", target: identity.email, detail: "disabled" })
       return deny(403, "Account disabled", "Your account on this hub is disabled. Ask its admin.")
     }
-    const user = store.upsertUser({ email: identity.email, ...(identity.name ? { name: identity.name } : {}), role })
-    if (user.role === "admin" && store.migrateLocal(user.id)) broadcast({ type: "catalog" })
+    const user = await store.upsertUser({ email: identity.email, ...(identity.name ? { name: identity.name } : {}), role })
+    if (user.role === "admin" && await store.migrateLocal(user.id)) broadcast({ type: "catalog" })
     const headers = new Headers({ "cache-control": "no-store" })
     headers.append("set-cookie", cleared["set-cookie"])
-    const current = deviceFor(request)
+    const current = await deviceFor(request)
     let deviceID: string
     if (current && current.user.id === user.id) deviceID = current.device.id
     else {
-      const { device, token } = store.addDevice(deviceName(request.headers.get("user-agent")), user.id)
+      const { device, token } = await store.addDevice(deviceName(request.headers.get("user-agent")), user.id)
       deviceID = device.id
       headers.append("set-cookie", cookie(token))
     }
-    store.audit({ actor: user.id, action: "signin", target: deviceID })
+    await store.audit({ actor: user.id, action: "signin", target: deviceID })
     // Speech not usable yet (e.g. no key): land on the page's speech setup (the console opens Settings → Speech for #speech).
     const setup = !next.includes("#") && speechSettings.view(speechScope(user.id)).ready.reason ? "#speech" : ""
     headers.set("location", `${next}${setup}`)
@@ -681,7 +693,7 @@ export function startCentral(options: CentralOptions): Central {
   const agentDeps = { store, sessionTokens, directory, registry, spokes, delivery, decisions, feed, heartbeatMs, now, audit, grants, grantRequests, acting, actions, escalate, launches, launchFeed, webhooks, maxPromptChars: MAX_PROMPT_CHARS }
   const resolveActor = createResolver({
     cookieName: COOKIE,
-    findDevice: (token) => store.findDevice(token),
+    findDevice: (token) => deviceOfToken(token),
     user: (id) => store.user(id),
     verifiers: [...agentVerifiers(agentDeps), ...(options.agent?.verifiers ?? [])],
   })
@@ -690,8 +702,9 @@ export function startCentral(options: CentralOptions): Central {
     cookieName: COOKIE,
     sameOrigin,
     touch: (user, device) => {
-      if (device) store.touchDevice(device.id)
-      store.touchUser(user.id)
+      // Never rejects (lastSeen only).
+      if (device) void store.touchDevice(device.id)
+      void store.touchUser(user.id)
     },
     routes: [...agentRoutes(agentDeps), ...(options.agent?.routes ?? [])],
   })
@@ -705,6 +718,8 @@ export function startCentral(options: CentralOptions): Central {
       if (method === "GET" && pathname === "/healthz") {
         return Response.json({ ok: true, version: options.version ?? "0.0.0", spokes: registry.connections(), nodes: nodes.count() })
       }
+      // A shared (cluster) store loads its records on first use; the file store is ready at once.
+      await store.ready()
       if (method === "POST" && pathname === "/spoke/enroll") {
         const start = auth.startEnrollment((await body(request)).machineName)
         const auto = config.auth.mode === "pairing" && localAutoApprove({
@@ -725,7 +740,7 @@ export function startCentral(options: CentralOptions): Central {
         return Response.json(start)
       }
       if (method === "POST" && pathname === "/spoke/enroll/poll") {
-        const poll = auth.pollEnrollment((await body(request)).deviceCode)
+        const poll = await auth.pollEnrollment((await body(request)).deviceCode)
         if (poll.status === "approved") broadcast({ type: "catalog" })
         return Response.json(poll)
       }
@@ -744,7 +759,7 @@ export function startCentral(options: CentralOptions): Central {
     }
   }
 
-  function login(request: Request, url: URL): Response {
+  async function login(request: Request, url: URL): Promise<Response> {
     const next = url.searchParams.get("next") ?? "/"
     if (!LOGIN_NEXT.test(next)) return error(400, "Invalid next path")
     const ownerID = auth.redeemLogin(url.searchParams.get("code"))
@@ -758,9 +773,9 @@ export function startCentral(options: CentralOptions): Central {
     const setup = speechSettings.view(speechScope(ownerID)).ready.reason ? "#speech" : ""
     const headers = new Headers({ location: `${next}${setup}`, "cache-control": "no-store" })
     // A link signs in as the machine's owner: a browser signed in as someone else gets a new device.
-    if (deviceFor(request)?.user.id !== ownerID) {
-      const { device, token } = store.addDevice("Browser (sign-in link)", ownerID)
-      store.audit({ actor: ownerID, action: "device.pair", target: device.id, detail: "login link" })
+    if ((await deviceFor(request))?.user.id !== ownerID) {
+      const { device, token } = await store.addDevice("Browser (sign-in link)", ownerID)
+      await store.audit({ actor: ownerID, action: "device.pair", target: device.id, detail: "login link" })
       headers.set("set-cookie", cookie(token))
     }
     return new Response(null, { status: 302, headers })
@@ -789,17 +804,17 @@ export function startCentral(options: CentralOptions): Central {
     ),
     route("POST", "/api/pair", "public", async ({ request }) => {
       const input = await body(request)
-      const paired = auth.pair(input.code, input.deviceName)
+      const paired = await auth.pair(input.code, input.deviceName)
       if (!paired) return error(401, "Invalid or expired pairing code")
-      store.audit({ actor: paired.device.ownerID, action: "device.pair", target: paired.device.id })
+      await store.audit({ actor: paired.device.ownerID, action: "device.pair", target: paired.device.id })
       return Response.json({ device: deviceView(paired.device) }, { headers: { "set-cookie": cookie(paired.token) } })
     }),
     // A native app trades a link code for a device token (kept by the app, sent as Authorization: Bearer): no cookie.
     route("POST", "/api/devices/redeem", "public", async ({ request }) => {
       const input = await body(request)
-      const linked = auth.redeemLink(input.code, input.deviceName, input.publicKey)
+      const linked = await auth.redeemLink(input.code, input.deviceName, input.publicKey)
       if (!linked) return error(401, "Invalid or expired link code")
-      store.audit({ actor: linked.device.ownerID, action: "device.pair", target: linked.device.id, detail: "app link" })
+      await store.audit({ actor: linked.device.ownerID, action: "device.pair", target: linked.device.id, detail: "app link" })
       return Response.json({ device: deviceView(linked.device), token: linked.token }, { headers: NO_STORE })
     }),
 
@@ -826,7 +841,7 @@ export function startCentral(options: CentralOptions): Central {
     // The phone's session view (hidden/pinned sessions and workspaces), per user, synced to their other devices.
     route("GET", "/api/prefs/view", "user", ({ user }) => Response.json({ prefs: store.viewPrefs(user.id) }, { headers: NO_STORE })),
     route("PUT", "/api/prefs/view", "user", async ({ request, user, device }) => {
-      const prefs = store.setViewPrefs(user.id, viewPrefsInput(await request.json()))
+      const prefs = await store.setViewPrefs(user.id, viewPrefsInput(await request.json()))
       // The user's other devices only: never another user, and not the device that made the change.
       toUser(user.id, { type: "prefs", prefs }, device.id)
       return Response.json({ prefs }, { headers: NO_STORE })
@@ -843,20 +858,20 @@ export function startCentral(options: CentralOptions): Central {
       }),
     ),
     // A link code for a native app, shown as a QR code / deep link in Settings → Devices → Add app.
-    route("POST", "/api/devices/link", "user", ({ user }) => {
+    route("POST", "/api/devices/link", "user", async ({ user }) => {
       const { code, expiresAt } = auth.issueLinkCode(user.id)
-      store.audit({ actor: user.id, action: "device.link" })
+      await store.audit({ actor: user.id, action: "device.link" })
       const url = `${APP_SCHEME}://link?hub=${encodeURIComponent(publicURL)}&code=${code}`
       return Response.json({ code, expiresAt, hub: publicURL, url }, { headers: NO_STORE })
     }),
-    route("DELETE", "/api/devices/:id", "user", ({ params, user }) => {
+    route("DELETE", "/api/devices/:id", "user", async ({ params, user }) => {
       const target = store.devices().find((d) => d.id === params.id && d.ownerID === user.id)
-      if (!target || !store.removeDevice(target.id)) return error(404, "No such device")
-      store.audit({ actor: user.id, action: "device.revoke", target: target.id })
+      if (!target || !await store.removeDevice(target.id)) return error(404, "No such device")
+      await store.audit({ actor: user.id, action: "device.revoke", target: target.id })
       return new Response(null, { status: 204 })
     }),
-    route("POST", "/api/logout", "user", ({ device }) => {
-      store.removeDevice(device.id)
+    route("POST", "/api/logout", "user", async ({ device }) => {
+      await store.removeDevice(device.id)
       return new Response(null, { status: 204, headers: { "set-cookie": cookie("", 0) } })
     }),
     route("POST", "/api/transcribe", "user", ({ request, user }) => transcribe(request, speechFor(user.id))),
@@ -868,7 +883,7 @@ export function startCentral(options: CentralOptions): Central {
       const audio = speech.speakStream ? await speech.speakStream(text, request.signal) : await speech.speak(text)
       return new Response(audio, { headers: { "content-type": "audio/mpeg" } })
     }),
-    route("GET", "/api/push/key", "user", () => Response.json({ publicKey: push.publicKey() })),
+    route("GET", "/api/push/key", "user", async () => Response.json({ publicKey: await push.publicKey() })),
     route("POST", "/api/push/subscribe", "user", async ({ request, device }) => {
       const input = await body(request)
       const target = pushTarget(input.subscription)
@@ -876,14 +891,14 @@ export function startCentral(options: CentralOptions): Central {
       const problem = await pushEndpointProblem(target.endpoint, options.resolveHost ?? systemResolveHost)
       if (problem) return error(400, `Invalid push subscription: ${problem}`)
       // pushsubscriptionchange: the service worker sends the endpoint it replaces.
-      if (typeof input.oldEndpoint === "string" && input.oldEndpoint !== target.endpoint) store.removePushSubscription(device.id, input.oldEndpoint)
-      store.addPushSubscription(device.id, target)
+      if (typeof input.oldEndpoint === "string" && input.oldEndpoint !== target.endpoint) await store.removePushSubscription(device.id, input.oldEndpoint)
+      await store.addPushSubscription(device.id, target)
       const prefs = prefsInput(input.prefs)
-      return Response.json({ prefs: prefs ? store.setPushPrefs(device.id, prefs) : store.pushPrefs(device.id) })
+      return Response.json({ prefs: prefs ? await store.setPushPrefs(device.id, prefs) : store.pushPrefs(device.id) })
     }),
     route("POST", "/api/push/unsubscribe", "user", async ({ request, device }) => {
       const endpoint = (await body(request)).endpoint
-      if (typeof endpoint !== "string" || !store.removePushSubscription(device.id, endpoint)) {
+      if (typeof endpoint !== "string" || !await store.removePushSubscription(device.id, endpoint)) {
         return error(404, "No such subscription on this device")
       }
       return new Response(null, { status: 204 })
@@ -894,17 +909,17 @@ export function startCentral(options: CentralOptions): Central {
       if ("quietHours" in input) {
         const quiet = input.quietHours === null ? null : quietHoursInput(input.quietHours)
         if (quiet === undefined) return error(400, "quietHours must be {start: \"HH:MM\", end: \"HH:MM\", timeZone} or null")
-        store.setQuietHours(device.id, quiet)
+        await store.setQuietHours(device.id, quiet)
       }
       if ("activityMinutes" in input) {
         const minutes = input.activityMinutes
         if (typeof minutes !== "number" || !Number.isInteger(minutes) || minutes < ACTIVITY_INTERVAL_MIN || minutes > ACTIVITY_INTERVAL_MAX) {
           return error(400, `activityMinutes must be a whole number of minutes from ${ACTIVITY_INTERVAL_MIN} to ${ACTIVITY_INTERVAL_MAX}`)
         }
-        store.setActivityMinutes(device.id, minutes)
+        await store.setActivityMinutes(device.id, minutes)
       }
       const prefs = prefsInput(input)
-      if (prefs) store.setPushPrefs(device.id, prefs)
+      if (prefs) await store.setPushPrefs(device.id, prefs)
       return pushPrefsView(device.id, user.id)
     }),
     route("PUT", "/api/push/mute", "user", async ({ request, user }) => {
@@ -913,7 +928,7 @@ export function startCentral(options: CentralOptions): Central {
       if (typeof sessionID !== "string" || !sessionID || sessionID.length > 200 || typeof input.muted !== "boolean") {
         return error(400, "Expected {sessionID, muted}")
       }
-      return Response.json({ muted: store.setSessionMuted(user.id, sessionID, input.muted) })
+      return Response.json({ muted: await store.setSessionMuted(user.id, sessionID, input.muted) })
     }),
     route("POST", "/api/push/test", "user", async ({ request, device }) => {
       // The body is optional (older clients send none): {kind?} picks what the test looks like.
@@ -931,7 +946,7 @@ export function startCentral(options: CentralOptions): Central {
     route("GET", "/api/settings/speech", "user", ({ user }) => Response.json(speechSettings.view(speechScope(user.id)), { headers: NO_STORE })),
     // Raw JSON: anything but an object is refused by the validator.
     route("PUT", "/api/settings/speech", "user", async ({ request, user }) =>
-      Response.json(speechSettings.update(await request.json(), speechScope(user.id)), { headers: NO_STORE }),
+      Response.json(await speechSettings.update(await request.json(), speechScope(user.id)), { headers: NO_STORE }),
     ),
     route("GET", "/api/settings/speech/models", "user", async ({ url, user }) => {
       const kind = url.searchParams.get("kind")
@@ -993,7 +1008,7 @@ export function startCentral(options: CentralOptions): Central {
       const change = modelPrefsInput(await request.json())
       await checkModelSelections(ownerOf(params.session!), params.session!, change)
       const reply = await spokes.request(ownerOf(params.session!), { op: "setModelPrefs", sessionID: params.session!, ...change })
-      const prefs = store.setModelPrefs(user.id, params.session!, change)
+      const prefs = await store.setModelPrefs(user.id, params.session!, change)
       return Response.json({ prefs, defaults: reply.defaults }, { headers: NO_STORE })
     }),
     route("GET", "/api/sessions/:session/timeline", "session", async ({ params, url }) => {
@@ -1051,8 +1066,8 @@ export function startCentral(options: CentralOptions): Central {
       const { patch } = await spokes.request(ownerOf(params.session!), { op: "diff", sessionID: params.session!, file })
       return patch ? Response.json(patch, { headers: NO_STORE }) : error(404, "No changes for that file")
     }),
-    route("POST", "/api/sessions/:session/read", "session", ({ params, user, device }) => {
-      const reads = store.markRead(user.id, params.session!, Date.now())
+    route("POST", "/api/sessions/:session/read", "session", async ({ params, user, device }) => {
+      const reads = await store.markRead(user.id, params.session!, Date.now())
       toUser(user.id, { type: "reads", reads }, device.id)
       return Response.json({ reads }, { headers: NO_STORE })
     }),
@@ -1084,9 +1099,9 @@ export function startCentral(options: CentralOptions): Central {
       )
     }),
     route("DELETE", "/api/admin/machines/:id", "admin", ({ params, user }) => revokeMachine(params.id!, user)),
-    route("DELETE", "/api/admin/devices/:id", "admin", ({ params, user }) => {
-      if (!store.removeDevice(params.id!)) return error(404, "No such device")
-      store.audit({ actor: user.id, action: "device.revoke", target: params.id! })
+    route("DELETE", "/api/admin/devices/:id", "admin", async ({ params, user }) => {
+      if (!await store.removeDevice(params.id!)) return error(404, "No such device")
+      await store.audit({ actor: user.id, action: "device.revoke", target: params.id! })
       return new Response(null, { status: 204 })
     }),
     route("GET", "/api/admin/audit", "admin", () => Response.json(store.auditLog())),
@@ -1095,8 +1110,8 @@ export function startCentral(options: CentralOptions): Central {
     route("PUT", "/api/admin/agents/acting", "admin", async ({ request, user }) => {
       const enabled = (await body(request)).enabled
       if (typeof enabled !== "boolean") return error(400, "enabled must be true or false")
-      store.setActingPaused(!enabled)
-      store.audit({ actor: user.id, action: enabled ? "agents.acting.resume" : "agents.acting.pause" })
+      await store.setActingPaused(!enabled)
+      await store.audit({ actor: user.id, action: enabled ? "agents.acting.resume" : "agents.acting.pause" })
       return Response.json({ enabled }, { headers: NO_STORE })
     }),
     // Decisions (asks to @me): the user's own; answered only here (tap: the console cookie, not a device token).
@@ -1117,7 +1132,7 @@ export function startCentral(options: CentralOptions): Central {
       try {
         const answered = await decisions.answer(user.id, params.id!, decisionAnswer(input), { kind: "user", userID: user.id, deviceID: device.id, via })
         if (answered.reply) feed.publish(user.id, answered.reply)
-        store.audit({ actor: user.id, action: "decision.answer", target: params.id!, detail: answered.decision.answer?.option ?? "text" })
+        await store.audit({ actor: user.id, action: "decision.answer", target: params.id!, detail: answered.decision.answer?.option ?? "text" })
         return Response.json(answered, { headers: NO_STORE })
       } catch (cause) {
         return decisionFailure(cause)
@@ -1125,8 +1140,8 @@ export function startCentral(options: CentralOptions): Central {
     }),
     route("GET", "/api/settings/speech/default", "admin", () => Response.json(speechSettings.view(), { headers: NO_STORE })),
     route("PUT", "/api/settings/speech/default", "admin", async ({ request, user }) => {
-      const view = speechSettings.update(await request.json())
-      store.audit({ actor: user.id, action: "speech.default" })
+      const view = await speechSettings.update(await request.json())
+      await store.audit({ actor: user.id, action: "speech.default" })
       return Response.json(view, { headers: NO_STORE })
     }),
   ]
@@ -1166,8 +1181,8 @@ export function startCentral(options: CentralOptions): Central {
     // Console routes are for the user's devices (cookie or device token) only, never session or app tokens.
     if (resolved.actor.kind !== "user" || !resolved.device) return error(403, "This token cannot be used here", "forbidden")
     const { device, user } = resolved
-    store.touchDevice(device.id)
-    store.touchUser(user.id)
+    void store.touchDevice(device.id)
+    void store.touchUser(user.id)
     if (!found) return error(404, "Not found")
 
     const { route: matched, params } = found
@@ -1188,18 +1203,18 @@ export function startCentral(options: CentralOptions): Central {
     return await matched.handle({ request, server, url, params, device, user })
   }
 
-  function decideEnrollment(code: string, status: "approved" | "denied", user: UserRecord): Response {
+  async function decideEnrollment(code: string, status: "approved" | "denied", user: UserRecord): Promise<Response> {
     const machineName = auth.decide(code, status, user.id)
     if (machineName === undefined) return error(404, "No pending enrollment with that code")
-    store.audit({ actor: user.id, action: status === "approved" ? "machine.approve" : "machine.deny", detail: machineName })
+    await store.audit({ actor: user.id, action: status === "approved" ? "machine.approve" : "machine.deny", detail: machineName })
     broadcast({ type: "enrollment" }, { admins: true })
     return new Response(null, { status: 204 })
   }
 
-  function revokeMachine(id: string, user: UserRecord): Response {
-    if (!store.revokeMachine(id)) return error(404, "No such machine")
-    store.bumpMachineEpoch(id)
-    store.audit({ actor: user.id, action: "machine.revoke", target: id })
+  async function revokeMachine(id: string, user: UserRecord): Promise<Response> {
+    if (!await store.revokeMachine(id)) return error(404, "No such machine")
+    await store.bumpMachineEpoch(id)
+    await store.audit({ actor: user.id, action: "machine.revoke", target: id })
     spokes.closeMachine(id, "revoked")
     broadcast({ type: "catalog" })
     return new Response(null, { status: 204 })
@@ -1220,7 +1235,7 @@ export function startCentral(options: CentralOptions): Central {
   }
 
   /** PUT /api/admin/users/:id {role?, disabled?}: the last active admin can be neither demoted nor disabled. */
-  function updateUser(id: string, input: Record<string, unknown>, actor: UserRecord): Response {
+  async function updateUser(id: string, input: Record<string, unknown>, actor: UserRecord): Promise<Response> {
     const target = store.user(id)
     if (!target) return error(404, "No such user")
     const { role, disabled } = input
@@ -1232,13 +1247,13 @@ export function startCentral(options: CentralOptions): Central {
     if (activeAdmin(target) && !activeAdmin(after) && store.users().filter(activeAdmin).length <= 1) {
       return error(409, "Cannot demote or disable the last active admin. Make someone else an admin first.")
     }
-    if (role && role !== target.role) store.audit({ actor: actor.id, action: "user.role", target: id, detail: role })
+    if (role && role !== target.role) await store.audit({ actor: actor.id, action: "user.role", target: id, detail: role })
     if (disabled !== undefined && disabled !== (target.disabled === true)) {
-      store.audit({ actor: actor.id, action: disabled ? "user.disable" : "user.enable", target: id })
+      await store.audit({ actor: actor.id, action: disabled ? "user.disable" : "user.enable", target: id })
     }
-    store.setUser(id, { ...(role ? { role: role as "admin" | "user" } : {}), ...(disabled !== undefined ? { disabled } : {}) })
+    await store.setUser(id, { ...(role ? { role: role as "admin" | "user" } : {}), ...(disabled !== undefined ? { disabled } : {}) })
     if (disabled === true) {
-      store.bumpUserEpoch(id)
+      await store.bumpUserEpoch(id)
       // Their machines go offline at once; their browsers get 401 from now on and lose their event streams.
       for (const machine of store.machines()) if (machine.ownerID === id) spokes.closeMachine(machine.id, "revoked")
       broadcast({ type: "catalog" })
@@ -1621,6 +1636,8 @@ export function startCentral(options: CentralOptions): Central {
       // resolves even though the listener is closed. Don't wait on it forever.
       await Promise.race([server.stop(true), Bun.sleep(250)])
       await backends.state.flush?.().catch((cause) => console.error(`[hub] agent state not saved: ${(cause as Error).message}`))
+      await store.close()
+      if (ownBackends) await backends.close?.().catch((cause) => console.error(`[hub] backends not closed: ${(cause as Error).message}`))
     },
   }
 }

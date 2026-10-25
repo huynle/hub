@@ -16,7 +16,7 @@ afterEach(async () => {
 
 describe("console assets", () => {
   test("app routes serve the shell; it links the manifest and same-origin hashed module and styles", async () => {
-    h = harness({ webDir: WEB })
+    h = await harness({ webDir: WEB })
     for (const route of ["/", "/pair", "/approve", "/new", "/settings", "/s/ses_1"]) {
       const res = await fetch(`${h.url}${route}`)
       expect(res.status).toBe(200)
@@ -37,7 +37,7 @@ describe("console assets", () => {
   })
 
   test("manifest is valid and every icon is served as a PNG/SVG", async () => {
-    h = harness({ webDir: WEB })
+    h = await harness({ webDir: WEB })
     const res = await fetch(`${h.url}/manifest.webmanifest`)
     expect(res.headers.get("content-type")).toBe("application/manifest+json")
     const manifest = (await res.json()) as any
@@ -52,7 +52,7 @@ describe("console assets", () => {
   })
 
   test("service worker handles push and notificationclick and never caches", async () => {
-    h = harness({ webDir: WEB })
+    h = await harness({ webDir: WEB })
     const res = await fetch(`${h.url}/sw.js`)
     expect(res.headers.get("cache-control")).toBe("no-cache")
     expect(res.headers.get("service-worker-allowed")).toBe("/")
@@ -63,7 +63,7 @@ describe("console assets", () => {
   })
 
   test("the Voice mode VAD worklet is served as JavaScript and registers its processor", async () => {
-    h = harness({ webDir: WEB })
+    h = await harness({ webDir: WEB })
     const res = await fetch(`${h.url}/vad-worklet.js`)
     expect(res.headers.get("content-type")).toBe("text/javascript; charset=utf-8")
     const source = await res.text()
@@ -72,7 +72,7 @@ describe("console assets", () => {
   })
 
   test("Silero VAD assets: the worker, onnxruntime's wasm and the model, hashed, typed, cached for good, outside the main chunk", async () => {
-    h = harness({ webDir: WEB })
+    h = await harness({ webDir: WEB })
     const assets = readdirSync(path.join(WEB, "assets"))
     const worker = assets.find((f) => /^silero-worker-.+\.js$/.test(f))
     const wasm = assets.find((f) => f.endsWith(".wasm"))
@@ -103,7 +103,7 @@ describe("console assets", () => {
   })
 
   test("big compressible assets (the 12 MB wasm) are sent compressed when the browser accepts it", async () => {
-    h = harness({ webDir: WEB })
+    h = await harness({ webDir: WEB })
     const wasm = readdirSync(path.join(WEB, "assets")).find((f) => f.endsWith(".wasm"))!
     const bytes = new Uint8Array(readFileSync(path.join(WEB, "assets", wasm)))
     const get = (encoding: string) => fetch(`${h.url}/assets/${wasm}`, { headers: { "accept-encoding": encoding }, decompress: false } as RequestInit)
@@ -122,7 +122,7 @@ describe("console assets", () => {
   }, 60_000)
 
   test("without a build the shell explains how to build it", async () => {
-    h = harness({ webDir: path.join(WEB, "missing") })
+    h = await harness({ webDir: path.join(WEB, "missing") })
     const res = await fetch(`${h.url}/`)
     expect(res.status).toBe(503)
     const text = await res.text()

@@ -235,4 +235,6 @@ export interface Backends {
   readonly locks: Locks
   readonly catalog: Catalog
   readonly kv: Kv
+  /** Closes the connections a networked bundle opened (cluster mode); the hub calls it on stop. */
+  close?(): Promise<void>
 }

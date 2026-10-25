@@ -25,7 +25,7 @@ const post = (pathname: string, body: unknown, token?: string) => (token ? beare
 
 /** A hub with ses_1 "API refactor", ses_2 "Web work" (roots, project hub) and ses_3 (a subagent of ses_1). */
 async function start() {
-  h = harness({ agent: { verifiers } } as any)
+  h = await harness({ agent: { verifiers } } as any)
   const sessions = [
     session("ses_1", { title: "API refactor", projectName: "hub" }),
     session("ses_2", { title: "Web work", projectName: "hub" }),
@@ -105,8 +105,8 @@ describe("POST /api/agent/name", () => {
 
   test("tenancy: another user's sessions and names are not_found", async () => {
     await start()
-    const bob = h.store.upsertUser({ email: "bob@example.test", role: "user" })
-    const machine = h.store.addMachine("bob box", bob.id)
+    const bob = await h.store.upsertUser({ email: "bob@example.test", role: "user" })
+    const machine = await h.store.addMachine("bob box", bob.id)
     await spoke(h, { machine, processID: "p2", sessions: [session("ses_bob", { title: "Bob secret", projectName: "hub" })] })
     await waitFor(() => (h.store.agentData(bob.id).names?.length ?? 0) === 1)
     for (const target of ["ses_bob", "@bob-secret"]) {

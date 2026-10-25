@@ -18,8 +18,8 @@ const json = async (r: Response) => (await r.json()) as any
 const LABELS = { app: "brain", "brain.task": "t1" }
 
 async function start() {
-  h = harness({ agent: { verifiers }, timing: { heartbeatMs: 40 } } as any)
-  const { machine, token } = h.store.addMachine("laptop")
+  h = await harness({ agent: { verifiers }, timing: { heartbeatMs: 40 } } as any)
+  const { machine, token } = await h.store.addMachine("laptop")
   const client = await spoke(h, {
     machine: { token },
     sessions: [session("ses_1", { title: "API refactor", directory: "/u/hub", project: "/u/hub", projectName: "hub" }), session("ses_2", { title: "Web work", directory: "/u/web", project: "/u/web", projectName: "web" })],

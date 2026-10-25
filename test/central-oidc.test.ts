@@ -13,9 +13,9 @@ afterEach(async () => {
   h = idp = undefined
 })
 
-function oidcHub(extra: Record<string, string> = {}, now?: () => number): Harness {
+async function oidcHub(extra: Record<string, string> = {}, now?: () => number): Promise<Harness> {
   idp = fakeProvider()
-  h = harness({ env: oidcEnv(idp, extra), noDevice: true, ...(now ? { now } : {}) })
+  h = await harness({ env: oidcEnv(idp, extra), noDevice: true, ...(now ? { now } : {}) })
   return h
 }
 
@@ -24,7 +24,7 @@ const text = (r: Response) => r.text()
 
 describe("GET /api/auth", () => {
   test("pairing mode: no sign-in", async () => {
-    h = harness({ noDevice: true })
+    h = await harness({ noDevice: true })
     const res = await h.api("/api/auth", { cookie: null })
     expect(await res.json()).toEqual({ mode: "pairing", signIn: null })
     expect((await h.api("/auth/login", { cookie: null })).status).toBe(404)
@@ -32,14 +32,14 @@ describe("GET /api/auth", () => {
   })
 
   test("oidc mode: sign-in path, public", async () => {
-    const hub = oidcHub()
+    const hub = await oidcHub()
     expect(await (await hub.api("/api/auth", { cookie: null })).json()).toEqual({ mode: "oidc", signIn: "/auth/login" })
   })
 })
 
 describe("/auth/login", () => {
   test("redirects to the provider with PKCE S256, state, nonce and a voice_oidc cookie", async () => {
-    const hub = oidcHub()
+    const hub = await oidcHub()
     const res = await hub.api("/auth/login?next=/s/ses_1", { cookie: null })
     expect(res.status).toBe(302)
     const location = new URL(res.headers.get("location")!)
@@ -64,14 +64,14 @@ describe("/auth/login", () => {
   })
 
   test("discovery is cached", async () => {
-    const hub = oidcHub()
+    const hub = await oidcHub()
     await hub.api("/auth/login", { cookie: null })
     await hub.api("/auth/login", { cookie: null })
     expect(idp!.discoveryHits).toBe(1)
   })
 
   test("discovery with a different issuer is refused (502 page)", async () => {
-    const hub = oidcHub()
+    const hub = await oidcHub()
     idp!.discovery = { issuer: "https://other.example.com", authorization_endpoint: `${idp!.issuer}/authorize`, token_endpoint: `${idp!.issuer}/token` }
     const res = await hub.api("/auth/login", { cookie: null })
     expect(res.status).toBe(502)
@@ -81,7 +81,7 @@ describe("/auth/login", () => {
 
 describe("/auth/callback", () => {
   test("happy path: user created, device cookie, 302 to next, /api/me, audit", async () => {
-    const hub = oidcHub()
+    const hub = await oidcHub()
     const { response, cookie, location } = await signIn(hub.url, idp!, "Alice@Example.com", { next: "/s/ses_1" })
     expect(response.status).toBe(302)
     expect(location).toBe("/s/ses_1#speech")
@@ -108,13 +108,13 @@ describe("/auth/callback", () => {
   })
 
   test("no #speech hint once speech is ready", async () => {
-    const hub = oidcHub({ OPENROUTER_API_KEY: "sk-or-test-key-1234" })
+    const hub = await oidcHub({ OPENROUTER_API_KEY: "sk-or-test-key-1234" })
     const { location } = await signIn(hub.url, idp!, "alice@example.com", { next: "/s/ses_1" })
     expect(location).toBe("/s/ses_1")
   })
 
   test("state must match the cookie", async () => {
-    const hub = oidcHub()
+    const hub = await oidcHub()
     const login = await hub.api("/auth/login", { cookie: null })
     const { code, state } = idp!.authorize(login.headers.get("location")!, { claims: { email: "alice@example.com" } })
     const other = setCookie(await hub.api("/auth/login", { cookie: null }), "voice_oidc")
@@ -128,7 +128,7 @@ describe("/auth/callback", () => {
   })
 
   test("a state is single use (replay refused)", async () => {
-    const hub = oidcHub()
+    const hub = await oidcHub()
     const login = await hub.api("/auth/login", { cookie: null })
     const cookie = `voice_oidc=${setCookie(login, "voice_oidc")}`
     const { code, state } = idp!.authorize(login.headers.get("location")!, { claims: { email: "alice@example.com" } })
@@ -141,7 +141,7 @@ describe("/auth/callback", () => {
 
   test("a pending sign-in expires after 10 minutes", async () => {
     let t = Date.now()
-    const hub = oidcHub({}, () => t)
+    const hub = await oidcHub({}, () => t)
     const login = await hub.api("/auth/login", { cookie: null })
     const cookie = `voice_oidc=${setCookie(login, "voice_oidc")}`
     const { code, state } = idp!.authorize(login.headers.get("location")!, { claims: { email: "alice@example.com" } })
@@ -164,7 +164,7 @@ describe("/auth/callback", () => {
   ]
   for (const [name, claims] of rejected) {
     test(`rejects: ${name}`, async () => {
-      const hub = oidcHub()
+      const hub = await oidcHub()
       const { response, cookie } = await signIn(hub.url, idp!, "alice@example.com", { claims })
       expect(response.status).toBeGreaterThanOrEqual(400)
       expect(response.status).toBeLessThan(500)
@@ -176,20 +176,20 @@ describe("/auth/callback", () => {
   }
 
   test("accepts an audience list containing the client with azp", async () => {
-    const hub = oidcHub()
+    const hub = await oidcHub()
     const { response } = await signIn(hub.url, idp!, "alice@example.com", { claims: { aud: ["client-123", "other"], azp: "client-123" } })
     expect(response.status).toBe(302)
   })
 
   test("token endpoint failure is a 502 page", async () => {
-    const hub = oidcHub()
+    const hub = await oidcHub()
     const { response, cookie } = await signIn(hub.url, idp!, "alice@example.com", { grant: { status: 500 } })
     expect(response.status).toBe(502)
     expect(cookie).toBeUndefined()
   })
 
   test("a malformed ID token is refused", async () => {
-    const hub = oidcHub()
+    const hub = await oidcHub()
     // A grant whose claims make the token unparsable is not possible through the fake; check the decoder directly.
     expect(unsignedJWT({ a: 1 }).split(".").length).toBe(3)
     const { response } = await signIn(hub.url, idp!, "alice@example.com", { claims: { exp: "soon" } })
@@ -197,7 +197,7 @@ describe("/auth/callback", () => {
   })
 
   test("not allowed: 403 page, audited, no user or device", async () => {
-    const hub = oidcHub()
+    const hub = await oidcHub()
     const { response, cookie } = await signIn(hub.url, idp!, "mallory@example.net")
     expect(response.status).toBe(403)
     expect(await text(response)).toContain("Not allowed")
@@ -207,16 +207,16 @@ describe("/auth/callback", () => {
   })
 
   test("@domain entries allow any address of that domain", async () => {
-    const hub = oidcHub()
+    const hub = await oidcHub()
     const { response } = await signIn(hub.url, idp!, "carol@example.org")
     expect(response.status).toBe(302)
     expect((await signIn(hub.url, idp!, "carol@sub.example.org")).response.status).toBe(403)
   })
 
   test("admins get the admin role; the first admin sign-in takes over local records", async () => {
-    const hub = oidcHub()
-    const machine = hub.store.addMachine("old laptop").machine
-    const device = hub.store.addDevice("old phone").device
+    const hub = await oidcHub()
+    const machine = (await hub.store.addMachine("old laptop")).machine
+    const device = (await hub.store.addDevice("old phone")).device
     const { cookie } = await signIn(hub.url, idp!, "admin@example.com")
     const body = await me(hub, cookie!)
     expect(body.user.role).toBe("admin")
@@ -230,17 +230,17 @@ describe("/auth/callback", () => {
   })
 
   test("a plain user's sign-in does not migrate local records", async () => {
-    const hub = oidcHub()
-    const machine = hub.store.addMachine("old laptop").machine
+    const hub = await oidcHub()
+    const machine = (await hub.store.addMachine("old laptop")).machine
     await signIn(hub.url, idp!, "alice@example.com")
     expect(hub.store.machines().find((m) => m.id === machine.id)?.ownerID).toBe(LOCAL_USER)
   })
 
   test("a disabled user cannot sign in", async () => {
-    const hub = oidcHub()
+    const hub = await oidcHub()
     const first = await signIn(hub.url, idp!, "alice@example.com")
     const id = (await me(hub, first.cookie!)).user.id
-    hub.store.setUser(id, { disabled: true })
+    await hub.store.setUser(id, { disabled: true })
     const { response, cookie } = await signIn(hub.url, idp!, "alice@example.com")
     expect(response.status).toBe(403)
     expect(cookie).toBeUndefined()
@@ -248,7 +248,7 @@ describe("/auth/callback", () => {
   })
 
   test("provider error param: readable, escaped page with a link back", async () => {
-    const hub = oidcHub()
+    const hub = await oidcHub()
     const login = await hub.api("/auth/login", { cookie: null })
     const cookie = `voice_oidc=${setCookie(login, "voice_oidc")}`
     const state = new URL(login.headers.get("location")!).searchParams.get("state")
@@ -265,7 +265,7 @@ describe("/auth/callback", () => {
   })
 
   test("open redirects in next are neutralized", async () => {
-    const hub = oidcHub({ OPENROUTER_API_KEY: "sk-or-test-key-1234" })
+    const hub = await oidcHub({ OPENROUTER_API_KEY: "sk-or-test-key-1234" })
     for (const next of ["//evil.test", "https://evil.test/x", "/\\evil.test", "\\\\evil.test", "http:/evil.test", "javascript:alert(1)", "/%0d%0aSet-Cookie:x", " /x", "evil"]) {
       const { location } = await signIn(hub.url, idp!, "alice@example.com", { next })
       expect(location?.startsWith("/")).toBe(true)

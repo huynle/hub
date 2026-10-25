@@ -7,7 +7,7 @@ import path from "node:path"
 import { harness } from "../../../test/central-harness"
 import { run } from "../src/cli"
 
-const hub = harness()
+const hub = await harness()
 afterAll(() => hub.stop())
 
 async function cli(argv: string[], env: Record<string, string>, home: string) {

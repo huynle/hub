@@ -26,7 +26,7 @@ export function webDir(): string {
   return dir
 }
 
-export function harness(overrides: Partial<CentralOptions> & { env?: Record<string, string>; noDevice?: boolean } = {}): Harness {
+export async function harness(overrides: Partial<CentralOptions> & { env?: Record<string, string>; noDevice?: boolean } = {}): Promise<Harness> {
   const { env, noDevice, ...rest } = overrides
   const notified: Harness["notified"] = []
   const config = centralConfig({
@@ -53,7 +53,7 @@ export function harness(overrides: Partial<CentralOptions> & { env?: Record<stri
     resolveHost: async () => ["93.184.215.14"],
     ...rest,
   })
-  const cookie = noDevice ? "" : `voice_device=${central.store.addDevice("test phone").token}`
+  const cookie = noDevice ? "" : `voice_device=${(await central.store.addDevice("test phone")).token}`
   const api: Harness["api"] = (pathname, init = {}) => {
     const headers = new Headers(init.headers)
     const c = init.cookie === undefined ? cookie : init.cookie
@@ -153,7 +153,7 @@ export async function spoke(
   central: Central,
   options: { machine?: { token: string }; hello?: Partial<Hello>; processID?: string; sessions?: SessionInfo[] } = {},
 ): Promise<FakeSpoke & { token: string }> {
-  const token = options.machine?.token ?? central.store.addMachine("laptop").token
+  const token = options.machine?.token ?? (await central.store.addMachine("laptop")).token
   const client = await connect(central, token)
   client.send(hello(options.processID ?? "p1", options.hello))
   await client.next((f) => f.t === "welcome")

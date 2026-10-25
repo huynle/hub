@@ -97,9 +97,9 @@ const asSession = (sessionID: string) => ({ env: { HUB_URL: ids[sessionID]!.url,
 
 beforeAll(async () => {
   tmp = mkdtempSync(path.join(tmpdir(), "hub-e2e-p2-"))
-  h = harness()
-  const a = h.store.addMachine("laptop-a")
-  const b = h.store.addMachine("laptop-b")
+  h = await harness()
+  const a = await h.store.addMachine("laptop-a")
+  const b = await h.store.addMachine("laptop-b")
 
   const configFile = path.join(tmp, "spoke-a.json")
   writeConfig(configFile, { ...defaults("laptop-a"), server: h.url, mode: "always", token: a.token, autoStartLocalHub: false, herdr: false })
@@ -393,8 +393,8 @@ describe("a second user cannot see or answer the first user's messages and Decis
     const a = asSession(ALPHA)
     askID = json(await cli(["ask", "@bravo", "open question", "--no-wake", "--json"], a.env, a.home)).message.id
     decisionID = json(await cli(["ask", "@me", "Another decision?", "--json"], a.env, a.home)).decision.id
-    const user = h.store.upsertUser({ email: "bob@example.com", role: "user" })
-    const cookie = `voice_device=${h.store.addDevice("bob laptop", user.id).token}`
+    const user = await h.store.upsertUser({ email: "bob@example.com", role: "user" })
+    const cookie = `voice_device=${(await h.store.addDevice("bob laptop", user.id)).token}`
     const { code } = (await (await h.api("/api/devices/link", { method: "POST", json: {}, cookie })).json()) as { code: string }
     const { token } = (await (await h.api("/api/devices/redeem", { method: "POST", json: { code }, cookie: null, origin: null })).json()) as { token: string }
     const home = dir("bob-home")

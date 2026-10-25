@@ -54,10 +54,10 @@ const step = (kind: string, text: string) => ({ kind, text })
 const activity = (p: Push, sessionID: string, s: { kind: string; text: string }, owner = "u1") =>
   (p as any).activity?.({ kind: "activity", sessionID, title: "Main", step: s, owner })
 
-function device(owner = "u1", n = 1, on = true) {
-  const d = store.addDevice(`phone ${n}`, owner).device
-  store.addPushSubscription(d.id, sub(n))
-  if (on) store.setPushPrefs(d.id, { activity: true } as any)
+async function device(owner = "u1", n = 1, on = true) {
+  const d = (await store.addDevice(`phone ${n}`, owner)).device
+  await store.addPushSubscription(d.id, sub(n))
+  if (on) await store.setPushPrefs(d.id, { activity: true } as any)
   return d
 }
 
@@ -77,14 +77,14 @@ describe("activity digest push", () => {
 
   test("off by default on every device; the toggle is a push pref", async () => {
     expect((DEFAULT_PUSH_PREFS as any).activity).toBe(false)
-    device("u1", 1, false)
+    await device("u1", 1, false)
     activity(push, "ses_1", step("idle", "Finished"))
     await advance(10 * 60_000)
     expect(sent).toEqual([])
   })
 
   test("a step of interest is sent at once, collapsing per session, normal urgency, short TTL", async () => {
-    device()
+    await device()
     activity(push, "ses_1", step("tool", "bash"))
     activity(push, "ses_1", step("tool", "read"))
     activity(push, "ses_1", step("job", "bun run build exited 0"))
@@ -95,14 +95,14 @@ describe("activity digest push", () => {
   })
 
   test("short tools alone never send; they are counted in the next digest", async () => {
-    device()
+    await device()
     for (let i = 0; i < 5; i++) activity(push, "ses_1", step("tool", "read"))
     await advance(30 * 60_000)
     expect(sent).toEqual([])
   })
 
   test("at most one per session per interval: later steps are collapsed into one at the end of it", async () => {
-    device()
+    await device()
     activity(push, "ses_1", step("subagent", "explore started"))
     await advance(0)
     activity(push, "ses_1", step("tool", "bash"))
@@ -120,25 +120,27 @@ describe("activity digest push", () => {
   })
 
   test("the interval is per device (setting, minutes)", async () => {
-    const slow = device("u1", 1)
-    const fast = device("u1", 2)
+    const slow = await device("u1", 1)
+    const fast = await device("u1", 2)
     ;(store as any).setActivityMinutes?.(fast.id, 1)
     expect((store as any).activityMinutes?.(slow.id)).toBe(ACTIVITY_INTERVAL_MINUTES)
     activity(push, "ses_1", step("idle", "Finished"))
     await advance(0)
     activity(push, "ses_1", step("job", "sleep 60 exited 0"))
     await advance(60_000)
-    expect(sent.map((s) => s.endpoint)).toEqual([sub(1).endpoint, sub(2).endpoint, sub(2).endpoint])
+    // Both devices at once (in either order: the first send creates the VAPID keys), then only the 1-minute one.
+    expect(sent.slice(0, 2).map((s) => s.endpoint).sort()).toEqual([sub(1).endpoint, sub(2).endpoint])
+    expect(sent.slice(2).map((s) => s.endpoint)).toEqual([sub(2).endpoint])
   })
 
   test("muted sessions, quiet hours and other users' devices get nothing", async () => {
-    const me = store.upsertUser({ email: "me@example.com", role: "user" }).id
-    const other = store.upsertUser({ email: "other@example.com", role: "user" }).id
-    const mine = device(me, 1)
-    device(other, 2)
-    store.setSessionMuted(me, "ses_muted", true)
+    const me = (await store.upsertUser({ email: "me@example.com", role: "user" })).id
+    const other = (await store.upsertUser({ email: "other@example.com", role: "user" })).id
+    const mine = await device(me, 1)
+    await device(other, 2)
+    await store.setSessionMuted(me, "ses_muted", true)
     activity(push, "ses_muted", step("idle", "Finished"), me)
-    store.setQuietHours(mine.id, { start: "00:00", end: "23:59", timeZone: "UTC" })
+    await store.setQuietHours(mine.id, { start: "00:00", end: "23:59", timeZone: "UTC" })
     activity(push, "ses_1", step("idle", "Finished"), me)
     await advance(10 * 60_000)
     expect(sent).toEqual([])

@@ -37,8 +37,8 @@ const post = (path: string, json?: unknown) => h.api(path, { method: "POST", jso
 
 describe("utterance", () => {
   test("routes steer to the owner and returns 202 with the inbox ID", async () => {
-    h = harness()
-    const machine = h.store.addMachine("laptop")
+    h = await harness()
+    const machine = await h.store.addMachine("laptop")
     const svc = await spoke(h, { machine, processID: "svc", hello: { kind: "service" }, sessions: [session("ses_1")] })
     const svcSeen = conversationSpoke(svc)
     const tui = await spoke(h, { machine, processID: "tui", sessions: [session("ses_1", { owned: true })] })
@@ -51,7 +51,7 @@ describe("utterance", () => {
   })
 
   test("is accepted while a voice turn holds the session", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     const seen = conversationSpoke(client)
     const turn = post("/api/sessions/ses_1/turn", { text: "long task" }).catch(() => undefined)
@@ -62,7 +62,7 @@ describe("utterance", () => {
   })
 
   test("validates text and requires an owner", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     const seen = conversationSpoke(client)
     expect((await post("/api/sessions/ses_1/utterance", { text: "   " })).status).toBe(400)
@@ -77,7 +77,7 @@ describe("utterance", () => {
   })
 
   test("spoke error is 502; no answer is 504", async () => {
-    h = harness({ timing: { requestTimeoutMs: 500 } })
+    h = await harness({ timing: { requestTimeoutMs: 500 } })
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     answer(client, (req) => (req.text === "fail" ? new Error("steer refused") : undefined))
     const failed = await post("/api/sessions/ses_1/utterance", { text: "fail" })
@@ -89,7 +89,7 @@ describe("utterance", () => {
 
 describe("interrupt", () => {
   test("sends interrupt to the owner and returns 204; 404 for an unreported session", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     const seen = conversationSpoke(client)
     const res = await post("/api/sessions/ses_1/interrupt")
@@ -101,7 +101,7 @@ describe("interrupt", () => {
 
 describe("conversation mode", () => {
   test("on/off is sent to the owner, returns the agent, emits SSE, and shows in session and catalog", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true, title: "Fix bug" })] })
     const seen = conversationSpoke(client)
     const events = sse(await h.api("/api/events"))
@@ -126,7 +126,7 @@ describe("conversation mode", () => {
   })
 
   test("invalid body is 400; unreported session is 404; spoke error leaves it off", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     answer(client, () => new Error("no voice agent"))
     expect((await post("/api/sessions/ses_1/conversation", { on: "yes" })).status).toBe(400)
@@ -137,14 +137,14 @@ describe("conversation mode", () => {
   })
 
   test("GET of an unknown session is 404", async () => {
-    h = harness()
+    h = await harness()
     expect((await h.api("/api/sessions/ses_nobody")).status).toBe(404)
   })
 })
 
 describe("auth on conversation routes", () => {
   test("cookie required; POSTs need a same-origin Origin", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     const seen = conversationSpoke(client)
     const routes: Array<[string, unknown]> = [
@@ -168,8 +168,8 @@ const ended = (sessionID: string, assistantMessageID: string, ordinal: number, t
 
 describe("say events", () => {
   test("only for root sessions in conversation mode, deduped, skipping blank text", async () => {
-    h = harness()
-    const machine = h.store.addMachine("laptop")
+    h = await harness()
+    const machine = await h.store.addMachine("laptop")
     const client = await spoke(h, {
       machine,
       sessions: [session("ses_1", { owned: true }), session("ses_sub", { parentID: "ses_1" }), session("ses_2", { owned: true })],
@@ -199,7 +199,7 @@ describe("say events", () => {
   })
 
   test("stop after conversation mode is switched off", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     conversationSpoke(client)
     await post("/api/sessions/ses_1/conversation", { on: true })
@@ -213,7 +213,7 @@ describe("say events", () => {
   })
 
   test("speaks a successful subagent's final text through its conversation root", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, {
       sessions: [session("ses_root", { owned: true }), session("ses_child", { parentID: "ses_root" })],
     })
@@ -236,8 +236,8 @@ describe("say events", () => {
   })
 
   test("speaks late subagent text when success arrives first and dedupes repeated reports", async () => {
-    h = harness()
-    const machine = h.store.addMachine("laptop")
+    h = await harness()
+    const machine = await h.store.addMachine("laptop")
     const sessions = [session("ses_root", { owned: true }), session("ses_child", { parentID: "ses_root" })]
     const client = await spoke(h, { machine, processID: "tui", sessions })
     conversationSpoke(client)
@@ -265,7 +265,7 @@ describe("say events", () => {
   })
 
   test("speaks only the latest subagent message with its parts in ordinal order", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, {
       sessions: [session("ses_root", { owned: true }), session("ses_child", { parentID: "ses_root" })],
     })
@@ -293,7 +293,7 @@ describe("say events", () => {
   })
 
   test("a new subagent execution clears text left by its previous run", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, {
       sessions: [session("ses_root", { owned: true }), session("ses_child", { parentID: "ses_root" })],
     })
@@ -318,7 +318,7 @@ describe("say events", () => {
   })
 
   test("does not speak failed, interrupted, root, or non-conversation child completions (a failure is announced instead)", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, {
       sessions: [
         session("ses_root", { owned: true }),
@@ -356,8 +356,8 @@ describe("say events", () => {
 
 describe("worker announcements", () => {
   async function conversationTree(children: string[]) {
-    h = harness()
-    const machine = h.store.addMachine("laptop")
+    h = await harness()
+    const machine = await h.store.addMachine("laptop")
     const sessions = [session("ses_root", { owned: true }), ...children.map((id) => session(id, { parentID: "ses_root" }))]
     const client = await spoke(h, { machine, sessions })
     conversationSpoke(client)
@@ -453,7 +453,7 @@ describe("worker announcements", () => {
 
 describe("heard events", () => {
   test("emitted when an utterance's inbox item is delivered, also if delivery beats the response", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     let n = 0
     client.ws.addEventListener("message", (raw) => {
@@ -477,7 +477,7 @@ describe("heard events", () => {
 
 describe("presence", () => {
   test("cookie and same Origin required; validates; marks the session watched until hidden", async () => {
-    h = harness()
+    h = await harness()
     await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     const presence = (json: unknown, init: { cookie?: null; origin?: string | null } = {}) =>
       h.api("/api/sessions/ses_1/presence", { method: "POST", json, ...init })
@@ -495,7 +495,7 @@ describe("presence", () => {
 
 describe("push in conversation mode", () => {
   test("no turn push while the session is watched (conversation mode or not); a permission still pushes", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true, title: "Fix bug" })] })
     conversationSpoke(client)
     await post("/api/sessions/ses_1/conversation", { on: true })
@@ -519,7 +519,7 @@ describe("push in conversation mode", () => {
   })
 
   test("when nobody watches, spoken texts and turns are pushed so results reach a locked phone", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true, title: "Fix bug" })] })
     conversationSpoke(client)
     await post("/api/sessions/ses_1/conversation", { on: true })
@@ -536,8 +536,8 @@ describe("push in conversation mode", () => {
 
 describe("conversation mode across reconnects", () => {
   test("re-sent once to the process that owns the session after a reconnect", async () => {
-    h = harness()
-    const machine = h.store.addMachine("laptop")
+    h = await harness()
+    const machine = await h.store.addMachine("laptop")
     const first = await spoke(h, { machine, processID: "a", sessions: [session("ses_1", { owned: true })] })
     const firstSeen = conversationSpoke(first)
     await post("/api/sessions/ses_1/conversation", { on: true })

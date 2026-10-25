@@ -76,9 +76,9 @@ describe.skipIf(!run)("live: an orchestrator session approves another session's 
   })
 
   test("session B's model calls hub approve with its act token; OpenCode runs session A's shell command", async () => {
-    const h = harness()
+    const h = await harness()
     cleanups.push(() => h.stop())
-    const machine = h.store.addMachine("it-box")
+    const machine = await h.store.addMachine("it-box")
     let target = { session: "", id: "" }
     const model = stubModel(() => target)
     cleanups.push(() => model.stop())

@@ -66,9 +66,9 @@ describe.skipIf(!run)("live: hub launch starts a real OpenCode session in a work
   })
 
   test("the session runs in <repo>/.worktrees/<branch> and the model receives the launch's prompt", async () => {
-    const h = harness()
+    const h = await harness()
     cleanups.push(() => h.stop())
-    const machine = h.store.addMachine("it-box")
+    const machine = await h.store.addMachine("it-box")
     const model = stubModel()
     cleanups.push(() => model.stop())
     const base = realpathSync(mkdtempSync(path.join(process.env.TMPDIR ?? tmpdir(), "hub-it-p4-")))

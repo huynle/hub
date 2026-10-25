@@ -38,31 +38,31 @@ beforeEach(() => {
 })
 
 describe("VAPID keys", () => {
-  test("generated once, persisted, reused after reopening the store", () => {
+  test("generated once, persisted, reused after reopening the store", async () => {
     const push = new Push({ store, subject: "mailto:a@b.c", sender: fakeSender().sender, now })
-    const key = push.publicKey()
+    const key = await push.publicKey()
     expect(key).toMatch(/^[A-Za-z0-9_-]{80,}$/)
-    expect(push.publicKey()).toBe(key)
+    expect(await push.publicKey()).toBe(key)
     expect(store.data().vapid?.publicKey).toBe(key)
     const reopened = new Push({ store: Store.open(dir), subject: "mailto:a@b.c", sender: fakeSender().sender, now })
-    expect(reopened.publicKey()).toBe(key)
+    expect(await reopened.publicKey()).toBe(key)
   })
 })
 
 describe("subscriptions and prefs", () => {
-  test("dedupe by endpoint; several per device; unsubscribe only own; device removal drops them", () => {
-    const a = store.addDevice("a").device
-    const b = store.addDevice("b").device
-    store.addPushSubscription(a.id, sub(1))
-    store.addPushSubscription(a.id, sub(2))
-    store.addPushSubscription(a.id, sub(1))
+  test("dedupe by endpoint; several per device; unsubscribe only own; device removal drops them", async () => {
+    const a = (await store.addDevice("a")).device
+    const b = (await store.addDevice("b")).device
+    await store.addPushSubscription(a.id, sub(1))
+    await store.addPushSubscription(a.id, sub(2))
+    await store.addPushSubscription(a.id, sub(1))
     expect(store.pushSubscriptions().map((s) => s.endpoint)).toEqual([sub(1).endpoint, sub(2).endpoint])
     // The same endpoint re-subscribed by another device moves to that device.
-    store.addPushSubscription(b.id, sub(2))
+    await store.addPushSubscription(b.id, sub(2))
     expect(store.pushSubscriptions().filter((s) => s.deviceID === b.id).map((s) => s.endpoint)).toEqual([sub(2).endpoint])
-    expect(store.removePushSubscription(a.id, sub(2).endpoint)).toBe(false)
-    expect(store.removePushSubscription(a.id, sub(1).endpoint)).toBe(true)
-    store.removeDevice(b.id)
+    expect(await store.removePushSubscription(a.id, sub(2).endpoint)).toBe(false)
+    expect(await store.removePushSubscription(a.id, sub(1).endpoint)).toBe(true)
+    await store.removeDevice(b.id)
     expect(store.pushSubscriptions()).toEqual([])
   })
 
@@ -86,25 +86,25 @@ describe("subscriptions and prefs", () => {
     message: true,
   }
 
-  test("prefs default to needs-you, all done, failed, hand-offs and say; are per device and persist", () => {
-    const a = store.addDevice("a").device
+  test("prefs default to needs-you, all done, failed, hand-offs and say; are per device and persist", async () => {
+    const a = (await store.addDevice("a")).device
     expect(store.pushPrefs(a.id)).toEqual(defaults)
     expect(DEFAULT_PUSH_PREFS).toEqual(defaults)
     expect([...PUSH_PREF_KEYS].sort() as string[]).toEqual(Object.keys(defaults).sort())
-    store.setPushPrefs(a.id, { turn: true, subagentDone: true })
+    await store.setPushPrefs(a.id, { turn: true, subagentDone: true })
     expect(Store.open(dir).pushPrefs(a.id)).toEqual({ ...defaults, turn: true, subagentDone: true })
   })
 
-  test("the old 'finished' key (every root turn) is accepted and means all done", () => {
-    const a = store.addDevice("a").device
-    expect(store.setPushPrefs(a.id, { finished: false } as any)).toMatchObject({ done: false, turn: false })
-    expect(store.setPushPrefs(a.id, { finished: true } as any)).toMatchObject({ done: true, turn: false })
+  test("the old 'finished' key (every root turn) is accepted and means all done", async () => {
+    const a = (await store.addDevice("a")).device
+    expect(await store.setPushPrefs(a.id, { finished: false } as any)).toMatchObject({ done: false, turn: false })
+    expect(await store.setPushPrefs(a.id, { finished: true } as any)).toMatchObject({ done: true, turn: false })
     expect("finished" in store.pushPrefs(a.id)).toBe(false)
   })
 
-  test("0.7 prefs migrate: finished → all done (not every turn), failed and activity kept, new kinds off", () => {
-    const a = store.addDevice("a").device
-    const b = store.addDevice("b").device
+  test("0.7 prefs migrate: finished → all done (not every turn), failed and activity kept, new kinds off", async () => {
+    const a = (await store.addDevice("a")).device
+    const b = (await store.addDevice("b")).device
     const raw = store.data()
     raw.devices.find((d) => d.id === a.id)!.pushPrefs = { handoff: true, question: true, permission: true, finished: true, failed: true, say: true, activity: true } as any
     raw.devices.find((d) => d.id === b.id)!.pushPrefs = { handoff: true, question: true, permission: false, finished: false, failed: false, say: false, activity: false } as any
@@ -117,9 +117,9 @@ describe("subscriptions and prefs", () => {
     expect(stored.done).toBe(true)
   })
 
-  test("legacy prefs migrate: blocked → question + permission, finished → all done + failed", () => {
-    const a = store.addDevice("a").device
-    const b = store.addDevice("b").device
+  test("legacy prefs migrate: blocked → question + permission, finished → all done + failed", async () => {
+    const a = (await store.addDevice("a")).device
+    const b = (await store.addDevice("b")).device
     const raw = store.data()
     // 0.5.0 stored the whole {handoff, blocked, finished, say} object.
     raw.devices.find((d) => d.id === a.id)!.pushPrefs = { handoff: true, blocked: false, finished: true, say: false } as any
@@ -132,30 +132,30 @@ describe("subscriptions and prefs", () => {
     expect(JSON.parse(readFileSync(path.join(dir, "state.json"), "utf8")).devices.find((d: any) => d.id === a.id).pushPrefs.blocked).toBeUndefined()
   })
 
-  test("a legacy blocked toggle sets both question and permission", () => {
-    const a = store.addDevice("a").device
-    expect(store.setPushPrefs(a.id, { blocked: false } as any)).toMatchObject({ question: false, permission: false })
+  test("a legacy blocked toggle sets both question and permission", async () => {
+    const a = (await store.addDevice("a")).device
+    expect(await store.setPushPrefs(a.id, { blocked: false } as any)).toMatchObject({ question: false, permission: false })
   })
 
-  test("quiet hours per device: valid HH:MM and an IANA time zone, or null to clear", () => {
-    const a = store.addDevice("a").device
+  test("quiet hours per device: valid HH:MM and an IANA time zone, or null to clear", async () => {
+    const a = (await store.addDevice("a")).device
     expect(store.quietHours(a.id)).toBeUndefined()
-    expect(store.setQuietHours(a.id, { start: "22:00", end: "07:30", timeZone: "Europe/Berlin" })).toEqual({ start: "22:00", end: "07:30", timeZone: "Europe/Berlin" })
+    expect(await store.setQuietHours(a.id, { start: "22:00", end: "07:30", timeZone: "Europe/Berlin" })).toEqual({ start: "22:00", end: "07:30", timeZone: "Europe/Berlin" })
     expect(Store.open(dir).quietHours(a.id)).toEqual({ start: "22:00", end: "07:30", timeZone: "Europe/Berlin" })
-    store.setQuietHours(a.id, null)
+    await store.setQuietHours(a.id, null)
     expect(store.quietHours(a.id)).toBeUndefined()
   })
 
-  test("muted sessions are per user, deduped, capped and persisted", () => {
-    const user = store.addDevice("a").device.ownerID
+  test("muted sessions are per user, deduped, capped and persisted", async () => {
+    const user = (await store.addDevice("a")).device.ownerID
     expect(store.mutedSessions(user)).toEqual([])
-    store.setSessionMuted(user, "ses_1", true)
-    store.setSessionMuted(user, "ses_1", true)
-    store.setSessionMuted(user, "ses_2", true)
+    await store.setSessionMuted(user, "ses_1", true)
+    await store.setSessionMuted(user, "ses_1", true)
+    await store.setSessionMuted(user, "ses_2", true)
     expect(Store.open(dir).mutedSessions(user)).toEqual(["ses_1", "ses_2"])
-    store.setSessionMuted(user, "ses_1", false)
+    await store.setSessionMuted(user, "ses_1", false)
     expect(store.mutedSessions(user)).toEqual(["ses_2"])
-    for (let i = 0; i < 600; i++) store.setSessionMuted(user, `ses_x${i}`, true)
+    for (let i = 0; i < 600; i++) await store.setSessionMuted(user, `ses_x${i}`, true)
     expect(store.mutedSessions(user).length).toBe(500)
     expect(store.mutedSessions(user).at(-1)).toBe("ses_x599")
   })
@@ -239,20 +239,20 @@ describe("notify", () => {
   let phone: string
   let tablet: string
 
-  const setup = (failures: Record<string, number> = {}) => {
+  const setup = async (failures: Record<string, number> = {}) => {
     fake = fakeSender(failures)
     push = new Push({ store, subject: "mailto:admin@example.com", sender: fake.sender, now })
-    const p = store.addDevice("phone")
-    const t = store.addDevice("tablet")
+    const p = await store.addDevice("phone")
+    const t = await store.addDevice("tablet")
     phone = p.device.id
     tablet = t.device.id
-    store.addPushSubscription(phone, sub(1))
-    store.addPushSubscription(tablet, sub(2))
+    await store.addPushSubscription(phone, sub(1))
+    await store.addPushSubscription(tablet, sub(2))
     return { phoneToken: p.token, tabletToken: t.token }
   }
 
   test("sends {kind, sessionID, title, body} with TTL 300 and high urgency; returns successful sends", async () => {
-    setup()
+    await setup()
     expect(await push.notify("handoff", "ses_1", "api-server")).toBe(2)
     expect(fake.sent.map((s) => s.endpoint)).toEqual([sub(1).endpoint, sub(2).endpoint])
     const { payload, options } = fake.sent[0]!
@@ -262,13 +262,13 @@ describe("notify", () => {
     expect(options).toMatchObject({ TTL: 300, urgency: "high" })
     expect(options.vapidDetails).toEqual({
       subject: "mailto:admin@example.com",
-      publicKey: push.publicKey(),
+      publicKey: await push.publicKey(),
       privateKey: store.data().vapid!.privateKey,
     })
   })
 
   test("blocked titles say what is needed; kinds are precise; urgent kinds live longer", async () => {
-    setup()
+    await setup()
     
     await push.notify("permission", "ses_1", "api-server", "bash: rm -rf build", undefined, { requestID: "per_1" })
     await push.notify("question", "ses_2", "docs")
@@ -289,7 +289,7 @@ describe("notify", () => {
   })
 
   test("payload never carries tokens, cookies or long titles", async () => {
-    const { phoneToken, tabletToken } = setup()
+    const { phoneToken, tabletToken } = await setup()
     await push.notify("handoff", "ses_1", "x".repeat(500))
     for (const s of fake.sent) {
       expect(s.raw).not.toContain(phoneToken)
@@ -301,27 +301,27 @@ describe("notify", () => {
   })
 
   test("prefs are respected per device and per precise kind", async () => {
-    setup()
+    await setup()
     expect(await push.notify("turn", "ses_1", "t")).toBe(0)
-    store.setPushPrefs(tablet, { turn: true })
+    await store.setPushPrefs(tablet, { turn: true })
     expect(await push.notify("turn", "ses_2", "t")).toBe(1)
     expect(fake.sent.map((s) => s.endpoint)).toEqual([sub(2).endpoint])
     // failed is its own toggle.
-    store.setPushPrefs(phone, { failed: false })
+    await store.setPushPrefs(phone, { failed: false })
     expect(await push.notify("failed", "ses_2c", "t")).toBe(1)
-    store.setPushPrefs(phone, { subagentDone: true })
+    await store.setPushPrefs(phone, { subagentDone: true })
     expect(await push.notify("subagentDone", "ses_2d", "t", undefined, undefined, { subject: "explore" })).toBe(1)
-    store.setPushPrefs(phone, { permission: false })
+    await store.setPushPrefs(phone, { permission: false })
     expect(await push.notify("permission", "ses_3", "t")).toBe(1)
     expect(await push.notify("question", "ses_4", "t")).toBe(2)
-    store.setPushPrefs(tablet, { question: false })
+    await store.setPushPrefs(tablet, { question: false })
     expect(await push.notify("question", "ses_5", "t")).toBe(1)
   })
 
   test("a muted session notifies nothing of its owner's devices except hand-offs", async () => {
-    setup()
+    await setup()
     const owner = store.devices().find((d) => d.id === phone)!.ownerID
-    store.setSessionMuted(owner, "ses_1", true)
+    await store.setSessionMuted(owner, "ses_1", true)
     expect(await push.notify("permission", "ses_1", "t", undefined, owner)).toBe(0)
     expect(await push.notify("say", "ses_1", "t", "hi", owner)).toBe(0)
     expect(await push.notify("handoff", "ses_1", "t", undefined, owner)).toBe(2)
@@ -329,9 +329,9 @@ describe("notify", () => {
   })
 
   test("quiet hours silence a device except hand-offs", async () => {
-    setup()
+    await setup()
     clock = Date.parse("2026-01-15T23:00:00Z")
-    store.setQuietHours(phone, { start: "22:00", end: "07:00", timeZone: "UTC" })
+    await store.setQuietHours(phone, { start: "22:00", end: "07:00", timeZone: "UTC" })
     expect(await push.notify("permission", "ses_1", "t")).toBe(1)
     expect(fake.sent.map((s) => s.endpoint)).toEqual([sub(2).endpoint])
     expect(await push.notify("handoff", "ses_1", "t")).toBe(2)
@@ -340,7 +340,7 @@ describe("notify", () => {
   })
 
   test("cooldown of 30 s per (session, kind)", async () => {
-    setup()
+    await setup()
     expect(PUSH_COOLDOWN_MS).toBe(30_000)
     expect(await push.notify("permission", "ses_1", "t")).toBe(2)
     clock += 10_000
@@ -354,7 +354,7 @@ describe("notify", () => {
   })
 
   test("say pushes carry the spoken text (at most 180 chars) under the session title, high urgency, 10 s cooldown", async () => {
-    setup()
+    await setup()
     expect(SAY_COOLDOWN_MS).toBe(10_000)
     expect(await push.notify("say", "ses_1", "api-server", `${"x".repeat(300)}`)).toBe(2)
     const { payload, options } = fake.sent[0]!
@@ -363,15 +363,15 @@ describe("notify", () => {
     clock += 5_000
     expect(await push.notify("say", "ses_1", "api-server", "next")).toBe(0)
     clock += 5_000
-    store.setPushPrefs(phone, { say: false })
+    await store.setPushPrefs(phone, { say: false })
     expect(await push.notify("say", "ses_1", "api-server", "  Tests\n  pass.  ")).toBe(1)
     expect(fake.sent.at(-1)!.payload.body).toBe("Tests pass.")
   })
 
   test("404/410 prune the subscription; other failures keep it; failures are not counted", async () => {
-    setup({ [sub(1).endpoint]: 410 })
-    store.addPushSubscription(phone, sub(3))
-    store.addPushSubscription(tablet, sub(4))
+    await setup({ [sub(1).endpoint]: 410 })
+    await store.addPushSubscription(phone, sub(3))
+    await store.addPushSubscription(tablet, sub(4))
     push = new Push({
       store,
       subject: "mailto:a@b.c",
@@ -383,9 +383,9 @@ describe("notify", () => {
   })
 
   test("test notifications go only to the given device, ignore prefs and are rate limited", async () => {
-    setup({ [sub(5).endpoint]: 500 })
-    store.addPushSubscription(phone, sub(5))
-    store.setPushPrefs(phone, { handoff: false, question: false, permission: false, say: false })
+    await setup({ [sub(5).endpoint]: 500 })
+    await store.addPushSubscription(phone, sub(5))
+    await store.setPushPrefs(phone, { handoff: false, question: false, permission: false, say: false })
     const result = await push.test(phone)
     expect(result).toEqual({ sent: 1, failed: [{ host: "push.example", status: 500 }] })
     expect(fake.sent.map((s) => s.endpoint)).toEqual([sub(1).endpoint])
@@ -398,7 +398,7 @@ describe("notify", () => {
   })
 
   test("a test of a chosen kind looks like that kind (label, urgency), marked as a test", async () => {
-    setup()
+    await setup()
     expect(await push.test(phone, "done")).toMatchObject({ sent: 1 })
     expect(fake.sent[0]!.payload).toMatchObject({ kind: "done", sessionID: "", title: "Test session · All done", test: true })
     expect(fake.sent[0]!.options.urgency).toBe("normal")

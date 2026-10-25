@@ -92,6 +92,13 @@ describe("cluster config", () => {
     expect(centralConfig({ ...CLUSTER, HUB_DATABASE_URL: "postgresql://h/db", HUB_VALKEY_URL: "rediss://h:6380" }, HOME).cluster).toBeDefined()
   })
 
+  test("HUB_VALKEY_URL may also be valkey:// or valkeys:// (Bun.RedisClient takes both)", () => {
+    for (const url of ["valkey://h:6379", "valkeys://:pw@h:6380/1"]) {
+      expect(centralConfig({ ...CLUSTER, HUB_VALKEY_URL: url }, HOME).cluster?.valkeyURL).toBe(url)
+    }
+    expect(failure({ ...CLUSTER, HUB_VALKEY_URL: "http://:s3cretVKpass@valkey.internal" })).toMatch(/redis:\/\/ or rediss:\/\/ or valkey:\/\/ or valkeys:\/\//)
+  })
+
   test("cluster mode requires HUB_TOKEN_KEYS", () => {
     const { HUB_TOKEN_KEYS: _k, ...noKeys } = CLUSTER
     expect(failure(noKeys)).toMatch(/HUB_TOKEN_KEYS/)

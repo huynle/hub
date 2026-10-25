@@ -59,14 +59,14 @@ export class ActingSwitch {
 
   /** Turns the user's agent actions on or off, and audits it. */
   async setUserActing(userID: string, actor: AgentActor, enabled: boolean): Promise<void> {
-    this.deps.store.updateAgentData(userID, (data) => {
+    await this.deps.store.updateAgentData(userID, (data) => {
       if (enabled) delete data.actingPaused
       else data.actingPaused = true
     })
     const verb = enabled ? "acting.resume" : "acting.pause"
     if (this.deps.audit) {
       await this.deps.audit.record(userID, { actor: partyFromActor(actor), verb, target: {}, decision: "allow", outcome: "ok" })
-    } else this.deps.store.audit({ actor: userID, action: verb })
+    } else await this.deps.store.audit({ actor: userID, action: verb })
   }
 }
 

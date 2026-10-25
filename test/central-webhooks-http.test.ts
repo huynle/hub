@@ -35,17 +35,17 @@ function receiver() {
 }
 
 /** A hub whose hub.json sets agents.webhooks.allowPrivate. */
-function privateHub(allowPrivate = true): Harness {
+async function privateHub(allowPrivate = true): Promise<Harness> {
   const config = centralConfig(
     { HUB_PORT: "0", HUB_PUBLIC_URL: PUBLIC, HUB_STATE_DIR: mkdtempSync(path.join(tmpdir(), "voice-state-")) },
     "/home/none",
     allowPrivate ? { agents: { webhooks: { allowPrivate: true } } } : {},
   )
-  return harness({ config })
+  return await harness({ config })
 }
 
 test("a user registers a webhook (secret once), and each launch change is POSTed to it, signed", async () => {
-  h = privateHub()
+  h = await privateHub()
   const hook = receiver()
   const created = await h.api("/api/agent/webhooks", { method: "POST", json: { url: hook.url, events: ["launch.*"], label: "ci" } })
   expect(created.status).toBe(201)
@@ -77,7 +77,7 @@ test("a user registers a webhook (secret once), and each launch change is POSTed
 })
 
 test("without allowPrivate a private or http URL is refused", async () => {
-  h = privateHub(false)
+  h = await privateHub(false)
   const res = await h.api("/api/agent/webhooks", { method: "POST", json: { url: "http://127.0.0.1:9/hook" } })
   expect(res.status).toBe(400)
   expect((await json(res)).error.code).toBe("invalid")
@@ -85,7 +85,7 @@ test("without allowPrivate a private or http URL is refused", async () => {
 })
 
 test("app tokens need sessions:launch, manage only their own webhooks and get only their own launches' events", async () => {
-  h = privateHub()
+  h = await privateHub()
   const hook = receiver()
   const readOnly = await json(await h.api("/api/agent/app-tokens", { method: "POST", json: { scopes: ["sessions:read"] } }))
   const token = await json(await h.api("/api/agent/app-tokens", { method: "POST", json: { scopes: ["sessions:launch"] } }))
@@ -122,7 +122,7 @@ test("app tokens need sessions:launch, manage only their own webhooks and get on
 })
 
 test("the webhook routes are in the route table as agent routes", async () => {
-  h = privateHub()
+  h = await privateHub()
   const keys = h.routes.filter((r) => r.access === "agent").map((r) => `${r.method} ${r.path}`)
   for (const route of ["POST /api/agent/webhooks", "GET /api/agent/webhooks", "GET /api/agent/webhooks/:id", "DELETE /api/agent/webhooks/:id"]) expect(keys).toContain(route)
 })

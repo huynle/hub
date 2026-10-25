@@ -71,8 +71,8 @@ export type Resolution =
 
 export interface ResolverDeps {
   readonly cookieName: string
-  /** Device of a token (cookie value or device token); constant-time. */
-  findDevice(token: string): DeviceRecord | undefined
+  /** Device of a token (cookie value or device token); constant-time. Async on a shared store (it re-reads the device and its owner). */
+  findDevice(token: string): DeviceRecord | undefined | Promise<DeviceRecord | undefined>
   user(id: string): UserRecord | undefined
   /** Session and app token verifiers, tried in order after the device lookup. */
   readonly verifiers?: readonly BearerVerifier[]
@@ -115,8 +115,8 @@ export function createResolver(deps: ResolverDeps): Resolver {
     const user = deps.user(id)
     return user && !user.disabled ? user : undefined
   }
-  const byDevice = (token: string, via: UserActor["via"]): Resolution | undefined => {
-    const device = token ? deps.findDevice(token) : undefined
+  const byDevice = async (token: string, via: UserActor["via"]): Promise<Resolution | undefined> => {
+    const device = token ? await deps.findDevice(token) : undefined
     const user = device && activeUser(device.ownerID)
     if (!device || !user) return undefined
     return { ok: true, credential: via, actor: { kind: "user", userID: user.id, deviceID: device.id, via }, user, device }
@@ -125,7 +125,7 @@ export function createResolver(deps: ResolverDeps): Resolver {
   /** The bearer is a hub credential (a device token, or a token a verifier answers for, expired included). */
   const recognised = async (token: string): Promise<boolean> => {
     if (!token) return false
-    if (deps.findDevice(token)) return true
+    if (await deps.findDevice(token)) return true
     for (const verifier of verifiers) if ((await verifier.verify(token)) !== undefined) return true
     return false
   }
@@ -139,12 +139,12 @@ export function createResolver(deps: ResolverDeps): Resolver {
   const resolve = async (request: Request): Promise<Resolution> => {
     const { cookie, bearer } = readCredentials(request, deps.cookieName)
     if (cookie !== undefined && (bearer === undefined || !(await recognised(bearer)))) {
-      return byDevice(cookie, "cookie") ?? { ok: false, reason: "invalid", bearer: false }
+      return (await byDevice(cookie, "cookie")) ?? { ok: false, reason: "invalid", bearer: false }
     }
     if (bearer === undefined) return { ok: false, reason: "none", bearer: false }
     if (cookie !== undefined) return { ok: false, reason: "mixed", bearer: true }
     if (!bearer) return { ok: false, reason: "invalid", bearer: true }
-    const device = byDevice(bearer, "device-token")
+    const device = await byDevice(bearer, "device-token")
     if (device) return device
     for (const verifier of verifiers) {
       const result = await verifier.verify(bearer)

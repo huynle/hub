@@ -188,6 +188,8 @@ export class LaunchTokens {
     if (expected.length !== sig.length || !timingSafeEqual(expected, sig)) return undefined
     if (claims.aud !== this.#aud) return undefined
     if (this.#now() >= claims.exp) return "expired"
+    // A shared store reads the user and machine again first (revocations and epoch bumps on other pods).
+    await this.#store.recheck({ users: [claims.uid], machines: [claims.mid] })
     if (claims.ue !== this.#store.userEpoch(claims.uid) || claims.me !== this.#store.machineEpoch(claims.mid)) return undefined
     if (this.#owner(claims.mid) !== claims.uid) return undefined
     if (!(await this.#live(claims.uid, claims.lid, claims.mid))) return undefined

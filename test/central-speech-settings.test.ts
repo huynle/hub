@@ -63,10 +63,10 @@ describe("ready", () => {
     expect(half.reason).toContain("base URL")
   })
 
-  test("the view reports readiness, and it follows a key set from the phone", () => {
+  test("the view reports readiness, and it follows a key set from the phone", async () => {
     const keyless = make({ apiKey: undefined })
     expect(keyless.view().ready).toMatchObject({ stt: false, tts: false, reason: expect.stringContaining("Speech-to-text") })
-    expect(keyless.update({ stt: { apiKey: KEY }, tts: { apiKey: KEY } }).ready).toEqual({ stt: true, tts: true })
+    expect((await keyless.update({ stt: { apiKey: KEY }, tts: { apiKey: KEY } })).ready).toEqual({ stt: true, tts: true })
   })
 })
 
@@ -81,8 +81,8 @@ describe("view", () => {
     expect(make({ apiKey: undefined }).view().stt.apiKey).toEqual({ set: false, source: "none" })
   })
 
-  test("a stored key is masked to set/last4/source and never appears in the view", () => {
-    const view = service.update({ stt: { apiKey: KEY }, tts: { apiKey: KEY, speed: 1.25 } })
+  test("a stored key is masked to set/last4/source and never appears in the view", async () => {
+    const view = await service.update({ stt: { apiKey: KEY }, tts: { apiKey: KEY, speed: 1.25 } })
     expect(view.stt.apiKey).toEqual({ set: true, last4: "CRET", source: "settings" })
     expect(view.tts).toMatchObject({ speed: 1.25, apiKey: { set: true, last4: "CRET", source: "settings" } })
     expect(JSON.stringify(view)).not.toContain(KEY)
@@ -90,8 +90,8 @@ describe("view", () => {
     expect(JSON.stringify(service.view())).not.toContain(ENV_KEY)
   })
 
-  test("short keys show no last4", () => {
-    expect(service.update({ stt: { apiKey: "abc12345" } }).stt.apiKey).toEqual({ set: true, source: "settings" })
+  test("short keys show no last4", async () => {
+    expect((await service.update({ stt: { apiKey: "abc12345" } })).stt.apiKey).toEqual({ set: true, source: "settings" })
   })
 
   test("voice hints cover the known OpenRouter TTS model families", () => {

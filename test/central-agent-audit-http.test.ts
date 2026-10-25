@@ -15,13 +15,13 @@ afterEach(async () => {
 })
 
 describe("GET /api/agent/audit", () => {
-  test("is an agent route", () => {
-    h = harness({ agent: { verifiers } } as any)
+  test("is an agent route", async () => {
+    h = await harness({ agent: { verifiers } } as any)
     expect(h.routes).toContainEqual({ method: "GET", path: "/api/agent/audit", access: "agent" })
   })
 
   test("the signed-in user gets their (empty) log, not cached", async () => {
-    h = harness({ agent: { verifiers } } as any)
+    h = await harness({ agent: { verifiers } } as any)
     const res = await h.api("/api/agent/audit")
     expect(res.status).toBe(200)
     expect(res.headers.get("cache-control")).toBe("no-store")
@@ -29,7 +29,7 @@ describe("GET /api/agent/audit", () => {
   })
 
   test("a session token is refused (403 forbidden)", async () => {
-    h = harness({ agent: { verifiers } } as any)
+    h = await harness({ agent: { verifiers } } as any)
     const res = await h.api("/api/agent/audit", { cookie: null, origin: null, headers: { authorization: `Bearer ${SESSION_TOKEN}` } })
     expect(res.status).toBe(403)
     expect(((await res.json()) as any).error.code).toBe("forbidden")

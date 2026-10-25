@@ -23,7 +23,7 @@ const bearer = (pathname: string, body: unknown) =>
 const event = (type: string, data: Record<string, unknown>) => ({ t: "event" as const, event: { type, data } })
 
 async function start() {
-  h = harness({ agent: { verifiers } } as any)
+  h = await harness({ agent: { verifiers } } as any)
   const requests: any[] = []
   const client = await spoke(h, {
     hello: { harness: "opencode", harnessVersion: "2.1.4", evidence: "native", features: ["deliver", "hubPrompt", "permissionMessage"] } as any,

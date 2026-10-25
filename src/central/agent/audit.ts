@@ -75,7 +75,7 @@ export interface AgentAuditDeps {
   readonly state: StateStore
   readonly now?: Clock
   /** The hub-wide admin audit (Store): gets the summary of every entry. */
-  readonly admin?: { audit(entry: Omit<AuditEntry, "at">): void }
+  readonly admin?: { audit(entry: Omit<AuditEntry, "at">): void | Promise<void> }
   /** A new entry, for its owner (the hub's SSE 'agent' event). */
   readonly recorded?: (userID: string, entry: AgentAuditEntry) => void
   /** Ring size (default AGENT_AUDIT_LIMIT). */
@@ -135,7 +135,7 @@ export class AgentAudit {
     }
     await state.put(userID, ENTRIES, keyOf(seq), entry)
     if (seq > this.limit) await state.delete(userID, ENTRIES, keyOf(seq - this.limit))
-    this.deps.admin?.audit({ actor: userID, action: `agent.${entry.verb}`, detail: entry.actor.kind })
+    await this.deps.admin?.audit({ actor: userID, action: `agent.${entry.verb}`, detail: entry.actor.kind })
     try {
       this.deps.recorded?.(userID, entry)
     } catch (cause) {

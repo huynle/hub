@@ -52,13 +52,13 @@ function answer(client: Client, reply: (req: any) => unknown = () => undefined) 
  * and ses_2 "Web work" (project web, working).
  */
 async function start(options: { hello?: Record<string, unknown> } = {}) {
-  h = harness({ agent: { verifiers }, timing: { heartbeatMs: 40 } } as any)
+  h = await harness({ agent: { verifiers }, timing: { heartbeatMs: 40 } } as any)
   const sessions = [
     session("ses_1", { title: "API refactor", directory: "/u/hub", project: "/u/hub", projectName: "hub", updated: 10 }),
     session("ses_3", { title: "explore", parentID: "ses_1", directory: "/u/hub", project: "/u/hub", projectName: "hub", updated: 11 }),
     session("ses_2", { title: "Web work", directory: "/u/web", project: "/u/web", projectName: "web", updated: 12 }),
   ]
-  const { machine, token } = h.store.addMachine("laptop")
+  const { machine, token } = await h.store.addMachine("laptop")
   const client = await spoke(h, { machine: { token }, sessions, ...(options.hello ? { hello: options.hello as any } : {}) })
   client.send(event("permission.asked", { sessionID: "ses_1", id: "per_1", action: "bash", resources: ["git push origin main"] }))
   client.send(event("session.execution.started", { sessionID: "ses_2" }))
@@ -296,8 +296,8 @@ describe("tenancy: user B against user A's sessions, names and roles", () => {
     // A (local) holds a role and an app token.
     expect((await bearer("/api/agent/roles/claim", SES_1, { method: "POST", json: { role: "reviewer" } })).status).toBe(200)
     expect((await h.api("/api/agent/app-tokens", { method: "POST", json: { label: "a-token", scopes: ["sessions:read"] } })).status).toBe(201)
-    const bob = h.store.upsertUser({ email: "bob@example.test", role: "user" })
-    const cookie = `voice_device=${h.store.addDevice("bob phone", bob.id).token}`
+    const bob = await h.store.upsertUser({ email: "bob@example.test", role: "user" })
+    const cookie = `voice_device=${(await h.store.addDevice("bob phone", bob.id)).token}`
     const asBob = (pathname: string, init: RequestInit & { json?: unknown } = {}) => h.api(pathname, { ...init, cookie })
 
     const notFound: Array<[string, string, unknown?]> = []
