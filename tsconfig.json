@@ -11,5 +11,5 @@
     "types": ["bun"],
     "lib": ["ES2022", "DOM"]
   },
-  "include": ["server.ts", "tui.ts", "rpc.ts", "src", "test", "bin", "web/e2e", "packages/protocol/src", "packages/protocol/test", "packages/sdk/src", "packages/sdk/test", "packages/cli/src", "packages/cli/test", "packages/runtime-sdk/src", "packages/runtime-sdk/test", "packages/node/src", "packages/node/test", "packages/runtime-openshell/src", "packages/runtime-openshell/test", "packages/runtime-openshell/image", "packages/spoke-sdk/src", "packages/spoke-sdk/test", "packages/testkit/src", "packages/testkit/test", "packages/conformance/src", "packages/conformance/test", "packages/conformance/fixtures"]
+  "include": ["server.ts", "tui.ts", "rpc.ts", "src", "test", "bin", "web/e2e", "packages/protocol/src", "packages/protocol/test", "packages/sdk/src", "packages/sdk/test", "packages/cli/src", "packages/cli/test", "packages/runtime-sdk/src", "packages/runtime-sdk/test", "packages/node/src", "packages/node/test", "packages/runtime-openshell/src", "packages/runtime-openshell/test", "packages/runtime-openshell/image", "packages/spoke-sdk/src", "packages/spoke-sdk/test", "packages/testkit/src", "packages/testkit/test", "packages/claude-code/src", "packages/claude-code/test", "packages/conformance/src", "packages/conformance/test", "packages/conformance/fixtures"]
 }

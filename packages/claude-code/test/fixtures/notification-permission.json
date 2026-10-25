@@ -1,0 +1,8 @@
+{
+  "session_id": "fdcdc49e-c7ea-4b8a-886d-7c5d3dbde164",
+  "transcript_path": "/cfg/projects/-work/fdcdc49e-c7ea-4b8a-886d-7c5d3dbde164.jsonl",
+  "cwd": "/work",
+  "hook_event_name": "Notification",
+  "notification_type": "permission_prompt",
+  "message": "Claude needs your permission to use Bash"
+}

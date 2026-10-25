@@ -66,3 +66,19 @@ describe("serviceFor(machine, harness)", () => {
     expect(registry.harnessOf("nope")).toBeUndefined()
   })
 })
+
+describe("catalog features (console controls, P7-T10)", () => {
+  test("each process lists the features it serves: an OpenCode hello implies the core ops, others only what they announce", () => {
+    registry.connect("oc", laptop, hello("p1"))
+    registry.connect("cc", laptop, claude("p2", { features: ["permission", "stop"] }))
+    const [machine] = registry.catalog()
+    const byID = new Map(machine!.processes.map((p) => [p.id, p]))
+    const oc = byID.get("p1")!
+    const cc = byID.get("p2")!
+    for (const op of ["turn", "steer", "interrupt", "stop", "permission", "form"]) expect(oc.features).toContain(op)
+    expect(oc.features).toContain("timeline")
+    expect([...cc.features].sort()).toEqual(["permission", "stop"])
+    expect(cc.harness).toBe("claude-code")
+    expect(cc.evidence).toBe("hooks")
+  })
+})

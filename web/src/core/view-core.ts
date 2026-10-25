@@ -176,6 +176,12 @@ export interface ViewProcess {
   pid: number
   /** The OpenCode version the process reported (hubs since 0.2). */
   opencodeVersion?: string
+  /** Harness id, version and evidence level (hubs with phase 7; none: OpenCode). */
+  harness?: string
+  harnessVersion?: string
+  evidence?: string
+  /** What the process serves (core ops and optional features); none from older hubs. */
+  features?: string[]
   sessions: ViewSession[]
 }
 export interface ViewMachine {

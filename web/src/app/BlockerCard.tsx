@@ -7,6 +7,7 @@ import { noteForBlocker, recommendationText } from "../core/agents-core"
 import { api, errorText, HttpError, sessionPath } from "./api"
 import { agentEntries } from "./hub"
 import { toast } from "./toast"
+import { unsupportedNotice } from "../core/harness-core"
 
 /** A request someone answered elsewhere (terminal, another device) or that expired: say so quietly. */
 function settled(e: unknown, hide: () => void): boolean {
@@ -16,7 +17,11 @@ function settled(e: unknown, hide: () => void): boolean {
   return true
 }
 
-export function BlockerCard(props: { sessionID: string; rootID: string; blocker: Blocker }) {
+/**
+ * `canAnswer` false: the session's spoke cannot answer this kind from the hub (another harness without the
+ * permission or form core op); the card says to answer it in the terminal instead of showing buttons.
+ */
+export function BlockerCard(props: { sessionID: string; rootID: string; blocker: Blocker; canAnswer?: boolean; harnessName?: string }) {
   const [gone, setGone] = createSignal(false)
   const b = () => props.blocker
   const who = () => (b().sessionID && b().sessionID !== props.rootID ? ` (${b().sessionTitle || "subagent"})` : "")
@@ -29,6 +34,12 @@ export function BlockerCard(props: { sessionID: string; rootID: string; blocker:
           {who()}
         </p>
         <Switch fallback={<p class="muted small">This question has nothing to fill in here; answer it in the terminal.</p>}>
+          <Match when={props.canAnswer === false}>
+            <p class={`blocker-text${b().kind === "permission" ? " mono" : ""}`}>{b().summary}</p>
+            <p class="muted small" data-answer-unavailable>
+              {props.harnessName ?? "This harness"} can't take this answer from the hub; answer it in the terminal.
+            </p>
+          </Match>
           <Match when={b().kind === "permission"}>
             <p class="blocker-text mono">{b().summary}</p>
             <Show when={recommendationText(b().recommendation)}>
@@ -63,7 +74,7 @@ function PermissionButtons(props: { sessionID: string; blocker: Blocker; onGone:
       await api(`${sessionPath(props.sessionID)}/permission`, { method: "POST", json: { requestID: props.blocker.id, decision } })
       toast(decision === "reject" ? "Denied" : "Allowed")
     } catch (e) {
-      if (!settled(e, props.onGone)) toast(errorText(e), "err")
+      if (!settled(e, props.onGone)) toast(unsupportedNotice(e) ?? errorText(e), "err")
       setBusy(false)
     }
   }
@@ -105,7 +116,7 @@ function FormFields(props: { sessionID: string; blocker: Blocker; fields: FormFi
       setSent(true)
       toast(done)
     } catch (e) {
-      if (!settled(e, props.onGone)) toast(errorText(e), "err")
+      if (!settled(e, props.onGone)) toast(unsupportedNotice(e) ?? errorText(e), "err")
       setBusy(false)
     }
   }

@@ -7,6 +7,7 @@
 // progressive history (newest page first, older pages while scrolling up, anchored, Retry), timeline order (subagents
 // where they were spawned, live rows in arrival order and after a reload), rich Markdown (tables, task lists, highlighted code, copy) and the text size (Settings, pinch, ctrl+wheel, kept after reload, phone at 1.8),
 // the agents console (Settings → Agents: grants CRUD, acting switches, Activity; a blocker's recommendation, who answered, escalation details),
+// controls by harness features and evidence (a Claude Code session announcing only permission + stop, a screen-evidence preset session, a 409 unsupported toast, OpenCode unchanged),
 // and speech detection (fake mics looping background noise: nothing sent, unless the on-device model is blocked; and a spoken request: one utterance, a hallucinated “Thank you.” shown as ignored). Screenshots go to $SMOKE_SHOTS (default: the OS temp
 // dir). Run `npm run build:web && npm run test:e2e`. Chromium: $CHROMIUM_PATH, else Playwright's cache, else PATH.
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
@@ -2173,6 +2174,93 @@ async function agentsConsole(browser: Browser): Promise<void> {
   await context.close()
 }
 
+/** Controls by harness features and evidence (P7-T10): non-OpenCode sessions show only what their spoke announced. */
+async function harnessControls(browser: Browser): Promise<void> {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+  const page = await context.newPage()
+  current = page
+  const errors: string[] = []
+  page.on("pageerror", (e) => errors.push(e.message))
+  const { sessions } = (await (await mock("/mock/harness", { on: true })).json()) as { sessions: [string, string] }
+  const [cc, preset] = sessions
+  const calls = async (id: string) =>
+    ((await (await fetch(`${BASE}/mock/log`)).json()) as { log: Array<{ method: string; path: string }> }).log.filter((e) => e.path.startsWith(`/api/sessions/${id}/`)).map((e) => `${e.method} ${e.path.slice(`/api/sessions/${id}/`.length)}`)
+  const toast = (text: string | RegExp) => page.locator(".toast").filter({ hasText: text })
+
+  await check("harness: a Claude Code session (permission + stop): Hooks badge, no prompt box, no transcript or models, permission buttons, form → terminal", async () => {
+    await page.goto(`${BASE}/`)
+    await page.locator(".sessions-table").waitFor()
+    await page.goto(`${BASE}/s/${cc}`)
+    const badge = page.locator('[data-evidence="hooks"]')
+    await badge.waitFor()
+    assert(((await badge.textContent()) ?? "").includes("Claude Code · Hooks"), `badge text: ${await badge.textContent()}`)
+    assert(((await badge.getAttribute("title")) ?? "").includes("queued"), "badge explains hooks delivery")
+    await page.locator("[data-no-prompt]").waitFor()
+    assert(((await page.locator("[data-no-prompt]").textContent()) ?? "").includes("terminal"), "no-prompt note says to use the terminal")
+    assert((await page.getByRole("textbox", { name: "Message" }).count()) === 0, "no prompt box")
+    assert((await page.locator(".model-chip").count()) === 0, "no model chips")
+    await page.locator('[data-unavailable="timeline"]').waitFor()
+    const permission = page.getByRole("group", { name: /Permission request: shell: npm publish/ })
+    await permission.getByRole("button", { name: "Allow once" }).waitFor()
+    const form = page.getByRole("group", { name: /^Question/ })
+    await form.locator("[data-answer-unavailable]").waitFor()
+    assert((await form.getByRole("button", { name: "Submit" }).count()) === 0, "no form submit")
+    assert(await page.locator("[data-no-prompt]").getByRole("button", { name: /Stop/ }).isVisible(), "Stop shows (stop announced, tree blocked)")
+    const made = await calls(cc)
+    for (const route of ["timeline", "models", "summary"]) assert(!made.some((c) => c.startsWith(`GET ${route}`)), `no ${route} request: ${made.join(", ")}`)
+    await shot(page, "harness-claude-code")
+  })
+
+  await check("harness: Stop posts; a 409 unsupported answer shows a clear toast", async () => {
+    await page.locator("[data-no-prompt]").getByRole("button", { name: /Stop/ }).click()
+    await page.waitForFunction(async (id) => ((await (await fetch("/mock/log")).json()) as { log: Array<{ method: string; path: string }> }).log.some((e) => e.method === "POST" && e.path === `/api/sessions/${id}/stop`), cc)
+    await mock("/mock/unsupported", { features: ["permission"] })
+    await page.getByRole("group", { name: /Permission request: shell: npm publish/ }).getByRole("button", { name: "Allow once" }).click()
+    await toast("Not available for this session: the claude-code spoke does not support permission. Use its terminal.").waitFor()
+    await mock("/mock/unsupported", { features: [] })
+  })
+
+  await check("harness: a screen-evidence preset (turn only): Screen badge, Send without Voice or models, a typed prompt is labelled queued", async () => {
+    await page.goto(`${BASE}/s/${preset}`)
+    const badge = page.locator('[data-evidence="screen"]')
+    await badge.waitFor()
+    assert(((await badge.textContent()) ?? "").includes("aider · Screen"), `badge text: ${await badge.textContent()}`)
+    assert(((await badge.getAttribute("title")) ?? "").includes("never counts as idle"), "badge explains screen evidence")
+    const box = page.getByRole("textbox", { name: "Message" })
+    await box.waitFor()
+    assert((await page.getByRole("button", { name: "Start Voice mode" }).count()) === 0, "no Voice mode button")
+    assert((await page.locator(".model-chip").count()) === 0, "no model chips")
+    await page.locator('[data-unavailable="timeline"]').waitFor()
+    await box.fill("fix the cart total")
+    await box.press("Enter")
+    const tick = page.locator(".tick.queued")
+    await tick.waitFor()
+    assert(((await tick.getAttribute("aria-label")) ?? "").startsWith("Queued"), "tick says queued")
+    assert((await page.locator(".tick.heard").count()) === 0, "never heard/delivered")
+    await shot(page, "harness-preset")
+  })
+
+  await check("harness: a hub message not delivered yet is labelled queued", async () => {
+    await mock("/mock/emit", {
+      type: "message",
+      message: { id: "msg_q", kind: "msg", from: { kind: "user" }, to: preset, recipient: { kind: "session", sessionID: preset }, text: "check the tests", state: "sent", at: Date.now(), delivery: "queued" },
+    })
+    await page.locator('[data-delivery="queued"]').waitFor()
+  })
+
+  await check("harness: an OpenCode session is unchanged (no badge; composer, Voice, model chips)", async () => {
+    await page.goto(`${BASE}/s/ses_mock`)
+    await page.getByRole("textbox", { name: "Message" }).waitFor()
+    assert((await page.locator("[data-evidence]").count()) === 0, "no evidence badge")
+    assert((await page.locator("[data-no-prompt]").count()) === 0, "prompt box shown")
+    await page.getByRole("button", { name: "Start Voice mode" }).waitFor()
+    assert((await page.locator(".model-chip").count()) >= 2, "model chips")
+  })
+
+  await check("harness: no page errors", async () => assert(!errors.length, errors.join("; ")))
+  await context.close()
+}
+
 mkdirSync(SHOTS, { recursive: true })
 if (!existsSync(path.join(ROOT, "web", "dist", "index.html"))) {
   console.error("web/dist is missing: run `npm run build:web` first")
@@ -2198,6 +2286,8 @@ try {
   await decisionCards(browser)
   await mock("/mock/reset")
   await agentsConsole(browser)
+  await mock("/mock/reset")
+  await harnessControls(browser)
   await mock("/mock/reset")
   await phone(browser)
   await mock("/mock/reset")

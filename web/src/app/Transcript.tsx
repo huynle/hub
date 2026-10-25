@@ -9,8 +9,14 @@ import { Markdown } from "./Markdown"
 import { sessionHref } from "./router"
 import { Icon } from "./ui"
 
-export type TickState = "pending" | "sent" | "heard" | "failed"
-const TICK: Record<TickState, [string, string]> = { pending: ["…", "Sending"], sent: ["✓", "Sent"], heard: ["✓✓", "Heard by the agent"], failed: ["!", "Not sent"] }
+export type TickState = "pending" | "sent" | "queued" | "heard" | "failed"
+const TICK: Record<TickState, [string, string]> = {
+  pending: ["…", "Sending"],
+  sent: ["✓", "Sent"],
+  queued: ["◷", "Queued: the harness takes it at its next step"],
+  heard: ["✓✓", "Heard by the agent"],
+  failed: ["!", "Not sent"],
+}
 
 interface Expansion {
   expanded: Readonly<Record<string, boolean>>
@@ -124,6 +130,11 @@ function HubMessage(props: { block: Extract<Block, { type: "message" }> } & Expa
           <span class="hub-msg-label">{props.block.label}</span>
           <Show when={props.block.state === "open" || props.block.state === "answered" || props.block.state === "declined" || props.block.state === "expired"}>
             <span class="hub-msg-state muted">{props.block.state}</span>
+          </Show>
+          <Show when={props.block.delivery}>
+            <span class="hub-msg-delivery muted" data-delivery={props.block.delivery} title="Not delivered into a turn yet: the recipient's harness takes it at its next step">
+              {props.block.delivery}
+            </span>
           </Show>
         </div>
         <div class="hub-msg-text">{props.block.text}</div>

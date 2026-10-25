@@ -31,6 +31,10 @@ export function Composer(props: {
   onDictate: () => void
   onVoice: () => void
   onModel: (kind: "voice" | "worker") => void
+  /** The model chips (off when the session's spoke has no models feature). */
+  showModels?: boolean
+  /** The Voice mode button (off when the session's spoke has no conversation mode). */
+  showVoice?: boolean
 }) {
   let area!: HTMLTextAreaElement
   let picker!: HTMLInputElement
@@ -155,6 +159,7 @@ export function Composer(props: {
               <Icon name={props.dictating !== false ? "stop" : "mic"} />
             </Show>
           </button>
+          <Show when={props.showVoice !== false}>
           <div class={`split${props.voiceOn ? " on" : ""}`}>
             <button
               type="button"
@@ -169,6 +174,7 @@ export function Composer(props: {
             </button>
             <MicPicker />
           </div>
+          </Show>
           <Show when={props.view.showStop}>
             <button type="button" class="btn stop" disabled={!props.view.canStop} onClick={props.onStop} aria-label="Stop the session and its subagents">
               <Icon name="stop" /> Stop
@@ -185,12 +191,14 @@ export function Composer(props: {
       <div class="composer-meta">
         <span class="muted small">{props.metaLeft}</span>
         <span class="grow" />
-        <button type="button" class="model-chip" onClick={() => props.onModel("voice")} title="Voice model (the orchestrator you talk to)">
-          Voice: {props.voiceModel}
-        </button>
-        <button type="button" class="model-chip" onClick={() => props.onModel("worker")} title="Worker model (subagents that do the work)">
-          Worker: {props.workerModel}
-        </button>
+        <Show when={props.showModels !== false}>
+          <button type="button" class="model-chip" onClick={() => props.onModel("voice")} title="Voice model (the orchestrator you talk to)">
+            Voice: {props.voiceModel}
+          </button>
+          <button type="button" class="model-chip" onClick={() => props.onModel("worker")} title="Worker model (subagents that do the work)">
+            Worker: {props.workerModel}
+          </button>
+        </Show>
       </div>
     </form>
   )

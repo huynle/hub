@@ -18,6 +18,7 @@ COPY packages/node/package.json ./packages/node/
 COPY packages/runtime-openshell/package.json ./packages/runtime-openshell/
 COPY packages/spoke-sdk/package.json ./packages/spoke-sdk/
 COPY packages/testkit/package.json ./packages/testkit/
+COPY packages/claude-code/package.json ./packages/claude-code/
 COPY packages/conformance/package.json ./packages/conformance/
 RUN npm ci --no-audit --no-fund --ignore-scripts
 COPY web ./web
@@ -34,6 +35,7 @@ COPY packages/node/package.json ./packages/node/
 COPY packages/runtime-openshell/package.json ./packages/runtime-openshell/
 COPY packages/spoke-sdk/package.json ./packages/spoke-sdk/
 COPY packages/testkit/package.json ./packages/testkit/
+COPY packages/claude-code/package.json ./packages/claude-code/
 COPY packages/conformance/package.json ./packages/conformance/
 # Bun migrates package-lock.json; --frozen-lockfile keeps the pinned versions.
 RUN bun install --production --frozen-lockfile --ignore-scripts
