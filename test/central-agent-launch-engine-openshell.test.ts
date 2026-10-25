@@ -352,3 +352,52 @@ describe("openshell provisioning", () => {
     w.engine.shutdown()
   })
 })
+
+describe("waiting for the sandbox's spoke", () => {
+  test("a harness that connects later (within LAUNCH_CONNECT_MS) is waited for", async () => {
+    const w = world()
+    w.control.connectOnStart = false
+    w.connectNode()
+    await w.engine.start()
+    const launch = await launched(w)
+    expect(launch.state).toBe("provisioning")
+    await w.clock.advance(LAUNCH_CONNECT_MS - 1_000)
+    expect((await w.launch(launch.id))!.state).toBe("provisioning")
+    w.connectLaunch(launch.id)
+    await settle()
+    expect(await w.launch(launch.id)).toMatchObject({ state: "running", sessionID: "ses_1" })
+    w.engine.shutdown()
+  })
+
+  test("no launch-bound connection within LAUNCH_CONNECT_MS fails the launch; the harness is stopped, the workspace removed", async () => {
+    const w = world()
+    w.control.connectOnStart = false
+    w.connectNode()
+    await w.engine.start()
+    const launch = await launched(w)
+    await w.clock.advance(LAUNCH_CONNECT_MS + 1)
+    const ended = (await w.launch(launch.id))!
+    expect(ended).toMatchObject({ state: "ended", outcome: "failed" })
+    expect(ended.reason).toContain("did not connect")
+    expect(w.ops()).toEqual(["prepare", "start", "stop", "cleanup"])
+    expect(w.nodeCalls[2]).toEqual({ op: "stop", launchID: launch.id, workspace: sandboxWorkspace, mode: "kill" })
+    expect(w.nodeCalls[3]).toMatchObject({ op: "cleanup", policy: "remove", workspace: sandboxWorkspace })
+    expect(w.spokeCalls).toEqual([])
+    w.engine.shutdown()
+  })
+
+  test("a stop while waiting ends the launch stopped at once; the harness is stopped and the workspace removed", async () => {
+    const w = world()
+    w.control.connectOnStart = false
+    w.connectNode()
+    await w.engine.start()
+    const launch = await launched(w)
+    expect(await w.engine.stop(U, launch.id)).toMatchObject({ state: "ended", outcome: "stopped" })
+    expect(w.ops()).toEqual(["prepare", "start", "cancel", "stop", "cleanup"])
+    expect(w.nodeCalls.find((r) => r.op === "cleanup")).toMatchObject({ policy: "remove" })
+    w.connectLaunch(launch.id)
+    await settle()
+    expect(w.spokeCalls).toEqual([])
+    w.engine.shutdown()
+  })
+})

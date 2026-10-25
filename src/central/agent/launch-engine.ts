@@ -122,6 +122,8 @@ export const SESSION_LOST_MS = 10 * 60_000
 interface Pipeline {
   done: Promise<void>
   stop?: string
+  /** Ends a wait in progress (for the harness's connection) when a stop comes. */
+  abort?: () => void
 }
 
 /** Thrown at a provisioning checkpoint after a stop. */
@@ -374,7 +376,9 @@ export class LaunchEngine {
           if (pipeline) {
             pipeline.stop = reason
             const node = launch.machineID !== undefined ? this.deps.nodes.forMachine(launch.machineID) : undefined
-            if (node) await this.deps.nodeOps.requestNode(node.connID, { op: "cancel", launchID: id }).catch(() => undefined)
+            const cancelled = node ? this.deps.nodeOps.requestNode(node.connID, { op: "cancel", launchID: id }).catch(() => undefined) : undefined
+            pipeline.abort?.()
+            await cancelled
             await pipeline.done
             return (await this.store.get(userID, id))!
           }
@@ -583,19 +587,38 @@ export class LaunchEngine {
     return this.waitForLaunchConn(launch.id)
   }
 
-  /** The launch's launch-bound connection, now or once it connects. */
+  /**
+   * The launch's launch-bound connection, now or once it connects; fails after LAUNCH_CONNECT_MS, and at once
+   * (StopRequested) when the launch is stopped meanwhile.
+   */
   private waitForLaunchConn(launchID: string): Promise<string> {
     const { registry } = this.deps
     const now = registry.launchConn(launchID)
     if (now !== undefined) return Promise.resolve(now)
-    return new Promise((resolve) => {
+    const pipeline = this.pipelines.get(launchID)
+    return new Promise((resolve, reject) => {
       const off = registry.subscribe((message) => {
         if (message.type !== "catalog") return
         const connID = registry.launchConn(launchID)
         if (connID === undefined) return
-        off()
+        done()
         resolve(connID)
       })
+      const timer = this.timers.set(() => {
+        done()
+        reject(new Error(`The sandbox's harness did not connect within ${LAUNCH_CONNECT_MS / 1000} s`))
+      }, LAUNCH_CONNECT_MS)
+      if (pipeline) {
+        pipeline.abort = () => {
+          done()
+          reject(new StopRequested())
+        }
+      }
+      const done = () => {
+        off()
+        this.timers.clear(timer)
+        if (pipeline) pipeline.abort = undefined
+      }
     })
   }
 
@@ -805,6 +828,14 @@ export class LaunchEngine {
       const policy: CleanupPolicy = outcome === "needs_user" ? "keep" : !work.prompted ? "remove" : launch.spec.end.cleanup
       const node = launch.machineID !== undefined ? this.deps.nodes.forMachine(launch.machineID) : undefined
       if (node) {
+        if (work.started) {
+          const mode = outcome === "idle" || outcome === "needs_user" ? "graceful" : "kill"
+          try {
+            await this.deps.nodeOps.requestNode(node.connID, { op: "stop", launchID: id, workspace: work.workspace, mode })
+          } catch (cause) {
+            notes.push(`harness not stopped: ${errorText(cause)}`)
+          }
+        }
         if (work.prompted) {
           try {
             artifacts = { ...(await this.deps.nodeOps.requestNode(node.connID, { op: "collect", launchID: id, workspace: work.workspace })).artifacts }
