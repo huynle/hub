@@ -251,6 +251,12 @@ An address several sessions match answers `ambiguous` with the candidates; anoth
 roles do not exist (`not_found`). A name is released 7 days after its session is archived or deleted; a role
 holder offline for 30 minutes loses the role. Some role names (such as `orchestrator…`) are reserved to the user.
 
+In an OpenCode prompt, an address is a reference, not routing: the prompt still goes to the session you typed it
+in, word for word, and the plugin attaches a short `hub-references.txt` note naming the session(s) it means (state,
+machine, project, your open asks to it) so the agent can contact them with the `hub` tool. OpenCode's own `@file`
+and `@agent` mentions win; unknown names add nothing; if the hub does not answer within 1.5 s the prompt goes on
+without the note.
+
 **Routes.** Errors are `{error: {code, message, hint?, …}}` with the codes the [CLI](#hub-cli) maps to exit
 codes. Console routes refuse session and app tokens (403); `/api/agent` refuses a request carrying both the
 cookie and a hub bearer token (400).
@@ -1329,7 +1335,9 @@ second user. The opt-in `HUB_IT_OPENCODE=1 bun test test/spoke-env-inject.it.tes
 `HUB_SESSION_TOKEN`, and that `hub whoami` there prints the session. `HUB_IT_OPENCODE=1 bun test
 test/spoke-deliver.it.test.ts` does the same for hub messages: the model sees the delivered envelope, a repeated
 message id is applied once, `wake: false` waits for the next turn, and inbox deliveries carry their origin. `HUB_IT_OPENCODE=1 bun test test/spoke-hub-tool.it.test.ts` has the stub model call the `hub` tool and checks
-that the hub sees the session's token while the model and the transcript never do.
+that the hub sees the session's token while the model and the transcript never do. `HUB_IT_OPENCODE=1 bun test
+test/spoke-prompt-refs.it.test.ts` checks that a prompt naming a session reaches the model unchanged with the
+reference note attached, and that hub-sourced prompts get none.
 
 Point a project's `.opencode/opencode.jsonc` at your checkout to try changes:
 `{ "plugins": [{ "package": "/path/to/hub" }] }`. If the plugin is also installed globally,

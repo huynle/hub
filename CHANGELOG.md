@@ -146,6 +146,15 @@ the protocol up:
   when the tool call is aborted, naming the still-open ask. Readable errors when the session has no token yet
   or the hub lacks `messaging` (messaging verbs only). Opt-in check: `HUB_IT_OPENCODE=1 bun test
   test/spoke-hub-tool.it.test.ts`.
+- **Prompt references**: `@name`, `@name.project`, `@@role` and `@@role.project` typed into an OpenCode prompt
+  still go to that session unchanged; the plugin's prompt hook adds one attached text file
+  (`hub-references.txt`, a `data:` URI the model sees inside the same message) listing each address that names
+  one of your sessions (name, session ID, harness, machine, project, state, your open asks to it) and saying to
+  contact it with the `hub` tool. OpenCode's own `@` meanings win (an attached file or agent mention for the same
+  `@x` is left alone), `@me` and unknown or other users' names add nothing, and hub-delivered prompts are skipped.
+  The lookup (`who`, `status`, `inbox` as the session) runs only when an address appears, gives up after 1.5 s,
+  fails open and is cached for 10 s per session. Opt-in check: `HUB_IT_OPENCODE=1 bun test
+  test/spoke-prompt-refs.it.test.ts`.
 
 ### Other changes
 
