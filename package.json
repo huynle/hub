@@ -50,12 +50,18 @@
     "packages/sdk/src",
     "packages/sdk/package.json",
     "packages/cli/dist/hub-cli.js",
+    "packages/runtime-sdk/src",
+    "packages/runtime-sdk/package.json",
+    "packages/node/src",
+    "packages/node/package.json",
     "bin",
     "web/dist",
     "docker",
     "Dockerfile",
     "scripts/hub-local.sh",
     "scripts/io.github.huynle.hub.plist",
+    "scripts/io.github.huynle.hub-node.plist",
+    "scripts/hub-node.service",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
@@ -63,7 +69,9 @@
   "workspaces": [
     "packages/protocol",
     "packages/sdk",
-    "packages/cli"
+    "packages/cli",
+    "packages/runtime-sdk",
+    "packages/node"
   ],
   "engines": {
     "bun": ">=1.3"

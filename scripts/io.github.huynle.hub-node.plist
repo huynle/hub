@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template: keep `hub node` running on macOS (launchd). Not installed by anything.
+  The node prepares launch workspaces for the hub. It needs an enrolled machine (the plugin's /hub dialog writes
+  the machine token to ~/.config/hub/config.json, which the node only reads) and ~/.config/hub/node.json with at
+  least {"workspaceRoots": ["/Users/you/projects"]} (optional: "labels", "slots", "memoryMB").
+  Install (replace __REPO__ and __HOME__ first):
+    sed -e "s|__REPO__|$PWD|g" -e "s|__HOME__|$HOME|g" scripts/io.github.huynle.hub-node.plist \
+      > ~/Library/LaunchAgents/io.github.huynle.hub-node.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.github.huynle.hub-node.plist
+  Remove:
+    launchctl bootout gui/$(id -u)/io.github.huynle.hub-node && rm ~/Library/LaunchAgents/io.github.huynle.hub-node.plist
+  Exit 78 means node.json gives the node nothing to do (no workspaceRoots): fix it, then kickstart the agent.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.github.huynle.hub-node</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/.bun/bin/bun</string>
+    <string>__REPO__/packages/node/src/main.ts</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__HOME__/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>__HOME__/.local/state/hub/node.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.local/state/hub/node.log</string>
+</dict>
+</plist>
