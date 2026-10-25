@@ -2,7 +2,7 @@
 // runtime with progress frames, slots held from prepare to cleanup, cancel, draining, and capacity frames.
 import { describe, expect, test } from "bun:test"
 import type { LaunchArtifacts, NodeRequest, PreparedWorkspace } from "../../protocol/src/index.ts"
-import type { CleanupResult, PrepareInput, RunHandle, Runtime, RuntimeContext } from "../../runtime-sdk/src/index.ts"
+import type { CleanupResult, PrepareInput, RunHandle, Runtime, RuntimeContext, StartInput, StartResult, StopMode, StopResult } from "../../runtime-sdk/src/index.ts"
 import type { NodeConnectionOptions } from "../src/connection.ts"
 import { NodeDaemon } from "../src/daemon.ts"
 
@@ -160,5 +160,123 @@ describe("NodeDaemon", () => {
     const failed = sent.find((f) => (f as { phase?: string }).phase === "failed") as { message: string }
     expect(failed.message.length).toBeLessThanOrEqual(500)
     expect(failed.message).not.toContain("\n")
+  })
+})
+
+const sandboxed: PreparedWorkspace = { repo: "/w/r", directory: "/sandbox/work", mode: "clone", branch: "b", reused: false, runtime: { kind: "openshell", sandbox: "hub-abc", profile: "default" } }
+
+class FakeSandboxRuntime implements Runtime {
+  readonly kind = "openshell"
+  calls: string[] = []
+  failStart = false
+  info() {
+    return { kind: "openshell", harnesses: ["opencode"], profiles: ["default"] }
+  }
+  async prepare(input: PrepareInput): Promise<PreparedWorkspace> {
+    this.calls.push(`prepare ${input.launchID}`)
+    return sandboxed
+  }
+  async start(ws: PreparedWorkspace, input: StartInput): Promise<StartResult> {
+    this.calls.push(`start ${input.launchID} ${input.hub.url}`)
+    if (this.failStart) throw new Error("sandbox hub-abc is gone")
+    return { launchID: input.launchID, workspace: ws, started: true }
+  }
+  async stop(handle: RunHandle, mode: StopMode): Promise<StopResult> {
+    this.calls.push(`stop ${handle.launchID} ${mode}`)
+    return { stopped: true }
+  }
+  async collect(handle: RunHandle): Promise<LaunchArtifacts> {
+    this.calls.push(`collect ${handle.launchID}`)
+    return { branch: "b", head: "abcdef1", dirty: false }
+  }
+  async cleanup(handle: RunHandle, policy: string): Promise<CleanupResult> {
+    this.calls.push(`cleanup ${handle.launchID} ${policy}`)
+    return { removed: true }
+  }
+}
+
+function setupBoth(extra: Partial<ConstructorParameters<typeof NodeDaemon>[0]> = {}) {
+  const host = new FakeRuntime()
+  const sandbox = new FakeSandboxRuntime()
+  const sent: unknown[] = []
+  let options!: NodeConnectionOptions
+  const daemon = new NodeDaemon({
+    config: { workspaceRoots: ["/w"], labels: {}, slots: 4 },
+    credentials: { server: "https://hub.example.com", token: "mt" },
+    runtimes: [host, sandbox],
+    instanceID: "inst-1",
+    platform: { os: "darwin", arch: "arm64" },
+    connect: (o) => {
+      options = o
+      return { start: () => {}, stop: () => {}, send: (f) => (sent.push(f), true) }
+    },
+    ...extra,
+  })
+  daemon.start()
+  const handle = (req: NodeRequest) => options.handle(req)
+  return { daemon, host, sandbox, sent, handle, hello: () => options.hello() }
+}
+
+const start = (launchID: string, ws: PreparedWorkspace): NodeRequest => ({ op: "start", launchID, workspace: ws, harness: "opencode", hub: { url: "http://127.0.0.1:4096", token: "lt" } })
+
+describe("NodeDaemon with a sandbox runtime", () => {
+  test("announces the sandbox feature only when a runtime can start and stop harnesses", () => {
+    expect(setup().daemon.hello().features ?? []).not.toContain("sandbox")
+    expect(setupBoth().hello().features).toContain("sandbox")
+  })
+
+  test("adds the runtime's backends to its hello entry", () => {
+    const { hello } = setupBoth({ backends: { openshell: ["vm"] } })
+    expect(hello().runtimes).toEqual([
+      { kind: "host", harnesses: ["opencode"] },
+      { kind: "openshell", harnesses: ["opencode"], profiles: ["default"], backends: ["vm"] },
+    ])
+  })
+
+  test("prepare goes to the request's runtime; collect, cleanup, start and stop to the workspace's runtime", async () => {
+    const { handle, host, sandbox, hello } = setupBoth()
+    expect(await handle({ op: "prepare", launchID: "s1", runtime: { kind: "openshell" }, harness: "opencode", workspace: { repo: "/w/r", mode: "clone", remote: "https://x/y.git" } })).toEqual({ workspace: sandboxed })
+    expect(hello().launches).toEqual([{ launchID: "s1", phase: "prepared", directory: "/sandbox/work", sandbox: "hub-abc" }])
+    expect(await handle(start("s1", sandboxed))).toEqual({ started: true })
+    expect(hello().launches[0]?.phase).toBe("running")
+    expect(await handle({ op: "stop", launchID: "s1", workspace: sandboxed, mode: "kill" })).toEqual({ stopped: true })
+    expect(hello().launches[0]?.phase).toBe("stopped")
+    await handle({ op: "collect", launchID: "s1", workspace: sandboxed })
+    await handle({ op: "cleanup", launchID: "s1", workspace: sandboxed, policy: "remove" })
+    expect(sandbox.calls).toEqual(["prepare s1", "start s1 http://127.0.0.1:4096", "stop s1 kill", "collect s1", "cleanup s1 remove"])
+    expect(host.calls).toEqual([])
+    await handle({ op: "collect", launchID: "h1", workspace })
+    expect(host.calls).toEqual(["collect h1"])
+  })
+
+  test("start and stop progress frames; a failed start reports failed and keeps the launch", async () => {
+    const { handle, sandbox, sent, hello } = setupBoth()
+    await handle({ op: "prepare", launchID: "s1", runtime: { kind: "openshell" }, harness: "opencode", workspace: { repo: "/w/r", mode: "clone", remote: "https://x/y.git" } })
+    await handle(start("s1", sandboxed))
+    expect(sent).toContainEqual({ t: "progress", launchID: "s1", phase: "starting" })
+    expect(sent).toContainEqual({ t: "progress", launchID: "s1", phase: "running" })
+    await handle({ op: "stop", launchID: "s1", workspace: sandboxed })
+    expect(sandbox.calls.at(-1)).toBe("stop s1 graceful")
+    expect(sent).toContainEqual({ t: "progress", launchID: "s1", phase: "stopping" })
+    expect(sent).toContainEqual({ t: "progress", launchID: "s1", phase: "stopped" })
+    sandbox.failStart = true
+    await handle({ op: "prepare", launchID: "s2", runtime: { kind: "openshell" }, harness: "opencode", workspace: { repo: "/w/r", mode: "clone", remote: "https://x/y.git" } })
+    await expect(handle(start("s2", sandboxed))).rejects.toThrow("gone")
+    expect(sent).toContainEqual({ t: "progress", launchID: "s2", phase: "failed", message: "sandbox hub-abc is gone" })
+    expect(hello().used).toEqual({ slots: 2 })
+  })
+
+  test("the host runtime does not start or stop harnesses: started/stopped false with a reason", async () => {
+    const { handle, host } = setupBoth()
+    expect(await handle(start("h1", workspace))).toEqual({ started: false, reason: expect.stringContaining("host") })
+    expect(await handle({ op: "stop", launchID: "h1", workspace })).toEqual({ stopped: false, reason: expect.stringContaining("host") })
+    expect(host.calls).toEqual([])
+  })
+
+  test("a workspace naming a runtime this node lacks is refused", async () => {
+    const { daemon, handle } = setup()
+    daemon.start()
+    await expect(handle({ op: "collect", launchID: "s1", workspace: sandboxed })).rejects.toThrow(/openshell/)
+    await expect(handle(start("s1", sandboxed))).rejects.toThrow(/openshell/)
   })
 })
