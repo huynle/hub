@@ -56,6 +56,16 @@ describe("testkit workspace package", () => {
     }
   })
 
+  test("the hub's test/spoke-fake.ts re-exports the fake hub under its old names", async () => {
+    const testkit = await import("../src/index.ts")
+    const old = await import("../../../test/spoke-fake.ts")
+    expect(old.fakeCentral).toBe(testkit.fakeHub)
+    expect(old.stopServer).toBe(testkit.stopServer)
+    expect(old.freePort).toBe(testkit.freePort)
+    expect(old.until).toBe(testkit.until)
+    expect(old.EventQueue).toBe(testkit.EventQueue)
+  })
+
   test("every shipped file exists", () => {
     for (const f of ["src/index.ts", "package.json"]) expect(existsSync(path.join(pkgDir, f))).toBe(true)
   })
