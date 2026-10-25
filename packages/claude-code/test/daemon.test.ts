@@ -52,6 +52,11 @@ describe("the daemon", () => {
     expect(await ask(socketPath, { v: 1, kind: "ping" })).toMatchObject({ ok: true, pid: process.pid })
   })
 
+  test("announces only what a hooks spoke can do: stop and permission among the core ops, deliver, prompts, reject messages", async () => {
+    const { daemon } = await setup()
+    expect([...daemon.spoke.features].sort()).toEqual(["actTokens", "deliver", "hubPrompt", "permission", "permissionMessage", "sessionTokens", "stop"])
+  })
+
   test("a second daemon on the same socket refuses to start; a stale socket file is replaced", async () => {
     const { socketPath, token, hub } = await setup()
     await expect(startDaemon({ socketPath, server: hub.url, token, harnessVersion: "x", pluginVersion: "x", directory: "/" })).rejects.toThrow(/already running/)
