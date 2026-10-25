@@ -8,6 +8,8 @@
 // IMPLIED_OPENCODE_FEATURES. The hub announces its own features in the welcome (HUB_FEATURES), and a spoke
 // sends a newer request only when the hub listed it. Neither side bumps PROTOCOL_VERSION for a new feature.
 
+export * from "./launch.ts"
+
 export const PROTOCOL_VERSION = 1
 
 export type SessionState = "idle" | "working" | "blocked" | "error"
