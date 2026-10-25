@@ -188,3 +188,16 @@ describe("stop", () => {
     expect(calls).toEqual(["cancelTurns s"])
   })
 })
+
+describe("answerPermission message (deny reasons)", () => {
+  test("a reject's message goes to every process tried; absent when not given", async () => {
+    const { actions, requests } = fakes({
+      permissionTargets: [{ connID: "c1", sessionID: "child" }, { connID: "c2", sessionID: "child" }],
+      reply: (connID) => (connID === "c1" ? { gone: true } : {}),
+    })
+    expect(await actions.answerPermission({ rootID: "root", requestID: "per_1", decision: "reject", message: "Denied by @x: no" })).toEqual({ outcome: "done" })
+    expect(requests.map((r) => r.req.message)).toEqual(["Denied by @x: no", "Denied by @x: no"])
+    await actions.answerPermission({ rootID: "root", requestID: "per_2", decision: "reject" })
+    expect("message" in requests[2]!.req).toBe(false)
+  })
+})
