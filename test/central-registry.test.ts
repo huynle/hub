@@ -122,7 +122,7 @@ describe("status from events", () => {
     registry.observe("c1", ev("form.created", { form: { id: "frm_1", sessionID: "ses_1", title: "Pick" } }))
     const status = registry.status("ses_1")!
     expect(status.find((s) => s.id === "ses_child")?.blockers).toEqual([
-      { kind: "permission", id: "per_1", summary: "bash: ls" },
+      { kind: "permission", id: "per_1", summary: "bash: ls", action: "bash", resources: ["ls"] },
     ])
     expect(status[0]?.blockers).toEqual([{ kind: "form", id: "frm_1", summary: "Pick" }])
     expect(status[0]?.state).toBe("blocked")
@@ -247,6 +247,79 @@ describe("permission routing", () => {
     registry.observe("b", ev("permission.asked", { sessionID: "ses_1", id: "per_1", action: "bash" }))
     registry.disconnect("b")
     expect(registry.permissionTarget("ses_1", "per_1")).toBeUndefined()
+  })
+})
+
+describe("permission requests", () => {
+  beforeEach(() => {
+    registry.connect("a", laptop, hello("pa"))
+    registry.setSessions("a", [session("ses_1", { owned: true })])
+    registry.connect("b", laptop, hello("pb", "service"))
+    registry.setSessions("b", [session("ses_1")])
+    registry.observe("a", ev("session.created", { sessionID: "ses_sub", parentID: "ses_1", title: "x" }))
+  })
+
+  const asked = (extra: Record<string, unknown> = {}) =>
+    ev("permission.asked", {
+      sessionID: "ses_sub",
+      id: "per_1",
+      action: "shell",
+      resources: ["git push origin main"],
+      save: ["git push *"],
+      metadata: { diff: "x".repeat(10_000) },
+      source: { type: "tool", messageID: "msg_1", id: "call_1" },
+      ...extra,
+    })
+
+  test("keeps what a pending permission asks, without metadata, until it is replied", () => {
+    registry.observe("a", asked())
+    expect(registry.permissionRequest("per_1")).toEqual({
+      sessionID: "ses_sub",
+      request: { action: "shell", resources: ["git push origin main"], save: ["git push *"], source: { type: "tool", messageID: "msg_1", id: "call_1" } },
+    })
+    expect(registry.permissionRequest("per_2")).toBeUndefined()
+    registry.observe("a", ev("permission.replied", { sessionID: "ses_sub", requestID: "per_1" }))
+    expect(registry.permissionRequest("per_1")).toBeUndefined()
+  })
+
+  test("the first forward wins; a later process forwarding it changes nothing", () => {
+    registry.observe("a", asked())
+    registry.observe("b", asked({ action: "read", resources: ["*"] }))
+    expect(registry.permissionRequest("per_1")?.request?.action).toBe("shell")
+  })
+
+  test("a request without a usable action is pending without a request", () => {
+    registry.observe("a", ev("permission.asked", { sessionID: "ses_sub", id: "per_1" }))
+    expect(registry.permissionRequest("per_1")).toEqual({ sessionID: "ses_sub" })
+  })
+
+  test("gone once dropped or once every process that held it disconnected", () => {
+    registry.observe("a", asked())
+    registry.dropPermission("per_1")
+    expect(registry.permissionRequest("per_1")).toBeUndefined()
+    registry.observe("a", asked({ id: "per_2" }))
+    registry.disconnect("a")
+    expect(registry.permissionRequest("per_2")).toBeUndefined()
+  })
+
+  test("the returned request is a copy", () => {
+    registry.observe("a", asked())
+    const got = registry.permissionRequest("per_1")!
+    ;(got.request!.resources as string[]).push("rm -rf /")
+    expect(registry.permissionRequest("per_1")!.request!.resources).toEqual(["git push origin main"])
+  })
+})
+
+describe("rootOf", () => {
+  test("the root of a session's status tree, itself for a root, undefined when unknown", () => {
+    registry.connect("a", laptop, hello("pa"))
+    registry.setSessions("a", [session("ses_1", { owned: true })])
+    registry.observe("a", ev("session.created", { sessionID: "ses_sub", parentID: "ses_1", title: "x" }))
+    registry.observe("a", ev("session.created", { sessionID: "ses_deep", parentID: "ses_sub", title: "y" }))
+    expect(registry.rootOf("ses_1")).toBe("ses_1")
+    expect(registry.rootOf("ses_sub")).toBe("ses_1")
+    expect(registry.rootOf("ses_deep")).toBe("ses_1")
+    expect(registry.rootOf("ses_nope")).toBeUndefined()
   })
 })
 

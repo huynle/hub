@@ -7,6 +7,10 @@ export interface Blocker {
   readonly kind: "permission" | "form"
   readonly id: string
   readonly summary: string
+  /** permission: what OpenCode asks to do ("shell", "edit", "read", an MCP tool), when it said. */
+  readonly action?: string
+  /** permission: what it applies to (commands, paths), at most BLOCKER_MAX_RESOURCES, each shortened. */
+  readonly resources?: readonly string[]
   /** form: asked by the agent's question tool (metadata.kind "question"). */
   readonly question?: true
   /** form: its fields, bounded, so a phone can render and answer it. */
@@ -53,6 +57,75 @@ const FIELD_TYPES = new Set<FormFieldSpec["type"]>(["string", "number", "integer
 
 const text = (v: unknown, max: number) => (typeof v === "string" && v ? v.slice(0, max) : undefined)
 const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined)
+
+/**
+ * What a permission request asks, as OpenCode sent it (permission.asked), kept so a policy can judge it.
+ * metadata (diff previews and the like) is dropped. When anything had to be cut or dropped, `truncated` is
+ * set: a judgement on what is left does not cover the whole request.
+ */
+export interface PermissionRequest {
+  /** "shell", "read", "edit", "external_directory", an MCP tool ("<server>_<tool>"), … */
+  readonly action: string
+  /** What the action applies to (one per parsed shell command, paths, "*"). */
+  readonly resources: readonly string[]
+  /** The patterns an "always" reply would save as rules. */
+  readonly save?: readonly string[]
+  /** The tool call that asked. */
+  readonly source?: { readonly type: "tool"; readonly messageID: string; readonly id: string }
+  readonly truncated?: true
+}
+
+/** Resources (and save patterns) kept per request, and the length kept of each. */
+export const PERMISSION_MAX_RESOURCES = 100
+export const PERMISSION_TEXT_MAX = 4000
+/** Longest action kept; a longer one makes the request unusable (undefined). */
+const PERMISSION_ACTION_MAX = 200
+const SOURCE_ID_MAX = 200
+/** Resources shown on a blocker (catalog and status go to every console), and the length of each. */
+export const BLOCKER_MAX_RESOURCES = 10
+const BLOCKER_RESOURCE_MAX = 500
+
+/** Strings of `list`, bounded; `cut` is set when anything was dropped or shortened. */
+function boundedStrings(list: unknown, maxItems: number, maxLength: number): { items: string[]; cut: boolean } {
+  if (!Array.isArray(list)) return { items: [], cut: list !== undefined }
+  const strings = list.filter((v): v is string => typeof v === "string")
+  const items = strings.slice(0, maxItems).map((v) => v.slice(0, maxLength))
+  const cut = strings.length !== list.length || strings.length > maxItems || strings.some((v) => v.length > maxLength)
+  return { items, cut }
+}
+
+/** A permission.asked event's request, bounded; undefined without a usable action. */
+export function permissionRequest(raw: any): PermissionRequest | undefined {
+  const action = raw?.action
+  if (typeof action !== "string" || !action || action.length > PERMISSION_ACTION_MAX) return undefined
+  const resources = boundedStrings(raw.resources, PERMISSION_MAX_RESOURCES, PERMISSION_TEXT_MAX)
+  const save = raw.save === undefined ? undefined : boundedStrings(raw.save, PERMISSION_MAX_RESOURCES, PERMISSION_TEXT_MAX)
+  const src = raw.source
+  const source =
+    src?.type === "tool" && typeof src.messageID === "string" && typeof src.id === "string"
+      ? { type: "tool" as const, messageID: src.messageID.slice(0, SOURCE_ID_MAX), id: src.id.slice(0, SOURCE_ID_MAX) }
+      : undefined
+  return {
+    action,
+    resources: resources.items,
+    ...(save ? { save: save.items } : {}),
+    ...(source ? { source } : {}),
+    ...(resources.cut || save?.cut ? { truncated: true as const } : {}),
+  }
+}
+
+/** A permission.asked event as a blocker: its summary, and what it asks (bounded for display). */
+function permissionBlocker(data: Record<string, any>): Blocker {
+  const action = typeof data.action === "string" && data.action ? data.action.slice(0, PERMISSION_ACTION_MAX) : undefined
+  const resources = boundedStrings(data.resources, BLOCKER_MAX_RESOURCES, BLOCKER_RESOURCE_MAX).items
+  return {
+    kind: "permission",
+    id: data.id,
+    summary: [data.action, (data.resources ?? []).join(", ")].filter(Boolean).join(": "),
+    ...(action ? { action } : {}),
+    ...(resources.length ? { resources } : {}),
+  }
+}
 
 function optionSpec(raw: any): FormOptionSpec | undefined {
   const value = text(raw?.value, FORM_LABEL_MAX)
@@ -186,11 +259,7 @@ export class StatusBoard {
       case "permission.asked":
         return this.update(data.sessionID, (entry) => {
           if (entry.blockers.some((b) => b.id === data.id)) return
-          entry.blockers.push({
-            kind: "permission",
-            id: data.id,
-            summary: [data.action, (data.resources ?? []).join(", ")].filter(Boolean).join(": "),
-          })
+          entry.blockers.push(permissionBlocker(data))
         })
       case "permission.replied":
         return this.unblock(data.sessionID, data.requestID)
