@@ -1,6 +1,7 @@
 // A fake `claude` for tests (never the real one): `claude -p --input-format stream-json --output-format
 // stream-json` as far as the hub uses it. It records how it was started (argv, cwd, the hub's environment) as one
-// JSON line in $FAKE_CLAUDE_LOG, then reads stream-json input lines:
+// JSON line in $FAKE_CLAUDE_LOG (and each prompt it gets as a line in $FAKE_CLAUDE_LOG.prompts), then reads
+// stream-json input lines:
 // - a user message: when $HUB_CLAUDE_SOCKET is set it runs the plugin's hooks through the real hook bridge
 //   (UserPromptSubmit, then Stop), and prints a result line: "echo: <text>". Prompts with markers:
 //   SLOW waits for an interrupt control request (then an error_during_execution result), FAIL gives an error
@@ -14,13 +15,13 @@ import path from "node:path"
 import { runHook } from "../src/bridge.ts"
 
 /** An executable that runs the fake (its path, and the log it records starts in). */
-export function fakeClaude(): { bin: string; log: string } {
+export function fakeClaude(): { bin: string; log: string; prompts: string } {
   const dir = mkdtempSync(path.join(tmpdir(), "fake-claude-"))
   const bin = path.join(dir, "claude")
   const log = path.join(dir, "starts.jsonl")
   writeFileSync(bin, `#!/bin/sh\nFAKE_CLAUDE_LOG='${log}' exec '${process.execPath}' '${path.join(import.meta.dir, "fake-claude.ts")}' "$@"\n`)
   chmodSync(bin, 0o755)
-  return { bin, log }
+  return { bin, log, prompts: `${log}.prompts` }
 }
 
 async function main(): Promise<void> {
@@ -70,6 +71,7 @@ async function main(): Promise<void> {
     const content = msg.message?.content
     const text = typeof content === "string" ? content : Array.isArray(content) ? content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("") : ""
     const images = Array.isArray(content) ? content.filter((c: any) => c.type === "image").length : 0
+    if (env.FAKE_CLAUDE_LOG) appendFileSync(`${env.FAKE_CLAUDE_LOG}.prompts`, `${JSON.stringify({ sessionID, text, images })}\n`)
     turns = turns.then(async () => {
       n += 1
       await hook("UserPromptSubmit", { prompt: text, prompt_id: `p${n}`, permission_mode: "default" })
