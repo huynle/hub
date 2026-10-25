@@ -11,7 +11,7 @@
 // another one and reaches it through SpokeHub.request (pod RPC). Events, alerts and speech stay with the pod that
 // holds the connection; remote state is never re-exported.
 import path from "node:path"
-import { helloHarness, spokeFeatures, type EvidenceLevel, type ForwardedEvent, type Hello, type HerdrWorkspace, type ProcessKind, type SessionInfo, type SpokeFeature, type SpokeMode, type TerminalInfo, type Terminals } from "../protocol"
+import { HARNESS_OPENCODE, helloHarness, spokeFeatures, type EvidenceLevel, type ForwardedEvent, type Hello, type HerdrWorkspace, type ProcessKind, type SessionInfo, type SpokeFeature, type SpokeMode, type TerminalInfo, type Terminals } from "../protocol"
 import { StatusBoard, permissionRequest, type Blocker, type BlockerRecommendation, type PermissionRequest, type SessionStatus } from "../status"
 import { sanitizeLabel } from "./agent/envelope"
 import { DoneWatch } from "./done"
@@ -112,6 +112,11 @@ export const WORKER_SPEECH_TTL_MS = 5 * 60_000
 export const ANNOUNCE_GROUP_MS = 60_000
 /** Root speech within this window counts as heard: a worker result it already contained is not read again. */
 export const HEARD_WINDOW_MS = 2 * 60_000
+/**
+ * How long a session whose turn ended by an inferred interruption (session.execution.interrupted `inferred`: the
+ * harness reported none, the spoke found it later) waits before it counts as idle (Registry.idle).
+ */
+export const INFERRED_IDLE_GRACE_MS = 5_000
 /** Another process forwarding the same worker failure within this window is not announced again. */
 const FAILURE_DEDUPE_MS = 30_000
 const ANNOUNCE_REASON_MAX = 150
@@ -384,6 +389,8 @@ export class Registry {
    * process holds it, but several may report the session; a reply tries them in order.
    */
   private readonly permissions = new Map<string, PendingPermission>()
+  /** When a session's latest turn ended by an inferred interruption (see INFERRED_IDLE_GRACE_MS). */
+  private readonly inferredEnds = new Map<string, number>()
   /** Told when a pending permission goes away (replied, dropped, its processes gone). */
   private readonly permissionClosedListeners = new Set<(requestID: string, sessionID: string, tenant: string | undefined) => void>()
   /** Sessions with a hub turn in flight, with how to end the waiting request early (stop/interrupt). */
@@ -658,6 +665,10 @@ export class Registry {
       if (owner !== undefined && owner !== tenant) return
     }
     if (sessionID) conn.activity.set(sessionID, this.tick())
+    if (sessionID && event.type.startsWith("session.execution.")) {
+      if (event.type === "session.execution.interrupted" && data.inferred === true) remember(this.inferredEnds, sessionID, this.now())
+      else this.inferredEnds.delete(sessionID)
+    }
     const streamed = event.type === "session.text.delta" || event.type === "session.reasoning.delta"
     // Streamed text changes nothing other pods mirror (its recency goes out with the next change).
     if (!streamed) this.changed(tenant)
@@ -1051,10 +1062,28 @@ export class Registry {
     return found?.id
   }
 
-  /** The machine's (most recently connected) background service process; never a launch-bound connection. */
-  serviceFor(machineID: string): string | undefined {
-    const services = this.all().filter((c) => c.machine.id === machineID && c.hello.kind === "service" && c.launchID === undefined)
+  /**
+   * The machine's (most recently connected) background service process of a harness (default OpenCode); never a
+   * launch-bound connection. Each harness has its own service: a Claude Code service never hides the OpenCode one.
+   */
+  serviceFor(machineID: string, harness: string = HARNESS_OPENCODE): string | undefined {
+    const services = this.services(machineID).filter((c) => helloHarness(c.hello).harness === harness)
     return services.sort((a, b) => b.seq - a.seq)[0]?.id
+  }
+
+  /** The harnesses that have a background service process (serviceFor) on the machine. */
+  serviceHarnesses(machineID: string): string[] {
+    return [...new Set(this.services(machineID).map((c) => helloHarness(c.hello).harness))]
+  }
+
+  /** A connection's harness ("opencode" for hellos that predate harness); undefined for an unknown connection. */
+  harnessOf(connID: string): string | undefined {
+    const conn = this.conn(connID)
+    return conn && helloHarness(conn.hello).harness
+  }
+
+  private services(machineID: string): Conn[] {
+    return this.all().filter((c) => c.machine.id === machineID && c.hello.kind === "service" && c.launchID === undefined)
   }
 
   /**
@@ -1080,15 +1109,21 @@ export class Registry {
   }
 
   /**
-   * Idle by real evidence (message re-wakes): the owner process observes the harness natively or through hooks,
-   * nothing in the session's tree is working or blocked, and no hub turn holds it.
+   * Idle by real evidence (message re-wakes): the owner process observes the harness natively or through hooks, or
+   * through a harness RPC when it announces "turnEvents" (confirmed turn completion); screen and unknown evidence
+   * never count. Nothing in the session's tree is working or blocked, no hub turn holds it, and a turn that ended by
+   * an inferred interruption ended at least INFERRED_IDLE_GRACE_MS ago (the harness reported none, so the spoke's
+   * guess may be followed at once by the next prompt's start).
    */
   idle(sessionID: string): boolean {
     const owner = this.owner(sessionID)
     const conn = owner === undefined ? undefined : this.conn(owner)
     if (!conn) return false
     const { evidence } = helloHarness(conn.hello)
-    if (evidence !== "native" && evidence !== "hooks") return false
+    const trusted = evidence === "native" || evidence === "hooks" || (evidence === "rpc" && conn.features.has("turnEvents"))
+    if (!trusted) return false
+    const inferred = this.inferredEnds.get(sessionID)
+    if (inferred !== undefined && this.now() - inferred < INFERRED_IDLE_GRACE_MS) return false
     return !this.busy(sessionID) && this.browserFields(sessionID).state === "idle"
   }
 
@@ -1489,6 +1524,16 @@ export class Registry {
   }
 
   /**
+   * Whether a connected process serves a feature (spokeFeatures): a core op (CORE_OPS: turn, steer, interrupt,
+   * stop, permission, form), which an OpenCode spoke implies and a spoke of another harness serves only when it
+   * announced it, or an optional feature, which it announced in its hello (or, for an OpenCode spoke that predates
+   * harness, one in IMPLIED_OPENCODE_FEATURES). Callers answer unsupported {feature, harness} (harnessOf) without it.
+   */
+  supports(connID: string, feature: SpokeFeature): boolean {
+    return this.conn(connID)?.features.has(feature) === true
+  }
+
+  /**
    * Connection that should run a turn for the session:
    * 1. a process reporting it as owned, most recent activity first;
    * 2. else a service process that reports it;
@@ -1496,13 +1541,6 @@ export class Registry {
    * 4. else any process that reports it, most recent activity first;
    * 5. else none.
    */
-  /**
-   * Whether a connected process serves an optional feature: it announced it in its hello, or it is an OpenCode
-   * spoke that predates harness and the feature is in IMPLIED_OPENCODE_FEATURES.
-   */
-  supports(connID: string, feature: SpokeFeature): boolean {
-    return this.conn(connID)?.features.has(feature) === true
-  }
 
   owner(sessionID: string): string | undefined {
     const tenant = this.sessionTenant(sessionID)

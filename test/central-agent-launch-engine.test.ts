@@ -122,6 +122,7 @@ function world(options: { deps?: Partial<LaunchEngineDeps>; service?: boolean; l
   const sessions = new Map<string, FakeSession>()
   const statusListeners = new Set<(message: any, tenant?: string) => void>()
   let serviceConn: string | undefined = options.service === false ? undefined : SERVICE
+  let serviceHarness = "opencode"
   const features = new Set<string>(options.launchFeature === false ? [] : ["launch"])
   const spokeCalls: ServerRequest[] = []
   let sessionSeq = 0
@@ -133,7 +134,8 @@ function world(options: { deps?: Partial<LaunchEngineDeps>; service?: boolean; l
     },
   }
   const registry = {
-    serviceFor: (machineID: string) => (machineID === MACHINE ? serviceConn : undefined),
+    serviceFor: (machineID: string, harness = "opencode") => (machineID === MACHINE && harness === serviceHarness ? serviceConn : undefined),
+    serviceHarnesses: (machineID: string) => (machineID === MACHINE && serviceConn !== undefined ? [serviceHarness] : []),
     supports: (connID: string, feature: string) => connID === serviceConn && features.has(feature),
     connTenant: (connID: string) => (connID === serviceConn ? U : undefined),
     hasSession: (id: string) => sessions.has(id),
@@ -200,13 +202,14 @@ function world(options: { deps?: Partial<LaunchEngineDeps>; service?: boolean; l
   }
   const prompts: { sessionID: string; text: string; resetHops: boolean }[] = []
   const stops: string[] = []
-  let promptOutcome: "turn" | "steer" | "offline" = "turn"
+  let promptOutcome: "turn" | "steer" | "offline" | "unsupported" = "turn"
   const turn = deferred<any>()
   const actions = {
     async prompt(input: { sessionID: string; text: string; resetHops: boolean }): Promise<any> {
       prompts.push({ sessionID: input.sessionID, text: input.text, resetHops: input.resetHops })
       primeOrder.push(`prompt:${input.sessionID}`)
       if (promptOutcome === "offline") return { outcome: "offline" }
+      if (promptOutcome === "unsupported") return { outcome: "unsupported", feature: "turn", harness: "claude-code" }
       if (promptOutcome === "steer") return { outcome: "done", mode: "steer", inboxID: "i1" }
       return { outcome: "done", mode: "turn", result: turn.promise }
     },
@@ -260,11 +263,12 @@ function world(options: { deps?: Partial<LaunchEngineDeps>; service?: boolean; l
     deps,
     engine,
     features,
-    setPrompt(outcome: "turn" | "steer" | "offline") {
+    setPrompt(outcome: "turn" | "steer" | "offline" | "unsupported") {
       promptOutcome = outcome
     },
-    setService(conn: string | undefined) {
+    setService(conn: string | undefined, harness = "opencode") {
       serviceConn = conn
+      serviceHarness = harness
     },
     /** Connects the node (a NodeRegistry connection). */
     connectNode(extra: Partial<NodeHello> = {}, connID = "conn-node") {
@@ -362,6 +366,33 @@ describe("provisioning", () => {
     expect(w.prompts).toEqual([{ sessionID: "ses_1", text: "Do the thing", resetHops: false }])
     expect(w.changes.map((l) => l.state)).toEqual(["queued", "provisioning", "running"])
     expect(await w.engine.view(U, launch.id)).toMatchObject({ id: launch.id, directory: "/p/hub/.worktrees/feat/x" })
+    w.engine.shutdown()
+  })
+
+  test("a launch's harness picks the machine's service spoke of that harness", async () => {
+    const w = world()
+    w.setService(SERVICE, "claude-code")
+    w.connectNode({ runtimes: [{ kind: "host", harnesses: ["opencode", "claude-code"] }] })
+    await w.engine.start()
+    const launch = await launched(w, { harness: "claude-code" })
+    expect(launch).toMatchObject({ state: "running", sessionID: "ses_1" })
+    expect(w.nodeCalls[0]).toMatchObject({ op: "prepare", harness: "claude-code" })
+    expect(w.spokeCalls[0]).toMatchObject({ op: "create", launchID: launch.id })
+    w.engine.shutdown()
+  })
+
+  test("an OpenCode launch waits while the machine has only another harness's service spoke", async () => {
+    const w = world()
+    w.setService(SERVICE, "claude-code")
+    w.connectNode({ runtimes: [{ kind: "host", harnesses: ["opencode", "claude-code"] }] })
+    await w.engine.start()
+    const launch = await launched(w)
+    expect(launch.state).toBe("queued")
+    expect(w.spokeCalls).toEqual([])
+    w.setService(SERVICE, "opencode")
+    w.engine.kick(U)
+    await settle()
+    expect(await w.launch(launch.id)).toMatchObject({ state: "running" })
     w.engine.shutdown()
   })
 
@@ -483,6 +514,17 @@ describe("provisioning failures", () => {
     await w.engine.start()
     const launch = await launched(w)
     expect(launch).toMatchObject({ state: "ended", outcome: "failed" })
+    w.engine.shutdown()
+  })
+
+  test("a spoke that cannot run the prompt's turn fails the launch, naming the feature and harness", async () => {
+    const w = world()
+    w.setPrompt("unsupported")
+    w.connectNode()
+    await w.engine.start()
+    const launch = await launched(w)
+    expect(launch).toMatchObject({ state: "ended", outcome: "failed" })
+    expect(launch.reason).toContain("The claude-code spoke does not support turn")
     w.engine.shutdown()
   })
 })

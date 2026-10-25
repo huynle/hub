@@ -340,8 +340,13 @@ const OPTIONAL_SPOKE_FEATURES = [...IMPLIED_OPENCODE_FEATURES, "autoName", "sess
 export const CORE_OPS = ["turn", "steer", "interrupt", "stop", "permission", "form"] as const
 export type CoreOp = (typeof CORE_OPS)[number]
 
-/** Every feature a spoke may serve: the core ops and the optional features. */
-export const KNOWN_SPOKE_FEATURES = [...CORE_OPS, ...OPTIONAL_SPOKE_FEATURES] as const
+/**
+ * Every feature a spoke may serve: the core ops, the optional features, and "turnEvents": a spoke of another
+ * harness reports every turn's end as the harness confirms it (session.execution.succeeded, failed or interrupted,
+ * never inferred), so the hub trusts its "rpc" evidence for idle (e.g. a Codex app-server spoke's turn/completed).
+ * Not in SPOKE_FEATURES: an OpenCode spoke's native evidence already counts.
+ */
+export const KNOWN_SPOKE_FEATURES = [...CORE_OPS, ...OPTIONAL_SPOKE_FEATURES, "turnEvents"] as const
 export type SpokeFeature = (typeof KNOWN_SPOKE_FEATURES)[number]
 /**
  * What this package's OpenCode spoke announces (without "deliver" and "hubPrompt" when its OpenCode has no synthetic
