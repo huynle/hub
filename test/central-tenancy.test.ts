@@ -311,6 +311,65 @@ describe("bob cannot reach alice's agent messages", () => {
   })
 })
 
+describe("bob cannot act on alice's sessions (approve, deny, answer, prompt, stop)", () => {
+  const ACT_OPS = ["permission", "form", "deliver", "steer", "turn", "stop"]
+
+  async function pending() {
+    alice.spoke.send(event("permission.asked", { sessionID: "ses_alice", id: "per_alice", action: "shell", resources: ["bun test"] }))
+    await waitFor(() => h.registry.permissionTargets("ses_alice", "per_alice").length === 1)
+  }
+
+  const verbs = (addr: string): Array<[string, unknown]> => [
+    [`/api/agent/sessions/${addr}/approve`, { requestID: "per_alice" }],
+    [`/api/agent/sessions/${addr}/deny`, { requestID: "per_alice", why: "spoof" }],
+    [`/api/agent/sessions/${addr}/answer`, { formID: "form_alice", cancel: true }],
+    [`/api/agent/sessions/${addr}/prompt`, { text: "spoof" }],
+    [`/api/agent/sessions/${addr}/stop`, {}],
+  ]
+
+  test("as a user, on alice's session or with her request id from his own session: not_found, like unknown ones; nothing reaches alice's spoke", async () => {
+    await pending()
+    for (const addr of ["ses_alice", "ses_unknown"]) {
+      for (const [pathname, body] of verbs(addr)) {
+        const res = await as(bob, pathname, { method: "POST", json: body })
+        expect({ pathname, status: res.status }).toEqual({ pathname, status: 404 })
+        expect((await json(res)).error.code).toBe("not_found")
+      }
+    }
+    for (const verb of ["approve", "deny"]) {
+      expect((await as(bob, `/api/agent/sessions/ses_bob/${verb}`, { method: "POST", json: { requestID: "per_alice" } })).status).toBe(404)
+    }
+    // admins get no extra agent powers
+    expect((await as(admin, "/api/agent/sessions/ses_alice/approve", { method: "POST", json: { requestID: "per_alice" } })).status).toBe(404)
+    expect(alice.requests.filter((r) => ACT_OPS.includes(r.op))).toEqual([])
+    expect(h.registry.permissionTargets("ses_alice", "per_alice")).toHaveLength(1)
+  })
+
+  test("bob's act app token under his own grant: alice's sessions stay not_found; a grant naming her session is refused", async () => {
+    await pending()
+    const token = await json(await as(bob, "/api/agent/app-tokens", { method: "POST", json: { scopes: ["sessions:act"] } }))
+    const created = await as(bob, "/api/agent/grants", {
+      method: "POST",
+      json: { holder: `app:${token.id}`, scope: { projects: ["/home/user/work"] }, allow: ["approve", "deny", "answer", "prompt", "stop"], permissions: { allow: ["shell"] } },
+    })
+    expect(created.status).toBe(201)
+    expect((await as(bob, "/api/agent/grants", { method: "POST", json: { holder: "ses_alice", scope: { projects: ["/home/user/work"] }, allow: ["stop"] } })).status).toBe(404)
+    for (const [pathname, body] of verbs("ses_alice")) {
+      const res = await h.api(pathname, { method: "POST", cookie: null, origin: null, headers: { authorization: `Bearer ${token.token}` }, json: body })
+      expect({ pathname, status: res.status }).toEqual({ pathname, status: 404 })
+    }
+    expect(alice.requests.filter((r) => ACT_OPS.includes(r.op))).toEqual([])
+    // alice's audit has nothing of bob's
+    expect((await json(await as(alice, "/api/agent/audit"))).entries).toEqual([])
+  })
+
+  test("alice approves her own request (positive control)", async () => {
+    await pending()
+    expect((await as(alice, "/api/agent/sessions/ses_alice/approve", { method: "POST", json: { requestID: "per_alice" } })).status).toBe(200)
+    expect(alice.requests.filter((r) => r.op === "permission")).toEqual([{ op: "permission", sessionID: "ses_alice", requestID: "per_alice", decision: "once" }])
+  })
+})
+
 describe("bob cannot reach alice's push settings", () => {
   test("user-scoped push routes only read and change the caller's own device and user", async () => {
     const endpoint = "https://push.example.com/alice"
