@@ -18,7 +18,8 @@ export interface KnownToken {
 function base64Forms(token: string): string[] {
   const forms: string[] = []
   for (const pad of [0, 1, 2]) {
-    const encoded = Buffer.from("\0".repeat(pad) + token, "utf8").toString("base64")
+    const padded = "\0".repeat(pad) + token
+    const encoded = Buffer.from(padded, "utf8").toString("base64")
     const middle = encoded.slice(pad ? 4 : 0, encoded.length - 4)
     if (middle.length >= 8) forms.push(middle)
   }

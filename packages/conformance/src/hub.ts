@@ -84,8 +84,13 @@ export function recordingHub(options: { hubFeatures?: readonly string[] } = {}):
         const left = deadline - Date.now()
         if (left <= 0) return undefined
         await new Promise<void>((resolve) => {
-          waiters.add(resolve)
-          setTimeout(resolve, left)
+          const done = () => {
+            clearTimeout(timer)
+            waiters.delete(done)
+            resolve()
+          }
+          const timer = setTimeout(done, left)
+          waiters.add(done)
         })
       }
     },
