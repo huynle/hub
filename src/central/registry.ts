@@ -306,6 +306,8 @@ export class Registry {
   private readonly alertListeners = new Set<(alert: Alert) => void>()
   /** Called after every sessions frame (unchanged snapshots too), e.g. to push session tokens. */
   private readonly sessionsListeners = new Set<(connID: string) => void>()
+  /** Called when the user's own prompt reached a session's inbox (typed or spoken in the harness). */
+  private readonly humanTurnListeners = new Set<(sessionID: string, tenant?: string) => void>()
   /** Pending form ID → its session and every connection that forwarded it, first first (like permissions). */
   private readonly forms = new Map<string, { connIDs: string[]; sessionID: string }>()
   /** Form IDs already alerted (forms may be forwarded by several processes). */
@@ -434,6 +436,15 @@ export class Registry {
   onSessions(listener: (connID: string) => void): () => void {
     this.sessionsListeners.add(listener)
     return () => this.sessionsListeners.delete(listener)
+  }
+
+  /**
+   * Listens to human turns the spokes report: a prompt the user put into a session's inbox
+   * (session.inbox.delivered with origin "user"); `tenant` owns the session.
+   */
+  onHumanTurn(listener: (sessionID: string, tenant?: string) => void): () => void {
+    this.humanTurnListeners.add(listener)
+    return () => this.humanTurnListeners.delete(listener)
   }
 
   connect(connID: string, machine: MachineRef, hello: Hello): void {
@@ -578,6 +589,10 @@ export class Registry {
     if (event.type === "session.text.ended" && sessionID) this.say(sessionID, data)
     if ((event.type === "session.execution.interrupted" || event.type === "session.execution.failed") && sessionID) this.dropRootSpeech(sessionID)
     if (event.type === "session.inbox.delivered" && typeof data.inboxID === "string") this.delivered(data.inboxID)
+    if (event.type === "session.inbox.delivered" && data.origin === "user" && sessionID) {
+      const tenant = this.sessionTenant(sessionID)
+      for (const listener of [...this.humanTurnListeners]) listener(sessionID, tenant)
+    }
     if (event.type === "session.deleted" && sessionID) this.setConversation(sessionID, false)
   }
 
@@ -923,6 +938,26 @@ export class Registry {
   hasSession(sessionID: string): boolean {
     for (const conn of this.conns.values()) if (conn.sessions.has(sessionID)) return true
     return false
+  }
+
+  /**
+   * Idle by real evidence (message re-wakes): the owner process observes the harness natively or through hooks,
+   * nothing in the session's tree is working or blocked, and no hub turn holds it.
+   */
+  idle(sessionID: string): boolean {
+    const owner = this.owner(sessionID)
+    const conn = owner === undefined ? undefined : this.conns.get(owner)
+    if (!conn) return false
+    const { evidence } = helloHarness(conn.hello)
+    if (evidence !== "native" && evidence !== "hooks") return false
+    return !this.active.has(sessionID) && this.browserFields(sessionID).state === "idle"
+  }
+
+  /** How recently a process sent an event for the session (higher: more recent; 0: never). */
+  recency(sessionID: string): number {
+    let latest = 0
+    for (const conn of this.conns.values()) latest = Math.max(latest, conn.activity.get(sessionID) ?? 0)
+    return latest
   }
 
   /** Something in the session's tree is working or waiting for the user (typed input steers then). */
@@ -1478,6 +1513,11 @@ export class Registry {
       if (next.length === pending.length) break
       pending = next
     }
+  }
+
+  /** Raises a notification about the session for its user (e.g. the delivery engine's unanswered asks). */
+  alertUser(kind: NotificationKind, sessionID: string, fields: { text?: string; subject?: string; key?: string } = {}): void {
+    this.alert(kind, sessionID, fields)
   }
 
   /**
