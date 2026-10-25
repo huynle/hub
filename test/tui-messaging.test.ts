@@ -1,6 +1,6 @@
 // /who and /msg in the TUI (src/tui-messaging.ts): argument parsing and what the TUI shows.
 import { describe, expect, test } from "bun:test"
-import { formatSent, formatWho, parseMsgInput, parseWhoInput, type WhoRow } from "../src/tui-messaging"
+import { formatSent, formatWho, parseMsgInput, parseWhoInput, runMsg, runWho, type MessagingDeps, type WhoRow } from "../src/tui-messaging"
 
 describe("parseMsgInput", () => {
   test("no arguments (palette, bare /msg, only spaces) is undefined", () => {
@@ -55,5 +55,88 @@ describe("formatSent", () => {
   test("names the recipient and how it was delivered", () => {
     expect(formatSent({ id: "m_1", to: "@bob", delivery: "queued" })).toBe("Sent to @bob (queued)")
     expect(formatSent({ id: "m_1", to: "the user" })).toBe("Sent to the user (stored)")
+  })
+})
+
+function deps(over: Partial<MessagingDeps> & { session?: string | undefined; answer?: string | null | undefined } = {}) {
+  const log = { who: [] as unknown[], msg: [] as unknown[], toasts: [] as Array<[string, string]>, prompts: [] as unknown[], alerts: [] as Array<{ title: string; message: string }> }
+  const session = "session" in over ? over.session : "ses_me"
+  const d: MessagingDeps = {
+    sessionID: () => session,
+    who: async (input) => {
+      log.who.push(input)
+      return { sessions: [{ sessionID: "ses_bob", name: "bob", online: true, roles: [] }] }
+    },
+    msg: async (input) => {
+      log.msg.push(input)
+      return { id: "m_1", to: "@bob", delivery: "queued" }
+    },
+    prompt: async (options) => {
+      log.prompts.push(options)
+      return over.answer
+    },
+    alert: async (options) => void log.alerts.push(options),
+    toast: (message, variant = "info") => void log.toasts.push([variant, message]),
+    ...over,
+  }
+  return { d, log }
+}
+
+describe("runMsg", () => {
+  test("sends the arguments word for word as the current session and says where it went", async () => {
+    const { d, log } = deps()
+    await runMsg(d, '@bob  hi  "you"')
+    expect(log.msg).toEqual([{ sessionID: "ses_me", to: "@bob", text: 'hi  "you"' }])
+    expect(log.toasts).toEqual([["success", "Sent to @bob (queued)"]])
+  })
+
+  test("without a session: a clear toast and nothing is sent", async () => {
+    const { d, log } = deps({ session: undefined })
+    await runMsg(d, "@bob hi")
+    expect(log.msg).toEqual([])
+    expect(log.prompts).toEqual([])
+    expect(log.toasts).toEqual([["warning", expect.stringMatching(/open a session/i)]])
+  })
+
+  test("without arguments it asks for the message; cancelling sends nothing", async () => {
+    const asked = deps({ answer: "@bob from the dialog" })
+    await runMsg(asked.d, undefined)
+    expect(asked.log.prompts).toHaveLength(1)
+    expect(asked.log.msg).toEqual([{ sessionID: "ses_me", to: "@bob", text: "from the dialog" }])
+    const cancelled = deps({ answer: undefined })
+    await runMsg(cancelled.d, "")
+    expect(cancelled.log.prompts).toHaveLength(1)
+    expect(cancelled.log.msg).toEqual([])
+    expect(cancelled.log.toasts).toEqual([])
+  })
+
+  test("a usage error is a toast; nothing is sent", async () => {
+    const { d, log } = deps()
+    await runMsg(d, "@bob")
+    expect(log.msg).toEqual([])
+    expect(log.toasts).toEqual([["error", expect.stringMatching(/usage/i)]])
+  })
+})
+
+describe("runWho", () => {
+  test("lists the directory in a dialog, asked as the current session, with the filter", async () => {
+    const { d, log } = deps()
+    await runWho(d, "@@reviewer")
+    expect(log.who).toEqual([{ sessionID: "ses_me", role: "reviewer" }])
+    expect(log.alerts).toEqual([{ title: expect.stringMatching(/who/i), message: "@bob · online" }])
+  })
+
+  test("an empty directory is a toast", async () => {
+    const { d, log } = deps({ who: async () => ({ sessions: [] }) })
+    await runWho(d, undefined)
+    expect(log.alerts).toEqual([])
+    expect(log.toasts).toEqual([["info", expect.stringMatching(/no named/i)]])
+  })
+
+  test("without a session: a clear toast and no request", async () => {
+    const { d, log } = deps({ session: undefined })
+    await runWho(d, "")
+    expect(log.who).toEqual([])
+    expect(log.toasts).toEqual([["warning", expect.stringMatching(/open a session/i)]])
   })
 })
