@@ -10,6 +10,8 @@ import { AgentError } from "../src/central/agent/errors"
 import type { Grant } from "../src/central/agent/grants"
 import { parsePattern, type Pattern } from "../src/central/agent/policy"
 import type { PermissionRequest } from "../src/status"
+import { BusyError } from "../src/central/registry"
+import { SpokeError } from "../src/central/spoke-ws"
 
 const USER = "u1"
 const PROJECT = "/work/hub"
@@ -52,6 +54,9 @@ function setup(options: {
   features?: string[]
   escalate?: ActingDeps["escalate"]
   stopped?: "done" | "offline"
+  noOwner?: boolean
+  busy?: boolean
+  deliver?: (req: any) => unknown
 } = {}) {
   const sessions = new Map<string, FakeSession>([
     ["ses_target", { tenant: USER, directory: `${PROJECT}/sub`, root: "ses_target", name: "worker" }],
@@ -94,7 +99,7 @@ function setup(options: {
       },
       permissionTargets: (rootID, id) => (permissions.has(id) && sessions.get(permissions.get(id)!)!.root === rootID ? [{ connID: "c1", sessionID: permissions.get(id)! }] : []),
       formTargets: (rootID, id) => (forms.has(id) && sessions.get(forms.get(id)!)!.root === rootID ? [{ connID: "c1", sessionID: forms.get(id)! }] : []),
-      owner: (id) => (sessions.has(id) ? "c1" : undefined),
+      owner: (id) => (sessions.has(id) && !options.noOwner ? "c1" : undefined),
       supports: (_connID, feature) => features.has(feature),
     },
     directory: {
@@ -108,11 +113,18 @@ function setup(options: {
     actions: {
       answerPermission: async (input) => (calls.push({ op: "permission", ...input }), { outcome: options.answered ?? "done" }),
       answerForm: async (input) => (calls.push({ op: "form", ...input }), { outcome: options.answered ?? "done" }),
-      prompt: async (input) => (calls.push({ op: "prompt", ...input }), { outcome: "done", mode: "steer", inboxID: "inb_1" }),
+      prompt: async (input) => {
+        if (options.busy) throw new BusyError()
+        calls.push({ op: "prompt", ...input })
+        return { outcome: "done", mode: "steer", inboxID: "inb_1" }
+      },
       stop: async (sessionID) => (calls.push({ op: "stop", sessionID }), options.stopped === "offline" ? { outcome: "offline" } : { outcome: "done", result: { stopped: ["ses_target"] } }),
     },
     spokes: {
-      request: async (connID, req) => (calls.push({ connID, ...req }), { delivered: "turn", inboxID: "inb_2" }),
+      request: async (connID, req) => {
+        calls.push({ connID, ...req })
+        return options.deliver ? options.deliver(req) : { delivered: "turn", inboxID: "inb_2" }
+      },
     },
     grants: {
       usable: async (actor, verb, target) =>
@@ -398,5 +410,92 @@ describe("stop", () => {
     const none = setup({ grants: [grant({ allow: ["approve"] })] })
     expect((await failure(none.acting.stop(caller(orchestrator), "ses_target", {}))).code).toBe("forbidden")
     expect([...paused.calls, ...none.calls]).toEqual([])
+  })
+})
+
+describe("prompt", () => {
+  test("an agent's prompt is a deliver of kind prompt with the grant (provenance), waking the session; hops never reset", async () => {
+    const { acting, calls, audits } = setup()
+    expect(await acting.prompt(caller(orchestrator), "@worker", { text: "  run the tests  " })).toEqual({
+      sessionID: "ses_target",
+      messageID: "msg_test",
+      delivered: "turn",
+      inboxID: "inb_2",
+      grant: "g_0000000000000001",
+    })
+    expect(calls).toEqual([
+      {
+        connID: "c1",
+        op: "deliver",
+        sessionID: "ses_target",
+        messageID: "msg_test",
+        text: "run the tests",
+        wake: true,
+        meta: { kind: "prompt", from: "@orch", to: "@worker", grant: "g_0000000000000001" },
+      },
+    ])
+    expect(audits[0]).toMatchObject({ verb: "prompt", target: { sessionID: "ses_target" }, decision: "allow", outcome: "ok" })
+  })
+
+  test("delivery steer|queue passes on; apps send as app:<id>", async () => {
+    const { acting, calls } = setup({ grants: [grant({ holder: "app:0123456789abcdef" })] })
+    await acting.prompt(caller(app), "ses_target", { text: "hi", delivery: "steer" })
+    expect(calls[0].meta).toEqual({ kind: "prompt", from: "app:0123456789abcdef", to: "ses_target", grant: "g_0000000000000001", delivery: "steer" })
+  })
+
+  test("refused: subagent sessions, wake:false, the session itself, images from agents, empty or too long text", async () => {
+    const { acting, calls } = setup({ grants: [grant({ scope: { projects: ["/work"] } })] })
+    for (const [addr, input] of [
+      ["ses_child", { text: "x" }],
+      ["ses_target", { text: "x", wake: false }],
+      ["ses_orch", { text: "x" }],
+      ["ses_target", { text: "x", images: [{ mime: "image/png", data: "AA==" }] }],
+      ["ses_target", { text: "   " }],
+      ["ses_target", { text: "x".repeat(16_001) }],
+    ] as const) {
+      expect([addr, (await failure(acting.prompt(caller(orchestrator), addr, input as any))).code]).toEqual([addr, "invalid"])
+    }
+    expect(calls).toEqual([])
+  })
+
+  test("a spoke without hubPrompt is unsupported; no owner is offline; a dropped spoke is offline", async () => {
+    const old = setup({ features: ["deliver"] })
+    const error = await failure(old.acting.prompt(caller(orchestrator), "ses_target", { text: "x" }))
+    expect([error.code, error.options.extra]).toEqual(["unsupported", { feature: "hubPrompt" }])
+    expect(old.calls).toEqual([])
+    expect(old.audits[0]).toMatchObject({ outcome: "unsupported" })
+    const none = setup({ noOwner: true })
+    expect((await failure(none.acting.prompt(caller(orchestrator), "ses_target", { text: "x" }))).code).toBe("offline")
+    const dropped = setup({
+      deliver: () => {
+        throw new SpokeError("Spoke disconnected")
+      },
+    })
+    expect((await failure(dropped.acting.prompt(caller(orchestrator), "ses_target", { text: "x" }))).code).toBe("offline")
+    expect(dropped.audits[0]).toMatchObject({ outcome: "offline" })
+  })
+
+  test("no prompt verb, kill switch: refused before any spoke request", async () => {
+    const verb = setup({ grants: [grant({ allow: ["stop"] })] })
+    expect((await failure(verb.acting.prompt(caller(orchestrator), "ses_target", { text: "x" }))).code).toBe("forbidden")
+    const paused = setup({ paused: () => true })
+    expect((await failure(paused.acting.prompt(caller(orchestrator), "ses_target", { text: "x" }))).code).toBe("paused")
+    expect([...verb.calls, ...paused.calls]).toEqual([])
+  })
+
+  test("the user's prompt is a human turn (hops reset), with images, up to the console limit", async () => {
+    const { acting, calls, audits } = setup({ grants: [] })
+    const images = [{ mime: "image/png", data: "iVBORw0KGgoAAAANSUhEUg==" }]
+    expect(await acting.prompt(caller(user), "ses_target", { text: "go", images })).toEqual({ sessionID: "ses_target", mode: "steer", inboxID: "inb_1" })
+    expect(calls).toEqual([{ op: "prompt", sessionID: "ses_target", text: "go", images, resetHops: true }])
+    expect(audits[0]).toMatchObject({ actor: { kind: "user" }, verb: "prompt", outcome: "ok" })
+    await acting.prompt(caller(user), "ses_target", { text: "x".repeat(20_000) })
+    expect(calls).toHaveLength(2)
+  })
+
+  test("the user's prompt while another turn starts: rate_limited (retry)", async () => {
+    const { acting } = setup({ busy: true })
+    const error = await failure(acting.prompt(caller(user), "ses_target", { text: "go" }))
+    expect([error.code, error.options.extra]).toEqual(["rate_limited", { retryAfter: 1 }])
   })
 })

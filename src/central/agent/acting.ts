@@ -19,9 +19,22 @@
 // - Every outcome after the address resolves is in the agent audit: decision (allow, needs_user, forbidden,
 //   paused, rate_limited) and outcome (ok, gone, offline, unsupported, escalated, refused, failed).
 // - Races: the request answered elsewhere first is gone (410).
-import { type FormAnswer, PERMISSION_MESSAGE_MAX, type PermissionDecision, type ResultFor, type ServerRequest } from "../../protocol"
+import {
+  DELIVER_TEXT_MAX,
+  type Delivered,
+  type DeliveryMode,
+  type FormAnswer,
+  isDeliverResult,
+  PERMISSION_MESSAGE_MAX,
+  type PermissionDecision,
+  type PromptImage,
+  promptImagesProblem,
+  type ResultFor,
+  type ServerRequest,
+} from "../../protocol"
 import type { Actions } from "../actions"
-import type { Registry } from "../registry"
+import { BusyError, type Registry } from "../registry"
+import { SpokeError } from "../spoke-ws"
 import type { PermissionRequest } from "../../status"
 import type { ActingSwitch } from "./acting-switch"
 import type { AgentActor } from "./actor"
@@ -31,6 +44,7 @@ import type { Directory } from "./directory"
 import { type Party, partyFromActor, partyLabel, sanitizeText } from "./envelope"
 import { AgentError } from "./errors"
 import type { Grant, Grants } from "./grants"
+import { newMessageID } from "./messages"
 import { evaluatePermission, formatPattern, type GrantVerb, parsePattern, type Pattern, riskTier } from "./policy"
 
 /** What the engine reads from the Registry. */
@@ -81,6 +95,8 @@ export interface ActingDeps {
   /** needs_user escalations (P3-T8); without it needs_user is answered and audited as refused. */
   readonly escalate?: Escalate
   readonly newMessageID?: () => string
+  /** Longest prompt a user sends (the console's limit); agents' prompts are at most DELIVER_TEXT_MAX. */
+  readonly maxPromptChars?: number
 }
 
 /** Who acts, for which user. */
@@ -136,6 +152,32 @@ export interface StoppedSession {
   /** The spoke's answer. */
   readonly result: ResultFor["stop"]
 }
+
+export interface PromptInput {
+  readonly text: string
+  /** Users only. */
+  readonly images?: readonly PromptImage[]
+  /** How an agent's prompt enters a busy session (the spoke picks when absent). */
+  readonly delivery?: DeliveryMode
+  /** Agents' prompts always wake the session: false is refused. */
+  readonly wake?: boolean
+  readonly why?: string
+}
+
+/** An agent's prompt, admitted by the spoke under its provenance header. */
+export interface AgentPrompted {
+  readonly sessionID: string
+  readonly messageID: string
+  readonly delivered: Delivered
+  readonly inboxID?: string
+  readonly grant: string
+}
+
+/** The user's prompt: steered into the running tree, or a new turn (its reply streams to the console). */
+export type UserPrompted = { readonly sessionID: string; readonly mode: "steer"; readonly inboxID: string } | { readonly sessionID: string; readonly mode: "turn" }
+
+/** The console's prompt limit (http.ts MAX_PROMPT_CHARS; Central passes it). */
+const DEFAULT_MAX_PROMPT_CHARS = 100_000
 
 /** The addressed session, live in the user's catalog. */
 interface Located {
@@ -198,6 +240,7 @@ function neverForms(request: PermissionRequest): PermissionRequest[] {
 
 const patterns = (texts: readonly string[]): Pattern[] => texts.flatMap((t) => parsePattern(t) ?? [])
 
+const invalid = (message: string) => new AgentError("invalid", message)
 const forbidden = (message: string) => new AgentError("forbidden", message)
 const offline = () => new AgentError("offline", "No spoke reports this session now")
 
@@ -282,6 +325,84 @@ export class Acting {
         return { sessionID: target.sessionID, ...(grant ? { grant: grant.id } : {}), result: stopped.result }
       },
     })
+  }
+
+  /**
+   * Prompts the addressed session. An agent's prompt is a deliver of kind "prompt" naming the sender and grant
+   * (feature hubPrompt; the spoke renders the provenance header), never a human turn: hop chains are kept.
+   * Refused (invalid): subagent sessions, the session itself, wake:false, images. The user's prompt is a human turn.
+   */
+  async prompt(caller: Caller, addr: string, input: PromptInput): Promise<AgentPrompted | UserPrompted> {
+    const { actor, userID } = caller
+    const text = input.text.trim()
+    const images = input.images?.length ? input.images : undefined
+    if (actor.kind === "user") {
+      if (images) {
+        const problem = promptImagesProblem(images)
+        if (problem) throw invalid(problem)
+      }
+      if (!text && !images) throw invalid("Empty prompt")
+      const max = this.deps.maxPromptChars ?? DEFAULT_MAX_PROMPT_CHARS
+      if (text.length > max) throw invalid(`Prompt longer than ${max} characters`)
+    } else {
+      if (images) throw invalid("An agent's prompt is text only")
+      if (input.wake === false) throw invalid("An agent's prompt always wakes the session (send a message for wake: false)")
+      if (!text) throw invalid("Empty prompt")
+      if (text.length > DELIVER_TEXT_MAX) throw invalid(`Prompt longer than ${DELIVER_TEXT_MAX} characters`)
+    }
+    const target = this.locate(userID, addr)
+    if (actor.kind !== "user") {
+      if (target.parentID) throw invalid("Prompts go to root sessions, not subagent sessions")
+      if (actor.kind === "session" && actor.sessionID === target.sessionID) throw invalid("A session never prompts itself")
+    }
+    return this.act(caller, "prompt", target, {}, input.why, {
+      run: async (grant) => {
+        if (!grant) return this.userPrompt(target.sessionID, text, images)
+        return this.agentPrompt(caller, addr, target.sessionID, text, grant, input.delivery)
+      },
+    })
+  }
+
+  private async userPrompt(sessionID: string, text: string, images: readonly PromptImage[] | undefined): Promise<UserPrompted> {
+    let started
+    try {
+      started = await this.deps.actions.prompt({ sessionID, text, ...(images ? { images } : {}), resetHops: true })
+    } catch (cause) {
+      if (cause instanceof BusyError) throw new AgentError("rate_limited", "Another turn is starting in this session", { hint: "Try again", extra: { retryAfter: 1 } })
+      throw cause
+    }
+    if (started.outcome === "offline") throw offline()
+    if (started.mode === "steer") return { sessionID, mode: "steer", inboxID: started.inboxID }
+    // Nobody waits for the turn here: its reply streams to the console.
+    void started.result.catch(() => {})
+    return { sessionID, mode: "turn" }
+  }
+
+  private async agentPrompt(caller: Caller, addr: string, sessionID: string, text: string, grant: Grant, delivery: DeliveryMode | undefined): Promise<AgentPrompted> {
+    const { registry, spokes } = this.deps
+    const connID = registry.owner(sessionID)
+    if (!connID) throw offline()
+    for (const feature of ["deliver", "hubPrompt"] as const) {
+      if (!registry.supports(connID, feature)) throw new AgentError("unsupported", `The session's spoke does not support ${feature}`, { extra: { feature } })
+    }
+    const messageID = (this.deps.newMessageID ?? newMessageID)()
+    const from = this.address(caller)
+    let result: unknown
+    try {
+      result = await spokes.request(connID, {
+        op: "deliver",
+        sessionID,
+        messageID,
+        text,
+        wake: true,
+        meta: { kind: "prompt", from, to: addr, grant: grant.id, ...(delivery ? { delivery } : {}) },
+      })
+    } catch (cause) {
+      if (cause instanceof SpokeError && /disconnected/i.test(cause.message)) throw new AgentError("offline", "The session's spoke disconnected")
+      throw cause
+    }
+    if (!isDeliverResult(result)) throw new Error("The spoke answered a deliver malformed")
+    return { sessionID, messageID, delivered: result.delivered, ...(result.inboxID ? { inboxID: result.inboxID } : {}), grant: grant.id }
   }
 
   // ---------- the check order ----------
@@ -402,6 +523,19 @@ export class Acting {
       throw new AgentError("not_found", `No pending request ${requestID} in this session's tree`)
     }
     return origin
+  }
+
+  /** The caller's address as a deliver's meta.from: `@name` or the session ID, `app:<token id>`. */
+  private address(caller: Caller): string {
+    const party = this.party(caller)
+    switch (party.kind) {
+      case "session":
+        return party.name ? `@${party.name}` : party.sessionID
+      case "app":
+        return `app:${party.tokenID}`
+      case "user":
+        return "@me"
+    }
   }
 
   /** The caller as the audit and envelopes name it (a session by its directory name). */
