@@ -176,3 +176,20 @@ describe("renderPrimer", () => {
     expect(renderPrimer({ sessionID: "ses_q", roles: [] })).toBe("[hub] You are ses_q. Message others with `hub msg @name`; see `hub who`.")
   })
 })
+
+describe("envelope size", () => {
+  test("the worst-case rendered envelope of a maximal body fits the deliver text limit", async () => {
+    const { DELIVER_TEXT_MAX } = await import("../packages/protocol/src/index.ts")
+    const { TEXT_MAX } = await import("../src/central/agent/messages")
+    const { renderEnvelope, LABEL_MAX } = await import("../src/central/agent/envelope")
+    const label = "n".repeat(LABEL_MAX)
+    const party = { kind: "session", sessionID: `ses_${"x".repeat(60)}`, name: label, harness: label, machine: label } as any
+    // Every line needs escaping and is as short as possible: the largest growth.
+    const body = "↩\n".repeat(Math.floor(TEXT_MAX / 2)).slice(0, TEXT_MAX)
+    const text = renderEnvelope({ id: `msg_${"a".repeat(22)}`, kind: "ask", from: party, to: `@@${"r".repeat(LABEL_MAX)}`, at: 1_793_000_000_000, text: body, replyTo: `msg_${"b".repeat(22)}`, expiresAt: 1_793_100_000_000 } as any)
+    expect(text.length).toBeLessThanOrEqual(DELIVER_TEXT_MAX)
+    // and a 16000-character body would not have fitted: the limit is needed.
+    const big = renderEnvelope({ id: `msg_${"a".repeat(22)}`, kind: "ask", from: party, to: "@@r", at: 1, text: "↩\n".repeat(8000), expiresAt: 2 } as any)
+    expect(big.length).toBeGreaterThan(DELIVER_TEXT_MAX)
+  })
+})

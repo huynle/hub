@@ -25,7 +25,8 @@ export const USER_MESSAGES = 10_000
 /** Stored bytes per user. */
 export const USER_BYTES = 20 * 1024 * 1024
 /** Characters of message text. */
-export const TEXT_MAX = 16_000
+/** Body limit: the rendered envelope (escaped lines, header, boundaries, hint) must fit DELIVER_TEXT_MAX (16000). */
+export const TEXT_MAX = 10_000
 /** Characters of a decline reason. */
 export const WHY_MAX = 1_000
 /** Default and bounds of an ask's lifetime. */
