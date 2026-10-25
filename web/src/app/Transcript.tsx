@@ -74,6 +74,7 @@ export function Transcript(props: { sessionID: string; blocks: Block[]; ticks: R
             </Match>
             <Match when={b.type === "thought" && b}>{(t) => <Thought block={t()} expanded={props.expanded} onToggle={props.onToggle} />}</Match>
             <Match when={b.type === "tools" && b}>{(t) => <Tools block={t()} sessionID={props.sessionID} onDetail={props.onDetail} expanded={props.expanded} onToggle={props.onToggle} />}</Match>
+            <Match when={b.type === "message" && b}>{(m) => <HubMessage block={m()} expanded={props.expanded} onToggle={props.onToggle} />}</Match>
             <Match when={b.type === "subagent" && b}>
               {(s) => (
                 <a class={`subagent ${s().state}`} href={sessionHref(s().sessionID)} data-key={s().key}>
@@ -92,6 +93,42 @@ export function Transcript(props: { sessionID: string; blocks: Block[]; ticks: R
         )}
       </For>
     </div>
+  )
+}
+
+/** A hub message: "from @y" / "to @@r (→ @x)" over its text; the identity primer folds into one line. */
+function HubMessage(props: { block: Extract<Block, { type: "message" }> } & Expansion) {
+  const open = () => !!props.expanded[props.block.key]
+  return (
+    <Show
+      when={!props.block.primer}
+      fallback={
+        <div class="fold hub-note" data-key={props.block.key}>
+          <button type="button" class="fold-head" aria-expanded={open()} onClick={() => props.onToggle(props.block.key, !open())}>
+            <span class="hub-msg-mark" aria-hidden="true">⇄</span>
+            <span>{props.block.label}</span>
+            <Icon name="chevron" class="chev" />
+          </button>
+          <Show when={open()}>
+            <div class="fold-body hub-msg-text">{props.block.text}</div>
+          </Show>
+        </div>
+      }
+    >
+      <div class={`msg hub-msg ${props.block.direction}`} data-key={props.block.key} role="group" aria-label={`Hub ${props.block.kind} ${props.block.label}`}>
+        <div class="hub-msg-head">
+          <span class="hub-msg-mark" aria-hidden="true">{props.block.direction === "out" ? "↗" : "↘"}</span>
+          <Show when={props.block.kind !== "msg"}>
+            <span class="hub-msg-kind">{props.block.kind}</span>
+          </Show>
+          <span class="hub-msg-label">{props.block.label}</span>
+          <Show when={props.block.state === "open" || props.block.state === "answered" || props.block.state === "declined" || props.block.state === "expired"}>
+            <span class="hub-msg-state muted">{props.block.state}</span>
+          </Show>
+        </div>
+        <div class="hub-msg-text">{props.block.text}</div>
+      </div>
+    </Show>
   )
 }
 

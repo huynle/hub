@@ -343,6 +343,14 @@ pre.code { white-space: pre; font-size: 0.75rem; }
 .tool-name { font-family: var(--mono); font-size: 0.7812rem; }
 .tool-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.7812rem; }
 .tool-detail pre { background: var(--side); border: 1px solid var(--line); border-radius: 6px; padding: 8px; max-height: 360px; overflow: auto; }
+.hub-msg { border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: var(--r); padding: 6px 10px; max-width: 85%; }
+.hub-msg.out { align-self: flex-end; }
+.hub-msg-head { display: flex; align-items: center; gap: 6px; font-size: 0.7812rem; color: var(--muted); margin-bottom: 2px; }
+.hub-msg-mark { color: var(--accent); }
+.hub-msg-kind { font-family: var(--mono); font-size: 0.7188rem; text-transform: uppercase; }
+.hub-msg-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hub-msg-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.875rem; }
+.hub-note .fold-body { color: var(--muted); }
 .subagent { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: var(--r); padding: 8px 10px; color: var(--muted); }
 .subagent:hover { background: var(--side); color: var(--text); }
 .sub-mark { color: var(--accent); width: 14px; display: inline-grid; place-items: center; }
