@@ -7,6 +7,7 @@ import { parse, str, UsageError, type CommandSpec, type Parsed } from "./args"
 import { loginFile, readLogin, removeLogin, resolveCredentials, writeLogin, type Credentials, type Env } from "./credentials"
 import { atName, logText, whoamiText, type Actor, roleText, sessionsText, showText, statusText, whoText } from "./format"
 import { CliError, EXIT, withHub } from "./http"
+import { serveMcp } from "./mcp"
 import { ASK_EXPIRES_DEFAULT_S, askOutcome, declinedText, durationArg, inboxText, mutedText, repliedText, sentText, textArg } from "./messaging"
 import { watch } from "./watch"
 import { DECISION_FLAGS, decisionOptions, decisionsText, openedText, stateArg } from "./decisions"
@@ -22,8 +23,10 @@ export interface Io {
   stderr(s: string): void
   /** The whole of stdin (login reads the token from it when --token is not given). */
   stdin?: () => Promise<string>
-  /** Ends `watch` (main.ts aborts it on SIGINT/SIGTERM). */
+  /** Ends `watch` and `mcp` (main.ts aborts it on SIGINT/SIGTERM). */
   signal?: AbortSignal
+  /** stdin as a stream (`hub mcp` reads JSON-RPC lines from it). */
+  input?: AsyncIterable<Uint8Array | string>
 }
 
 export const USAGE = `Usage: hub <command> [options]     (also installed as hubctl)
@@ -56,6 +59,9 @@ Messaging (text "-" reads it from stdin)
   hub decisions list [--state open|answered|expired]   the Decisions you asked
   hub inbox                           asks to answer, your open asks, recent messages, mutes
   hub mute <addr> · hub unmute <addr>    refuse (or accept again) messages from a session
+
+MCP
+  hub mcp                             an MCP server on stdio: these verbs as tools, with this CLI's credential
 
 Login (outside a hub session)
   hub login [--url URL] [--token APP_TOKEN]   store an app token (token read from stdin when not given)
@@ -266,6 +272,12 @@ const COMMANDS: Record<string, Command> = {
     async handle(context) {
       const body = await context.hub((hub) => hub.unmute(context.parsed.args[0]!))
       answer(context, body, (b) => mutedText(b.muted))
+    },
+  },
+  mcp: {
+    async handle({ io, credentials }) {
+      if (!io.input) throw new UsageError("needs stdin")
+      await serveMcp({ input: io.input, write: io.stdout, log: io.stderr, credentials, version: VERSION, ...(io.signal ? { signal: io.signal } : {}) })
     },
   },
   login: {

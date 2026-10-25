@@ -18,6 +18,8 @@ export type Block =
   | { type: "thought"; key: string; text: string; running: boolean; seconds?: number }
   | { type: "tools"; key: string; items: TimelineRow[]; failed: number; running: number }
   | { type: "subagent"; key: string; sessionID: string; label: string; state: string }
+  /** A hub message: `label` "from @y" (in) or "to @@r (→ @x)" (out); the identity primer is a compact note. */
+  | { type: "message"; key: string; direction: "in" | "out"; kind: string; label: string; text: string; primer: boolean; state?: string }
 
 /** URL of one image of a user message (GET …/timeline/messages/:message/files/:index). */
 export const messageFileURL = (sessionID: string, messageID: string, index: number) =>
@@ -75,12 +77,26 @@ export function transcriptBlocks(rows: readonly TimelineRow[]): Block[] {
         if (!group) out.push(target)
         break
       }
+      case "message":
+        out.push(messageBlock(row))
+        break
       case "subagent":
         if (row.sessionID) out.push({ type: "subagent", key: row.key, sessionID: row.sessionID, label: row.label ?? row.sessionID, state: row.state ?? "working" })
         break
     }
   }
   return out
+}
+
+function messageBlock(row: TimelineRow): Extract<Block, { type: "message" }> {
+  const meta = row.message && typeof row.message === "object" ? (row.message as Record<string, unknown>) : {}
+  const kind = typeof meta.kind === "string" ? meta.kind : "msg"
+  const direction = row.direction === "out" ? "out" : "in"
+  const to = String(meta.to ?? "")
+  const recipient = typeof row.recipient === "string" ? row.recipient : undefined
+  const label =
+    kind === "primer" ? "Hub identity note" : direction === "out" ? `to ${to}${recipient && recipient !== to ? ` (→ ${recipient})` : ""}` : `from ${String(meta.from ?? "?")}`
+  return { type: "message", key: row.key, direction, kind, label, text: row.text ?? "", primer: kind === "primer", ...(typeof row.state === "string" ? { state: row.state } : {}) }
 }
 
 /** Shown when a thought has no readable text: the provider kept only an encrypted signature. */

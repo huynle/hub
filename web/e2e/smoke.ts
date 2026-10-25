@@ -343,6 +343,32 @@ async function desktop(browser: Browser): Promise<void> {
     await shot(page, "desktop-thoughts")
   })
 
+  await check("desktop: hub messages — received (history), sent (hub store), live, compact primer, no duplicates", async () => {
+    const inbound = page.getByRole("group", { name: "Hub msg from @web-work" })
+    await inbound.waitFor()
+    assert((await inbound.textContent())?.includes("The API types changed; please rebase."), "inbound body without the envelope")
+    assert(!(await inbound.textContent())?.includes("----- hm_in1"), "no envelope boundaries")
+    const sent = page.getByRole("group", { name: "Hub ask to @@reviewer (→ @rev)" })
+    await sent.waitFor()
+    assert((await sent.textContent())?.includes("Can you review the picker fix?"), "sent message text")
+    const primer = page.getByRole("button", { name: /Hub identity note/ })
+    await primer.waitFor()
+    assert(!(await page.getByText(/You are @mock/).count()), "primer folded by default")
+    await primer.click()
+    await page.getByText(/You are @mock/).waitFor()
+    await primer.click()
+    // The same sent message again (SSE) and a new one received live: one row each.
+    const event = (message: Record<string, unknown>) => mock("/mock/emit", { type: "message", message })
+    await event({ id: "hm_out1", kind: "ask", from: { kind: "session", sessionID: "ses_mock", name: "mock" }, to: "@@reviewer", recipient: { kind: "session", sessionID: "ses_rev", name: "rev" }, text: "Can you review the picker fix?", state: "answered", at: Date.now() - 20 * 60_000 + 31_500, hop: 0 })
+    await event({ id: "hm_live1", kind: "reply", replyTo: "hm_out1", from: { kind: "session", sessionID: "ses_rev", name: "rev" }, to: "@mock", recipient: { kind: "session", sessionID: "ses_mock", name: "mock" }, text: "Looks good to me.", state: "sent", at: Date.now(), hop: 1 })
+    await event({ id: "hm_other", kind: "msg", from: { kind: "session", sessionID: "ses_x" }, to: "@y", recipient: { kind: "session", sessionID: "ses_y" }, text: "not this session's", state: "sent", at: Date.now(), hop: 0 })
+    await page.getByRole("group", { name: "Hub reply from @rev" }).waitFor()
+    assert((await page.getByRole("group", { name: "Hub ask to @@reviewer (→ @rev)" }).count()) === 1, "the sent message shows once")
+    await sent.getByText("answered").waitFor()
+    assert(!(await page.getByText("not this session's").count()), "other sessions' messages stay out")
+    await shot(page, "desktop-hub-messages")
+  })
+
   await check("desktop: composer Send → Steer + Stop while running → Send", async () => {
     // The turn stays working until Stop: steering and stopping never race the mock turn's timer.
     await mock("/mock/hold-turns", { on: true })

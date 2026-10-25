@@ -85,6 +85,10 @@ export interface TimelineRow {
 const reasoningKey = (messageID: string) => `${messageID}:reasoning`
 /** Key of live text of a message's text part (`ordinal`; all its text with hubs that do not send it). */
 const textKey = (messageID: string, ordinal?: number) => (ordinal === undefined ? `${messageID}:text` : `${messageID}:text:${ordinal}`)
+/** Key of a hub message row from the hub's store or a live 'message' event. */
+const hubMessageKey = (messageID: string) => `hubmsg:${messageID}`
+/** History positions per millisecond of a message's creation time (src/spoke/timeline.ts POS_PARTS). */
+const POS_PER_MS = 1000
 /** Key of a live tool activity item. */
 const activityKey = (sessionID: string, id: string) => `activity:${sessionID}:${id}`
 
@@ -187,6 +191,7 @@ export class Timeline {
       if (item.ordinal === undefined || item.ordinal === 0) candidates.push(textKey(messageID))
     }
     if (item.kind === "tool" && typeof item.callID === "string" && typeof item.sessionID === "string") candidates.push(activityKey(item.sessionID, item.callID))
+    if (item.kind === "message" && messageID) candidates.push(hubMessageKey(messageID))
     for (const key of candidates) {
       const row = key === item.key ? undefined : this.items.get(key)
       if (row && !this.history.has(key)) return row
@@ -288,6 +293,25 @@ export class Timeline {
     this.items.set(item.key, { ...(this.items.get(item.key) ?? {}), ...item } as TimelineRow)
   }
 
+  /**
+   * A hub message from the hub's store or a live 'message' event (storedMessageRow): placed by its time among the
+   * history rows (the spoke's positions count POS_PER_MS per millisecond), merged with an earlier copy, and left
+   * out when the spoke's row of the same delivered message is already there (that row replaces it otherwise).
+   */
+  hubMessage(row: TimelineInput): void {
+    if (!row || typeof row.key !== "string" || typeof row.messageID !== "string") return
+    for (const [key, item] of this.items) if (key !== row.key && item.kind === "message" && item.messageID === row.messageID && this.history.has(key)) return
+    if (!this.places.has(row.key)) {
+      if (typeof row.at === "number" && Number.isFinite(row.at)) {
+        const pos = row.at * POS_PER_MS
+        this.places.set(row.key, { pos, live: 0 })
+        // What arrives live after it goes after it.
+        this.top = Math.max(this.top, pos)
+      } else this.places.set(row.key, this.livePlace())
+    }
+    this.put(row as Keyed)
+  }
+
   /** Whether `key` came from a history page. */
   fromHistory(key: string): boolean {
     return this.history.has(key)
@@ -377,4 +401,38 @@ export class Timeline {
 
 function pick(row: TimelineRow, keys: readonly string[]): Record<string, unknown> {
   return Object.fromEntries(keys.filter((key) => row[key] !== undefined).map((key) => [key, row[key]]))
+}
+
+/** How a stored message names a party (src/central/agent/messages.ts addressOf; apps by their label). */
+function partyAddress(raw: unknown): string {
+  const party = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {}
+  const label = (value: unknown) => (typeof value === "string" && value ? value : undefined)
+  if (party.kind === "session") return label(party.name) ? `@${party.name}` : String(party.sessionID ?? "?")
+  if (party.kind === "user") return "@me"
+  if (party.kind === "app") return `app ${label(party.label) ?? String(party.tokenID ?? "?")}`
+  return "?"
+}
+
+/**
+ * The row of a stored hub message (GET /api/sessions/:session/messages, SSE 'message') in `sessionID`'s
+ * transcript: "out" when the session sent it, "in" when it got it; nothing when it is not the session's.
+ */
+export function storedMessageRow(sessionID: string, raw: unknown): TimelineInput | undefined {
+  const m = raw && typeof raw === "object" ? (raw as Record<string, any>) : undefined
+  if (!m || typeof m.id !== "string" || !m.id || typeof m.kind !== "string" || typeof m.to !== "string") return undefined
+  const ofSession = (party: any) => party?.kind === "session" && party.sessionID === sessionID
+  const direction = ofSession(m.from) ? "out" : ofSession(m.recipient) ? "in" : undefined
+  if (!direction) return undefined
+  return {
+    key: hubMessageKey(m.id),
+    kind: "message",
+    messageID: m.id,
+    sessionID,
+    text: typeof m.text === "string" ? m.text : "",
+    ...(typeof m.at === "number" ? { at: m.at } : {}),
+    direction,
+    message: { kind: m.kind, from: partyAddress(m.from), to: m.to, ...(typeof m.replyTo === "string" ? { replyTo: m.replyTo } : {}) },
+    recipient: partyAddress(m.recipient),
+    ...(typeof m.state === "string" ? { state: m.state } : {}),
+  }
 }

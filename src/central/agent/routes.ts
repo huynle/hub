@@ -57,7 +57,7 @@ export interface AgentDeps {
   readonly delivery?: Delivery
   /** Decisions (ask @me, P2-T9): with the message routes. */
   readonly decisions?: Decisions
-  /** The message feed (watch events, waiters); the hub shares it with its console routes (default: a new one). */
+  /** Stored messages as they are sent (the hub also streams them to the console); a new feed when absent. */
   readonly feed?: MessageFeed
   /** Heartbeat of GET /api/agent/watch. */
   readonly heartbeatMs?: number
