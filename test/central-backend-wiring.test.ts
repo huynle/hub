@@ -1,7 +1,12 @@
-// Backends bundle: memoryBackends shares one clock across the in-memory backends, and startCentral exposes the
-// bundle (its own by default, or the one passed in) for new code.
+// Backends bundle: memoryBackends shares one clock across the in-memory backends, fileBackends keeps the
+// StateStore in files, and startCentral exposes the bundle (file state under its stateDir by default, or the
+// one passed in) for new code, flushing it on stop.
 import { afterEach, describe, expect, test } from "bun:test"
-import { memoryBackends } from "../src/central/backend"
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import path from "node:path"
+import { fileBackends, memoryBackends } from "../src/central/backend"
+import { FileStateStore } from "../src/central/backend/file-state"
 import { MemoryBus } from "../src/central/backend/memory-bus"
 import { MemoryCatalog } from "../src/central/backend/memory-catalog"
 import { MemoryCounters, MemoryLocks } from "../src/central/backend/memory-counters"
@@ -36,6 +41,26 @@ describe("memoryBackends", () => {
   })
 })
 
+describe("fileBackends", () => {
+  test("keeps state in files under <stateDir>/agent, everything else in memory, on one clock", async () => {
+    const stateDir = mkdtempSync(path.join(tmpdir(), "hub-file-backends-"))
+    try {
+      const backends = fileBackends({ stateDir, now: () => 7 })
+      expect(backends.state).toBeInstanceOf(FileStateStore)
+      expect(backends.bus).toBeInstanceOf(MemoryBus)
+      expect(backends.events).toBeInstanceOf(MemoryEventLog)
+      expect(backends.counters).toBeInstanceOf(MemoryCounters)
+      expect(backends.locks).toBeInstanceOf(MemoryLocks)
+      expect(backends.catalog).toBeInstanceOf(MemoryCatalog)
+      await backends.state.claim("ns", "k", "o")
+      await backends.state.flush?.()
+      expect(await new FileStateStore({ stateDir }).claimOf("ns", "k")).toEqual({ namespace: "ns", key: "k", owner: "o", at: 7 })
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true })
+    }
+  })
+})
+
 describe("startCentral backends", () => {
   let hub: Harness | undefined
   afterEach(async () => {
@@ -43,10 +68,23 @@ describe("startCentral backends", () => {
     hub = undefined
   })
 
-  test("creates in-memory backends by default", () => {
+  test("keeps state in files under its stateDir by default, the rest in memory", () => {
     hub = harness()
-    expect(hub.backends.state).toBeInstanceOf(MemoryStateStore)
+    expect(hub.backends.state).toBeInstanceOf(FileStateStore)
     expect(hub.backends.bus).toBeInstanceOf(MemoryBus)
+  })
+
+  test("stop flushes pending state; a restarted hub reads it back; state.json stays untouched", async () => {
+    hub = harness()
+    const { stateDir } = hub
+    await hub.backends.state.put("alice", "messages", "m1", { text: "kept" })
+    await hub.backends.state.claim("alice:names", "scout", "agent_1")
+    expect(existsSync(path.join(stateDir, "agent"))).toBe(false)
+    await hub.stop()
+    hub = harness({ env: { HUB_STATE_DIR: stateDir } })
+    expect(await hub.backends.state.get("alice", "messages", "m1")).toEqual({ value: { text: "kept" }, version: 1 })
+    expect((await hub.backends.state.claimOf("alice:names", "scout"))!.owner).toBe("agent_1")
+    expect(readFileSync(path.join(stateDir, "state.json"), "utf8")).not.toContain("kept")
   })
 
   test("uses the backends it is given", () => {
