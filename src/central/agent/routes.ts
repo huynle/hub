@@ -25,6 +25,7 @@ import { type ActingSwitch, actingSwitchRoutes } from "./acting-switch"
 import { Acting, type ActingRegistry, type Escalate } from "./acting"
 import { actingRoutes } from "./acting-routes"
 import type { Actions } from "../actions"
+import { launchRoutes, type RouteLaunches } from "./launch-routes"
 
 export const AGENT_PREFIX = "/api/agent"
 
@@ -78,6 +79,11 @@ export interface AgentDeps {
    * POST /api/agent/sessions/:addr/{approve,deny,answer,prompt,stop} (P3-T7).
    */
   readonly actions?: Actions
+  /**
+   * Launches (P4-T8): with grants, acting and audit, the launch routes /api/agent/launches (P4-T9); the read
+   * routes show the labels of launched sessions.
+   */
+  readonly launches?: RouteLaunches
   /** needs_user escalations of the act verbs (P3-T8 opens a Decision); without it needs_user is only answered. */
   readonly escalate?: Escalate
   /** The console's prompt limit, for the user's prompts on the act route. */
@@ -122,6 +128,9 @@ export function agentRoutes(deps: AgentDeps): AgentRoute[] {
     ...(deps.grants ? grantRoutes(deps.grants, deps.now, deps.grantRequests) : []),
     ...(deps.acting ? actingSwitchRoutes(deps.acting) : []),
     ...actVerbRoutes(deps),
+    ...(deps.launches && deps.grants && deps.acting && deps.audit
+      ? launchRoutes({ launches: deps.launches, grants: deps.grants, acting: deps.acting, audit: deps.audit, ...(deps.directory ? { directory: deps.directory } : {}) })
+      : []),
   ]
 }
 

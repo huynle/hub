@@ -41,6 +41,7 @@ import { SpeechService } from "./speech/service"
 import { NodeRegistry } from "./nodes"
 import { randomBytes } from "node:crypto"
 import { LaunchEngine } from "./agent/launch-engine"
+import { LaunchFeed, launchInfo } from "./agent/launch-routes"
 import { RequestTimeoutError, RequestTooLargeError, SpokeError, SpokeHub, type Notifier, type SpokeHubOptions, type SpokeSocketData } from "./spoke-ws"
 import { ACTIVITY_INTERVAL_MAX, ACTIVITY_INTERVAL_MIN, LOCAL_USER, PUSH_PREF_KEYS, quietHoursInput, Store, VIEW_PREF_KEYS, type DeviceRecord, type LegacyPushPrefs, type PushPrefs, type UserRecord, type ViewPrefs } from "./store"
 
@@ -107,6 +108,8 @@ export interface Central {
   readonly acting: ActingSwitch
   /** Launches (design §6): accept, list, stop; placement onto nodes and each launch's run to its end. */
   readonly launches: LaunchEngine
+  /** Every launch change, per user (SSE 'launch' events and the agent watch subscribe; webhooks hang off it). */
+  readonly launchFeed: LaunchFeed
   /** The JSON API's route table (method, path, access), for audits and tests. */
   readonly routes: readonly RouteInfo[]
   stop(): Promise<void>
@@ -570,7 +573,10 @@ export function startCentral(options: CentralOptions): Central {
   const actions = createActions({ registry, spokes, humanTurn })
   delivery.start()
   // Launches (design §6): placement onto the user's nodes, prepare on the node, the session through the machine's
-  // service spoke, then its end; restart recovery runs on start.
+  // service spoke, then its end; restart recovery runs on start. Every change goes to launchFeed: the owner's
+  // console streams get it as a 'launch' event.
+  const launchFeed = new LaunchFeed()
+  launchFeed.subscribe((userID, launch) => broadcast({ type: "launch", launch: launchInfo(launch) }, { tenant: userID }))
   const launches = new LaunchEngine({
     state: backends.state,
     counters: backends.counters,
@@ -587,6 +593,7 @@ export function startCentral(options: CentralOptions): Central {
     actions,
     users: () => store.users().map((u) => u.id),
     now,
+    onLaunchChanged: (launch) => launchFeed.publish(launch.owner, launch),
   })
   void launches.start().catch((cause) => console.error(`[hub] launches did not start: ${(cause as Error).message}`))
 
@@ -635,7 +642,7 @@ export function startCentral(options: CentralOptions): Central {
     void escalations.closed(tenant, requestID).catch((cause) => console.error(`[hub] escalation close failed: ${(cause as Error).message}`))
   })
   const escalate: Escalate = (escalation) => escalations.escalate(escalation)
-  const agentDeps = { store, sessionTokens, directory, registry, spokes, delivery, decisions, feed, heartbeatMs, now, audit, grants, grantRequests, acting, actions, escalate, maxPromptChars: MAX_PROMPT_CHARS }
+  const agentDeps = { store, sessionTokens, directory, registry, spokes, delivery, decisions, feed, heartbeatMs, now, audit, grants, grantRequests, acting, actions, escalate, launches, maxPromptChars: MAX_PROMPT_CHARS }
   const resolveActor = createResolver({
     cookieName: COOKIE,
     findDevice: (token) => store.findDevice(token),
@@ -1562,6 +1569,7 @@ export function startCentral(options: CentralOptions): Central {
     decisions,
     acting,
     launches,
+    launchFeed,
     routes: [...routes.map(({ method, path, access }) => ({ method, path, access })), ...agent.routes.map(({ method, path }) => ({ method, path, access: "agent" as const }))],
     async stop() {
       launches.shutdown()

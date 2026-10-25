@@ -24,7 +24,7 @@ import { AgentError } from "./errors"
 import type { Grant, Grants } from "./grants"
 import type { LaunchEngine, LaunchView } from "./launch-engine"
 import { type LaunchSpec, validateLaunchSpec } from "./launch-spec"
-import { LAUNCH_STATES, type LaunchFilter, type LaunchState, type LaunchStep } from "./launch-store"
+import { LAUNCH_STATES, type Launch, type LaunchFilter, type LaunchState, type LaunchStep } from "./launch-store"
 import type { AgentRoute } from "./routes"
 
 // A literal: routes.ts imports this module (AGENT_PREFIX is not initialised yet when it loads).
@@ -42,6 +42,32 @@ export interface LaunchRoutesDeps {
   readonly audit: Pick<AgentAudit, "record">
   /** Names a session caller in the audit. */
   readonly directory?: Pick<Directory, "resolveOne">
+}
+
+/** A launch change for its user (the engine's onLaunchChanged). */
+export type LaunchListener = (userID: string, launch: Launch) => void
+
+/**
+ * Every launch change, per user: the hub's SSE 'launch' events, GET /api/agent/watch and webhooks (P4-T10)
+ * subscribe. A throwing listener is logged and never stops the others.
+ */
+export class LaunchFeed {
+  private readonly listeners = new Set<LaunchListener>()
+
+  subscribe(listener: LaunchListener): () => void {
+    this.listeners.add(listener)
+    return () => void this.listeners.delete(listener)
+  }
+
+  publish(userID: string, launch: Launch): void {
+    for (const listener of [...this.listeners]) {
+      try {
+        listener(userID, launch)
+      } catch (cause) {
+        console.error(`[hub] launch listener failed: ${cause instanceof Error ? cause.message : String(cause)}`)
+      }
+    }
+  }
 }
 
 /** A launch as the API shows it: LaunchInfo, plus who launched it and its steps. */
