@@ -1,0 +1,170 @@
+// A fake hub for spoke tests: HTTP enrollment (/spoke/enroll, /spoke/enroll/poll), the spoke WebSocket
+// (/spoke/ws: hello → welcome, every parsed frame recorded) and server requests correlated with the spoke's `res`.
+import { encode, parseSpokeMessage, PROTOCOL_VERSION, type EnrollPoll, type ServerMessage, type SpokeMessage } from "../../protocol/src/index.ts"
+
+export type SpokeRes = Extract<SpokeMessage, { t: "res" }>
+
+export interface FakeHub {
+  url: string
+  /** Every frame the spokes sent that parsed, in arrival order. */
+  frames: SpokeMessage[]
+  /** The authorization header of each /spoke/ws upgrade (null when absent). */
+  auth: Array<string | null>
+  sockets: Array<Bun.ServerWebSocket<unknown>>
+  closed: number
+  /** Replies for POST /spoke/enroll/poll, consumed in order (last one repeats). */
+  pollReplies: EnrollPoll[]
+  /** Sends a frame (or raw text) to the latest socket. */
+  send(message: ServerMessage | string): void
+  /** Sends a server request and resolves with the spoke's `res` frame. */
+  request(req: unknown): Promise<SpokeRes>
+  /** Resolves with the first recorded frame (past or future) matching the predicate. */
+  next(predicate?: (frame: SpokeMessage) => boolean, timeoutMs?: number): Promise<SpokeMessage>
+  stop(): Promise<void>
+}
+
+export interface FakeHubOptions {
+  onFrame?: (m: SpokeMessage, ws: Bun.ServerWebSocket<unknown>) => void
+  port?: number
+  enrollExtra?: Record<string, unknown>
+  /** Features the welcome lists (none by default, like a hub that predates them). */
+  hubFeatures?: readonly string[]
+  /** Answers other HTTP requests (e.g. /api/agent/*) before the 404. */
+  http?: (req: Request) => Response | Promise<Response> | undefined
+}
+
+export function fakeHub(options: FakeHubOptions = {}): FakeHub {
+  let reqID = 0
+  const waiters = new Map<string, (m: SpokeRes) => void>()
+  const frameWaiters = new Set<() => void>()
+  const fake: FakeHub = {
+    url: "",
+    frames: [],
+    auth: [],
+    sockets: [],
+    closed: 0,
+    pollReplies: [{ status: "pending" }],
+    send(message) {
+      fake.sockets.at(-1)?.send(typeof message === "string" ? message : encode(message))
+    },
+    request(req) {
+      const id = `srv${++reqID}`
+      return new Promise((resolve) => {
+        waiters.set(id, resolve)
+        fake.send(JSON.stringify({ t: "req", id, req }))
+      })
+    },
+    async next(predicate = () => true, timeoutMs = 2000) {
+      const deadline = Date.now() + timeoutMs
+      for (;;) {
+        const found = fake.frames.find(predicate)
+        if (found) return found
+        const left = deadline - Date.now()
+        if (left <= 0) throw new Error("timed out waiting for frame")
+        await new Promise<void>((resolve) => {
+          frameWaiters.add(resolve)
+          setTimeout(resolve, left)
+        })
+      }
+    },
+    stop: async () => {},
+  }
+  const server: Bun.Server<unknown> = Bun.serve({
+    port: options.port ?? 0,
+    hostname: "127.0.0.1",
+    async fetch(req, srv) {
+      const path = new URL(req.url).pathname
+      if (path === "/spoke/enroll") {
+        return Response.json({
+          userCode: "ABCD-EFGH",
+          deviceCode: "dev_1",
+          approveURL: `${fake.url}/approve`,
+          intervalMs: 10,
+          expiresAt: Date.now() + 60_000,
+          ...options.enrollExtra,
+        })
+      }
+      if (path === "/spoke/enroll/poll") {
+        const reply = fake.pollReplies.length > 1 ? fake.pollReplies.shift()! : fake.pollReplies[0]!
+        return Response.json(reply)
+      }
+      if (path !== "/spoke/ws") return (await options.http?.(req)) ?? new Response("not found", { status: 404 })
+      fake.auth.push(req.headers.get("authorization"))
+      return srv.upgrade(req, { data: undefined }) ? undefined : new Response("upgrade failed", { status: 400 })
+    },
+    websocket: {
+      open(ws) {
+        fake.sockets.push(ws)
+      },
+      close() {
+        fake.closed++
+      },
+      message(ws, data) {
+        const m = parseSpokeMessage(typeof data === "string" ? data : Buffer.from(data).toString("utf8"))
+        if (!m) return
+        fake.frames.push(m)
+        if (m.t === "hello") {
+          const features = options.hubFeatures ? { features: [...options.hubFeatures] } : {}
+          ws.send(encode({ t: "welcome", v: PROTOCOL_VERSION, machineID: "m_1", publicURL: "https://voice.example", ...features }))
+        }
+        if (m.t === "res") waiters.get(m.id)?.(m)
+        for (const wake of [...frameWaiters]) wake()
+        frameWaiters.clear()
+        options.onFrame?.(m, ws)
+      },
+    },
+  })
+  fake.url = `http://127.0.0.1:${server.port}`
+  fake.stop = () => stopServer(server)
+  return fake
+}
+
+/**
+ * Stops a Bun server without hanging: in Bun 1.3.5, once the server has closed a WebSocket itself,
+ * stop(true)'s promise can stay pending forever (see src/central/http.ts). An afterEach hook awaiting it
+ * then hangs the whole test run (hooks have no timeout); seen about 1 in 8 full runs on Linux CI.
+ */
+export function stopServer(server: { stop(force?: boolean): unknown }): Promise<void> {
+  return Promise.race([Promise.resolve(server.stop(true)).then(() => undefined), Bun.sleep(250)])
+}
+
+/** A loopback port nothing listens on (taken from a server that was just stopped). */
+export function freePort(): number {
+  const probe = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") })
+  const port = probe.port!
+  probe.stop(true)
+  return port
+}
+
+/** Polls until the check passes; throws "timed out" after ms. */
+export const until = async (check: () => boolean, ms = 3000): Promise<void> => {
+  const end = Date.now() + ms
+  while (!check()) {
+    if (Date.now() > end) throw new Error("timed out")
+    await Bun.sleep(5)
+  }
+}
+
+/** A push-driven async iterable, standing in for ctx.event.subscribe. */
+export class EventQueue<T> {
+  private items: T[] = []
+  private wake?: () => void
+  push(item: T): void {
+    this.items.push(item)
+    this.wake?.()
+  }
+  async *iterate(signal: AbortSignal): AsyncIterable<T> {
+    while (!signal.aborted) {
+      const item = this.items.shift()
+      if (item !== undefined) {
+        yield item
+        continue
+      }
+      await new Promise<void>((resolve) => {
+        this.wake = resolve
+        signal.addEventListener("abort", () => resolve(), { once: true })
+      })
+      this.wake = undefined
+    }
+  }
+}

@@ -12,6 +12,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { defaults, writeConfig } from "../src/config"
+import { stubModel as testkitStubModel } from "../packages/testkit/src/index.ts"
 import { fakeCentral, stopServer, until } from "./spoke-fake"
 
 const enabled = process.env.HUB_IT_OPENCODE === "1"
@@ -20,26 +21,10 @@ if (enabled && !opencode) console.warn("[it] HUB_IT_OPENCODE=1 but `opencode` is
 const run = enabled && opencode !== null
 const ROOT = path.resolve(import.meta.dir, "..")
 
-/** A stub OpenAI-compatible chat model that answers "ack" and records the user messages of every request. */
+/** The testkit's stub OpenAI-compatible chat model ("ack"), exposing the user messages of every request. */
 function stubModel() {
-  const requests: string[][] = []
-  const sse = (chunks: unknown[]) =>
-    new Response(chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") + "data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } })
-  const chunk = (delta: unknown, finish: string | null) => ({ id: "c1", object: "chat.completion.chunk", created: 0, model: "stub", choices: [{ index: 0, delta, finish_reason: finish }] })
-  const text = (content: unknown): string =>
-    typeof content === "string" ? content : Array.isArray(content) ? content.map((p: any) => (typeof p?.text === "string" ? p.text : "")).join("") : ""
-  const server = Bun.serve({
-    port: 0,
-    hostname: "127.0.0.1",
-    async fetch(req) {
-      if (!new URL(req.url).pathname.endsWith("/chat/completions")) return new Response("not found", { status: 404 })
-      const body = (await req.json()) as { messages?: Array<{ role: string; content?: unknown }> }
-      // Title generation and other side requests carry no tools list either; record only user messages.
-      requests.push((body.messages ?? []).filter((m) => m.role === "user").map((m) => text(m.content)))
-      return sse([chunk({ role: "assistant", content: "ack" }, null), chunk({}, "stop")])
-    },
-  })
-  return { url: `http://127.0.0.1:${server.port}/v1`, requests, stop: () => server.stop(true) }
+  const stub = testkitStubModel()
+  return { url: stub.openaiBaseURL, get requests() { return stub.requests.map((r) => [...r.users]) }, stop: () => stub.stop() }
 }
 
 async function freePort(): Promise<number> {
