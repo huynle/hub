@@ -130,9 +130,9 @@ describe("launch phases and the sandbox feature", () => {
     expect(node({ ...hello, launches: [{ launchID: "lch_1", phase: "running", sandbox: "Demo" }] })).toBeUndefined()
   })
 
-  test("sandbox is a known node feature, not announced until the node serves it; nodeFeatures reads a hello", () => {
+  test("sandbox is a known node feature the node can announce (it serves start and stop); nodeFeatures reads a hello", () => {
     expect(P.KNOWN_NODE_FEATURES).toContain("sandbox")
-    expect(P.NODE_FEATURES).not.toContain("sandbox")
+    expect(P.NODE_FEATURES).toContain("sandbox")
     const hello = { features: ["sandbox"] } as any
     expect(P.nodeFeatures(hello).has("sandbox")).toBe(true)
     expect(P.nodeFeatures({} as any).has("sandbox")).toBe(false)

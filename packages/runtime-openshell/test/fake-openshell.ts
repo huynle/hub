@@ -56,6 +56,8 @@ export interface FakeState {
   sandboxes: Record<string, FakeSandbox>
   failures: FakeFailure[]
   nextID: number
+  /** What `gateway info` lists as compute drivers (default ["vm"]). */
+  computeDrivers?: string[]
 }
 
 export interface FakeCall {
@@ -303,6 +305,12 @@ async function main(dir: string, argv: string[]): Promise<number> {
     case "status": {
       const status = { authentication: { provider: "mTLS transport", status: "authenticated" }, gateway: gateway ?? "openshell", server: "https://localhost:17670", status: "connected", version: state.version }
       out(json ? JSON.stringify(status, null, 2) + "\n" : `Server Status\n\n  Gateway: ${status.gateway}\n  Status: Connected\n`)
+      return 0
+    }
+    case "gateway info": {
+      const drivers = state.computeDrivers ?? ["vm"]
+      const info = { auth: null, compute_drivers: drivers.map((name) => ({ capabilities: { driver_name: `openshell-driver-${name}`, driver_version: state.version }, name })), extensions: [] }
+      out(json ? JSON.stringify(info, null, 2) + "\n" : `Gateway Info\n\n  Compute drivers:\n${drivers.map((d) => `    ${d}\n`).join("")}`)
       return 0
     }
     case "sandbox create": {

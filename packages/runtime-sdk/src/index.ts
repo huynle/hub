@@ -27,6 +27,16 @@ export interface PrepareInput {
   readonly workspace: LaunchWorkspace
 }
 
+/** What start gets: the launch, its harness, how its spoke connects back to the hub, and extra environment. */
+export interface StartInput {
+  readonly launchID: string
+  readonly harness: string
+  /** The hub URL as the node knows it, and a token bound to this launch (secret: never in errors or argv). */
+  readonly hub: { readonly url: string; readonly token: string }
+  /** Extra non-secret environment for the harness (upper-case names). */
+  readonly env?: Readonly<Record<string, string>>
+}
+
 /** Per-op context: cancellation, and a short human progress line ("cloning …"). */
 export interface RuntimeContext {
   readonly signal?: AbortSignal
@@ -45,6 +55,18 @@ export interface CleanupResult {
   readonly reason?: string
 }
 
+/** What start did: `started: false` with a reason when the harness had been started already (a repeated start). */
+export interface StartResult extends RunHandle {
+  readonly started: boolean
+  readonly reason?: string
+}
+
+/** What stop did: `stopped: false` with a reason when nothing was running. */
+export interface StopResult {
+  readonly stopped: boolean
+  readonly reason?: string
+}
+
 export type StopMode = "graceful" | "kill"
 
 export interface Runtime {
@@ -52,8 +74,8 @@ export interface Runtime {
   /** What the node's hello reports for this runtime (kind, harnesses, profiles, backends). */
   info(): NodeRuntimeInfo
   prepare(input: PrepareInput, ctx?: RuntimeContext): Promise<Workspace>
-  start?(workspace: Workspace, input: PrepareInput, ctx?: RuntimeContext): Promise<RunHandle>
-  stop?(handle: RunHandle, mode: StopMode): Promise<void>
+  start?(workspace: Workspace, input: StartInput, ctx?: RuntimeContext): Promise<StartResult>
+  stop?(handle: RunHandle, mode: StopMode): Promise<StopResult>
   collect(handle: RunHandle, ctx?: RuntimeContext): Promise<Artifacts>
   /** Keep, or remove without force: uncommitted or unpushed work, a reused workspace or another launch's keeps it. */
   cleanup(handle: RunHandle, policy: CleanupPolicy, ctx?: RuntimeContext): Promise<CleanupResult>

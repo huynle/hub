@@ -43,7 +43,7 @@ import { SpeechService } from "./speech/service"
 import { NodeRegistry } from "./nodes"
 import { randomBytes } from "node:crypto"
 import { LaunchEngine } from "./agent/launch-engine"
-import { LAUNCH_TOKEN_STATES, LaunchTokens } from "./agent/launch-tokens"
+import { LaunchTokens } from "./agent/launch-tokens"
 import { LaunchFeed, launchInfo } from "./agent/launch-routes"
 import { RequestTimeoutError, RequestTooLargeError, SpokeError, SpokeHub, type Notifier, type SpokeHubOptions, type SpokeSocketData } from "./spoke-ws"
 import { ACTIVITY_INTERVAL_MAX, ACTIVITY_INTERVAL_MIN, LOCAL_USER, PUSH_PREF_KEYS, quietHoursInput, Store, VIEW_PREF_KEYS, type DeviceRecord, type LegacyPushPrefs, type PushPrefs, type UserRecord, type ViewPrefs } from "./store"
@@ -367,7 +367,7 @@ export function startCentral(options: CentralOptions): Central {
   const speechFor = (userID: string): Speech => options.speech ?? speechSettings.forUser(speechScope(userID))
   const tokenKeys = TokenKeys.open(config.stateDir)
   // Launch-bound tokens (phase 5): checked against the launch engine's store (created below; read only at use).
-  const launchTokens = new LaunchTokens({ keys: tokenKeys, store, launches: { launch: (userID, launchID) => launches.store.get(userID, launchID) }, publicURL, now })
+  const launchTokens: LaunchTokens = new LaunchTokens({ keys: tokenKeys, store, launches: { launch: (userID, launchID) => launches.store.get(userID, launchID) }, publicURL, now })
   spokes = new SpokeHub({
     store,
     auth,
@@ -602,13 +602,17 @@ export function startCentral(options: CentralOptions): Central {
     delivery,
     decisions,
     actions,
+    // openshell launches: the node starts the sandbox's harness with an hlt1 token and the hub's public URL.
+    launchTokens,
+    hubURL: publicURL,
     users: () => store.users().map((u) => u.id),
     now,
     onLaunchChanged: (launch) => launchFeed.publish(launch.owner, launch),
   })
-  // A launch-bound connection lives only while its launch is provisioning or running.
+  // A launch-bound connection lives only while its launch is provisioning or running: it is closed (and refused from
+  // then on) when the launch ends. Not on queued: that would refuse the sandbox's spoke before it ever connects.
   launchFeed.subscribe((_userID, launch) => {
-    if (!LAUNCH_TOKEN_STATES.includes(launch.state)) spokes.closeLaunch(launch.id)
+    if (launch.state === "ended") spokes.closeLaunch(launch.id)
   })
   void launches.start().catch((cause) => console.error(`[hub] launches did not start: ${(cause as Error).message}`))
   // Webhooks (P4-T10): launch changes go to the owner's matching registrations through the durable outbox; URLs

@@ -86,6 +86,11 @@ export interface GatewayStatus {
   readonly version: string
 }
 
+/** What `gateway info -o json` tells the node: the gateway's compute drivers (e.g. "vm"), its sandbox backends. */
+export interface GatewayInfo {
+  readonly computeDrivers: readonly string[]
+}
+
 export interface CreateSandboxOptions {
   readonly name: string
   /** A container image reference or rootfs tar (`--from`); or a template; or neither (the gateway's default image). */
@@ -132,6 +137,8 @@ export interface CallOptions {
 export interface OpenShellClient {
   version(options?: CallOptions): Promise<string>
   status(options?: CallOptions): Promise<GatewayStatus>
+  /** Optional: clients without it report no backends. */
+  gatewayInfo?(options?: CallOptions): Promise<GatewayInfo>
   create(sandbox: CreateSandboxOptions, options?: CallOptions): Promise<Sandbox>
   /** undefined when there is no such sandbox. */
   get(name: string, options?: CallOptions): Promise<Sandbox | undefined>
@@ -320,6 +327,14 @@ export class OpenShellCli implements OpenShellClient {
     const o = parseJSON<Record<string, unknown>>("status", stdout)
     const auth = (o.authentication ?? {}) as Record<string, unknown>
     return { gateway: str(o.gateway), server: str(o.server), connected: o.status === "connected", authenticated: auth.status === "authenticated", version: str(o.version) }
+  }
+
+  async gatewayInfo(options: CallOptions = {}): Promise<GatewayInfo> {
+    const { stdout } = await this.call(["gateway", "info", "-o", "json"], { what: "gateway info", ...options })
+    const o = parseJSON<{ compute_drivers?: unknown }>("gateway info", stdout)
+    if (!Array.isArray(o.compute_drivers)) throw new OpenShellError("openshell gateway info: no compute drivers in the output", "bad_output")
+    const computeDrivers = o.compute_drivers.map((d) => str((d as { name?: unknown } | null)?.name)).filter(Boolean)
+    return { computeDrivers }
   }
 
   async create(sandbox: CreateSandboxOptions, options: CallOptions = {}): Promise<Sandbox> {

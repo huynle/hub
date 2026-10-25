@@ -147,6 +147,7 @@ function world(options: { deps?: Partial<LaunchEngineDeps>; service?: boolean; l
       return () => void statusListeners.delete(listener)
     },
     onSessions: (_listener: (connID: string) => void) => () => {},
+    launchConn: (_launchID: string) => undefined,
   }
   const spokes = {
     async request(connID: string, req: ServerRequest): Promise<any> {
