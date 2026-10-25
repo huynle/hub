@@ -7,12 +7,16 @@
 // A hello without `harness` comes from an OpenCode spoke that predates this split and implies
 // IMPLIED_OPENCODE_FEATURES. The hub announces its own features in the welcome (HUB_FEATURES), and a spoke
 // sends a newer request only when the hub listed it. Neither side bumps PROTOCOL_VERSION for a new feature.
+//
+// Modules: launch.ts (launch vocabulary and workspace checks), node.ts (the `hub node` hello, frames and ops on the
+// same socket), webhook.ts (webhook signature format), wire.ts (shared frame primitives). All are re-exported here.
 
 import { featureList, ID, isByeFrame as isBye, isObj, isResFrame as isRes, isWelcomeFrame, MAX_FRAME, nonEmpty, num, parseFrame as parse, str, token, UNSAFE_CHARS } from "./wire.ts"
 import type { NodeMessage, NodeServerMessage } from "./node.ts"
 
 export * from "./launch.ts"
 export * from "./node.ts"
+export * from "./webhook.ts"
 export { MAX_FRAME }
 
 export const PROTOCOL_VERSION = 1
