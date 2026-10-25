@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { launchDirectoryProblem, nodeConfigPath, readWorkspaceRoots } from "../src/spoke/node-roots"
+import { launchDirectoryProblem, nodeConfigPath, nodeConfigPathNextTo, readWorkspaceRoots } from "../src/spoke/node-roots"
 
 const cleanups: Array<() => void> = []
 afterEach(() => {
@@ -20,6 +20,12 @@ describe("nodeConfigPath", () => {
     expect(nodeConfigPath({}, "/home/u")).toBe("/home/u/.config/hub/node.json")
     expect(nodeConfigPath({ XDG_CONFIG_HOME: "/xdg" }, "/home/u")).toBe("/xdg/hub/node.json")
     expect(nodeConfigPath({ HUB_SPOKE_CONFIG: "/etc/hub-test/config.json" }, "/home/u")).toBe("/etc/hub-test/node.json")
+  })
+})
+
+describe("nodeConfigPathNextTo", () => {
+  test("is node.json in the directory of a given config file (a launch-bound spoke's launch config)", () => {
+    expect(nodeConfigPathNextTo("/sandbox/.hub/config.json")).toBe("/sandbox/.hub/node.json")
   })
 })
 
