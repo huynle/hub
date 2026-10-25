@@ -3,7 +3,7 @@
 // "launch" creates the session and runs its turn.
 import { afterEach, expect, test } from "bun:test"
 import { NODE_ROLE, PROTOCOL_VERSION, type NodeHello } from "../src/protocol"
-import { connect, harness, spoke, waitFor, type Harness } from "./central-harness"
+import { connect, harness, hello, PUBLIC, spoke, waitFor, type Harness } from "./central-harness"
 
 let h: Harness
 afterEach(async () => {
@@ -80,4 +80,62 @@ test("Central.launches places a launch on the node, creates and prompts its sess
   const stopped = await h.launches.stop("local", launch.id)
   expect(stopped).toMatchObject({ state: "ended", outcome: "stopped", artifacts: { commits: 1 } })
   expect(nodeOps.map((r) => r.op)).toEqual(["prepare", "collect", "cleanup"])
+})
+
+test("an openshell launch: the node starts the harness with the hub's URL and an hlt1 token; the launch-bound spoke creates the session", async () => {
+  h = harness()
+  const { token } = h.store.addMachine("box")
+  const node = await connect(h, token)
+  node.send({ ...nodeHello, features: ["sandbox"], runtimes: [{ kind: "openshell", harnesses: ["opencode"] }] })
+  await node.next((f) => f.t === "welcome")
+  const workspace = { repo: "/p/hub", directory: "/sandbox/work", mode: "clone", branch: "feat/x", reused: false, runtime: { kind: "openshell", sandbox: "hub-0123456789abcdef0123" } }
+  let boxed: Awaited<ReturnType<typeof connect>> | undefined
+  const boxedOps: any[] = []
+  const nodeOps = serve(node, (req) => {
+    if (req.op === "prepare") return { ok: true, result: { workspace } }
+    if (req.op === "start") {
+      // The sandbox's harness connects back with the launch token, bound to the launch.
+      void (async () => {
+        boxed = await connect(h, req.hub.token)
+        boxed.send(hello("box1", { kind: "service", features: ["launch", "deliver"], launchID: req.launchID }))
+        const seen = serve(boxed, (r) => {
+          if (r.op === "create") {
+            boxed!.send({ t: "sessions", sessions: [{ id: "ses_b1", title: r.title ?? "", directory: "/sandbox/work", updated: 2, owned: true }] })
+            return { ok: true, result: { sessionID: "ses_b1" } }
+          }
+          if (r.op === "deliver") return { ok: true, result: { delivery: "steer" } }
+          if (r.op === "turn") return undefined
+          if (r.op === "stop") return { ok: true, result: { stopped: [r.sessionID] } }
+          return { ok: true, result: {} }
+        })
+        boxedOps.push(seen)
+      })()
+      return { ok: true, result: { started: true } }
+    }
+    if (req.op === "stop") return { ok: true, result: { stopped: true } }
+    if (req.op === "collect") return { ok: true, result: { artifacts: { branch: "feat/x", commits: 1 } } }
+    if (req.op === "cleanup") return { ok: true, result: { removed: true } }
+    return { ok: true, result: { cancelled: false } }
+  })
+  await waitFor(() => h.nodes.count() === 1)
+
+  const body = { workspace: { repo: "/p/hub", mode: "clone", remote: "https://github.com/a/b", branch: "feat/x" }, runtime: { kind: "openshell" }, prompt: "Go" }
+  const { launch } = await h.launches.accept("local", body, { by: "user" })
+  let current = launch
+  await waitFor(() => {
+    void h.launches.store.get("local", launch.id).then((l) => (current = l!))
+    return current.state === "running" || current.state === "ended"
+  }, 4000)
+  expect(current).toMatchObject({ state: "running", sessionID: "ses_b1" })
+  const start = nodeOps.find((r) => r.op === "start")
+  expect(start).toMatchObject({ launchID: launch.id, harness: "opencode", workspace, hub: { url: PUBLIC } })
+  expect(start.hub.token).toStartWith("hlt1.")
+  expect(h.registry.launchConn(launch.id)).toBeDefined()
+  const created = (boxedOps[0] as any[]).find((r) => r.op === "create")
+  expect(created).toMatchObject({ directory: "/sandbox/work", launchID: launch.id })
+
+  const stopped = await h.launches.stop("local", launch.id)
+  expect(stopped).toMatchObject({ state: "ended", outcome: "stopped", artifacts: { commits: 1 } })
+  expect(nodeOps.map((r) => r.op)).toEqual(["prepare", "start", "stop", "collect", "cleanup"])
+  await waitFor(() => h.registry.launchConn(launch.id) === undefined)
 })
