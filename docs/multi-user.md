@@ -112,6 +112,7 @@ New or changed:
 | `GET /api/admin/machines` | admin | all machines with owner email |
 | `DELETE /api/admin/machines/:id`, `DELETE /api/admin/devices/:id` | admin | revoke anyone's |
 | `GET /api/admin/audit` | admin | newest first, max 200 |
+| `GET/PUT /api/admin/agents/acting` | admin | `{enabled}`: the hub-wide kill switch for agent actions (all users); audited `agents.acting.pause` / `agents.acting.resume` |
 | `GET /api/devices`, `DELETE /api/devices/:id` | any | own devices only |
 | `POST /api/devices/link` | any | `{code, expiresAt, hub, url}`: a single-use app link code (256-bit, 5 min) for the caller; `url` is `hubapp://link?hub=<public URL>&code=<code>` |
 | `POST /api/devices/redeem {code, deviceName?, publicKey?}` | public | `{device, token}`: a new device of the code's issuer; `token` is its device token (`Authorization: Bearer`), no cookie |
@@ -130,7 +131,8 @@ adds) is ignored.
 |---|---|---|---|---|
 | `user` (`via: "cookie"`) | `voice_device` cookie | random secret; only its hash is stored (DeviceRecord) | until revoked | the device is revoked, the user signs out or is disabled |
 | `user` (`via: "device-token"`) | `Authorization: Bearer <device token>` | the same secret as the cookie, issued by `POST /api/devices/redeem` for a link code | until revoked | as above; bearer requests skip the same-origin check |
-| `session` `{userID, machineID, sessionID}` | `Authorization: Bearer hst1.…` | `hst1.<payload>.<HMAC-SHA256>`, claims `typ, uid, mid, sid, exp, kid, ue, me, aud`; minted by the hub, never stored | 24 h (renewed with ⅓ left) | see *Epochs and revocation* |
+| `session` `{userID, machineID, sessionID, via: "shell"}` | `Authorization: Bearer hst1.…` | `hst1.<payload>.<HMAC-SHA256>`, claims `typ, uid, mid, sid, exp, kid, ue, me, aud`; minted by the hub, never stored | 24 h (renewed with ⅓ left) | see *Epochs and revocation* |
+| `session` `{…, via: "act"}` | `Authorization: Bearer hst1.…` (`typ: "act"`) | the same format; pushed only with the `actTokens` op, kept apart by the spoke, never in any environment | as above | as above |
 | `app` `{userID, tokenID, scopes, label?}` | `Authorization: Bearer hat_<id>_<secret>` | created by a user (`POST /api/agent/app-tokens`, shown once); only a sha256 hash is stored; at most 50 per user | until revoked | revoked (`DELETE /api/agent/app-tokens/:id`) or the user disabled |
 
 What each actor may do:
@@ -140,8 +142,11 @@ What each actor may do:
   (`403 forbidden` for another one); send, answer and read its own messages (never to itself); no console
   routes (`403`), no token management, no messaging switch.
 - **app**: what its scopes allow: `sessions:read` (status, sessions, show, log, watch, who), `messages:send`
-  (msg, ask, reply, decline, mute, unmute) and `messages:read` (inbox, messages/:id, its own `message` watch
-  events); `whoami` always. No other writes, no console routes, no token management (`403`).
+  (msg, ask, reply, decline, mute, unmute, grant requests), `messages:read` (inbox, messages/:id, its own `message`
+  watch events) and `sessions:act` (approve, deny, answer, prompt, stop, under a grant); `whoami` always. No other
+  writes, no console routes, no token management (`403`).
+- **acting**: only a session's act token (never its shell token: `403`) and app tokens with `sessions:act` act, and
+  only under a grant of their user (see *Grants tenancy*). Users act on their own sessions without a grant.
 
 Messages are per user like everything else: another user's session, name, role or message id answers
 `404 not_found` on every message route, exactly like one that does not exist, and admins get no access to them.
@@ -218,6 +223,34 @@ Agent messages (msg, ask, reply, decline), Decisions, pending deliveries and mut
 - **Storage**: messages, asks, Decisions, pending deliveries and mutes live under `<HUB_STATE_DIR>/agent/`, one file
   per user and collection (mode 0600), not in `state.json`. Admins get no access to them through any route.
 
+### Grants tenancy
+
+Grants, escalations, grant requests and the agent audit are per user, like messages:
+
+- **Only users** create, list, read, edit or revoke grants (`/api/agent/grants`, cookie or device token); a session
+  or app token gets `403`. A grant's owner is the user who created it (or approved its request); the API never
+  echoes it.
+- **Holders** must be the owner's: a `ses_…` or `@name` among their sessions (pinned to that session at
+  creation), a reserved role of theirs, or one of their app tokens (`app:<id>`). Naming another user's session or
+  token answers `404 not_found`, like one that does not exist. Holder, owner and token are checked again on every
+  use.
+- **Another user's** grant ids, sessions, pending permission requests and forms, escalation and grant-request
+  Decisions answer `404 not_found` on every route (grants, act verbs, decisions, the console's answer route),
+  exactly like unknown ones, for every credential, also under a grant of the caller's own that names the same
+  project path. Lists (grants, decisions, inbox, audit) never include them. Admins get no access either.
+- **Escalations** (`needs_user`) open Decisions for the session's own user only; answering one replies to the
+  permission as that user, after checking again that the session is still theirs.
+- **Grant requests** are stored per requester's user; the requested holder may be only the requester itself or a
+  reserved role it holds (another session or app: `403`; another user's: `404`).
+- **Kill switches**: `PUT /api/agent/acting {enabled}` is the user's own (audited in their agent audit as
+  `acting.pause` / `acting.resume`); `PUT /api/admin/agents/acting` is the admin's, for every user. Either answers
+  every agent action `423 paused`; reading, messaging and the user's own actions keep working.
+- **hub.json `agents.never`** applies to every user and beats every grant.
+- **Agent audit**: each user's actions, kept per user (the last 2000) under `<HUB_STATE_DIR>/agent/` and readable
+  only by that user (`GET /api/agent/audit`, SSE `agent` events to their own streams). The hub audit gets a
+  summary per entry for admins: `{actor: <user id>, action: "agent.<verb>", detail: <actor kind>}`, never targets,
+  reasons, holders or patterns; grant changes add `grant.create` / `grant.update` / `grant.revoke` with the grant id.
+
 ## Speech settings precedence
 
 user settings field → server default (admin, stored in `state.speech`) → `hub.json` → env. A user's
@@ -229,7 +262,9 @@ provider/baseURL drops the stored key of that scope (existing rule).
 `signin`, `signin.denied`, `device.pair`, `device.revoke`, `machine.approve`, `machine.deny`,
 `machine.revoke`, `user.role`, `user.disable`, `user.enable`, `speech.default`, `migrate.local`,
 `device.link` (an app link code issued), `app-token.create`, `app-token.revoke`, `messaging.pause`,
-`messaging.resume`, `decision.answer` (the chosen option, or `text`).
+`messaging.resume`, `decision.answer` (the chosen option, or `text`), `grant.create`, `grant.update`,
+`grant.revoke` (the grant id), `agents.acting.pause`, `agents.acting.resume` (the admin's switch), and
+`agent.<verb>` summaries of the agent audit (`agent.approve`, `agent.acting.pause`, …; detail: the actor kind).
 Never include tokens, codes, keys or session content.
 
 ## Implementation notes (server, 0.3.0)
