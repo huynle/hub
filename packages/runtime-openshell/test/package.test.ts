@@ -23,9 +23,11 @@ describe("runtime-openshell workspace package", () => {
     expect(include).toContain("packages/runtime-openshell/test")
   })
 
-  test("its index exports the CLI client", async () => {
+  test("its index exports the CLI client and the runtime", async () => {
     const index = await import("../src/index.ts")
     expect(typeof index.OpenShellCli).toBe("function")
     expect(typeof index.OpenShellError).toBe("function")
+    expect(typeof index.OpenShellRuntime).toBe("function")
+    expect(typeof index.sandboxName).toBe("function")
   })
 })
