@@ -20,6 +20,7 @@ import {
   type LaunchArtifacts,
   type LaunchRuntime,
   type LaunchWorkspace,
+  type RuntimeKind,
   type WorkspaceMode,
 } from "./launch.ts"
 import { featureList, ID, isByeFrame, isObj, isResFrame, isWelcomeFrame, nonEmpty, num, parseFrame, str, token, UNSAFE_CHARS } from "./wire.ts"
@@ -96,6 +97,15 @@ export type NodeMessage = NodeHello | NodeCapacityFrame | NodeProgress | Res | B
 
 // ---------- hub → node ----------
 
+/** Where a prepared workspace lives: on the host, or in an OpenShell sandbox (named by the node at prepare). */
+export interface PreparedRuntime {
+  readonly kind: RuntimeKind
+  /** The OpenShell sandbox (a lowercase DNS label, see isSandboxName); only for kind "openshell". */
+  readonly sandbox?: string
+  /** The hub profile the sandbox was prepared with. */
+  readonly profile?: string
+}
+
 /** A workspace the node prepared; collect and cleanup carry it back, so the node needs no state of its own. */
 export interface PreparedWorkspace {
   readonly repo: string
@@ -107,6 +117,21 @@ export interface PreparedWorkspace {
   readonly head?: string
   /** The worktree or clone existed before this launch; cleanup never removes a reused workspace. */
   readonly reused: boolean
+  /** Where the workspace lives; absent (phase 4 nodes) means the host. */
+  readonly runtime?: PreparedRuntime
+}
+
+/** A prepared workspace's runtime: its `runtime`, or the host when it has none. */
+export function preparedWorkspaceRuntime(workspace: PreparedWorkspace): PreparedRuntime {
+  return workspace.runtime ?? { kind: "host" }
+}
+
+/** OpenShell sandbox names are lowercase DNS labels: 1–63 letters, digits and `-`, not starting or ending with `-`. */
+const SANDBOX_NAME = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
+
+/** Whether `v` is an acceptable OpenShell sandbox name. */
+export function isSandboxName(v: unknown): v is string {
+  return typeof v === "string" && SANDBOX_NAME.test(v)
 }
 
 export type NodeRequest =
@@ -200,7 +225,17 @@ export function preparedWorkspaceProblem(v: unknown): string | undefined {
   if (v.base !== undefined && !isRefName(v.base)) return "workspace.base must be a valid branch name"
   if (v.head !== undefined && !(str(v.head) && COMMIT.test(v.head))) return "workspace.head must be a commit id (7–64 hex digits)"
   if (typeof v.reused !== "boolean") return "workspace.reused must be true or false"
+  if (v.runtime !== undefined) return preparedRuntimeProblem(v.runtime)
   return undefined
+}
+
+function preparedRuntimeProblem(v: unknown): string | undefined {
+  if (!isObj(v)) return "workspace.runtime must be an object"
+  if (!(RUNTIME_KINDS as readonly unknown[]).includes(v.kind)) return `workspace.runtime.kind must be one of ${RUNTIME_KINDS.join(", ")}`
+  if (v.profile !== undefined && !token(v.profile, 64)) return "workspace.runtime.profile must be a short lowercase name"
+  if (v.sandbox === undefined) return undefined
+  if (v.kind !== "openshell") return "workspace.runtime.sandbox is only for an openshell workspace"
+  return isSandboxName(v.sandbox) ? undefined : "workspace.runtime.sandbox must be a lowercase DNS label (1–63 letters, digits and -)"
 }
 
 function artifactsProblem(v: unknown): string | undefined {
