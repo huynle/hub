@@ -11,7 +11,8 @@
 //
 // Modules: harness-events.ts (the forwarded events a non-OpenCode spoke may send, with their shapes), launch.ts
 // (launch vocabulary and workspace checks), node.ts (the `hub node` hello, frames and ops on the same socket),
-// webhook.ts (webhook signature format), wire.ts (shared frame primitives). All are re-exported here.
+// preset.ts (the harness preset schema), webhook.ts (webhook signature format), wire.ts (shared frame primitives).
+// All are re-exported here.
 
 import { featureList, HUB_URL_MAX_CHARS, ID, isByeFrame as isBye, isHubURL, isObj, isResFrame as isRes, isWelcomeFrame, MAX_FRAME, MAX_RETRY_AFTER_MS, nonEmpty, num, parseFrame as parse, str, token, UNSAFE_CHARS } from "./wire.ts"
 import type { NodeMessage, NodeServerMessage } from "./node.ts"
@@ -19,6 +20,7 @@ import type { NodeMessage, NodeServerMessage } from "./node.ts"
 export * from "./harness-events.ts"
 export * from "./launch.ts"
 export * from "./node.ts"
+export * from "./preset.ts"
 export * from "./webhook.ts"
 export { HUB_URL_MAX_CHARS, isHubURL, MAX_FRAME, MAX_RETRY_AFTER_MS }
 
