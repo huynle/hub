@@ -6,6 +6,7 @@ import { homedir } from "node:os"
 import path from "node:path"
 import { hubEnv } from "../env"
 import { isLoopbackHost } from "../loopback"
+import { formatPattern, parsePattern } from "./agent/policy"
 import { APP_DIR, configBase, legacyPaths, migrateFirst, stateBase } from "../migrate"
 import { updateSpeech, type StoredSpeech } from "./speech/settings"
 
@@ -59,6 +60,14 @@ export interface CentralConfig {
   /** Speech settings from hub.json (below the phone's saved settings, above the env). */
   readonly speech?: StoredSpeech
   readonly auth: AuthConfig
+  /** hub.json `agents.never`: permission patterns no agent may ever approve, for every user (design §5, §7). */
+  readonly agentsNever: readonly string[]
+}
+
+/** hub.json `agents`, validated. */
+export interface HubAgents {
+  /** Normalised `action[:glob]` patterns (see agent/policy.ts), duplicates dropped. */
+  readonly never?: readonly string[]
 }
 
 /** hub.json, validated. */
@@ -69,11 +78,13 @@ export interface HubFile {
   readonly stateDir?: string
   readonly speech?: StoredSpeech
   readonly auth?: HubAuth
+  readonly agents?: HubAgents
 }
 
 type Env = Readonly<Record<string, string | undefined>>
 
-const HUB_KEYS = new Set(["host", "port", "publicURL", "stateDir", "speech", "auth"])
+const HUB_KEYS = new Set(["host", "port", "publicURL", "stateDir", "speech", "auth", "agents"])
+const AGENTS_KEYS = new Set(["never"])
 const AUTH_KEYS = new Set(["mode", "issuer", "clientId", "clientSecret", "allowed", "admins"])
 const EMAIL = /^[^\s@,]+@[^\s@,]+\.[^\s@,]+$/
 const DOMAIN = /^@[^\s@,]+\.[^\s@,]+$/
@@ -161,6 +172,7 @@ export function readHubFile(file: string, home: string = homedir()): { file?: Hu
     hub.stateDir = expandHome((raw.stateDir as string).trim(), home)
   }
   if (raw.auth !== undefined) hub.auth = readHubAuth(raw.auth, file, warnings, fail)
+  if (raw.agents !== undefined) hub.agents = readHubAgents(raw.agents, file, warnings, fail)
   if (raw.speech !== undefined) {
     if (!isObj(raw.speech)) fail("speech must be an object with stt and/or tts")
     const speech = { ...(raw.speech as Record<string, unknown>) }
@@ -204,6 +216,22 @@ function readHubAuth(raw: unknown, file: string, warnings: string[], fail: (mess
     warnings.push(`${file} is readable by other users, so its auth.clientSecret is ignored. Fix it with: chmod 600 ${file}`)
   }
   return auth
+}
+
+function readHubAgents(raw: unknown, file: string, warnings: string[], fail: (message: string) => never): HubAgents {
+  if (!isObj(raw)) fail("agents must be an object")
+  const input = raw as Record<string, unknown>
+  for (const key of Object.keys(input)) if (!AGENTS_KEYS.has(key)) warnings.push(`${file}: unknown key "agents.${key}" ignored`)
+  if (input.never === undefined) return {}
+  if (!Array.isArray(input.never)) fail('agents.never must be a list of patterns ("action" or "action:glob")')
+  const never: string[] = []
+  for (const item of input.never as unknown[]) {
+    const pattern = typeof item === "string" ? parsePattern(item) : undefined
+    if (!pattern) fail(`agents.never: ${JSON.stringify(item)} is not a pattern ("action" or "action:glob")`)
+    const text = formatPattern(pattern!)
+    if (!never.includes(text)) never.push(text)
+  }
+  return { never }
 }
 
 /** Validates the OIDC issuer: https, or plain http on loopback when the dev flag is set. No trailing slash. */
@@ -278,6 +306,7 @@ export function centralConfig(rawEnv: Env = process.env, home: string = homedir(
     vapidSubject: env.HUB_VAPID_SUBJECT || (publicURL.startsWith("https://") ? publicURL : "mailto:hub@localhost"),
     ...(file.speech ? { speech: file.speech } : {}),
     auth: authConfig(env, file.auth),
+    agentsNever: [...(file.agents?.never ?? [])],
   }
 }
 

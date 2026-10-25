@@ -165,6 +165,10 @@ describe("route table", () => {
       "POST /api/agent/unmute",
       "GET /api/agent/messaging",
       "PUT /api/agent/messaging",
+      "GET /api/agent/acting",
+      "PUT /api/agent/acting",
+      "GET /api/admin/agents/acting",
+      "PUT /api/admin/agents/acting",
       "GET /api/agent/decisions",
       "GET /api/agent/decisions/:id",
       "GET /api/decisions",
@@ -287,6 +291,16 @@ describe("bob cannot reach alice's agent messages", () => {
   test("bob's messaging switch is his own", async () => {
     expect((await as(bob, "/api/agent/messaging", { method: "PUT", json: { enabled: false } })).status).toBe(200)
     expect(await json(await as(alice, "/api/agent/messaging"))).toEqual({ enabled: true })
+  })
+
+  test("bob's acting switch is his own; only the admin's hub-wide switch reaches alice", async () => {
+    expect((await as(bob, "/api/agent/acting", { method: "PUT", json: { enabled: false } })).status).toBe(200)
+    expect(await json(await as(alice, "/api/agent/acting"))).toEqual({ enabled: true, hubEnabled: true })
+    expect(h.acting.isActingPaused(alice.id)).toBe(false)
+    expect((await as(bob, "/api/admin/agents/acting", { method: "PUT", json: { enabled: false } })).status).toBe(403)
+    expect((await as(admin, "/api/admin/agents/acting", { method: "PUT", json: { enabled: false } })).status).toBe(200)
+    expect(await json(await as(alice, "/api/agent/acting"))).toEqual({ enabled: true, hubEnabled: false })
+    expect(h.acting.isActingPaused(alice.id)).toBe(true)
   })
 
   test("alice reads her session's messages on the console route (positive control)", async () => {

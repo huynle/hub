@@ -221,3 +221,24 @@ describe("migration from opencode-hub and opencode-voice", () => {
     expect(existsSync(path.join(home, ".local", "state", "hub"))).toBe(false)
   })
 })
+
+describe("agents.never (hub-wide agent never rules, design §5, §7)", () => {
+  test("hub.json agents.never: patterns normalised (bash is shell), duplicates dropped; centralConfig carries them", () => {
+    const { file: hub, warnings } = readHubFile(file({ agents: { never: ["bash:git push*", "external_directory", "shell:git push*", "edit:*.env"] } }))
+    expect(warnings).toEqual([])
+    expect(hub).toEqual({ agents: { never: ["shell:git push*", "external_directory", "edit:*.env"] } })
+    expect(centralConfig({}, HOME, hub).agentsNever).toEqual(["shell:git push*", "external_directory", "edit:*.env"])
+    expect(centralConfig({}, HOME).agentsNever).toEqual([])
+  })
+
+  test("invalid agents values fail; unknown agents keys warn", () => {
+    expect(() => readHubFile(file({ agents: [] }))).toThrow(/agents must be an object/)
+    expect(() => readHubFile(file({ agents: { never: "shell:rm*" } }))).toThrow(/agents\.never/)
+    expect(() => readHubFile(file({ agents: { never: ["ok", 3] } }))).toThrow(/agents\.never/)
+    expect(() => readHubFile(file({ agents: { never: ["bad action!:x"] } }))).toThrow(/agents\.never.*bad action!/)
+    expect(() => readHubFile(file({ agents: { never: ["shell:"] } }))).toThrow(/agents\.never/)
+    const { file: hub, warnings } = readHubFile(file({ agents: { never: [], allow: ["x"] } }))
+    expect(hub).toEqual({ agents: { never: [] } })
+    expect(warnings).toEqual([expect.stringContaining('unknown key "agents.allow"')])
+  })
+})

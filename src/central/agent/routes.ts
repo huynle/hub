@@ -18,6 +18,7 @@ import { MessageFeed, messageRoutes } from "./message-routes"
 import type { SessionTokens } from "./session-tokens"
 import { AgentError, agentFailure } from "./errors"
 import { type AgentAudit, auditRoutes } from "./audit"
+import { type ActingSwitch, actingSwitchRoutes } from "./acting-switch"
 
 export const AGENT_PREFIX = "/api/agent"
 
@@ -60,6 +61,8 @@ export interface AgentDeps {
   readonly decisions?: Decisions
   /** The agent audit (P3-T5): GET /api/agent/audit when given. */
   readonly audit?: AgentAudit
+  /** Kill switches (P3-T4): GET/PUT /api/agent/acting when given; the acting verbs check it. */
+  readonly acting?: ActingSwitch
   /** Stored messages as they are sent (the hub also streams them to the console); a new feed when absent. */
   readonly feed?: MessageFeed
   /** Heartbeat of GET /api/agent/watch. */
@@ -97,6 +100,7 @@ export function agentRoutes(deps: AgentDeps): AgentRoute[] {
     },
     ...appTokenRoutes(deps.store),
     ...(deps.audit ? auditRoutes(deps.audit) : []),
+    ...(deps.acting ? actingSwitchRoutes(deps.acting) : []),
   ]
 }
 
