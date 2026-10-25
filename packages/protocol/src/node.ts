@@ -64,8 +64,9 @@ export interface NodeLaunchReport {
  */
 export const KNOWN_NODE_FEATURES = ["sandbox"] as const
 export type NodeFeature = (typeof KNOWN_NODE_FEATURES)[number]
-/** What this package's `hub node` announces; "sandbox" joins once the node serves start and stop. */
-export const NODE_FEATURES: readonly NodeFeature[] = []
+/** What this package's `hub node` can announce; "sandbox" only while it offers a runtime that starts harnesses
+ * (node.json `openshell.enabled`). */
+export const NODE_FEATURES: readonly NodeFeature[] = ["sandbox"]
 
 /** The features a node announced in its hello. */
 export function nodeFeatures(hello: Pick<NodeHello, "features">): ReadonlySet<string> {

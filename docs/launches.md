@@ -186,6 +186,7 @@ Per-user caps in `hub.json` (`agents.launches`, each a whole number from 1 to 10
 | `labels` | `{}` | added to the node's `os` and `arch` labels for placement |
 | `slots` | 4 | launches the node holds at once (from prepare until cleanup), 1–10,000 |
 | `memoryMB` | none | reported to the hub; not matched yet |
+| `openshell` | none | `{ "enabled": true, "gateway"?: name, "image"?: ref, "profiles"?: {…} }`: also offer the `openshell` runtime (sandboxes through the `openshell` CLI, in its workspace `hub`). The node then announces the `sandbox` feature (start/stop), reports its profiles and the gateway's compute drivers (backends), and at startup reports the sandboxes labelled `hub.machine=<this machine>` as launches (`running` or `stopped`) so the hub reconciles them. An unusable CLI is logged and the node offers `host` only |
 
 The OpenCode service spoke reads the same `workspaceRoots` and creates launch sessions only under them.
 

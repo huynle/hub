@@ -3,11 +3,14 @@
 // know, so node settings never live in config.json. The node reads config.json only for the hub URL and the
 // machine token (spoke and node share one machine record) and never writes it.
 //
-// node.json: { "workspaceRoots": ["/Users/huy/projects"], "labels": {"gpu": "no"}, "slots": 6, "memoryMB": 49152 }
+// node.json: { "workspaceRoots": ["/Users/huy/projects"], "labels": {"gpu": "no"}, "slots": 6, "memoryMB": 49152,
+//   "openshell": { "enabled": true, "gateway": "openshell", "image": "ghcr.io/huynle/hub-sandbox:0.1",
+//                  "profiles": { "untrusted-code": { "providers": ["anthropic"] } } } }
 import { readFileSync } from "node:fs"
 import { homedir, hostname } from "node:os"
 import path from "node:path"
 import { isAbsolutePath, labelsProblem, NODE_ROOTS_MAX, NODE_SLOTS_MAX } from "../../protocol/src/index.ts"
+import { normalizeOpenShellProfiles, type OpenShellProfiles } from "../../runtime-openshell/src/profiles.ts"
 import { configPath, readConfig } from "../../../src/config.ts"
 
 type Env = Readonly<Record<string, string | undefined>>
@@ -16,6 +19,8 @@ export const NODE_CONFIG_FILE = "node.json"
 /** Concurrent launches when node.json sets no `slots`. */
 export const DEFAULT_SLOTS = 4
 const MEMORY_MB_MAX = 2 ** 31
+const GATEWAY = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/
+const IMAGE = /^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}$/
 
 export interface NodeConfig {
   /** Every launch workspace must resolve (realpath) under one of these. Empty: the node prepares nothing. */
@@ -24,6 +29,18 @@ export interface NodeConfig {
   readonly labels: Readonly<Record<string, string>>
   readonly slots: number
   readonly memoryMB?: number
+  /** The `openshell` runtime's settings; absent when node.json has no openshell section. */
+  readonly openshell?: OpenShellNodeConfig
+}
+
+/** node.json `openshell`: whether the node offers sandboxes, through which gateway, with which image and profiles. */
+export interface OpenShellNodeConfig {
+  readonly enabled: boolean
+  /** An OpenShell gateway name (`--gateway`); default: the CLI's active gateway. */
+  readonly gateway?: string
+  /** The image for profiles without their own (default: the runtime's). */
+  readonly image?: string
+  readonly profiles: OpenShellProfiles
 }
 
 /** A config and what was wrong with the input (each bad field is dropped, with one problem line). */
@@ -82,7 +99,34 @@ export function normalizeNodeConfig(raw: unknown): NodeConfigResult {
     else problems.push("memoryMB must be a positive whole number")
   }
 
-  return { config: { workspaceRoots, labels, slots, ...(memoryMB !== undefined ? { memoryMB } : {}) }, problems }
+  const openshell = r.openshell === undefined ? undefined : normalizeOpenShell(r.openshell, problems)
+
+  return { config: { workspaceRoots, labels, slots, ...(memoryMB !== undefined ? { memoryMB } : {}), ...(openshell ? { openshell } : {}) }, problems }
+}
+
+function normalizeOpenShell(raw: unknown, problems: string[]): OpenShellNodeConfig | undefined {
+  if (!isObject(raw)) {
+    problems.push("openshell must be an object")
+    return undefined
+  }
+  let enabled = false
+  if (raw.enabled !== undefined) {
+    if (typeof raw.enabled === "boolean") enabled = raw.enabled
+    else problems.push("openshell.enabled must be true or false")
+  }
+  let gateway: string | undefined
+  if (raw.gateway !== undefined) {
+    if (typeof raw.gateway === "string" && GATEWAY.test(raw.gateway)) gateway = raw.gateway
+    else problems.push(`openshell.gateway: ${show(raw.gateway)} is not a gateway name`)
+  }
+  let image: string | undefined
+  if (raw.image !== undefined) {
+    if (typeof raw.image === "string" && IMAGE.test(raw.image)) image = raw.image
+    else problems.push(`openshell.image: ${show(raw.image)} is not an image reference`)
+  }
+  const profiles = normalizeOpenShellProfiles(raw.profiles)
+  problems.push(...profiles.problems)
+  return { enabled, ...(gateway ? { gateway } : {}), ...(image ? { image } : {}), profiles }
 }
 
 /** Reads node.json; a missing file is the defaults, unreadable or bad JSON the defaults with a problem. */

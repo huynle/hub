@@ -93,3 +93,41 @@ describe("readSpokeCredentials", () => {
     expect(readSpokeCredentials({ HUB_SPOKE_CONFIG: file }, "/nowhere")).toBeUndefined()
   })
 })
+
+describe("normalizeNodeConfig: the openshell section", () => {
+  test("absent: no openshell config", () => {
+    expect(normalizeNodeConfig({ workspaceRoots: ["/w"] }).config.openshell).toBeUndefined()
+  })
+
+  test("keeps enabled, gateway, image and normalizes profiles (the built-in default always there)", () => {
+    const { config, problems } = normalizeNodeConfig({
+      openshell: { enabled: true, gateway: "openshell", image: "ghcr.io/huynle/hub-sandbox:0.1", profiles: { web: { providers: ["anthropic"], endpoints: ["registry.npmjs.org:443"] } } },
+    })
+    expect(problems).toEqual([])
+    expect(config.openshell?.enabled).toBe(true)
+    expect(config.openshell?.gateway).toBe("openshell")
+    expect(config.openshell?.image).toBe("ghcr.io/huynle/hub-sandbox:0.1")
+    expect(Object.keys(config.openshell!.profiles.profiles).sort()).toEqual(["default", "web"])
+    expect(config.openshell!.profiles.profiles.web!.providers).toEqual(["anthropic"])
+  })
+
+  test("enabled defaults to false; bad fields are dropped with a problem each, profile problems included", () => {
+    const { config, problems } = normalizeNodeConfig({ openshell: { enabled: "yes", gateway: "-bad gw", image: "not an image!", profiles: { big: { cpu: 4 } } } })
+    expect(config.openshell?.enabled).toBe(false)
+    expect(config.openshell?.gateway).toBeUndefined()
+    expect(config.openshell?.image).toBeUndefined()
+    expect(config.openshell?.profiles.unsupported.big).toContain("cpu")
+    const text = problems.join("\n")
+    expect(problems.length).toBe(4)
+    expect(text).toContain("openshell.enabled")
+    expect(text).toContain("openshell.gateway")
+    expect(text).toContain("openshell.image")
+    expect(text).toContain("openshell.profiles.big")
+  })
+
+  test("a non-object openshell section is a problem and leaves openshell off", () => {
+    const { config, problems } = normalizeNodeConfig({ openshell: true })
+    expect(config.openshell).toBeUndefined()
+    expect(problems).toEqual(["openshell must be an object"])
+  })
+})

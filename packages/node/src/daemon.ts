@@ -1,18 +1,25 @@
 // The node daemon (design §6.3): one NodeConnection to the hub and the runtimes it offers. It serves the hub's
-// prepare → collect → cleanup (and cancel) for each launch, reports progress frames, and holds a slot per launch
-// from prepare until cleanup (or a failed or cancelled prepare), sending a capacity frame whenever use changes.
-// It keeps launches in memory only: collect and cleanup carry the prepared workspace, so a restarted node can still
-// serve them. There is no remote exec channel: these four ops are all the hub can ask.
+// prepare → (start → stop) → collect → cleanup (and cancel) for each launch, reports progress frames, and holds a
+// slot per launch from prepare until cleanup (or a failed or cancelled prepare), sending a capacity frame whenever
+// use changes. prepare goes to the runtime the request names; every later op to the runtime the prepared workspace
+// names (workspace.runtime, absent = host). It announces the "sandbox" feature (start and stop) only when one of its
+// runtimes starts harnesses (openshell); the host runtime answers start and stop with started/stopped false.
+// It keeps launches in memory only: the later ops carry the prepared workspace, so a restarted node can still
+// serve them. There is no remote exec channel: these ops are all the hub can ask.
 import { randomUUID } from "node:crypto"
 import { arch as osArch, platform as osPlatform } from "node:os"
 import {
+  NODE_FEATURES,
   NODE_MESSAGE_MAX,
+  preparedWorkspaceRuntime,
   type NodeCapacity,
   type NodeHello,
   type NodeLaunchPhase,
   type NodeLaunchReport,
   type NodeRequest,
   type NodeResultFor,
+  type NodeRuntimeInfo,
+  type PreparedWorkspace,
 } from "../../protocol/src/index.ts"
 import { RuntimeError, type Runtime } from "../../runtime-sdk/src/index.ts"
 import pkg from "../package.json" with { type: "json" }
@@ -39,11 +46,16 @@ export interface NodeDaemonOptions {
   readonly platform?: { readonly os: string; readonly arch: string }
   readonly connect?: (options: NodeConnectionOptions) => ConnectionLike
   readonly onState?: (state: NodeConnectionState, error?: string) => void
+  /** Backends per runtime kind (e.g. openshell: the gateway's compute drivers), added to the hello's runtimes. */
+  readonly backends?: Readonly<Record<string, readonly string[]>>
+  /** Launches found at startup (an earlier run's sandboxes): reported in the hello, each holding a slot until cleanup. */
+  readonly recovered?: readonly NodeLaunchReport[]
 }
 
 interface Tracked {
   phase: NodeLaunchPhase
   directory?: string
+  sandbox?: string
   abort?: AbortController
 }
 
@@ -68,6 +80,8 @@ export class NodeDaemon {
     this.instanceID = options.instanceID ?? randomUUID()
     const platform = options.platform ?? { os: osPlatform(), arch: osArch() }
     this.labels = { os: platform.os, arch: platform.arch, ...options.config.labels }
+    for (const r of options.recovered ?? [])
+      this.launches.set(r.launchID, { phase: r.phase, ...(r.directory ? { directory: r.directory } : {}), ...(r.sandbox ? { sandbox: r.sandbox } : {}) })
   }
 
   start(): void {
@@ -96,16 +110,20 @@ export class NodeDaemon {
   }
 
   hello(): Omit<NodeHello, "t" | "v" | "role"> {
+    const features = NODE_FEATURES.filter((f) => f !== "sandbox" || this.servesSandbox())
     return {
       instanceID: this.instanceID,
       nodeVersion: NODE_VERSION,
-      runtimes: this.runtimes.map((r) => r.info()),
+      ...(features.length ? { features } : {}),
+      runtimes: this.runtimes.map((r) => this.runtimeInfo(r)),
       labels: this.labels,
       capacity: this.capacity(),
       used: this.used(),
       workspaceRoots: [...this.options.config.workspaceRoots],
       draining: this.draining,
-      launches: [...this.launches].map(([launchID, t]): NodeLaunchReport => ({ launchID, phase: t.phase, ...(t.directory ? { directory: t.directory } : {}) })),
+      launches: [...this.launches].map(
+        ([launchID, t]): NodeLaunchReport => ({ launchID, phase: t.phase, ...(t.directory ? { directory: t.directory } : {}), ...(t.sandbox ? { sandbox: t.sandbox } : {}) }),
+      ),
     }
   }
 
@@ -114,7 +132,7 @@ export class NodeDaemon {
       case "prepare":
         return this.prepare(req)
       case "collect": {
-        const runtime = this.workspaceRuntime()
+        const runtime = this.workspaceRuntime(req.workspace)
         const before = this.launches.get(req.launchID)?.phase
         this.phase(req.launchID, "collecting")
         try {
@@ -128,7 +146,7 @@ export class NodeDaemon {
         }
       }
       case "cleanup": {
-        const runtime = this.workspaceRuntime()
+        const runtime = this.workspaceRuntime(req.workspace)
         this.phase(req.launchID, "cleaning")
         try {
           const result = await runtime.cleanup({ launchID: req.launchID, workspace: req.workspace }, req.policy)
@@ -144,10 +162,45 @@ export class NodeDaemon {
         tracked.abort.abort()
         return { cancelled: true }
       }
-      // Feature "sandbox" (not announced yet): the hub sends start and stop only to nodes that announce it.
       case "start":
+        return this.startLaunch(req)
       case "stop":
-        throw new RuntimeError(`this node does not serve ${req.op} (no "sandbox" feature)`)
+        return this.stopLaunch(req)
+    }
+  }
+
+  private async startLaunch(req: Extract<NodeRequest, { op: "start" }>): Promise<NodeResultFor["start"]> {
+    const runtime = this.workspaceRuntime(req.workspace)
+    if (!runtime.start) return { started: false, reason: `the ${runtime.kind} runtime does not start harnesses (its sessions run in the machine's harness service)` }
+    const before = this.launches.get(req.launchID)?.phase
+    this.phase(req.launchID, "starting")
+    try {
+      const result = await runtime.start(req.workspace, { launchID: req.launchID, harness: req.harness, hub: req.hub, ...(req.env ? { env: req.env } : {}) }, {
+        progress: (message) => this.progress(req.launchID, "starting", message),
+      })
+      this.phase(req.launchID, "running")
+      return { started: result.started, ...(result.reason ? { reason: result.reason } : {}) }
+    } catch (cause) {
+      const tracked = this.launches.get(req.launchID)
+      if (tracked && before) tracked.phase = before
+      this.progress(req.launchID, "failed", errorText(cause))
+      throw cause
+    }
+  }
+
+  private async stopLaunch(req: Extract<NodeRequest, { op: "stop" }>): Promise<NodeResultFor["stop"]> {
+    const runtime = this.workspaceRuntime(req.workspace)
+    if (!runtime.stop) return { stopped: false, reason: `the ${runtime.kind} runtime runs no harness of its own to stop` }
+    const before = this.launches.get(req.launchID)?.phase
+    this.phase(req.launchID, "stopping")
+    try {
+      const result = await runtime.stop({ launchID: req.launchID, workspace: req.workspace }, req.mode ?? "graceful")
+      this.phase(req.launchID, result.stopped ? "stopped" : (before ?? "stopped"))
+      return { stopped: result.stopped, ...(result.reason ? { reason: result.reason } : {}) }
+    } catch (cause) {
+      const tracked = this.launches.get(req.launchID)
+      if (tracked && before) tracked.phase = before
+      throw cause
     }
   }
 
@@ -166,7 +219,7 @@ export class NodeDaemon {
         { signal: abort.signal, progress: (message) => this.progress(req.launchID, "preparing", message) },
       )
       if (abort.signal.aborted) throw new RuntimeError("prepare cancelled")
-      this.launches.set(req.launchID, { phase: "prepared", directory: workspace.directory })
+      this.launches.set(req.launchID, { phase: "prepared", directory: workspace.directory, ...(workspace.runtime?.sandbox ? { sandbox: workspace.runtime.sandbox } : {}) })
       this.progress(req.launchID, "prepared")
       return { workspace }
     } catch (cause) {
@@ -182,10 +235,20 @@ export class NodeDaemon {
     return runtime
   }
 
-  /** The runtime that owns a prepared workspace. Only host workspaces exist yet; sandbox runtimes will need the
-   * workspace to name its runtime. */
-  private workspaceRuntime(): Runtime {
-    return this.runtimeFor("host")
+  /** The runtime that owns a prepared workspace: the one it names (absent: host). */
+  private workspaceRuntime(workspace: PreparedWorkspace): Runtime {
+    return this.runtimeFor(preparedWorkspaceRuntime(workspace).kind)
+  }
+
+  /** Whether a runtime here starts and stops harnesses itself (the "sandbox" feature). */
+  private servesSandbox(): boolean {
+    return this.runtimes.some((r) => typeof r.start === "function" && typeof r.stop === "function")
+  }
+
+  private runtimeInfo(runtime: Runtime): NodeRuntimeInfo {
+    const info = runtime.info()
+    const backends = this.options.backends?.[runtime.kind]
+    return backends?.length ? { ...info, backends: [...backends] } : info
   }
 
   private capacity(): NodeCapacity {
