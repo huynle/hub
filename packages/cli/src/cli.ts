@@ -1,12 +1,13 @@
 // The hub CLI (`hub` / `hubctl`, design §2.2, §4, §8): reads and names sessions through the hub's /api/agent, with
 // the hub SDK (packages/sdk) as its client.
 // `run(argv, io)` is the whole program (main.ts wires it to the process); it returns the exit code.
-import type { HubClient } from "../../sdk/src/index.ts"
+import type { HubClient, Sent, SentAll } from "../../sdk/src/index.ts"
 import pkg from "../package.json" with { type: "json" }
 import { parse, str, UsageError, type CommandSpec, type Parsed } from "./args"
 import { loginFile, readLogin, removeLogin, resolveCredentials, writeLogin, type Credentials, type Env } from "./credentials"
 import { atName, logText, whoamiText, type Actor, roleText, sessionsText, showText, statusText, whoText } from "./format"
 import { CliError, EXIT, withHub } from "./http"
+import { sentText, textArg } from "./messaging"
 import { watch } from "./watch"
 
 export { EXIT } from "./http"
@@ -76,6 +77,9 @@ function crossCheck(io: Io, actor: Actor | undefined) {
 
 /** Prints the raw answer with --json, else its text. */
 const answer = (context: Context, body: unknown, text: (body: any) => string) => (context.json ? printJSON(context.io, body) : out(context.io, text(body)))
+
+/** --no-wake and --urgent as SDK send options. */
+const sendFlags = (flags: Parsed["flags"]) => ({ ...(flags["no-wake"] === true ? { wake: false } : {}), ...(flags.urgent === true ? { urgent: true } : {}) })
 
 const COMMANDS: Record<string, Command> = {
   whoami: {
@@ -162,6 +166,17 @@ const COMMANDS: Record<string, Command> = {
       await watch(credentials(), { blocked: parsed.flags.blocked === true, session: str(parsed.flags, "session") }, (line) => io.stdout(line), io.signal)
     },
   },
+  msg: {
+    args: ["<addr>", "<text>"],
+    flags: { all: "bool", "no-wake": "bool", urgent: "bool" },
+    async handle(context) {
+      const { flags, args } = context.parsed
+      const text = await textArg(args[1]!, context.io.stdin)
+      const options = sendFlags(flags)
+      const body = await context.hub<Sent | SentAll>((hub) => (flags.all === true ? hub.msg(args[0]!, text, { ...options, all: true }) : hub.msg(args[0]!, text, options)))
+      answer(context, body, (b) => ("sent" in b ? b.sent.map(sentText).join("\n") || "no recipients" : sentText(b)))
+    },
+  },
   login: {
     flags: { url: "string", token: "string" },
     async handle(context) {
@@ -199,6 +214,7 @@ function reportError(io: Io, error: CliError, json: boolean) {
       io.stderr(`  ${[c.sessionID, c.name ? `@${String(c.name).replace(/^@/, "")}` : undefined, c.title].filter(Boolean).join("  ")}\n`)
     }
   }
+  if (typeof envelope?.feature === "string") io.stderr(`missing feature: ${envelope.feature}${typeof envelope.harness === "string" ? ` (${envelope.harness})` : ""}\n`)
   if (typeof envelope?.retryAfter === "number") io.stderr(`retry after ${Math.ceil(envelope.retryAfter)} s\n`)
   if (error.hint) io.stderr(`hint: ${error.hint}\n`)
 }
