@@ -95,6 +95,22 @@ describe("status", () => {
   })
 })
 
+describe("gatewayInfo", () => {
+  test("parses `gateway info -o json`: the compute drivers' names", async () => {
+    const { fake, cli } = setup()
+    expect(await cli.gatewayInfo()).toEqual({ computeDrivers: ["vm"] })
+    expect(fake.calls()[1]!.argv.slice(-4)).toEqual(["gateway", "info", "-o", "json"])
+    fake.update((s) => (s.computeDrivers = ["vm", "kata"]))
+    expect((await cli.gatewayInfo()).computeDrivers).toEqual(["vm", "kata"])
+  })
+
+  test("output without compute drivers is bad output", async () => {
+    const { fake, cli } = setup()
+    fake.fail({ command: "gateway info", exitCode: 0, stdout: "{}" })
+    expect((await rejection(cli.gatewayInfo())).code).toBe("bad_output")
+  })
+})
+
 describe("create", () => {
   test("builds the argv: name, image, policy, providers, labels, env, detached, no auto providers, JSON out, then the command", async () => {
     const { fake, cli } = setup()
