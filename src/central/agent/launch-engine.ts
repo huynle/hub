@@ -679,17 +679,17 @@ export class LaunchEngine {
   private async identify(userID: string, launch: Launch, sessionID: string, checkpoint: () => void = () => {}): Promise<void> {
     const { directory, delivery, actions } = this.deps
     const { spec } = launch
-    directory.sync(userID)
+    await directory.sync(userID)
     const notes: string[] = []
     const byUser = launch.by === undefined || launch.by === "user"
     for (const role of spec.roles) {
       try {
-        directory.claimRole(userID, sessionID, role, byUser ? { byUser: true } : {})
+        await directory.claimRole(userID, sessionID, role, byUser ? { byUser: true } : {})
       } catch (cause) {
         notes.push(`@@${role} not claimed: ${errorText(cause)}`)
       }
     }
-    if (spec.name !== undefined) directory.setName(userID, sessionID, spec.name)
+    if (spec.name !== undefined) await directory.setName(userID, sessionID, spec.name)
     await delivery.prime(userID, sessionID)
     checkpoint()
     if (spec.prompt !== undefined) {

@@ -2,6 +2,10 @@
 // Kept apart from the spoke Registry on purpose: a node is never a process, never in the catalog and never makes
 // its machine "online"; it only reports runtimes, labels, capacity and launch progress. Placement (P4-T5) reads
 // list(ownerID); the launch engine (P4-T8) subscribes to progress and connect/disconnect events.
+// Cluster mode (design §9): each pod is the single writer of its own nodes and exports them per owner (clusterSlice);
+// ./cluster/view.ts applies other pods' slices (setRemote), so list/get/forMachine see every node of the cluster (a
+// node on another pod is reached through SpokeHub.requestNode). Events and count() stay local; a local node of a
+// machine wins over a remote one.
 import type { NodeCapacity, NodeCapacityFrame, NodeHello, NodeLaunchPhase, NodeLaunchReport, NodeProgress, NodeRuntimeInfo } from "../protocol"
 
 export interface NodeMachine {
@@ -41,6 +45,11 @@ export type NodeEvent =
 
 export type NodeListener = (event: NodeEvent) => void
 
+/** One owner's nodes on one pod, as other pods mirror them (JSON-compatible). */
+export interface NodeSlice {
+  readonly nodes: NodeView[]
+}
+
 /** Phases after which the node no longer carries the launch. */
 const GONE: ReadonlySet<NodeLaunchPhase> = new Set(["cleaned", "cancelled"])
 
@@ -60,6 +69,9 @@ interface Entry {
 export class NodeRegistry {
   private readonly entries = new Map<string, Entry>()
   private readonly listeners = new Set<NodeListener>()
+  private readonly localChangeListeners = new Set<(owner: string | undefined) => void>()
+  /** Other pods' nodes: pod → owner → slice. */
+  private readonly remote = new Map<string, Map<string, NodeSlice>>()
 
   constructor(
     private readonly ownerOf: (machineID: string) => string | undefined,
@@ -127,11 +139,16 @@ export class NodeRegistry {
 
   get(connID: string): NodeView | undefined {
     const entry = this.entries.get(connID)
-    return entry && this.view(entry)
+    return entry ? this.view(entry) : this.remoteNodes().find((node) => node.connID === connID)
   }
 
-  /** The node connection of a machine (at most one: the hub turns away a second one). */
+  /** The node connection of a machine (at most one: the hub turns away a second one); this pod's first. */
   forMachine(machineID: string): NodeView | undefined {
+    return this.localForMachine(machineID) ?? this.remoteNodes().find((node) => node.machineID === machineID)
+  }
+
+  /** The node connection of a machine held by this pod. */
+  localForMachine(machineID: string): NodeView | undefined {
     for (const entry of this.entries.values()) if (entry.machine.id === machineID) return this.view(entry)
     return undefined
   }
@@ -139,11 +156,60 @@ export class NodeRegistry {
   /** Connected nodes of `ownerID` (all owned nodes when omitted); a node whose machine has no owner is never listed. */
   list(ownerID?: string): NodeView[] {
     const out: NodeView[] = []
-    for (const entry of this.entries.values()) {
-      const node = this.view(entry)
+    for (const node of [...[...this.entries.values()].map((entry) => this.view(entry)), ...this.remoteNodes()]) {
       if (node.ownerID !== undefined && (ownerID === undefined || node.ownerID === ownerID)) out.push(node)
     }
     return out
+  }
+
+  // ---------- cluster (design §9) ----------
+
+  /** Listens for changes to this pod's nodes of an owner. */
+  onLocalChange(listener: (owner: string | undefined) => void): () => void {
+    this.localChangeListeners.add(listener)
+    return () => this.localChangeListeners.delete(listener)
+  }
+
+  /** Owners of this pod's nodes. */
+  clusterTenants(): string[] {
+    const owners = new Set<string>()
+    for (const entry of this.entries.values()) {
+      const owner = this.ownerOf(entry.machine.id)
+      if (owner !== undefined) owners.add(owner)
+    }
+    return [...owners]
+  }
+
+  /** This pod's nodes of an owner for other pods (undefined when none). */
+  clusterSlice(owner: string): NodeSlice | undefined {
+    const nodes = [...this.entries.values()].map((entry) => this.view(entry)).filter((node) => node.ownerID === owner)
+    return nodes.length ? { nodes } : undefined
+  }
+
+  /** Applies another pod's nodes of an owner (undefined: it has none any more). */
+  setRemote(pod: string, owner: string, slice: NodeSlice | undefined): void {
+    let slices = this.remote.get(pod)
+    if (slice) {
+      if (!slices) this.remote.set(pod, (slices = new Map()))
+      slices.set(owner, slice)
+    } else if (slices?.delete(owner) && !slices.size) this.remote.delete(pod)
+  }
+
+  /** Other pods' nodes (owner read live), one per machine (the newest), none for a machine with a local node. */
+  private remoteNodes(): NodeView[] {
+    if (!this.remote.size) return []
+    const local = new Set([...this.entries.values()].map((entry) => entry.machine.id))
+    const byMachine = new Map<string, NodeView>()
+    for (const slices of this.remote.values()) {
+      for (const slice of slices.values()) {
+        for (const node of slice.nodes ?? []) {
+          if (local.has(node.machineID) || this.entries.has(node.connID)) continue
+          const known = byMachine.get(node.machineID)
+          if (!known || node.connectedAt > known.connectedAt) byMachine.set(node.machineID, node)
+        }
+      }
+    }
+    return [...byMachine.values()].map((node) => ({ ...structuredClone(node), ownerID: this.ownerOf(node.machineID) }))
   }
 
   /** Connected node connections (for /healthz). */
@@ -157,6 +223,13 @@ export class NodeRegistry {
   }
 
   private emit(event: NodeEvent): void {
+    for (const listener of [...this.localChangeListeners]) {
+      try {
+        listener(event.node.ownerID)
+      } catch (cause) {
+        console.error("[hub] node change listener failed:", cause instanceof Error ? cause.message : cause)
+      }
+    }
     for (const listener of this.listeners) {
       try {
         listener(event)

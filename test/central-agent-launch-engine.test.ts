@@ -160,14 +160,14 @@ function world(options: { deps?: Partial<LaunchEngineDeps>; service?: boolean; l
   const names = new Map<string, string>()
   const roles: { sessionID: string; role: string; byUser?: boolean }[] = []
   const directory = {
-    sync: (_userID: string) => {},
-    setName(_userID: string, sessionID: string, name: string) {
+    sync: async (_userID: string) => {},
+    async setName(_userID: string, sessionID: string, name: string) {
       if ([...names].some(([n, s]) => n === name && s !== sessionID)) throw new AgentError("name_taken", `@${name} is taken`)
       names.set(name, sessionID)
       primeOrder.push(`name:${name}`)
       return { sessionID, name }
     },
-    claimRole(_userID: string, sessionID: string, role: string, opts: { byUser?: boolean } = {}) {
+    async claimRole(_userID: string, sessionID: string, role: string, opts: { byUser?: boolean } = {}) {
       roles.push({ sessionID, role, ...(opts.byUser ? { byUser: true } : {}) })
       primeOrder.push(`role:${role}`)
       return { role, generation: 1 } as any
@@ -390,7 +390,7 @@ describe("provisioning", () => {
 
   test("a role the directory refuses does not fail the launch; it is noted in the reason", async () => {
     const w = world()
-    w.deps.directory.claimRole = () => {
+    w.deps.directory.claimRole = async () => {
       throw new AgentError("name_taken", "@@lead is held exclusively by another session")
     }
     w.connectNode()

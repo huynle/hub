@@ -56,7 +56,7 @@ export interface DeliveryRegistry {
 export interface DeliveryDirectory {
   resolve(userID: string, addr: string): Resolved
   primed?(userID: string, sessionID: string): boolean
-  markPrimed?(userID: string, sessionID: string): void
+  markPrimed?(userID: string, sessionID: string): void | Promise<void>
   /** Explicit names (Directory.onNamed): an unprimed session is primed then. */
   onNamed?(listener: NamedListener): () => void
 }
@@ -318,7 +318,7 @@ export class Delivery {
       wake: false,
       meta: { kind: "primer", from: "hub", to: entry.name ? `@${entry.name}` : sessionID, delivery: "steer" },
     }
-    if (await this.request(userID, sessionID, req)) directory.markPrimed(userID, sessionID)
+    if (await this.request(userID, sessionID, req)) await directory.markPrimed(userID, sessionID)
   }
 
   /** A msg or ask to the user (@me): stored only; a msg alerts the user. */

@@ -2,6 +2,14 @@
 // StatusBoard per root session (fed by forwarded events from any process), owner selection for turns,
 // a per-session turn lock, permission routing back to the process that asked, and conversation mode
 // (which sessions speak their replies on the phone).
+//
+// Cluster mode (design §9, decision vkxkqiuf §5): the Registry is the single writer of this pod's connections and
+// exports, per tenant, a RegistrySlice of them (connections and what they report, status boards with their activity,
+// pending permissions and forms, presence, sessions with a turn running); ./cluster/view.ts publishes it to the
+// Catalog and the Bus and applies other pods' slices here (setRemote). The synchronous reads (sessionTenant,
+// owner, catalog, permissionTargets, …) answer over local and remote state, so a route on any pod finds a spoke on
+// another one and reaches it through SpokeHub.request (pod RPC). Events, alerts and speech stay with the pod that
+// holds the connection; remote state is never re-exported.
 import path from "node:path"
 import { helloHarness, spokeFeatures, type EvidenceLevel, type ForwardedEvent, type Hello, type HerdrWorkspace, type ProcessKind, type SessionInfo, type SpokeFeature, type SpokeMode, type TerminalInfo, type Terminals } from "../protocol"
 import { StatusBoard, permissionRequest, type Blocker, type BlockerRecommendation, type PermissionRequest, type SessionStatus } from "../status"
@@ -264,6 +272,56 @@ interface Conn {
    * connection is never the machine's service nor an exposure target.
    */
   readonly launchID?: string
+  /** A connection another pod holds (from its slice): its tenant as that pod saw it. */
+  readonly remote?: { readonly pod: string; readonly tenant: string }
+}
+
+/** A connection in a RegistrySlice. */
+export interface SliceConn {
+  readonly id: string
+  readonly machine: MachineRef
+  readonly hello: Hello
+  readonly connected: number
+  readonly seq: number
+  readonly lastSeen: number
+  readonly sessions: SessionInfo[]
+  /** sessionID → recency (comparable across pods: clock-based). */
+  readonly activity: Array<[string, number]>
+  readonly launchID?: string
+  /** The machine's terminal context, when this connection sent the latest one. */
+  readonly terminals?: MachineTerminals
+}
+
+/** A root session's status tree (live: run starts and recommendations included) and activity feed. */
+export interface SliceBoard {
+  readonly rootID: string
+  readonly sessions: LiveStatus[]
+  readonly activity: ActivityItem[]
+}
+
+export interface SlicePermission {
+  readonly requestID: string
+  readonly sessionID: string
+  readonly connIDs: string[]
+  readonly request?: PermissionRequest
+  readonly recommendation?: BlockerRecommendation
+}
+
+export interface SliceForm {
+  readonly formID: string
+  readonly sessionID: string
+  readonly connIDs: string[]
+}
+
+/** One tenant's state on one pod, as other pods mirror it (JSON-compatible). */
+export interface RegistrySlice {
+  readonly conns: SliceConn[]
+  readonly boards: SliceBoard[]
+  readonly permissions: SlicePermission[]
+  readonly forms: SliceForm[]
+  readonly presence: Array<{ readonly deviceID: string; readonly sessionID: string; readonly at: number }>
+  /** Sessions with a hub turn running on that pod. */
+  readonly busy: string[]
 }
 
 /** How a connection was authenticated, beyond its machine. */
@@ -371,6 +429,17 @@ export class Registry {
   private readonly machineTerminals = new Map<string, { connID: string; terminals: MachineTerminals; key: string }>()
   private seq = 0
   private readonly doneWatch: DoneWatch
+  /** Told when this pod's state of a tenant changed (undefined: any tenant). */
+  private readonly localChangeListeners = new Set<(tenant: string | undefined) => void>()
+  /** Other pods' slices: pod → tenant → slice; the maps below index them (see reindex). */
+  private readonly remoteSlices = new Map<string, Map<string, RegistrySlice>>()
+  private remoteConns = new Map<string, Conn>()
+  private remoteBoards = new Map<string, SliceBoard>()
+  private remotePermissions = new Map<string, { sessionID: string; tenant: string; connIDs: string[]; request?: PermissionRequest; recommendation?: BlockerRecommendation }>()
+  private remoteForms = new Map<string, { sessionID: string; connIDs: string[] }>()
+  private remotePresence: Array<{ sessionID: string; at: number }> = []
+  private remoteBusy = new Set<string>()
+  private remoteTerminals = new Map<string, MachineTerminals>()
 
   constructor(
     private readonly now: () => number = Date.now,
@@ -409,13 +478,29 @@ export class Registry {
   // claim, read or inject into another user's session by reusing its ID.
 
   private tenant(conn: Conn): string {
-    return this.tenantOf(conn.machine.id) ?? `?${conn.machine.id}`
+    return conn.remote ? conn.remote.tenant : (this.tenantOf(conn.machine.id) ?? `?${conn.machine.id}`)
+  }
+
+  /** A connection of this pod or (remote) of another one. */
+  private conn(connID: string): Conn | undefined {
+    return this.conns.get(connID) ?? this.remoteConns.get(connID)
+  }
+
+  /** Every connection: this pod's, then other pods'. */
+  private all(): Conn[] {
+    return this.remoteConns.size ? [...this.conns.values(), ...this.remoteConns.values()] : [...this.conns.values()]
+  }
+
+  /** A sequence number that also orders across pods (clock-based, strictly increasing here). */
+  private tick(): number {
+    this.seq = Math.max(this.seq + 1, this.now())
+    return this.seq
   }
 
   /** Tenant of a reported session, or of the status board that contains it; undefined when unknown. */
   sessionTenant(sessionID: string): string | undefined {
     let first: Conn | undefined
-    for (const conn of this.conns.values()) if (conn.sessions.has(sessionID) && (!first || conn.seq < first.seq)) first = conn
+    for (const conn of this.all()) if (conn.sessions.has(sessionID) && (!first || conn.seq < first.seq)) first = conn
     if (first) return this.tenant(first)
     const rootID = this.rootOf(sessionID)
     return rootID && rootID !== sessionID ? this.sessionTenant(rootID) : undefined
@@ -439,24 +524,24 @@ export class Registry {
 
   /** Whether the connection's process belongs to the tenant. */
   connTenant(connID: string): string | undefined {
-    const conn = this.conns.get(connID)
+    const conn = this.conn(connID)
     return conn && this.tenant(conn)
   }
 
   /** IDs of the sessions the connection reports for its own tenant (subagents included); empty when unknown. */
   reportedSessions(connID: string): string[] {
-    const conn = this.conns.get(connID)
+    const conn = this.conn(connID)
     return conn ? this.visible(conn).map((s) => s.id) : []
   }
 
   /** The machine of a connected process. */
   connMachine(connID: string): string | undefined {
-    return this.conns.get(connID)?.machine.id
+    return this.conn(connID)?.machine.id
   }
 
   /** Whether a connected process of the machine reports the session for the machine's tenant. */
   machineReports(machineID: string, sessionID: string): boolean {
-    for (const conn of this.conns.values()) if (conn.machine.id === machineID && this.reports(conn, sessionID)) return true
+    for (const conn of this.all()) if (conn.machine.id === machineID && this.reports(conn, sessionID)) return true
     return false
   }
 
@@ -484,12 +569,13 @@ export class Registry {
       hello,
       features: spokeFeatures(hello),
       connected: t,
-      seq: ++this.seq,
+      seq: this.tick(),
       lastSeen: t,
       sessions: new Map(),
       sessionsKey: "[]",
       activity: new Map(),
     })
+    this.changed(this.tenant(this.conns.get(connID)!))
     this.emit({ type: "catalog" })
   }
 
@@ -514,6 +600,7 @@ export class Registry {
       this.observeBoards({ type: "form.cancelled", data: { sessionID: origin.sessionID, id: formID } })
     }
     this.syncBoards()
+    this.changed(this.tenant(conn))
     this.emit({ type: "catalog" })
   }
 
@@ -532,6 +619,7 @@ export class Registry {
       conn.sessionsKey = key
       conn.sessions = new Map(sessions.map((s) => [s.id, s]))
       this.syncBoards()
+      this.changed(this.tenant(conn))
       this.emit({ type: "catalog" })
     }
     for (const listener of [...this.sessionsListeners]) listener(connID)
@@ -546,12 +634,14 @@ export class Registry {
     const key = JSON.stringify(terminals)
     const previous = this.machineTerminals.get(conn.machine.id)
     this.machineTerminals.set(conn.machine.id, { connID, terminals, key })
-    if (previous?.key !== key) this.emit({ type: "catalog" })
+    if (previous?.key === key) return
+    this.changed(this.tenant(conn))
+    this.emit({ type: "catalog" })
   }
 
   /** The machine's terminal context, while the process that sent it is connected. */
   terminals(machineID: string): MachineTerminals | undefined {
-    return this.machineTerminals.get(machineID)?.terminals
+    return this.machineTerminals.get(machineID)?.terminals ?? this.remoteTerminals.get(machineID)
   }
 
   observe(connID: string, event: ForwardedEvent): void {
@@ -567,8 +657,10 @@ export class Registry {
       const owner = this.sessionTenant(id)
       if (owner !== undefined && owner !== tenant) return
     }
-    if (sessionID) conn.activity.set(sessionID, ++this.seq)
+    if (sessionID) conn.activity.set(sessionID, this.tick())
     const streamed = event.type === "session.text.delta" || event.type === "session.reasoning.delta"
+    // Streamed text changes nothing other pods mirror (its recency goes out with the next change).
+    if (!streamed) this.changed(tenant)
     // Anything else in a session (text ended → say, run ended → status) goes out after its streamed text.
     if (sessionID && !streamed) this.flushStream(this.streams.get(sessionID), sessionID)
 
@@ -914,14 +1006,15 @@ export class Registry {
   setPresence(deviceID: string, sessionID: string, visible: boolean): void {
     const key = `${deviceID} ${sessionID}`
     if (visible) remember(this.presence, key, { sessionID, at: this.now() })
-    else this.presence.delete(key)
+    else if (!this.presence.delete(key)) return
+    this.changed(this.sessionTenant(sessionID))
   }
 
   /** True while some device reported the session's tree visible within PRESENCE_WINDOW_MS. */
   watched(sessionID: string): boolean {
     const rootID = this.rootOf(sessionID) ?? sessionID
     const t = this.now()
-    for (const entry of this.presence.values()) {
+    for (const entry of [...this.presence.values(), ...this.remotePresence]) {
       if (t - entry.at <= PRESENCE_WINDOW_MS && (this.rootOf(entry.sessionID) ?? entry.sessionID) === rootID) return true
     }
     return false
@@ -930,7 +1023,7 @@ export class Registry {
   /** Whether any process exposes the session to voice; undefined when no process reports it. */
   exposed(sessionID: string): boolean | undefined {
     let reported = false
-    for (const conn of this.conns.values()) {
+    for (const conn of this.all()) {
       const s = this.reports(conn, sessionID)
       if (!s) continue
       if (isOn(s)) return true
@@ -941,26 +1034,26 @@ export class Registry {
 
   /** Process to change a session's exposure: a reporting service process, else the most recent reporter (never launch-bound). */
   exposeTarget(sessionID: string): string | undefined {
-    const reporters = [...this.conns.values()].filter((c) => c.launchID === undefined && this.reports(c, sessionID))
+    const reporters = this.all().filter((c) => c.launchID === undefined && this.reports(c, sessionID))
     const services = reporters.filter((c) => c.hello.kind === "service")
     return this.recent(services.length ? services : reporters, sessionID)
   }
 
   /** The launch a connection is bound to (undefined for ordinary connections and unknown ones). */
   launchOf(connID: string): string | undefined {
-    return this.conns.get(connID)?.launchID
+    return this.conn(connID)?.launchID
   }
 
   /** The (most recent) connection bound to a launch. */
   launchConn(launchID: string): string | undefined {
     let found: Conn | undefined
-    for (const conn of this.conns.values()) if (conn.launchID === launchID && (!found || conn.seq > found.seq)) found = conn
+    for (const conn of this.all()) if (conn.launchID === launchID && (!found || conn.seq > found.seq)) found = conn
     return found?.id
   }
 
   /** The machine's (most recently connected) background service process; never a launch-bound connection. */
   serviceFor(machineID: string): string | undefined {
-    const services = [...this.conns.values()].filter((c) => c.machine.id === machineID && c.hello.kind === "service" && c.launchID === undefined)
+    const services = this.all().filter((c) => c.machine.id === machineID && c.hello.kind === "service" && c.launchID === undefined)
     return services.sort((a, b) => b.seq - a.seq)[0]?.id
   }
 
@@ -969,7 +1062,7 @@ export class Registry {
    * machine has a Herdr pane in it.
    */
   reportsWorkspace(connID: string, directory: string): boolean {
-    const conn = this.conns.get(connID)
+    const conn = this.conn(connID)
     if (!conn || !directory.startsWith("/")) return false
     const target = path.posix.resolve(directory)
     const herdr = this.terminals(conn.machine.id)?.herdr
@@ -982,7 +1075,7 @@ export class Registry {
   }
 
   hasSession(sessionID: string): boolean {
-    for (const conn of this.conns.values()) if (conn.sessions.has(sessionID)) return true
+    for (const conn of this.all()) if (conn.sessions.has(sessionID)) return true
     return false
   }
 
@@ -992,17 +1085,17 @@ export class Registry {
    */
   idle(sessionID: string): boolean {
     const owner = this.owner(sessionID)
-    const conn = owner === undefined ? undefined : this.conns.get(owner)
+    const conn = owner === undefined ? undefined : this.conn(owner)
     if (!conn) return false
     const { evidence } = helloHarness(conn.hello)
     if (evidence !== "native" && evidence !== "hooks") return false
-    return !this.active.has(sessionID) && this.browserFields(sessionID).state === "idle"
+    return !this.busy(sessionID) && this.browserFields(sessionID).state === "idle"
   }
 
   /** How recently a process sent an event for the session (higher: more recent; 0: never). */
   recency(sessionID: string): number {
     let latest = 0
-    for (const conn of this.conns.values()) latest = Math.max(latest, conn.activity.get(sessionID) ?? 0)
+    for (const conn of this.all()) latest = Math.max(latest, conn.activity.get(sessionID) ?? 0)
     return latest
   }
 
@@ -1015,7 +1108,27 @@ export class Registry {
   /** Status tree of the root session that contains `sessionID`. */
   status(sessionID: string): LiveStatus[] | undefined {
     const board = this.boards.get(sessionID) ?? [...this.boards.values()].find((b) => b.get(sessionID))
-    return board && this.live(board.snapshot().sessions)
+    if (board) return this.live(board.snapshot().sessions)
+    return this.remoteBoard(sessionID)?.sessions.map((s) => structuredClone(s))
+  }
+
+  /** Another pod's status board that contains the session. */
+  private remoteBoard(sessionID: string): SliceBoard | undefined {
+    if (!this.remoteBoards.size) return undefined
+    const board = this.remoteBoards.get(sessionID)
+    if (board) return board
+    for (const candidate of this.remoteBoards.values()) if (candidate.sessions.some((s) => s.id === sessionID)) return candidate
+    return undefined
+  }
+
+  /** A root's activity feed, here or (remote) on another pod. */
+  private feed(rootID: string): readonly ActivityItem[] | undefined {
+    return this.feeds.get(rootID) ?? (this.boards.has(rootID) ? undefined : this.remoteBoards.get(rootID)?.activity)
+  }
+
+  /** A hub turn runs for the session, on this pod or another. */
+  private busy(sessionID: string): boolean {
+    return this.active.has(sessionID) || this.remoteBusy.has(sessionID)
   }
 
   /** Adds `since` (run start) to working entries and agents' recommendations to permission blockers. */
@@ -1036,7 +1149,7 @@ export class Registry {
 
   catalog(): CatalogMachine[] {
     const machines = new Map<string, { id: string; name: string; processes: CatalogProcess[] }>()
-    for (const conn of [...this.conns.values()].sort((a, b) => a.seq - b.seq)) {
+    for (const conn of this.all().sort((a, b) => a.seq - b.seq)) {
       const machine = machines.get(conn.machine.id) ?? { id: conn.machine.id, name: conn.machine.name, processes: [] }
       machines.set(conn.machine.id, machine)
       const terminals = this.terminals(conn.machine.id)
@@ -1061,7 +1174,7 @@ export class Registry {
             processID,
             machineID: conn.machine.id,
             status: this.status(s.id) ?? [],
-            busy: this.active.has(s.id),
+            busy: this.busy(s.id),
             conversation: this.conversations.has(s.id),
           }
         }),
@@ -1075,7 +1188,7 @@ export class Registry {
     let info: SessionInfo | undefined
     /** Open from any reporting process; a Herdr pane wins over a TUI. */
     let terminal: TerminalInfo | undefined
-    for (const conn of this.conns.values()) {
+    for (const conn of this.all()) {
       const s = this.reports(conn, sessionID)
       if (s && (!info || s.updated > info.updated)) info = s
       if (s?.open && s.terminal && (!terminal || (terminal.source !== "herdr" && s.terminal.source === "herdr"))) terminal = s.terminal
@@ -1094,7 +1207,7 @@ export class Registry {
       updated: info.updated,
       ...(terminal ? { open: true, terminal } : {}),
       ...fields,
-      busy: this.active.has(sessionID),
+      busy: this.busy(sessionID),
       conversation: this.conversations.has(sessionID),
       status,
       activity: this.activity(sessionID),
@@ -1120,7 +1233,7 @@ export class Registry {
       ...(root.projectName ? { projectName: root.projectName } : {}),
       updated: root.updated,
       ...this.browserFields(sessionID),
-      busy: this.active.has(sessionID),
+      busy: this.busy(sessionID),
       conversation: this.conversations.has(sessionID),
       status: root.status,
       activity: root.activity,
@@ -1152,7 +1265,7 @@ export class Registry {
           : "idle"
     const blockers = entries.flatMap((e) => e.blockers.map((b) => ({ ...b, sessionID: e.id, sessionTitle: e.title })))
     const rootID = this.rootOf(sessionID)
-    const item = [...((rootID && this.feeds.get(rootID)) || [])].reverse().find((i) => i.state === "running" && tree.has(i.sessionID))
+    const item = [...((rootID && this.feed(rootID)) || [])].reverse().find((i) => i.state === "running" && tree.has(i.sessionID))
     const now = item && { kind: item.kind, ...(item.tool ? { tool: item.tool } : {}), ...(item.summary ? { summary: item.summary } : {}) }
     return { exposed, state, blockers, ...(now ? { now } : {}) }
   }
@@ -1160,14 +1273,14 @@ export class Registry {
   /** Recent activity of the root session that contains `sessionID`, newest last. */
   activity(sessionID: string): ActivityItem[] {
     const rootID = this.rootOf(sessionID)
-    return rootID ? (this.feeds.get(rootID) ?? []).map((item) => ({ ...item })) : []
+    return rootID ? (this.feed(rootID) ?? []).map((item) => ({ ...item })) : []
   }
 
   /** Root session of the status board that contains `sessionID`. */
   rootOf(sessionID: string): string | undefined {
     if (this.boards.has(sessionID)) return sessionID
     for (const [rootID, board] of this.boards) if (board.get(sessionID)) return rootID
-    return undefined
+    return this.remoteBoard(sessionID)?.rootID
   }
 
   /**
@@ -1388,12 +1501,12 @@ export class Registry {
    * spoke that predates harness and the feature is in IMPLIED_OPENCODE_FEATURES.
    */
   supports(connID: string, feature: SpokeFeature): boolean {
-    return this.conns.get(connID)?.features.has(feature) === true
+    return this.conn(connID)?.features.has(feature) === true
   }
 
   owner(sessionID: string): string | undefined {
     const tenant = this.sessionTenant(sessionID)
-    const all = [...this.conns.values()].filter((c) => this.tenant(c) === tenant)
+    const all = this.all().filter((c) => this.tenant(c) === tenant)
     const reporters = all.filter((c) => this.reports(c, sessionID))
     if (reporters.length === 0) {
       // A subagent session no process lists runs in the process that runs its root.
@@ -1417,7 +1530,7 @@ export class Registry {
     const owner = this.owner(sessionID)
     if (!owner) return []
     const tenant = this.sessionTenant(sessionID)
-    const others = [...this.conns.values()]
+    const others = this.all()
       .filter((c) => c.id !== owner && this.tenant(c) === tenant && this.reports(c, sessionID))
       .sort((a, b) => (b.activity.get(sessionID) ?? 0) - (a.activity.get(sessionID) ?? 0) || b.seq - a.seq)
     return [owner, ...others.map((c) => c.id)]
@@ -1438,11 +1551,13 @@ export class Registry {
     const pending = this.status(rootID)?.some((s) =>
       s.blockers.some((b) => b.kind === "permission" && b.id === requestID),
     )
-    const origin = this.permissions.get(requestID)
+    const local = this.permissions.get(requestID)
+    const remote = this.remotePermissions.get(requestID)
+    const origin = local ?? remote
     if (!pending || !origin) return []
     const tenant = this.sessionTenant(rootID)
-    return origin.connIDs
-      .filter((connID) => this.conns.has(connID) && this.connTenant(connID) === tenant)
+    return [...new Set([...(local?.connIDs ?? []), ...(remote?.connIDs ?? [])])]
+      .filter((connID) => this.conn(connID) !== undefined && this.connTenant(connID) === tenant)
       .map((connID) => ({ connID, sessionID: origin.sessionID }))
   }
 
@@ -1451,7 +1566,7 @@ export class Registry {
    * request had no usable action). Callers check tenancy (owns) and that it is still pending in the tree.
    */
   permissionRequest(requestID: string): { sessionID: string; request?: PermissionRequest } | undefined {
-    const origin = this.permissions.get(requestID)
+    const origin = this.permissions.get(requestID) ?? this.remotePermissions.get(requestID)
     if (!origin) return undefined
     return { sessionID: origin.sessionID, ...(origin.request ? { request: structuredClone(origin.request) } : {}) }
   }
@@ -1459,11 +1574,13 @@ export class Registry {
   /** Every connected process of the session's tenant that forwarded the pending form, first first. */
   formTargets(rootID: string, formID: string): Array<{ connID: string; sessionID: string }> {
     const pending = this.status(rootID)?.some((s) => s.blockers.some((b) => b.kind === "form" && b.id === formID))
-    const origin = this.forms.get(formID)
+    const local = this.forms.get(formID)
+    const remote = this.remoteForms.get(formID)
+    const origin = local ?? remote
     if (!pending || !origin) return []
     const tenant = this.sessionTenant(rootID)
-    return origin.connIDs
-      .filter((connID) => this.conns.has(connID) && this.connTenant(connID) === tenant)
+    return [...new Set([...(local?.connIDs ?? []), ...(remote?.connIDs ?? [])])]
+      .filter((connID) => this.conn(connID) !== undefined && this.connTenant(connID) === tenant)
       .map((connID) => ({ connID, sessionID: origin.sessionID }))
   }
 
@@ -1473,6 +1590,7 @@ export class Registry {
     if (!origin) return
     this.forms.delete(formID)
     this.observeBoards({ type: "form.cancelled", data: { sessionID: origin.sessionID, id: formID } })
+    this.changed(this.sessionTenant(origin.sessionID))
   }
 
   /** A permission no process holds any more (answered elsewhere, expired): drop it and its blocker. */
@@ -1481,6 +1599,7 @@ export class Registry {
     if (!origin) return
     this.permissions.delete(requestID)
     this.observeBoards({ type: "permission.replied", data: { sessionID: origin.sessionID, requestID } })
+    this.changed(origin.tenant ?? this.sessionTenant(origin.sessionID))
     this.permissionClosed(requestID, origin)
   }
 
@@ -1507,6 +1626,7 @@ export class Registry {
     const rootID = this.rootOf(origin.sessionID)
     const board = rootID === undefined ? undefined : this.boards.get(rootID)
     if (rootID !== undefined && board) this.emit({ type: "status", sessionID: rootID, sessions: this.live(board.snapshot().sessions) })
+    this.changed(origin.tenant ?? this.sessionTenant(origin.sessionID))
     return true
   }
 
@@ -1525,13 +1645,15 @@ export class Registry {
    * interrupt releases the lock first (see cancelTurns), so the waiting request can end.
    */
   beginTurn(sessionID: string, onCancel?: () => void): () => void {
-    if (this.active.has(sessionID)) throw new BusyError()
+    if (this.busy(sessionID)) throw new BusyError()
     const turn = { cancel: onCancel }
     this.active.set(sessionID, turn)
+    this.changed(this.sessionTenant(sessionID))
     this.emit({ type: "catalog" })
     return () => {
       if (this.active.get(sessionID) !== turn) return // already released, or cancelled and taken by a newer turn
       this.active.delete(sessionID)
+      this.changed(this.sessionTenant(sessionID))
       this.emit({ type: "catalog" })
       this.doneWatch.poke(this.rootOf(sessionID) ?? sessionID)
     }
@@ -1543,6 +1665,7 @@ export class Registry {
     const ended = [...this.active].filter(([id]) => id === sessionID || (this.rootOf(id) ?? id) === rootID)
     if (!ended.length) return
     for (const [id] of ended) this.active.delete(id)
+    this.changed(this.sessionTenant(sessionID))
     this.emit({ type: "catalog" })
     for (const [, turn] of ended) {
       try {
@@ -1614,6 +1737,155 @@ export class Registry {
       if (next.length === pending.length) break
       pending = next
     }
+  }
+
+  // ---------- cluster (design §9) ----------
+
+  /** Listens for changes to this pod's state of a tenant (undefined: any tenant may have changed). */
+  onLocalChange(listener: (tenant: string | undefined) => void): () => void {
+    this.localChangeListeners.add(listener)
+    return () => this.localChangeListeners.delete(listener)
+  }
+
+  private changed(tenant: string | undefined): void {
+    for (const listener of [...this.localChangeListeners]) {
+      try {
+        listener(tenant)
+      } catch (cause) {
+        console.error(`[hub] registry change listener failed: ${cause instanceof Error ? cause.message : String(cause)}`)
+      }
+    }
+  }
+
+  /** Tenants this pod holds state of (connections, boards, pending permissions and forms, presence, turns). */
+  clusterTenants(): string[] {
+    const tenants = new Set<string>()
+    for (const conn of this.conns.values()) tenants.add(this.tenant(conn))
+    const add = (tenant: string | undefined) => tenant !== undefined && tenants.add(tenant)
+    for (const rootID of this.boards.keys()) add(this.sessionTenant(rootID))
+    for (const origin of this.permissions.values()) add(origin.tenant ?? this.sessionTenant(origin.sessionID))
+    for (const origin of this.forms.values()) add(this.sessionTenant(origin.sessionID))
+    for (const entry of this.presence.values()) add(this.sessionTenant(entry.sessionID))
+    for (const sessionID of this.active.keys()) add(this.sessionTenant(sessionID))
+    return [...tenants]
+  }
+
+  /** This pod's state of a tenant for other pods (undefined when there is none). Remote state is not included. */
+  clusterSlice(tenant: string): RegistrySlice | undefined {
+    const conns: SliceConn[] = [...this.conns.values()]
+      .filter((conn) => this.tenant(conn) === tenant)
+      .map((conn) => {
+        const terminals = this.machineTerminals.get(conn.machine.id)
+        return {
+          id: conn.id,
+          machine: { id: conn.machine.id, name: conn.machine.name },
+          hello: conn.hello,
+          connected: conn.connected,
+          seq: conn.seq,
+          lastSeen: conn.lastSeen,
+          sessions: [...conn.sessions.values()],
+          activity: [...conn.activity],
+          ...(conn.launchID !== undefined ? { launchID: conn.launchID } : {}),
+          ...(terminals?.connID === conn.id ? { terminals: terminals.terminals } : {}),
+        }
+      })
+    const boards: SliceBoard[] = [...this.boards]
+      .filter(([rootID]) => this.sessionTenant(rootID) === tenant)
+      .map(([rootID, board]) => ({ rootID, sessions: this.live(board.snapshot().sessions), activity: this.feeds.get(rootID) ?? [] }))
+    const permissions: SlicePermission[] = [...this.permissions]
+      .filter(([, origin]) => (origin.tenant ?? this.sessionTenant(origin.sessionID)) === tenant)
+      .map(([requestID, origin]) => ({
+        requestID,
+        sessionID: origin.sessionID,
+        connIDs: [...origin.connIDs],
+        ...(origin.request ? { request: origin.request } : {}),
+        ...(origin.recommendation ? { recommendation: origin.recommendation } : {}),
+      }))
+    const forms: SliceForm[] = [...this.forms]
+      .filter(([, origin]) => this.sessionTenant(origin.sessionID) === tenant)
+      .map(([formID, origin]) => ({ formID, sessionID: origin.sessionID, connIDs: [...origin.connIDs] }))
+    const t = this.now()
+    const presence = [...this.presence]
+      .filter(([, entry]) => t - entry.at <= PRESENCE_WINDOW_MS && this.sessionTenant(entry.sessionID) === tenant)
+      .map(([key, entry]) => ({ deviceID: key.slice(0, key.lastIndexOf(` ${entry.sessionID}`)), sessionID: entry.sessionID, at: entry.at }))
+    const busy = [...this.active.keys()].filter((sessionID) => this.sessionTenant(sessionID) === tenant)
+    if (!conns.length && !boards.length && !permissions.length && !forms.length && !presence.length && !busy.length) return undefined
+    return structuredClone({ conns, boards, permissions, forms, presence, busy })
+  }
+
+  /**
+   * Applies another pod's slice of a tenant (undefined: it has none any more, e.g. the pod is gone). Remote
+   * connections answer the reads like local ones; listeners get a catalog message.
+   */
+  setRemote(pod: string, tenant: string, slice: RegistrySlice | undefined): void {
+    let slices = this.remoteSlices.get(pod)
+    if (slice) {
+      if (!slices) this.remoteSlices.set(pod, (slices = new Map()))
+      slices.set(tenant, slice)
+    } else {
+      if (!slices?.delete(tenant)) return
+      if (!slices.size) this.remoteSlices.delete(pod)
+    }
+    this.reindex()
+    this.emit({ type: "catalog" })
+  }
+
+  /** The pods whose slices are applied here, with their tenants. */
+  remotePods(): Map<string, string[]> {
+    return new Map([...this.remoteSlices].map(([pod, slices]) => [pod, [...slices.keys()]]))
+  }
+
+  /** Rebuilds the indexes of the remote slices. */
+  private reindex(): void {
+    const conns = new Map<string, Conn>()
+    const boards = new Map<string, SliceBoard>()
+    const permissions = new Map<string, { sessionID: string; tenant: string; connIDs: string[]; request?: PermissionRequest; recommendation?: BlockerRecommendation }>()
+    const forms = new Map<string, { sessionID: string; connIDs: string[] }>()
+    const presence: Array<{ sessionID: string; at: number }> = []
+    const busy = new Set<string>()
+    const terminals = new Map<string, MachineTerminals>()
+    for (const [pod, slices] of this.remoteSlices) {
+      for (const [tenant, slice] of slices) {
+        for (const c of slice.conns ?? []) {
+          if (this.conns.has(c.id)) continue
+          conns.set(c.id, {
+            id: c.id,
+            machine: c.machine,
+            hello: c.hello,
+            features: spokeFeatures(c.hello),
+            connected: c.connected,
+            seq: c.seq,
+            lastSeen: c.lastSeen,
+            sessions: new Map((c.sessions ?? []).map((s) => [s.id, s])),
+            sessionsKey: "",
+            activity: new Map(c.activity ?? []),
+            ...(c.launchID !== undefined ? { launchID: c.launchID } : {}),
+            remote: { pod, tenant },
+          })
+          if (c.terminals) terminals.set(c.machine.id, c.terminals)
+        }
+        for (const board of slice.boards ?? []) boards.set(board.rootID, board)
+        for (const p of slice.permissions ?? []) {
+          const known = permissions.get(p.requestID)
+          if (known) known.connIDs.push(...p.connIDs.filter((id) => !known.connIDs.includes(id)))
+          else permissions.set(p.requestID, { sessionID: p.sessionID, tenant, connIDs: [...p.connIDs], ...(p.request ? { request: p.request } : {}), ...(p.recommendation ? { recommendation: p.recommendation } : {}) })
+        }
+        for (const f of slice.forms ?? []) {
+          const known = forms.get(f.formID)
+          if (known) known.connIDs.push(...f.connIDs.filter((id) => !known.connIDs.includes(id)))
+          else forms.set(f.formID, { sessionID: f.sessionID, connIDs: [...f.connIDs] })
+        }
+        for (const entry of slice.presence ?? []) presence.push({ sessionID: entry.sessionID, at: entry.at })
+        for (const sessionID of slice.busy ?? []) busy.add(sessionID)
+      }
+    }
+    this.remoteConns = conns
+    this.remoteBoards = boards
+    this.remotePermissions = permissions
+    this.remoteForms = forms
+    this.remotePresence = presence
+    this.remoteBusy = busy
+    this.remoteTerminals = terminals
   }
 
   /** Raises a notification about the session for its user (e.g. the delivery engine's unanswered asks). */

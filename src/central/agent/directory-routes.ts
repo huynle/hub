@@ -58,7 +58,7 @@ export function registrySource(registry: Pick<DirectoryRegistry, "catalog" | "se
 }
 
 /** The hub's directory: fed by the Registry, synced for the affected users on every catalog change. */
-export function hubDirectory(options: { registry: DirectoryRegistry; store: Pick<Store, "viewPrefs" | "updateAgentData">; now?: () => number }): Directory {
+export function hubDirectory(options: { registry: DirectoryRegistry; store: Pick<Store, "viewPrefs" | "updateAgentData" | "agentData" | "user">; now?: () => number }): Directory {
   const { registry, store } = options
   const directory = new Directory({ store, source: registrySource(registry, store), ...(options.now ? { now: options.now } : {}) })
   /** Users with reported sessions at the last catalog change (they need a sync when theirs go away). */
@@ -75,11 +75,9 @@ export function hubDirectory(options: { registry: DirectoryRegistry; store: Pick
       }
     }
     for (const userID of new Set([...online, ...now])) {
-      try {
-        directory.sync(userID)
-      } catch (cause) {
+      directory.sync(userID).catch((cause: unknown) => {
         if (!(cause instanceof AgentError)) console.error("[hub] directory sync failed:", cause)
-      }
+      })
     }
     online = now
   })
@@ -150,7 +148,7 @@ export function directoryRoutes(directory: Directory): AgentRoute[] {
         const body = await readBody(context.request)
         const name = text(body, "name", true)
         const sessionID = target(directory, context, text(body, "session"))
-        return ok(directory.setName(context.user.id, sessionID, name))
+        return ok(await directory.setName(context.user.id, sessionID, name))
       },
     },
     {
@@ -163,7 +161,7 @@ export function directoryRoutes(directory: Directory): AgentRoute[] {
         const exclusive = flag(body, "exclusive")
         const project = text(body, "project")
         const sessionID = target(directory, context, text(body, "session"))
-        const claim = directory.claimRole(context.user.id, sessionID, role, {
+        const claim = await directory.claimRole(context.user.id, sessionID, role, {
           ...(exclusive !== undefined ? { exclusive } : {}),
           ...(project !== undefined ? { project } : {}),
           byUser: context.actor.kind === "user",
@@ -180,7 +178,7 @@ export function directoryRoutes(directory: Directory): AgentRoute[] {
         const role = text(body, "role", true)
         const project = text(body, "project")
         const sessionID = target(directory, context, text(body, "session"))
-        return ok({ sessionID, ...directory.releaseRole(context.user.id, sessionID, role, project), released: true })
+        return ok({ sessionID, ...(await directory.releaseRole(context.user.id, sessionID, role, project)), released: true })
       },
     },
   ]
