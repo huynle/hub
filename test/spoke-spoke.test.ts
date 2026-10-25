@@ -1554,6 +1554,70 @@ describe("session tokens", () => {
   })
 })
 
+describe("act tokens", () => {
+  const later = () => Date.now() + 60_000
+
+  test("the hello announces actTokens", () => {
+    expect(SPOKE_FEATURES).toContain("actTokens")
+  })
+
+  test("stores act tokens apart from session tokens; unknown and expired ones are skipped", async () => {
+    const { spoke, server, host } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    host.push(created("ses_b"))
+    await until(() => lastSessions(server)?.sessions.length === 2)
+    const res = await server.request({
+      op: "actTokens",
+      tokens: [
+        { sessionID: "ses_a", token: "act.a", exp: later() },
+        { sessionID: "ses_ghost", token: "act.g", exp: later() },
+        { sessionID: "ses_b", token: "act.old", exp: Date.now() - 1 },
+      ],
+    })
+    expect(res).toMatchObject({ ok: true, result: { applied: ["ses_a"], skipped: [{ sessionID: "ses_ghost", reason: "unknown" }, { sessionID: "ses_b", reason: "expired" }] } })
+    // An act token is never a session token.
+    expect(spoke.sessionToken("ses_a")).toBeUndefined()
+    expect(spoke.shellIdentity("ses_a")).toBeUndefined()
+    // The hub URL is the spoke's own server, as for shells.
+    expect(spoke.actIdentity("ses_a")).toEqual({ token: "act.a", url: server.url })
+    await server.request({ op: "sessionTokens", tokens: [{ sessionID: "ses_a", token: "hst.a", exp: later() }], hubURL: "https://hub.example" })
+    expect(spoke.shellIdentity("ses_a")).toEqual({ token: "hst.a", url: server.url })
+    expect(spoke.actIdentity("ses_a")).toEqual({ token: "act.a", url: server.url })
+    expect(spoke.actIdentity("ses_b")).toBeUndefined()
+  })
+
+  test("shellIdentity never returns an act token, even when the session has no session token", async () => {
+    const { spoke, server, host } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    host.push(created("ses_b"))
+    await until(() => lastSessions(server)?.sessions.length === 2)
+    await server.request({ op: "sessionTokens", tokens: [{ sessionID: "ses_b", token: "hst.b", exp: later() }], hubURL: "https://hub.example" })
+    await server.request({ op: "actTokens", tokens: [{ sessionID: "ses_a", token: "ACT-SECRET", exp: later() }, { sessionID: "ses_b", token: "ACT-SECRET-B", exp: later() }] })
+    expect(spoke.shellIdentity("ses_a")).toBeUndefined()
+    expect(spoke.shellIdentity("ses_b")).toEqual({ token: "hst.b", url: server.url })
+    expect(JSON.stringify([spoke.shellIdentity("ses_a"), spoke.shellIdentity("ses_b"), spoke.sessionToken("ses_a"), spoke.sessionToken("ses_b")])).not.toContain("ACT-SECRET")
+    expect(Bun.inspect(spoke)).not.toContain("ACT-SECRET")
+  })
+
+  test("act tokens are dropped with the connection and when the session is deleted", async () => {
+    const { spoke, server, host } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    host.push(created("ses_b"))
+    await until(() => lastSessions(server)?.sessions.length === 2)
+    await server.request({ op: "sessionTokens", tokens: [{ sessionID: "ses_a", token: "hst.a", exp: later() }, { sessionID: "ses_b", token: "hst.b", exp: later() }], hubURL: "https://hub.example" })
+    await server.request({ op: "actTokens", tokens: [{ sessionID: "ses_a", token: "act.a", exp: later() }, { sessionID: "ses_b", token: "act.b", exp: later() }] })
+    host.push({ type: "session.deleted", data: { sessionID: "ses_a" } })
+    await until(() => spoke.actIdentity("ses_a") === undefined)
+    expect(spoke.actIdentity("ses_b")?.token).toBe("act.b")
+    spoke.setMode("off")
+    await until(() => spoke.status().connection === "off")
+    expect(spoke.actIdentity("ses_b")).toBeUndefined()
+  })
+})
+
 describe("deliver", () => {
   const deliver = (extra: Record<string, unknown> = {}, meta: Record<string, unknown> = {}) => ({
     op: "deliver",
