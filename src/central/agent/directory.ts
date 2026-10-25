@@ -14,6 +14,8 @@
 //   the RECONNECT_WINDOW_MS after the hub started, while spokes reconnect.
 // - At most SESSION_LIMIT records per user: archived/deleted ones are dropped first, then the least recently
 //   seen, with their names and roles.
+// - Primer (design §2.3): a session record remembers when the identity primer reached it (primed); explicit
+//   names are announced to onNamed listeners (the delivery engine primes on them), derived names never are.
 //
 // Tenancy: everything is per user; another user's sessions, names and roles do not exist here (not_found),
 // and ambiguity candidates only ever list the caller's own sessions.
@@ -88,6 +90,9 @@ export interface DirectoryEntry {
   readonly roles: RoleView[]
 }
 
+/** Hears an explicit name change (setName); derived names are never announced. */
+export type NamedListener = (userID: string, sessionID: string, name: string) => void
+
 export interface Resolved {
   readonly address: Address
   /** One session for an ID or @name; every live holder for a @@role. */
@@ -116,6 +121,7 @@ export class Directory {
   private readonly startedAt: number
   /** Per user: the sessions reported at the last update (to stamp lastSeen when they go away). */
   private readonly online = new Map<string, Set<string>>()
+  private readonly named = new Set<NamedListener>()
 
   constructor(options: DirectoryOptions) {
     this.store = options.store
@@ -137,10 +143,43 @@ export class Directory {
     })
   }
 
+  // ---------- primer ----------
+
+  /** Whether the identity primer reached the session (false for an unknown one). */
+  primed(userID: string, sessionID: string): boolean {
+    return this.update(userID, (draft) => draft.byID.get(sessionID)?.primed !== undefined)
+  }
+
+  /** Records that the identity primer reached the session (an unknown session is ignored). */
+  markPrimed(userID: string, sessionID: string): void {
+    this.update(userID, (draft) => {
+      const record = draft.byID.get(sessionID)
+      if (record && record.primed === undefined) record.primed = this.now()
+    })
+  }
+
+  /** Listens for explicit names (setName); returns the unsubscribe. */
+  onNamed(listener: NamedListener): () => void {
+    this.named.add(listener)
+    return () => void this.named.delete(listener)
+  }
+
   // ---------- names ----------
 
-  /** Names a session (explicit: a taken name fails); the previous name stays an alias for ALIAS_MS. */
+  /** Names a session (explicit: a taken name fails); the previous name stays an alias for ALIAS_MS. Tells onNamed listeners. */
   setName(userID: string, sessionID: string, requested: string): { sessionID: string; name: string; alias?: string } {
+    const result = this.assignName(userID, sessionID, requested)
+    for (const listener of this.named) {
+      try {
+        listener(userID, sessionID, result.name)
+      } catch (cause) {
+        console.error("[hub] name listener failed:", cause)
+      }
+    }
+    return result
+  }
+
+  private assignName(userID: string, sessionID: string, requested: string): { sessionID: string; name: string; alias?: string } {
     const name = requested.replace(/^@/, "")
     if (!validName(name)) throw new AgentError("invalid", "A name is 2–40 characters: a-z, 0-9 and -")
     return this.update(userID, (draft) => {

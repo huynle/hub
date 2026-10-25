@@ -46,6 +46,8 @@ export interface AgentSession {
   deletedAt?: number
   /** Name derivation already happened (derived once, from the first non-placeholder title). */
   named?: boolean
+  /** When the one-time identity primer reached the session (ms); absent: not primed yet. */
+  primed?: number
   [field: string]: unknown
 }
 

@@ -42,9 +42,36 @@ describe("delivery in the hub", () => {
     const { requests } = await start()
     const sent = await h.delivery.send(USER, asSession("ses_1"), "@web-work", "msg", "hello")
     expect(sent.delivery).toBe("turn")
-    const req = requests.find((r) => r.op === "deliver")
+    const req = requests.find((r) => r.op === "deliver" && r.meta.kind !== "primer")
     expect(req).toMatchObject({ sessionID: "ses_2", messageID: sent.message.id, wake: true, meta: { kind: "msg", from: "@api-refactor", to: "@web-work", delivery: "queue" } })
     expect(req.text).toContain("[hub] msg from @api-refactor (laptop) to you")
+  })
+
+  test("the first message is preceded by one identity primer (wake:false), persisted on the session record", async () => {
+    const { requests } = await start()
+    await h.delivery.send(USER, asSession("ses_1"), "@web-work", "msg", "one")
+    await h.delivery.send(USER, asSession("ses_1"), "@web-work", "msg", "two")
+    const delivers = requests.filter((r) => r.op === "deliver")
+    expect(delivers.map((r) => r.meta.kind)).toEqual(["primer", "msg", "msg"])
+    expect(delivers[0]).toMatchObject({ sessionID: "ses_2", wake: false, meta: { kind: "primer", from: "hub", to: "@web-work", delivery: "steer" } })
+    expect(delivers[0].text).toContain("[hub] You are @web-work.")
+    expect(delivers[0].text).toContain("not from the user")
+    expect(h.store.agentData(USER).sessions?.find((s) => s.sessionID === "ses_2")?.primed).toEqual(expect.any(Number))
+    expect(h.store.agentData(USER).sessions?.find((s) => s.sessionID === "ses_1")?.primed).toBeUndefined()
+  })
+
+  test("POST /api/agent/name primes with the new name (again on each explicit rename); derived names never prime", async () => {
+    const { requests } = await start()
+    // ses_1 and ses_2 have derived names already: nothing was primed.
+    expect(requests.filter((r) => r.op === "deliver")).toEqual([])
+    const res = await h.api("/api/agent/name", { method: "POST", json: { name: "backend", session: "ses_1" } })
+    expect(res.status).toBe(200)
+    await waitFor(() => requests.some((r) => r.op === "deliver"))
+    expect(requests.filter((r) => r.op === "deliver")).toEqual([expect.objectContaining({ sessionID: "ses_1", wake: false, meta: expect.objectContaining({ kind: "primer", to: "@backend" }) })])
+    // An explicit rename primes again with the new name.
+    expect((await h.api("/api/agent/name", { method: "POST", json: { name: "backend-2", session: "ses_1" } })).status).toBe(200)
+    await waitFor(() => requests.filter((r) => r.op === "deliver").length === 2)
+    expect(requests.filter((r) => r.op === "deliver")[1]).toMatchObject({ sessionID: "ses_1", wake: false, meta: { kind: "primer", to: "@backend-2" } })
   })
 
   test("a spoke without deliver: unsupported", async () => {
@@ -61,8 +88,9 @@ describe("delivery in the hub", () => {
     const again = await spoke(h, { machine: { token: client.token }, hello: { harness: "opencode", harnessVersion: "2.1.4", evidence: "native", features: ["deliver"] } })
     const requests = answer(again)
     again.send({ t: "sessions", sessions })
-    await waitFor(() => requests.some((r) => r.op === "deliver"))
-    expect(requests.find((r) => r.op === "deliver")).toMatchObject({ sessionID: "ses_2", messageID: sent.message.id })
+    await waitFor(() => requests.some((r) => r.op === "deliver" && r.meta.kind !== "primer"))
+    expect(requests.filter((r) => r.op === "deliver").map((r) => r.meta.kind)).toEqual(["primer", "msg"])
+    expect(requests.find((r) => r.op === "deliver" && r.meta.kind === "msg")).toMatchObject({ sessionID: "ses_2", messageID: sent.message.id })
     const stored = async () => (await h.delivery.messages.get(USER, sent.message.id))?.delivery
     for (let i = 0; i < 100 && (await stored()) !== "turn"; i++) await Bun.sleep(10)
     expect(await stored()).toBe("turn")

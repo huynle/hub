@@ -228,6 +228,57 @@ describe("explicit names", () => {
   })
 })
 
+describe("primer", () => {
+  test("primed is false until markPrimed, then persisted on the session record (survives a restart)", () => {
+    const h = setup()
+    h.report(h.alice, root("ses_a", "API refactor"))
+    h.dir.sync(h.alice)
+    expect(h.dir.primed(h.alice, "ses_a")).toBe(false)
+    h.dir.markPrimed(h.alice, "ses_a")
+    expect(h.dir.primed(h.alice, "ses_a")).toBe(true)
+    expect(h.data(h.alice).sessions?.find((s) => s.sessionID === "ses_a")?.primed).toBe(h.now())
+    expect(h.restart().primed(h.alice, "ses_a")).toBe(true)
+  })
+
+  test("primed is per session and per user; unknown sessions are not primed and markPrimed ignores them", () => {
+    const h = setup()
+    h.report(h.alice, root("ses_a", "one"), root("ses_b", "two"))
+    h.report(h.bob, root("ses_x", "three"))
+    h.dir.markPrimed(h.alice, "ses_a")
+    expect(h.dir.primed(h.alice, "ses_b")).toBe(false)
+    expect(h.dir.primed(h.bob, "ses_a")).toBe(false)
+    h.dir.markPrimed(h.bob, "ses_a")
+    expect(h.dir.primed(h.bob, "ses_a")).toBe(false)
+    expect(h.data(h.bob).sessions?.some((s) => s.sessionID === "ses_a")).toBe(false)
+  })
+
+  test("onNamed hears explicit names only, never derived ones", () => {
+    const h = setup()
+    const heard: Array<[string, string, string]> = []
+    const off = h.dir.onNamed((userID, sessionID, name) => heard.push([userID, sessionID, name]))
+    h.report(h.alice, root("ses_a", "API refactor"))
+    h.dir.sync(h.alice)
+    expect(nameOf(h, h.alice, "ses_a")).toBe("api-refactor")
+    expect(heard).toEqual([])
+    h.dir.setName(h.alice, "ses_a", "backend")
+    expect(heard).toEqual([[h.alice, "ses_a", "backend"]])
+    expect(failure(() => h.dir.setName(h.alice, "ses_a", "Bad_Name")).code).toBe("invalid")
+    expect(heard).toHaveLength(1)
+    off()
+    h.dir.setName(h.alice, "ses_a", "other")
+    expect(heard).toHaveLength(1)
+  })
+
+  test("a throwing onNamed listener does not fail setName", () => {
+    const h = setup()
+    h.dir.onNamed(() => {
+      throw new Error("boom")
+    })
+    h.report(h.alice, root("ses_a", "New session - 2026-10-24T20:43:31.123Z"))
+    expect(h.dir.setName(h.alice, "ses_a", "api")).toEqual({ sessionID: "ses_a", name: "api" })
+  })
+})
+
 describe("name release", () => {
   test(`a name stays bound while its session is offline; it is released ${NAME_RELEASE_MS / DAY} d after the session is archived`, () => {
     const h = setup()
