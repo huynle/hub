@@ -282,7 +282,7 @@ export function startCentral(options: CentralOptions): Central {
   // A machine's tenant is its owner (read live: ownership moves on migration).
   const registry = new Registry(now, undefined, (machineID) => store.machines().find((m) => m.id === machineID)?.ownerID)
   const nodes = new NodeRegistry((machineID) => store.machines().find((m) => m.id === machineID)?.ownerID, now)
-  const push = new Push({ store, subject: config.vapidSubject, sender: options.pushSender })
+  const push = new Push({ store, subject: config.vapidSubject, sender: options.pushSender, kv: backends.kv })
   const notifier = options.notifier ?? push
   /** SSE subscribers, one user each. */
   const listeners = new Set<Listener>()
