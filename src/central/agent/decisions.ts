@@ -169,6 +169,8 @@ export interface DecisionsDeps {
   readonly newID?: () => string
   /** The users whose Decisions the deadline loop looks at. */
   readonly users?: () => Iterable<string>
+  /** How often the deadline loop runs (default DECISION_TICK_MS). */
+  readonly tickMs?: number
   /** A Decision the user should see (opened, or past its deadline without a safe onTimeout). */
   readonly notify?: (userID: string, decision: Decision, reason: NotifyReason) => void
   /** A Decision opened or changed (answered, timed out, escalated, expired): the console's live event. Never throws through. */
@@ -412,7 +414,7 @@ export class Decisions {
       void this.tick().finally(() => {
         if (this.running && this.timer === undefined) this.schedule()
       })
-    }, DECISION_TICK_MS)
+    }, this.deps.tickMs ?? DECISION_TICK_MS)
   }
 
   /** The Decision as of now (an open one past its ask's expiry reads expired). */

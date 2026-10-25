@@ -4,8 +4,10 @@
 // list(ownerID); the launch engine (P4-T8) subscribes to progress and connect/disconnect events.
 // Cluster mode (design §9): each pod is the single writer of its own nodes and exports them per owner (clusterSlice);
 // ./cluster/view.ts applies other pods' slices (setRemote), so list/get/forMachine see every node of the cluster (a
-// node on another pod is reached through SpokeHub.requestNode). Events and count() stay local; a local node of a
-// machine wins over a remote one.
+// node on another pod is reached through SpokeHub.requestNode). Events and count() stay local, except for
+// subscribers asking for remote events (the launch supervisor on the leader pod): they also get connected,
+// capacity, progress and disconnected derived from other pods' slice changes. A local node of a machine wins over a
+// remote one.
 import type { NodeCapacity, NodeCapacityFrame, NodeHello, NodeLaunchPhase, NodeLaunchReport, NodeProgress, NodeRuntimeInfo } from "../protocol"
 
 export interface NodeMachine {
@@ -69,6 +71,8 @@ interface Entry {
 export class NodeRegistry {
   private readonly entries = new Map<string, Entry>()
   private readonly listeners = new Set<NodeListener>()
+  /** Listeners that also get events derived from other pods' slices (the launch supervisor on the leader pod). */
+  private readonly remoteListeners = new Set<NodeListener>()
   private readonly localChangeListeners = new Set<(owner: string | undefined) => void>()
   /** Other pods' nodes: pod → owner → slice. */
   private readonly remote = new Map<string, Map<string, NodeSlice>>()
@@ -189,10 +193,43 @@ export class NodeRegistry {
   /** Applies another pod's nodes of an owner (undefined: it has none any more). */
   setRemote(pod: string, owner: string, slice: NodeSlice | undefined): void {
     let slices = this.remote.get(pod)
+    const before = slices?.get(owner)?.nodes ?? []
     if (slice) {
       if (!slices) this.remote.set(pod, (slices = new Map()))
       slices.set(owner, slice)
     } else if (slices?.delete(owner) && !slices.size) this.remote.delete(pod)
+    if (this.remoteListeners.size) this.emitRemote(before, slice?.nodes ?? [])
+  }
+
+  /**
+   * Events for remote listeners from a change of another pod's slice: nodes connecting and leaving, capacity, and
+   * per launch its new phase, or (gone from the slice) cancelled while preparing, else cleaned.
+   */
+  private emitRemote(before: readonly NodeView[], after: readonly NodeView[]): void {
+    const view = (node: NodeView): NodeView => ({ ...structuredClone(node), ownerID: this.ownerOf(node.machineID) })
+    const old = new Map(before.map((node) => [node.connID, node]))
+    const events: NodeEvent[] = []
+    for (const node of after) {
+      const previous = old.get(node.connID)
+      old.delete(node.connID)
+      if (!previous) {
+        events.push({ type: "connected", node: view(node) })
+        continue
+      }
+      const capacity = (n: NodeView) => JSON.stringify([n.capacity, n.used, n.draining, n.labels])
+      if (capacity(previous) !== capacity(node)) events.push({ type: "capacity", node: view(node) })
+      const phases = new Map(previous.launches.map((l) => [l.launchID, l.phase]))
+      const current = new Set(node.launches.map((l) => l.launchID))
+      // Released launches first, then the new phases.
+      for (const [launchID, phase] of phases) {
+        if (!current.has(launchID)) events.push({ type: "progress", node: view(node), launchID, phase: phase === "preparing" ? "cancelled" : "cleaned" })
+      }
+      for (const launch of node.launches) {
+        if (phases.get(launch.launchID) !== launch.phase) events.push({ type: "progress", node: view(node), launchID: launch.launchID, phase: launch.phase })
+      }
+    }
+    for (const node of old.values()) events.push({ type: "disconnected", node: view(node) })
+    for (const event of events) this.notify(this.remoteListeners, event)
   }
 
   /** Other pods' nodes (owner read live), one per machine (the newest), none for a machine with a local node. */
@@ -217,9 +254,14 @@ export class NodeRegistry {
     return this.entries.size
   }
 
-  subscribe(listener: NodeListener): () => void {
+  /** Events of this pod's nodes; with `remote`, also of other pods' nodes (derived from their slices). */
+  subscribe(listener: NodeListener, options: { readonly remote?: boolean } = {}): () => void {
     this.listeners.add(listener)
-    return () => this.listeners.delete(listener)
+    if (options.remote) this.remoteListeners.add(listener)
+    return () => {
+      this.listeners.delete(listener)
+      this.remoteListeners.delete(listener)
+    }
   }
 
   private emit(event: NodeEvent): void {
@@ -230,7 +272,11 @@ export class NodeRegistry {
         console.error("[hub] node change listener failed:", cause instanceof Error ? cause.message : cause)
       }
     }
-    for (const listener of this.listeners) {
+    this.notify(this.listeners, event)
+  }
+
+  private notify(listeners: ReadonlySet<NodeListener>, event: NodeEvent): void {
+    for (const listener of [...listeners]) {
       try {
         listener(event)
       } catch (cause) {

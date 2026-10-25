@@ -5,7 +5,8 @@
 import { describe, expect, test } from "bun:test"
 import { createActions, type ActionRegistry, type ActionSpokes } from "../src/central/actions"
 import { MemoryKv } from "../src/central/backend/memory-kv"
-import type { Kv } from "../src/central/backend/types"
+import { MemoryLocks } from "../src/central/backend/memory-counters"
+import type { Kv, Locks } from "../src/central/backend/types"
 import { BusyError } from "../src/central/registry"
 import type { TurnResult } from "../src/protocol"
 
@@ -21,6 +22,9 @@ function fakes(options: {
   reply?: (connID: string, req: Req) => unknown
   /** Shared with another executor (another pod). */
   kv?: Kv
+  /** The cluster's turn locks, shared with another executor (another pod). */
+  turnLocks?: Locks
+  pod?: string
 } = {}) {
   const requests: Array<{ connID: string; req: Req }> = []
   const calls: string[] = []
@@ -51,7 +55,13 @@ function fakes(options: {
     }) as ActionSpokes["request"],
   }
   const hops: string[] = []
-  const actions = createActions({ registry, spokes, humanTurn: async (sessionID) => void hops.push(sessionID), ...(options.kv ? { kv: options.kv } : {}) })
+  const actions = createActions({
+    registry,
+    spokes,
+    humanTurn: async (sessionID) => void hops.push(sessionID),
+    ...(options.kv ? { kv: options.kv } : {}),
+    ...(options.turnLocks ? { turns: { locks: options.turnLocks, owner: options.pod ?? "pod", ttlMs: 60_000 } } : {}),
+  })
   return { actions, requests, calls, locks, hops }
 }
 
@@ -223,6 +233,27 @@ describe("prompt", () => {
     expect(await outcome.result).toEqual({ outcome: "interrupted", message: "Stopped", reply: "" })
     await Promise.resolve()
     expect(locks[0]!.released).toBe(true)
+  })
+
+  test("two pods prompting the same idle session at once: one turn, the other BusyError; free again once it settles", async () => {
+    const turnLocks = new MemoryLocks()
+    let finish!: (result: TurnResult) => void
+    const turn = new Promise<TurnResult>((resolve) => (finish = resolve))
+    const a = fakes({ owner: "c1", reply: () => turn, turnLocks, pod: "pod-a" })
+    const b = fakes({ owner: "c1", reply: () => ({ outcome: "succeeded", reply: "b" }), turnLocks, pod: "pod-b" })
+    const outcome = await a.actions.prompt({ sessionID: "s", text: "from A", resetHops: false })
+    expect(outcome).toMatchObject({ outcome: "done", mode: "turn" })
+    await expect(b.actions.prompt({ sessionID: "s", text: "from B", resetHops: false })).rejects.toBeInstanceOf(BusyError)
+    expect(b.requests).toEqual([])
+    // B's local lock was given back.
+    expect(b.locks.map((l) => l.released)).toEqual([true])
+    finish({ outcome: "succeeded", reply: "a" })
+    if (outcome.outcome !== "done" || outcome.mode !== "turn") throw new Error("expected a turn")
+    await outcome.result
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+    const again = await b.actions.prompt({ sessionID: "s", text: "from B", resetHops: false })
+    expect(again).toMatchObject({ outcome: "done", mode: "turn" })
+    expect(b.requests).toHaveLength(1)
   })
 
   test("a busy session throws BusyError", async () => {

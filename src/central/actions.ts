@@ -3,9 +3,10 @@
 // returns an outcome instead of an HTTP response, so every caller maps it to its own errors (the console answers
 // gone with 409, the agent API with 410) and adds its own checks (grants, audit) around the same execution.
 import type { FormAnswer, PermissionDecision, PromptImage, ResultFor, TurnResult } from "../protocol"
+import { randomUUID } from "node:crypto"
 import { MemoryKv } from "./backend/memory-kv"
-import type { Kv } from "./backend/types"
-import type { Registry } from "./registry"
+import type { Kv, Locks } from "./backend/types"
+import { BusyError, type Registry } from "./registry"
 import type { SpokeHub } from "./spoke-ws"
 
 /** The registry calls the executor needs (a fake in tests). */
@@ -22,6 +23,11 @@ export interface ActionDeps {
   readonly humanTurn: (sessionID: string) => Promise<void>
   /** Where requests answered through the hub are recorded (default: this process; Valkey in a cluster). */
   readonly kv?: Kv
+  /**
+   * Cluster mode: a turn also holds the session's lease in the shared Locks (turn:<sessionID>, for ttlMs at most),
+   * so two pods never start turns in the same session within the cluster view's publish window.
+   */
+  readonly turns?: { readonly locks: Locks; readonly owner: string; readonly ttlMs: number }
 }
 
 /** The action ran. */
@@ -93,7 +99,15 @@ const STOPPED: TurnResult = { outcome: "interrupted", message: "Stopped", reply:
 const ANSWERED_MS = 10 * 60_000
 const answeredKey = (requestID: string) => `action:answered:${requestID}`
 
-export function createActions({ registry, spokes, humanTurn, kv = new MemoryKv() }: ActionDeps): Actions {
+export function createActions({ registry, spokes, humanTurn, kv = new MemoryKv(), turns }: ActionDeps): Actions {
+  /** Takes the session's cluster-wide turn lease (BusyError when another pod's turn holds it); resolves its release. */
+  const shareTurn = async (sessionID: string): Promise<() => void> => {
+    if (!turns) return () => {}
+    const key = `turn:${sessionID}`
+    const holder = `${turns.owner}:${randomUUID()}`
+    if (!(await turns.locks.acquire(key, holder, turns.ttlMs))) throw new BusyError()
+    return () => void turns.locks.release(key, holder).catch(() => false)
+  }
   return {
     async answerPermission({ rootID, requestID, decision, message }) {
       if ((await kv.get(answeredKey(requestID))) !== undefined) return GONE
@@ -155,7 +169,18 @@ export function createActions({ registry, spokes, humanTurn, kv = new MemoryKv()
       const stopped = new Promise<TurnResult>((resolve) => {
         cancel = () => resolve(STOPPED)
       })
-      const release = registry.beginTurn(sessionID, () => cancel())
+      const releaseLocal = registry.beginTurn(sessionID, () => cancel())
+      let releaseShared: () => void
+      try {
+        releaseShared = await shareTurn(sessionID)
+      } catch (cause) {
+        releaseLocal()
+        throw cause
+      }
+      const release = () => {
+        releaseLocal()
+        releaseShared()
+      }
       const voiceStyle = registry.exposed(sessionID) === true
       let result: Promise<TurnResult>
       try {
