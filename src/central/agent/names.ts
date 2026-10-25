@@ -1,5 +1,5 @@
 // Pure helpers for @name / @@role addressing (design §2.1): OpenCode's placeholder titles, slugs for derived names,
-// conflict suffixes and reserved roles. Name syntax and address parsing live in the SDK (packages/sdk/src/address.ts)
+// conflict suffixes, the reserved name and reserved roles. Name syntax and address parsing live in the SDK (packages/sdk/src/address.ts)
 // and are re-exported here.
 
 import { NAME_MAX, validName } from "../../../packages/sdk/src/address.ts"
@@ -38,6 +38,9 @@ export function withSuffix(base: string, taken: (name: string) => boolean): stri
     if (!taken(name)) return name
   }
 }
+
+/** `me` always addresses the user (@me), so no session may hold it, explicitly or derived. Only the exact name. */
+export const isReservedName = (name: string): boolean => name === "me"
 
 /** Roles only the user may claim in phase 1 (grants including `roles` come in phase 3). */
 const RESERVED_ROLES = ["orchestrator", "concierge"]
