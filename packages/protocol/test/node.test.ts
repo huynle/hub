@@ -4,7 +4,7 @@
 // unchanged, and an old hub (no "nodes" feature) rejects the node hello, so it never sees node frames.
 import { describe, expect, test } from "bun:test"
 import * as protocol from "../src/index.ts"
-import { encode, HUB_FEATURES, parseSpokeMessage, PROTOCOL_VERSION } from "../src/index.ts"
+import { encode, HUB_FEATURES, KNOWN_HUB_FEATURES, parseSpokeMessage, PROTOCOL_VERSION } from "../src/index.ts"
 
 const P = protocol as any
 const j = (v: unknown) => JSON.stringify(v)
@@ -172,7 +172,9 @@ describe("node op results", () => {
 
 describe("hub features", () => {
   test("the hub announces nodes and launches; hubServesNodes reads a welcome", () => {
-    expect(HUB_FEATURES as readonly string[]).toEqual(expect.arrayContaining(["harness", "messaging", "nodes", "launches"]))
+    expect(KNOWN_HUB_FEATURES as readonly string[]).toEqual(expect.arrayContaining(["harness", "messaging", "nodes", "launches"]))
+    // Announced only once the hub serves them (P4-T4, P4-T9).
+    expect(HUB_FEATURES as readonly string[]).not.toContain("nodes")
     expect(P.hubServesNodes({ t: "welcome", v: 1, machineID: "m", publicURL: "", features: ["harness", "nodes"] })).toBe(true)
     expect(P.hubServesNodes({ t: "welcome", v: 1, machineID: "m", publicURL: "", features: ["harness"] })).toBe(false)
     expect(P.hubServesNodes({ t: "welcome", v: 1, machineID: "m", publicURL: "" })).toBe(false)
