@@ -12,6 +12,7 @@ import path from "node:path"
 import { HarnessSpoke, type HarnessSpokeOptions } from "../../spoke-sdk/src/index.ts"
 import { parseHookInput } from "./hook-input.ts"
 import { ensurePrivateDir, SOCKET_PATH_MAX } from "./paths.ts"
+import { createMcpRouter, MCP_END, type McpRouter } from "./mcp.ts"
 import { ClaudeSessions, type SessionsOptions } from "./sessions.ts"
 import { ask, onLines, WIRE_VERSION } from "./wire.ts"
 
@@ -137,6 +138,39 @@ export async function startDaemon(options: DaemonOptions): Promise<ClaudeDaemon>
     }
   }
 
+  /** An MCP pipe: JSON-RPC lines both ways, as the launch's current session; at the pipe's end line, answers then closes. */
+  function mcp(conn: Socket, launch: string | undefined): (text: string) => void {
+    const router: McpRouter = createMcpRouter({
+      version: options.pluginVersion,
+      sessionID: () => (launch ? sessions.sessionForLaunch(launch) : undefined),
+      sessionToken: (id) => spoke.sessionToken(id),
+      actToken: (id) => spoke.actToken(id),
+    })
+    const pending = new Set<Promise<void>>()
+    conn.on("close", () => router.close())
+    return (text) => {
+      let message: unknown
+      try {
+        message = JSON.parse(text)
+      } catch {
+        if (!conn.destroyed) conn.write(`${JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error: not JSON" } })}\n`)
+        return
+      }
+      if (typeof message === "object" && message !== null && (message as { hub?: unknown }).hub === MCP_END.hub) {
+        void Promise.allSettled([...pending]).then(() => conn.end())
+        return
+      }
+      const task = router
+        .handle(message)
+        .then((answer) => {
+          if (answer && !conn.destroyed) conn.write(`${JSON.stringify(answer)}\n`)
+        })
+        .catch((cause) => log(`mcp: ${cause instanceof Error ? cause.message : String(cause)}`))
+        .finally(() => pending.delete(task))
+      pending.add(task)
+    }
+  }
+
   const server: Server = createServer((conn) => {
     connections.add(conn)
     const abort = new AbortController()
@@ -146,7 +180,9 @@ export async function startDaemon(options: DaemonOptions): Promise<ClaudeDaemon>
     })
     conn.on("error", () => {})
     let first = true
+    let rpc: ((text: string) => void) | undefined
     onLines(conn, (text) => {
+      if (rpc) return rpc(text)
       if (!first) return
       first = false
       let req: unknown
@@ -156,6 +192,10 @@ export async function startDaemon(options: DaemonOptions): Promise<ClaudeDaemon>
         return reply(conn, { ok: false, error: "not JSON" })
       }
       if (typeof req !== "object" || req === null || (req as { v?: unknown }).v !== WIRE_VERSION) return reply(conn, { ok: false, error: "unsupported request" })
+      if ((req as { kind?: unknown }).kind === "mcp") {
+        rpc = mcp(conn, str((req as { launch?: unknown }).launch))
+        return
+      }
       request(conn, req as Record<string, unknown>, abort.signal).catch((cause) => {
         log(`request failed: ${cause instanceof Error ? cause.message : String(cause)}`)
         reply(conn, {})
