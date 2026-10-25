@@ -481,6 +481,11 @@ not persist those potentially sensitive details.
   calling session (never the caller itself, its siblings or another session's workers), so the voice agent
   keeps listening. The phone's stop words ("stop", "cancel", "never mind", "stop that", "hold on") still
   interrupt the root turn at once.
+- **Messaging other sessions**: the plugin adds a tool `hub {verb, …}` with the verbs `msg`, `ask`, `reply`,
+  `decline`, `inbox`, `who`, `status` and `whoami` (`src/spoke/hub-tool.ts`). It acts as the calling session
+  with that session's own hub token (the token never appears in the tool's output). `ask` with `wait` (seconds,
+  at most 600) blocks for the answer until the tool call is stopped; without it the answer arrives later as a hub
+  message. Messages from other sessions are shown in the hub's envelope and are not from the user.
 - Child text and execution events are paired by the hub. The latest assistant message of a successful
   child is emitted as root-session speech; interruptions and stale partial results are not. **Announcements**
   (hub, `src/central/registry.ts`): while another worker of the session runs or waits, or one was announced in
@@ -1303,7 +1308,8 @@ second user. The opt-in `HUB_IT_OPENCODE=1 bun test test/spoke-env-inject.it.tes
 `opencode serve` (own port, password and XDG dirs) with a local stub model and checks a real shell: its
 `HUB_SESSION_TOKEN`, and that `hub whoami` there prints the session. `HUB_IT_OPENCODE=1 bun test
 test/spoke-deliver.it.test.ts` does the same for hub messages: the model sees the delivered envelope, a repeated
-message id is applied once, `wake: false` waits for the next turn, and inbox deliveries carry their origin.
+message id is applied once, `wake: false` waits for the next turn, and inbox deliveries carry their origin. `HUB_IT_OPENCODE=1 bun test test/spoke-hub-tool.it.test.ts` has the stub model call the `hub` tool and checks
+that the hub sees the session's token while the model and the transcript never do.
 
 Point a project's `.opencode/opencode.jsonc` at your checkout to try changes:
 `{ "plugins": [{ "package": "/path/to/hub" }] }`. If the plugin is also installed globally,

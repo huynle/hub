@@ -138,6 +138,14 @@ the protocol up:
   sent and received messages, newest first.
 - **SDK messaging verbs**: `msg`, `ask` (with `wait` looping over polls of at most 60 s), `message`, `reply`,
   `decline`, `inbox`, `mute`, `unmute`.
+- **OpenCode `hub` tool**: the plugin adds one tool `hub {verb, …}` (verbs `msg`, `ask`, `reply`, `decline`,
+  `inbox`, `who`, `status`, `whoami`; JSON Schema input, not in code mode) that calls `/api/agent` through the SDK
+  as the calling session, with that session's own token (never in the tool's output or metadata; redacted should
+  a hub echo it). Answers and inbox items show in the hub's sanitised envelope; the description and results say
+  messages from other sessions are not from the user. `ask` waits at most 10 minutes (`wait` seconds) and stops
+  when the tool call is aborted, naming the still-open ask. Readable errors when the session has no token yet
+  or the hub lacks `messaging` (messaging verbs only). Opt-in check: `HUB_IT_OPENCODE=1 bun test
+  test/spoke-hub-tool.it.test.ts`.
 
 ### Other changes
 
