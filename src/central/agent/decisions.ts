@@ -13,6 +13,9 @@
 //   looks at every user's open Decisions, so deadlines survive restarts.
 // - Text is sanitised (question by the message store; labels, ids and reasons here). Notifications carry only
 //   the Decision (the push layer sends a generic body).
+// - Actions (P3-T8): the hub (never an asker) may attach an action (an escalated permission request); the user's
+//   answer runs it through `act` as that user after the answer wins. Its subject gone → the Decision closes and
+//   the answer is gone; it fails → the Decision opens again.
 // - close(): a Decision whose subject went away (a permission answered elsewhere) is closed, not answered; the asker
 //   hears why.
 // - Every open and change (answer, timeout, escalation, expiry, close) goes to `changed` (the console's 'decision' event).
@@ -65,6 +68,18 @@ export interface DecisionAnswer {
   readonly deviceID?: string
 }
 
+/** What answering a Decision does besides replying (an escalated permission request, P3-T8). */
+export interface DecisionAction {
+  readonly kind: "permission"
+  readonly requestID: string
+  /** The tree the request is pending in. */
+  readonly rootID: string
+  /** The session that asked. */
+  readonly sessionID: string
+  /** The agent asked to approve it always. */
+  readonly always: boolean
+}
+
 export interface Decision {
   readonly id: string
   /** The ask (to @me) that carries it. */
@@ -91,6 +106,15 @@ export interface Decision {
   readonly answer?: DecisionAnswer
   /** Why it closed without an answer (state closed). */
   readonly closed?: { readonly at: number; readonly reason: string }
+  /** Run (as the answering user) when the user answers; set by the hub only, never by an asker. */
+  readonly action?: DecisionAction
+}
+
+/** What the hub (never an asker's request) adds to an ask. */
+export interface AskExtra {
+  readonly action?: DecisionAction
+  /** Open it without the "opened" notification (coalesced pushes). */
+  readonly quiet?: boolean
 }
 
 export interface AskInput {
@@ -115,6 +139,9 @@ export interface AnswerInput {
 
 export type NotifyReason = "opened" | "escalated"
 
+/** Runs a Decision's action for the user's choice: gone when its subject went away first. */
+export type DecisionActor = (userID: string, decision: Decision, choice: { readonly option?: string; readonly text?: string }, by: UserActor) => Promise<"done" | "gone">
+
 export interface DecisionsDeps {
   readonly state: StateStore
   readonly delivery: Pick<Delivery, "send" | "reply">
@@ -127,6 +154,8 @@ export interface DecisionsDeps {
   readonly notify?: (userID: string, decision: Decision, reason: NotifyReason) => void
   /** A Decision opened or changed (answered, timed out, escalated, expired): the console's live event. Never throws through. */
   readonly changed?: (userID: string, decision: Decision) => void
+  /** Runs Decisions' actions (escalations); a Decision with an action cannot be answered without it. */
+  readonly act?: DecisionActor
 }
 
 const DECISIONS = "decisions"
@@ -215,7 +244,7 @@ export class Decisions {
    * Opens a Decision: stores the ask to @me (through the delivery engine: rate limits, sanitising) and the
    * Decision, then notifies. Throws invalid (input; the user as asker), rate_limited, forbidden.
    */
-  async ask(userID: string, actor: AgentActor, input: AskInput): Promise<{ message: Message; decision: Decision }> {
+  async ask(userID: string, actor: AgentActor, input: AskInput, extra: AskExtra = {}): Promise<{ message: Message; decision: Decision }> {
     if (actor.kind === "user") throw invalid("You are @me: the user cannot ask themselves")
     if (typeof input.question !== "string") throw invalid("question must be a string")
     const v = validate(input)
@@ -237,12 +266,13 @@ export class Decisions {
       state: "open",
       at: message.at,
       expiresAt: message.expiresAt ?? message.at + v.expiresInMs,
+      ...(extra.action ? { action: extra.action } : {}),
     }
     const written = await this.deps.state.put(userID, DECISIONS, decision.id, decision, { ifVersion: 0 })
     if (!written.ok) throw new Error("decision id collision")
     await this.deps.state.put(userID, BY_MESSAGE, message.id, decision.id)
     await this.trim(userID)
-    this.deps.notify?.(userID, decision, "opened")
+    if (!extra.quiet) this.deps.notify?.(userID, decision, "opened")
     this.emit(userID, decision)
     return { message, decision }
   }
@@ -282,6 +312,7 @@ export class Decisions {
     const answer: DecisionAnswer = { ...choice, answeredBy: "user", at, deviceID: by.deviceID }
     const decision = await this.settle(userID, id, answer)
     if (!decision) throw gone()
+    if (decision.action) await this.runAction(userID, decision, choice, by)
     this.emit(userID, decision)
     const option = decision.options.find((o) => o.id === choice.option)
     const text = option ? `Decision ${id}: ${option.label} [${option.id}]${choice.text ? `\n${choice.text}` : ""}` : `Decision ${id}: ${choice.text}`
@@ -302,6 +333,20 @@ export class Decisions {
     const hub: UserActor = { kind: "user", userID, deviceID: "hub", via: "cookie" }
     await this.replyTo(userID, closed, `Decision ${id} closed: ${why}`, hub)
     return closed
+  }
+
+  /** Replaces an open Decision's recommendation (one of its options); undefined when it is not open. */
+  async revise(userID: string, id: string, input: { readonly recommendation: { readonly option: string; readonly why?: string } }): Promise<Decision | undefined> {
+    const current = await this.get(userID, id)
+    if (!current || current.state !== "open") return undefined
+    const { option, why } = input.recommendation
+    if (typeof option !== "string" || !current.options.some((o) => o.id === option)) throw invalid("The recommendation must name one of the options")
+    const recommendation = { option, ...(why === undefined ? {} : { why: cleanLabel(why, WHY_MAX, "The recommendation's reason") }) }
+    const revised = await updateVersioned<Decision>(this.deps.state, userID, DECISIONS, id, (stored) =>
+      stored && this.view(stored).state === "open" ? { ...stored, recommendation } : undefined,
+    )
+    if (revised) this.emit(userID, revised)
+    return revised
   }
 
   /** Starts the deadline loop (every DECISION_TICK_MS). */
@@ -364,6 +409,34 @@ export class Decisions {
       throw invalid(`Pick one of the options: ${decision.options.map((o) => o.id).join(", ")}`)
     }
     return { option: input.option, ...(text === undefined ? {} : { text }) }
+  }
+
+  /**
+   * Runs the answered Decision's action. Its subject gone: the Decision closes instead (throws gone). It fails:
+   * the Decision opens again (the user may retry) and the error goes through.
+   */
+  private async runAction(userID: string, decision: Decision, choice: { option?: string; text?: string }, by: UserActor): Promise<void> {
+    let outcome: "done" | "gone"
+    try {
+      if (!this.deps.act) throw new Error("This decision's action cannot run on this hub")
+      outcome = await this.deps.act(userID, decision, choice, by)
+    } catch (cause) {
+      await updateVersioned<Decision>(this.deps.state, userID, DECISIONS, decision.id, (current) => {
+        if (current?.state !== "answered" || current.answer?.at !== decision.answer?.at) return undefined
+        const { answer: _answer, ...rest } = current
+        return { ...rest, state: "open" }
+      })
+      throw cause
+    }
+    if (outcome === "done") return
+    const why = "The request was answered elsewhere or ended"
+    const closed = await updateVersioned<Decision>(this.deps.state, userID, DECISIONS, decision.id, (current) => {
+      if (current?.state !== "answered") return undefined
+      const { answer: _answer, ...rest } = current
+      return { ...rest, state: "closed", closed: { at: this.now(), reason: why } }
+    })
+    if (closed) this.emit(userID, closed)
+    throw gone()
   }
 
   /** Answers the Decision if it is still open (version-checked); undefined when it is not. */
