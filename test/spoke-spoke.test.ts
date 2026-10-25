@@ -5,6 +5,7 @@ import path from "node:path"
 import { defaults, readConfig, writeConfig, type VoiceConfig } from "../src/config"
 import { PROTOCOL_VERSION, SPOKE_FEATURES } from "../src/protocol"
 import type { HerdrRunner } from "../src/spoke/herdr"
+import { envInjector, ShellCorrelator } from "../src/spoke/env-inject"
 import { detectKind, Spoke, SpokeError, type SpokeHost, type SpokeOptions } from "../src/spoke/spoke"
 import { EventQueue, fakeCentral, until, type FakeCentral } from "./spoke-fake"
 
@@ -1599,6 +1600,25 @@ describe("act tokens", () => {
     expect(spoke.shellIdentity("ses_b")).toEqual({ token: "hst.b", url: server.url })
     expect(JSON.stringify([spoke.shellIdentity("ses_a"), spoke.shellIdentity("ses_b"), spoke.sessionToken("ses_a"), spoke.sessionToken("ses_b")])).not.toContain("ACT-SECRET")
     expect(Bun.inspect(spoke)).not.toContain("ACT-SECRET")
+  })
+
+  test("shell env injection (spoke.shellIdentity) never carries an act token into any variable", async () => {
+    const { spoke, server, host } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    host.push(created("ses_b"))
+    await until(() => lastSessions(server)?.sessions.length === 2)
+    await server.request({ op: "sessionTokens", tokens: [{ sessionID: "ses_a", token: "hst.a", exp: later() }], hubURL: "https://hub.example" })
+    await server.request({ op: "actTokens", tokens: [{ sessionID: "ses_a", token: "ACT-A", exp: later() }, { sessionID: "ses_b", token: "ACT-B", exp: later() }] })
+    const injector = envInjector({ correlator: new ShellCorrelator(), binDir: "/bin/hub", identity: (sessionID) => spoke.shellIdentity(sessionID) })
+    for (const sessionID of ["ses_a", "ses_b"]) {
+      injector.toolBefore({ tool: "shell", sessionID, id: `call_${sessionID}`, input: { command: "env" } })
+      const inv = { command: "env", cwd: "/w", timeout: 0, shell: "/bin/sh", env: { PATH: "/usr/bin" } as Record<string, string | undefined> }
+      injector.shellBefore(inv)
+      expect(Object.values(inv.env).join("\n")).not.toContain("ACT-")
+      // The session's own shell token does go in (the injector path is live), the act token never.
+      expect(inv.env.HUB_SESSION_TOKEN).toBe(sessionID === "ses_a" ? "hst.a" : undefined)
+    }
   })
 
   test("act tokens are dropped with the connection and when the session is deleted", async () => {
