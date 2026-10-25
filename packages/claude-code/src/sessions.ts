@@ -23,6 +23,10 @@
 //
 // Stop: a running turn stops at its next tool hook ({continue: false}), a waiting permission request is denied
 // with an interrupt; an idle session has nothing to stop.
+//
+// Hub-launched sessions (launched(): the daemon runs their claude headless, launcher.ts) are reported at create,
+// before any hook; a prompt the hub writes to one (hubPrompt) is delivered with origin "hub", and the turn's result
+// line ends a turn the hooks left running (turnEnded: an interrupt fires no Stop hook).
 import { existsSync } from "node:fs"
 import path from "node:path"
 import { randomBytes } from "node:crypto"
@@ -113,6 +117,8 @@ interface Session {
   readonly queue: Queued[]
   /** Messages handed to the rewake hook: the next prompt is theirs (origin hub). */
   woke: string[]
+  /** Prompts the hub wrote to a launched session's stdin (turn op): the next prompts are the hub's. */
+  hubPrompts: number
   readonly rewake: Set<Waiter>
   /** Tool calls seen at PreToolUse (tool + input → tool_use_id), to match a PermissionRequest to its call. */
   readonly tools: Map<string, string>
@@ -250,6 +256,45 @@ export class ClaudeSessions {
     this.#launches.delete(launch)
   }
 
+  /**
+   * A session the daemon started for a hub launch (its claude runs headless): reported at once, before Claude Code
+   * runs any hook, titled as the launch asks, tied to the launch. Returns its hub session ID.
+   */
+  launched(input: { readonly sessionID: string; readonly cwd: string; readonly launch: string; readonly title?: string }): string {
+    const s = this.#sessions.get(input.sessionID) ?? this.#register(input.sessionID, input.cwd, input.title ? cut(input.title, HARNESS_TITLE_MAX) : this.#title(input.cwd))
+    s.launch = input.launch
+    this.#launches.set(input.launch, s.hubID)
+    return s.hubID
+  }
+
+  /** The native session ID of a root session the daemon reports (undefined for a child session or an unknown one). */
+  nativeOf(hubID: string): string | undefined {
+    const native = this.#roots.get(hubID)
+    return native !== undefined && this.#sessions.get(native)?.hubID === hubID ? native : undefined
+  }
+
+  /** The hub is writing a prompt to the session (turn op): its UserPromptSubmit is the hub's, not the user's. */
+  hubPrompt(sessionID: string): void {
+    const s = this.#sessions.get(sessionID)
+    if (s) s.hubPrompts += 1
+  }
+
+  /**
+   * A launched session's turn ended as its result line says: a turn the hooks did not end (an interrupt fires no
+   * Stop hook; a missed Stop or StopFailure) ends now. Nothing when the hooks ended it already.
+   */
+  turnEnded(sessionID: string, outcome: "succeeded" | "failed" | "interrupted" | "timeout", message?: string): void {
+    const s = this.#sessions.get(sessionID)
+    if (!s?.busy) return
+    this.#settle(s, undefined, true)
+    s.stopRequested = false
+    if (outcome === "interrupted") return this.#interrupted(s, false)
+    const turnID = s.turnID
+    s.busy = false
+    if (outcome === "succeeded") this.#emit({ type: "session.execution.succeeded", data: { sessionID: s.hubID, ...(turnID ? { turnID } : {}) } })
+    else this.#emit({ type: "session.execution.failed", data: { sessionID: s.hubID, ...(turnID ? { turnID } : {}), error: { message: cut(message || "the turn failed", HARNESS_ERROR_MAX) } } })
+  }
+
   /** The launches the daemon knows (for liveness checks). */
   launches(): string[] {
     return [...this.#launches.keys()]
@@ -260,15 +305,19 @@ export class ClaudeSessions {
   #ensure(input: HookInput): { session: Session; created: boolean } {
     const known = this.#sessions.get(input.session_id)
     if (known) return { session: known, created: false }
-    const hubID = claudeSessionID(input.session_id)
     const cwd = typeof input.cwd === "string" && input.cwd ? input.cwd : "/"
-    const s: Session = { hubID, cwd, busy: false, stopRequested: false, children: new Map(), queue: [], woke: [], rewake: new Set(), tools: new Map() }
-    this.#sessions.set(input.session_id, s)
-    this.#roots.set(hubID, input.session_id)
-    const title = this.#title(cwd)
+    return { session: this.#register(input.session_id, cwd, this.#title(cwd)), created: true }
+  }
+
+  /** A new root session: reported and announced. */
+  #register(native: string, cwd: string, title: string): Session {
+    const hubID = claudeSessionID(native)
+    const s: Session = { hubID, cwd, busy: false, stopRequested: false, children: new Map(), queue: [], woke: [], hubPrompts: 0, rewake: new Set(), tools: new Map() }
+    this.#sessions.set(native, s)
+    this.#roots.set(hubID, native)
     this.#spoke.upsertSession(this.#info(hubID, cwd, title))
     this.#emit({ type: "session.created", data: { sessionID: hubID, title } })
-    return { session: s, created: true }
+    return s
   }
 
   #title(cwd: string): string {
@@ -302,7 +351,12 @@ export class ClaudeSessions {
     const prompt = typeof input.prompt === "string" ? input.prompt : ""
     const woke = s.woke.splice(0)
     for (const inboxID of woke) this.#emit({ type: "session.inbox.delivered", data: { sessionID: s.hubID, inboxID, origin: "hub" } })
-    const fromUser = !woke.length && !prompt.startsWith(REWAKE_PREFIX)
+    const fromHub = !woke.length && s.hubPrompts > 0
+    if (fromHub) {
+      s.hubPrompts -= 1
+      this.#emit({ type: "session.inbox.delivered", data: { sessionID: s.hubID, inboxID: `prompt_${turnID}`, origin: "hub" } })
+    }
+    const fromUser = !woke.length && !fromHub && !prompt.startsWith(REWAKE_PREFIX)
     if (fromUser) this.#emit({ type: "session.inbox.delivered", data: { sessionID: s.hubID, inboxID: `prompt_${turnID}`, origin: "user" } })
     this.#release(s)
     const parts: string[] = []

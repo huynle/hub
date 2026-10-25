@@ -387,3 +387,63 @@ describe("prompt references and launches", () => {
     expect(sessions.sessionForLaunch("L1")).toBeUndefined()
   })
 })
+
+describe("hub-launched sessions", () => {
+  test("launched() reports the session at once (before any hook) with the launch's title, tied to its launch", () => {
+    const { spoke, sessions } = make()
+    expect(sessions.launched({ sessionID: SID, cwd: "/work/app", launch: "cl_l1", title: "fix-tests" })).toBe(HUB)
+    expect(spoke.sessions.get(HUB)).toMatchObject({ id: HUB, title: "fix-tests", directory: "/work/app", owned: true, project: "/work" })
+    expect(spoke.take()).toEqual([{ type: "session.created", data: { sessionID: HUB, title: "fix-tests" } }])
+    expect(sessions.sessionForLaunch("cl_l1")).toBe(HUB)
+    expect(sessions.nativeOf(HUB)).toBe(SID)
+    // Its hooks then find the same session (no second session.created).
+    sessions.endLaunch("cl_l1")
+    expect(spoke.ended).toEqual([HUB])
+    expect(sessions.nativeOf(HUB)).toBeUndefined()
+  })
+
+  test("a launched session's SessionStart does not announce it again", async () => {
+    const { spoke, sessions } = make()
+    sessions.launched({ sessionID: SID, cwd: "/work", launch: "cl_l1" })
+    spoke.take()
+    await sessions.hook(fixture("session-start"), { launch: "cl_l1" })
+    expect(spoke.types()).toEqual([])
+  })
+
+  test("nativeOf answers root sessions only (not a subagent's child session)", async () => {
+    const { sessions } = await started()
+    await sessions.hook(fixture("subagent-start"), {})
+    expect(sessions.nativeOf(HUB)).toBe(SID)
+    expect(sessions.nativeOf(childSessionID(SID, fixture("subagent-start").agent_id as string))).toBeUndefined()
+  })
+
+  test("a prompt the hub wrote (hubPrompt) is delivered with origin hub, not as the user's", async () => {
+    const { spoke, sessions } = make()
+    sessions.launched({ sessionID: SID, cwd: "/work", launch: "cl_l1" })
+    spoke.take()
+    sessions.hubPrompt(SID)
+    await sessions.hook(fixture("user-prompt-submit"), { launch: "cl_l1" })
+    const delivered = spoke.take().filter((e) => e.type === "session.inbox.delivered")
+    expect(delivered).toEqual([{ type: "session.inbox.delivered", data: { sessionID: HUB, inboxID: expect.stringMatching(/^prompt_/), origin: "hub" } }])
+    // The next prompt (typed) is the user's again.
+    await sessions.hook(fixture("stop"), {})
+    await sessions.hook(fixture("user-prompt-submit", { prompt_id: "p2" }), {})
+    expect(spoke.take().find((e) => e.type === "session.inbox.delivered")?.data).toMatchObject({ origin: "user" })
+  })
+
+  test("turnEnded: a turn the hooks did not end (an interrupt has no Stop hook) ends with the result's outcome", async () => {
+    const { spoke, sessions } = await started()
+    sessions.turnEnded(SID, "interrupted")
+    expect(spoke.take()).toEqual([{ type: "session.execution.interrupted", data: { sessionID: HUB, turnID: expect.any(String) } }])
+    // Already ended by Stop: nothing more.
+    await sessions.hook(fixture("user-prompt-submit", { prompt_id: "p2" }), {})
+    await sessions.hook(fixture("stop"), {})
+    spoke.take()
+    sessions.turnEnded(SID, "succeeded")
+    expect(spoke.take()).toEqual([])
+    await sessions.hook(fixture("user-prompt-submit", { prompt_id: "p3" }), {})
+    spoke.take()
+    sessions.turnEnded(SID, "failed", "model failed")
+    expect(spoke.take()).toEqual([{ type: "session.execution.failed", data: { sessionID: HUB, turnID: expect.any(String), error: { message: "model failed" } } }])
+  })
+})
