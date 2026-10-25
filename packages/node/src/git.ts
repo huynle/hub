@@ -1,9 +1,9 @@
-// The node's only way to run git (decision 10). Never a shell: execFile with an argv the caller builds with `--`
+// The node's only way to run git (decision 10). Never a shell: spawn (execFile semantics, no shell) with an argv the caller builds with `--`
 // before paths and refs. The environment is fixed: no terminal or credential-manager prompts (a daemon has no one to
 // ask), only the https and ssh transports (never ext::, file:: or a local path as a remote), and none of the
 // inherited GIT_* variables that redirect a repository, its config or git's own programs. Every run has a time limit
 // and can be cancelled. node:child_process (not Bun.spawn) so the node also runs bundled for node.
-import { execFile } from "node:child_process"
+import { spawn } from "node:child_process"
 
 type Env = Readonly<Record<string, string | undefined>>
 
@@ -56,25 +56,48 @@ export function runGit(args: readonly string[], options: GitOptions): Promise<st
   const what = `git ${args.find((a) => !a.startsWith("-")) ?? ""}`.trim()
   return new Promise((resolve, reject) => {
     if (options.signal?.aborted) return reject(new GitError(`${what} cancelled`))
-    let ended: string | undefined
-    const child = execFile(
-      options.binary ?? "git",
-      argv,
-      { cwd: options.cwd, env: gitEnv(options.baseEnv ?? process.env, options.env), maxBuffer: MAX_BUFFER, encoding: "utf8", windowsHide: true },
-      (error, stdout, stderr) => {
-        clearTimeout(timer)
-        options.signal?.removeEventListener("abort", onAbort)
-        if (ended) return reject(new GitError(`${what} ${ended}`))
-        if (error) {
-          const detail = redact(String(stderr || error.message).trim()).slice(0, STDERR_MAX)
-          return reject(new GitError(`${what} failed${detail ? `: ${detail}` : ""}`))
-        }
-        resolve(String(stdout))
-      },
-    )
-    const stop = (why: string) => {
-      ended ??= why
-      child.kill("SIGKILL")
+    let settled = false
+    const finish = (error?: GitError, stdout?: string) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      options.signal?.removeEventListener("abort", onAbort)
+      if (error) reject(error)
+      else resolve(stdout ?? "")
+    }
+    // Its own process group, so a timeout or cancel also kills what git started (ssh, git-remote-https).
+    const child = spawn(options.binary ?? "git", argv, {
+      cwd: options.cwd,
+      env: gitEnv(options.baseEnv ?? process.env, options.env),
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
+      windowsHide: true,
+    })
+    const out: Buffer[] = []
+    const err: Buffer[] = []
+    let size = 0
+    const collect = (into: Buffer[]) => (chunk: Buffer) => {
+      size += chunk.length
+      if (size > MAX_BUFFER) return stop("printed too much output")
+      into.push(chunk)
+    }
+    child.stdout.on("data", collect(out))
+    child.stderr.on("data", collect(err))
+    child.on("error", (cause) => finish(new GitError(`${what} failed: ${cause.message}`)))
+    child.on("close", (code, signal) => {
+      if (code === 0) return finish(undefined, Buffer.concat(out).toString("utf8"))
+      const detail = redact(Buffer.concat(err).toString("utf8").trim()).slice(0, STDERR_MAX) || (signal ? `killed by ${signal}` : `exit ${code}`)
+      finish(new GitError(`${what} failed: ${detail}`))
+    })
+    // Settles at once: a killed git's children may hold its output pipes open for a while.
+    function stop(why: string): void {
+      if (settled) return
+      try {
+        if (child.pid) process.kill(-child.pid, "SIGKILL")
+      } catch {
+        child.kill("SIGKILL")
+      }
+      finish(new GitError(`${what} ${why}`))
     }
     const timeoutMs = options.timeoutMs ?? GIT_TIMEOUT_MS
     const timer = setTimeout(() => stop(`timed out after ${Math.round(timeoutMs / 1000) || 1} s`), timeoutMs)
