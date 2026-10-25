@@ -5,12 +5,14 @@
 // store, placement and backends are the real in-memory ones.
 import { describe, expect, test } from "bun:test"
 import { AgentError } from "../src/central/agent/errors"
-import { LaunchEngine, type LaunchEngineDeps } from "../src/central/agent/launch-engine"
+import { LAUNCH_WORK, LaunchEngine, type LaunchEngineDeps } from "../src/central/agent/launch-engine"
+import { validateLaunchSpec } from "../src/central/agent/launch-spec"
 import type { Launch } from "../src/central/agent/launch-store"
 import { MemoryCounters, MemoryLocks } from "../src/central/backend/memory-counters"
 import { MemoryStateStore } from "../src/central/backend/memory-state"
 import type { Timers } from "../src/central/backend/types"
 import { NodeRegistry } from "../src/central/nodes"
+import { LaunchStore } from "../src/central/agent/launch-store"
 import type { NodeHello, NodeRequest, ServerRequest } from "../src/protocol"
 
 const U = "u1"
@@ -678,6 +680,143 @@ describe("stop", () => {
     await expect(w.engine.stop(U, queued.id)).rejects.toMatchObject({ code: "gone" })
     await expect(w.engine.stop(U, "l_nope")).rejects.toMatchObject({ code: "not_found" })
     await expect(w.engine.stop("u2", queued.id)).rejects.toMatchObject({ code: "not_found" })
+    w.engine.shutdown()
+  })
+})
+
+/** The hub restarts: a new engine over the same state and world. */
+async function restart(w: World): Promise<LaunchEngine> {
+  w.engine.shutdown()
+  const engine = new LaunchEngine(w.deps)
+  await engine.start()
+  await settle()
+  return engine
+}
+
+/** A launch left provisioning on the machine by a hub that stopped, with the engine's work record. */
+async function leftProvisioning(w: World, work: Record<string, unknown>, extra: Record<string, unknown> = {}): Promise<Launch> {
+  const store = new LaunchStore({ state: w.state, now: w.clock.now })
+  const { launch } = await store.create(U, validateLaunchSpec(body(extra)), { by: "user" })
+  await store.transition(U, launch.id, "placing", { reason: "Placing on mbp" })
+  const provisioning = await store.transition(U, launch.id, "provisioning", { reason: "Placed on mbp", machineID: MACHINE })
+  await w.state.put(U, LAUNCH_WORK, launch.id, work)
+  return provisioning
+}
+
+const preparedWorkspace = { repo: "/p/hub", directory: "/p/hub/.worktrees/feat/x", mode: "worktree", branch: "feat/x", base: "main", reused: false } as const
+
+describe("restart recovery", () => {
+  test("a running launch is watched again: seen working survives, so idle ends it", async () => {
+    const { w, launch, sessionID } = await running()
+    w.setSession(sessionID, { state: "working", idle: false })
+    await settle()
+    w.setSession(sessionID, { state: "idle", idle: true })
+    await settle()
+    await restart(w)
+    await w.clock.advance(31_000)
+    expect(await w.launch(launch.id)).toMatchObject({ state: "ended", outcome: "idle" })
+  })
+
+  test("a running launch's timeout counts from when it started running", async () => {
+    const { w, launch } = await running({ end: { when: "never", timeout: "2m" } })
+    await w.clock.advance(60_000)
+    const engine = await restart(w)
+    await w.clock.advance(59_000)
+    expect((await w.launch(launch.id))!.state).toBe("running")
+    await w.clock.advance(2_000)
+    expect(await w.launch(launch.id)).toMatchObject({ state: "ended", outcome: "timeout" })
+    engine.shutdown()
+  })
+
+  test("queued launches are placed after a restart", async () => {
+    const w = world()
+    await w.engine.start()
+    const queued = await launched(w)
+    w.engine.shutdown()
+    w.connectNode()
+    const engine = await restart(w)
+    expect(await w.launch(queued.id)).toMatchObject({ state: "running" })
+    engine.shutdown()
+  })
+
+  test("provisioning with its session prompted: running, never prompted again", async () => {
+    const w = world()
+    w.connectNode()
+    w.sessions.set("ses_9", { state: "idle", blockers: [], idle: true })
+    const launch = await leftProvisioning(w, { workspace: preparedWorkspace, sessionID: "ses_9", prompted: true })
+    const engine = await restart(w)
+    expect(await w.launch(launch.id)).toMatchObject({ state: "running", sessionID: "ses_9" })
+    expect(w.prompts).toEqual([])
+    expect(w.nodeCalls).toEqual([])
+    engine.shutdown()
+  })
+
+  test("provisioning with its workspace prepared: carries on from the launch create", async () => {
+    const w = world()
+    w.connectNode({ launches: [] })
+    const launch = await leftProvisioning(w, { workspace: preparedWorkspace })
+    const engine = await restart(w)
+    expect(await w.launch(launch.id)).toMatchObject({ state: "running", sessionID: "ses_1" })
+    expect(w.nodeCalls).toEqual([])
+    expect(w.spokeCalls.map((r) => r.op)).toEqual(["create"])
+    expect(w.prompts).toHaveLength(1)
+    engine.shutdown()
+  })
+
+  test("provisioning, the node reports it prepared: released (kept, as reused) and prepared again", async () => {
+    const w = world()
+    const launch = await leftProvisioning(w, {})
+    w.connectNode({ launches: [{ launchID: launch.id, phase: "prepared", directory: "/p/hub/.worktrees/feat/x" }] })
+    const engine = await restart(w)
+    expect(w.nodeCalls.map((r) => r.op)).toEqual(["cleanup", "prepare"])
+    expect(w.nodeCalls[0]).toMatchObject({ policy: "keep", workspace: { directory: "/p/hub/.worktrees/feat/x", reused: true } })
+    expect(await w.launch(launch.id)).toMatchObject({ state: "running" })
+    engine.shutdown()
+  })
+
+  test("provisioning, the node is still preparing it: cancelled, and prepared again once the node lets it go", async () => {
+    const w = world()
+    const launch = await leftProvisioning(w, {})
+    w.connectNode({ launches: [{ launchID: launch.id, phase: "preparing" }] })
+    const engine = await restart(w)
+    expect(w.nodeCalls.map((r) => r.op)).toEqual(["cancel"])
+    expect((await w.launch(launch.id))!.state).toBe("provisioning")
+    w.nodes.progress("conn-node", { t: "progress", launchID: launch.id, phase: "cancelled" })
+    await settle()
+    expect(w.nodeCalls.map((r) => r.op)).toEqual(["cancel", "prepare"])
+    expect(await w.launch(launch.id)).toMatchObject({ state: "running" })
+    engine.shutdown()
+  })
+
+  test("provisioning, the node is not connected: waits for it, else lost after 5 minutes", async () => {
+    const w = world()
+    const comes = await leftProvisioning(w, {})
+    const engine = await restart(w)
+    await w.clock.advance(60_000)
+    expect((await w.launch(comes.id))!.state).toBe("provisioning")
+    w.connectNode()
+    await settle()
+    expect(await w.launch(comes.id)).toMatchObject({ state: "running" })
+    engine.shutdown()
+
+    const w2 = world()
+    const never = await leftProvisioning(w2, {})
+    const engine2 = await restart(w2)
+    await w2.clock.advance(301_000)
+    expect(await w2.launch(never.id)).toMatchObject({ state: "ended", outcome: "lost" })
+    engine2.shutdown()
+  })
+
+  test("a launch that ended while its node was away is cleaned up when the node comes back", async () => {
+    const { w, launch } = await running({ end: { cleanup: "remove" } })
+    w.disconnectNode()
+    const stopped = await w.engine.stop(U, launch.id)
+    expect(stopped.reason).toContain("waits for the node")
+    w.connectNode({ launches: [{ launchID: launch.id, phase: "prepared", directory: "/p/hub/.worktrees/feat/x" }] })
+    await settle()
+    expect(w.nodeCalls.filter((r) => r.op === "cleanup")).toEqual([
+      { op: "cleanup", launchID: launch.id, workspace: { ...preparedWorkspace }, policy: "remove" },
+    ])
     w.engine.shutdown()
   })
 })

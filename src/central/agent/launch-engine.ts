@@ -1,6 +1,6 @@
 // The launch engine (design §6, §7, §9; decision znbg8xa5): drives a launch from accept to its end.
 import type { NodeListener, NodeView } from "../nodes"
-import type { ModelSelection, NodeRequest, NodeResultFor, PreparedWorkspace, ServerRequest } from "../../protocol"
+import type { ModelSelection, NodeLaunchPhase, NodeRequest, NodeResultFor, PreparedWorkspace, ServerRequest } from "../../protocol"
 import type { Clock, Counters, Locks, StateStore, Timers } from "../backend/types"
 import type { HubLaunches } from "../config"
 import type { Registry } from "../registry"
@@ -71,6 +71,8 @@ export interface LaunchWork {
   readonly prompted?: boolean
   /** The session was seen working after its prompt (an idle end may start). */
   readonly seenWorking?: boolean
+  /** The launch ended while its node was away: the cleanup policy to apply when it comes back. */
+  readonly cleanup?: CleanupPolicy
 }
 
 /** How long a session must stay idle (or asking) with nothing changing before its launch ends. */
@@ -88,6 +90,21 @@ interface Pipeline {
 
 /** Thrown at a provisioning checkpoint after a stop. */
 class StopRequested extends Error {}
+
+/** The node is gone (or never came back): the launch is lost. */
+class LostError extends Error {}
+
+/** How long a restarted hub waits for a provisioning launch's node to (re)connect or let the launch go. */
+export const NODE_RETURN_MS = 5 * 60_000
+
+/** Node phases after which the node holds nothing for the launch. */
+const RELEASED: ReadonlySet<NodeLaunchPhase> = new Set(["cancelled", "failed", "cleaned"])
+
+/** A workspace the node reports for a launch the hub has no record of: reused, so cleanup never removes it. */
+function leftWorkspace(launch: Launch, directory: string): PreparedWorkspace {
+  const { repo, mode, branch, base } = launch.spec.workspace
+  return { repo, directory, mode, ...(branch !== undefined ? { branch } : {}), ...(base !== undefined ? { base } : {}), reused: true }
+}
 
 /** A running launch being watched for its end. */
 interface Watch {
@@ -230,6 +247,7 @@ export class LaunchEngine {
     this.unsubscribe.push(
       nodes.subscribe((event) => {
         if (event.type === "disconnected" || event.node.ownerID === undefined) return
+        if (event.type === "connected") void this.reconcile(event.node)
         void this.loop.kick(event.node.ownerID)
       }),
       registry.subscribe((message) => {
@@ -245,7 +263,17 @@ export class LaunchEngine {
     )
     this.loop.start()
     this.scheduleTick()
-    for (const userID of await this.deps.users()) void this.loop.kick(userID)
+    for (const userID of await this.deps.users()) {
+      try {
+        for (const launch of await this.store.list(userID, { states: ["provisioning", "running"] })) {
+          if (launch.state === "running") this.arm(userID, launch, (await this.work(userID, launch.id))?.seenWorking === true)
+          else void this.recover(userID, launch)
+        }
+      } catch (cause) {
+        console.error(`[hub] launch recovery for ${userID} failed: ${errorText(cause)}`)
+      }
+      void this.loop.kick(userID)
+    }
   }
 
   shutdown(): void {
@@ -301,33 +329,153 @@ export class LaunchEngine {
   /** A placed launch: prepare → create → roles, name, primer → prompt → running. */
   private provision(placed: Placed): Promise<void> {
     const { userID, launch } = placed
-    if (this.pipelines.has(launch.id)) return this.pipelines.get(launch.id)!.done
-    const pipeline: Pipeline = { done: Promise.resolve() }
-    this.pipelines.set(launch.id, pipeline)
-    pipeline.done = this.provisionNow(placed, pipeline).finally(() => this.pipelines.delete(launch.id))
-    return pipeline.done
-  }
-
-  private async provisionNow(placed: Placed, pipeline: Pipeline): Promise<void> {
-    const { userID, launch } = placed
-    this.changed(launch)
-    const checkpoint = () => {
-      if (pipeline.stop !== undefined) throw new StopRequested()
-    }
-    try {
+    return this.pipeline(userID, launch, async (checkpoint) => {
+      this.changed(launch)
       await this.putWork(userID, launch.id, { fence: placed.fence })
       const workspace = await this.prepare(userID, launch)
       checkpoint()
       const sessionID = await this.create(userID, launch, workspace)
       checkpoint()
       await this.identify(userID, launch, sessionID, checkpoint)
-    } catch (cause) {
-      if (pipeline.stop !== undefined) {
-        await this.end(userID, launch.id, "stopped", pipeline.stop)
+    })
+  }
+
+  /**
+   * A launch a previous run of the hub left provisioning carries on from its work record: prompted → running;
+   * a session → identity and prompt; a workspace → the launch create; nothing → whatever the node still holds
+   * for it is released (a running prepare cancelled, a prepared workspace kept as reused), then prepare again.
+   * A node that does not come back within NODE_RETURN_MS loses the launch.
+   */
+  private recover(userID: string, launch: Launch): Promise<void> {
+    return this.pipeline(userID, launch, async (checkpoint) => {
+      const work = (await this.work(userID, launch.id)) ?? {}
+      if (work.sessionID !== undefined) {
+        if (work.prompted) await this.toRunning(userID, launch, work.sessionID, [], work.seenWorking === true)
+        else await this.identify(userID, launch, work.sessionID, checkpoint)
         return
       }
-      const gone = this.deps.nodes.forMachine(launch.machineID!) === undefined
-      await this.end(userID, launch.id, gone ? "lost" : "failed", gone ? "The node went away while preparing the launch" : `Failed: ${errorText(cause)}`)
+      let workspace = work.workspace
+      if (!workspace) {
+        const node = await this.waitForNode(launch.machineID!)
+        await this.releaseOnNode(node, launch)
+        checkpoint()
+        workspace = await this.prepare(userID, launch)
+        checkpoint()
+      }
+      const sessionID = await this.create(userID, launch, workspace)
+      checkpoint()
+      await this.identify(userID, launch, sessionID, checkpoint)
+    })
+  }
+
+  /** Runs provisioning steps once per launch in this process; a failure ends the launch (stopped, lost or failed). */
+  private pipeline(userID: string, launch: Launch, steps: (checkpoint: () => void) => Promise<void>): Promise<void> {
+    const running = this.pipelines.get(launch.id)
+    if (running) return running.done
+    const pipeline: Pipeline = { done: Promise.resolve() }
+    this.pipelines.set(launch.id, pipeline)
+    const checkpoint = () => {
+      if (pipeline.stop !== undefined) throw new StopRequested()
+    }
+    pipeline.done = (async () => {
+      try {
+        await steps(checkpoint)
+      } catch (cause) {
+        if (pipeline.stop !== undefined) {
+          await this.end(userID, launch.id, "stopped", pipeline.stop)
+          return
+        }
+        const gone = cause instanceof LostError || this.deps.nodes.forMachine(launch.machineID!) === undefined
+        const reason = cause instanceof LostError ? cause.message : gone ? "The node went away while preparing the launch" : `Failed: ${errorText(cause)}`
+        await this.end(userID, launch.id, gone ? "lost" : "failed", reason)
+      }
+    })()
+      .catch((cause) => console.error(`[hub] launch ${launch.id}: ${errorText(cause)}`))
+      .finally(() => this.pipelines.delete(launch.id))
+    return pipeline.done
+  }
+
+  /** The machine's node, now or once it connects (LostError after NODE_RETURN_MS). */
+  private waitForNode(machineID: string): Promise<NodeView> {
+    const { nodes } = this.deps
+    const now = nodes.forMachine(machineID)
+    if (now) return Promise.resolve(now)
+    return new Promise((resolve, reject) => {
+      const off = nodes.subscribe((event) => {
+        if (event.type !== "connected" || event.node.machineID !== machineID) return
+        done()
+        resolve(event.node)
+      })
+      const timer = this.timers.set(() => {
+        done()
+        reject(new LostError(`The node did not come back within ${NODE_RETURN_MS / 60_000} minutes`))
+      }, NODE_RETURN_MS)
+      const done = () => {
+        off()
+        this.timers.clear(timer)
+      }
+    })
+  }
+
+  /** Releases what the node still holds for a launch the hub lost track of: cancels a prepare, keeps a workspace. */
+  private async releaseOnNode(node: NodeView, launch: Launch): Promise<void> {
+    const report = node.launches.find((l) => l.launchID === launch.id)
+    if (!report) return
+    const { nodeOps } = this.deps
+    if (report.phase === "preparing") {
+      const released = this.waitForRelease(node.machineID, launch.id)
+      await nodeOps.requestNode(node.connID, { op: "cancel", launchID: launch.id })
+      await released
+    } else if (report.directory !== undefined) {
+      await nodeOps.requestNode(node.connID, { op: "cleanup", launchID: launch.id, workspace: leftWorkspace(launch, report.directory), policy: "keep" })
+    }
+  }
+
+  /** Resolves when the node lets the launch go (cancelled, failed or cleaned); LostError when the node goes. */
+  private waitForRelease(machineID: string, launchID: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const off = this.deps.nodes.subscribe((event) => {
+        if (event.node.machineID !== machineID) return
+        if (event.type === "progress" && event.launchID === launchID && RELEASED.has(event.phase)) {
+          done()
+          resolve()
+        } else if (event.type === "disconnected") {
+          done()
+          reject(new LostError("The node went away"))
+        }
+      })
+      const timer = this.timers.set(() => {
+        done()
+        reject(new LostError(`The node did not let the launch go within ${NODE_RETURN_MS / 60_000} minutes`))
+      }, NODE_RETURN_MS)
+      const done = () => {
+        off()
+        this.timers.clear(timer)
+      }
+    })
+  }
+
+  /** A node (re)connected: it cleans up what it still holds for launches that ended (or that this hub forgot). */
+  private async reconcile(node: NodeView): Promise<void> {
+    const userID = node.ownerID
+    if (userID === undefined) return
+    const { nodeOps } = this.deps
+    for (const report of node.launches) {
+      if (this.pipelines.has(report.launchID)) continue
+      const launch = await this.store.get(userID, report.launchID)
+      if (launch && launch.state !== "ended") continue
+      try {
+        if (report.phase === "preparing") {
+          await nodeOps.requestNode(node.connID, { op: "cancel", launchID: report.launchID })
+          continue
+        }
+        const work = await this.work(userID, report.launchID)
+        const workspace = work?.workspace ?? (launch && report.directory !== undefined ? leftWorkspace(launch, report.directory) : undefined)
+        if (!workspace) continue
+        await nodeOps.requestNode(node.connID, { op: "cleanup", launchID: report.launchID, workspace, policy: work?.cleanup ?? "keep" })
+      } catch (cause) {
+        console.error(`[hub] launch ${report.launchID}: cleanup on the node failed: ${errorText(cause)}`)
+      }
     }
   }
 
@@ -390,14 +538,19 @@ export class LaunchEngine {
         () => this.sawWorking(userID, launch.id),
       )
     }
+    await this.toRunning(userID, launch, sessionID, notes, false)
+  }
+
+  private async toRunning(userID: string, launch: Launch, sessionID: string, notes: readonly string[], seenWorking: boolean): Promise<void> {
+    const { name } = launch.spec
     const running = await this.store.transition(userID, launch.id, "running", {
       reason: ["Running", ...notes].join("; "),
       sessionID,
-      ...(spec.name !== undefined ? { name: spec.name } : {}),
+      ...(name !== undefined ? { name } : {}),
       from: ["provisioning"],
     })
     this.changed(running)
-    this.arm(userID, running, false)
+    this.arm(userID, running, seenWorking)
   }
 
   // ---- the end watcher ----------------------------------------------------------------------------------
@@ -561,6 +714,9 @@ export class LaunchEngine {
         } catch (cause) {
           notes.push(`workspace cleanup failed: ${errorText(cause)}`)
         }
+      } else {
+        notes.push("workspace cleanup waits for the node")
+        await this.updateWork(userID, id, { cleanup: policy })
       }
     }
     try {
