@@ -364,28 +364,41 @@ export class Store {
   static open(dir: string, now: () => number = Date.now, options: StoreOptions = {}): Store {
     prepareStateDir(dir, options)
     const file = path.join(dir, "state.json")
-    let state: StateData = { machines: [], devices: [], push: [], users: [], audit: [] }
-    if (existsSync(file)) {
-      try {
-        const raw = JSON.parse(readFileSync(file, "utf8")) as Partial<StateData>
-        state = {
-          machines: Array.isArray(raw.machines) ? raw.machines : [],
-          devices: Array.isArray(raw.devices) ? raw.devices : [],
-          ...(raw.vapid ? { vapid: raw.vapid } : {}),
-          push: Array.isArray(raw.push) ? raw.push : [],
-          ...(isRecord(raw.speech) ? { speech: raw.speech } : {}),
-          users: Array.isArray(raw.users) ? raw.users : [],
-          audit: Array.isArray(raw.audit) ? raw.audit : [],
-          ...(raw.agentsActingPaused === true ? { agentsActingPaused: true as const } : {}),
-        }
-      } catch (cause) {
-        throw new Error(`Cannot read ${file}: ${cause instanceof Error ? cause.message : cause}. Fix or move it away.`)
-      }
+    let state = Store.read(dir, now, options)
+    if (!state) {
+      state = { machines: [], devices: [], push: [], users: [], audit: [] }
+      migrate(state, now(), options)
     }
-    migrate(state, now(), options)
     const store = new Store(file, state, now)
     store.save()
     return store
+  }
+
+  /**
+   * The records in <dir>/state.json, upgraded from older formats, without writing anything (`hub-server import`);
+   * undefined when there is no state.json.
+   */
+  static read(dir: string, now: () => number = Date.now, options: Pick<StoreOptions, "mode"> = {}): StateData | undefined {
+    const file = path.join(dir, "state.json")
+    if (!existsSync(file)) return undefined
+    let state: StateData
+    try {
+      const raw = JSON.parse(readFileSync(file, "utf8")) as Partial<StateData>
+      state = {
+        machines: Array.isArray(raw.machines) ? raw.machines : [],
+        devices: Array.isArray(raw.devices) ? raw.devices : [],
+        ...(raw.vapid ? { vapid: raw.vapid } : {}),
+        push: Array.isArray(raw.push) ? raw.push : [],
+        ...(isRecord(raw.speech) ? { speech: raw.speech } : {}),
+        users: Array.isArray(raw.users) ? raw.users : [],
+        audit: Array.isArray(raw.audit) ? raw.audit : [],
+        ...(raw.agentsActingPaused === true ? { agentsActingPaused: true as const } : {}),
+      }
+    } catch (cause) {
+      throw new Error(`Cannot read ${file}: ${cause instanceof Error ? cause.message : cause}. Fix or move it away.`)
+    }
+    migrate(state, now(), options)
+    return state
   }
 
   /**
@@ -989,7 +1002,7 @@ export class Store {
  * Idempotent upgrade of older states: the local user exists, every machine and device has an owner, agent data
  * and token epochs are valid.
  */
-function migrate(state: StateData, t: number, options: StoreOptions): void {
+function migrate(state: StateData, t: number, options: Pick<StoreOptions, "mode">): void {
   let local = state.users.find((u) => u.id === LOCAL_USER)
   if (!local) {
     local = { id: LOCAL_USER, role: "admin", created: t, lastSeen: t }
