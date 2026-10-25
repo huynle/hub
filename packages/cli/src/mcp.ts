@@ -382,3 +382,68 @@ export function createMcpServer(options: McpServerOptions): McpServer {
     },
   }
 }
+
+export interface ServeOptions extends McpServerOptions {
+  /** stdin: newline-delimited JSON-RPC messages. */
+  readonly input: AsyncIterable<Uint8Array | string>
+  /** stdout: protocol frames only (one per call, each ending in a newline). */
+  readonly write: (frame: string) => void
+  /** stderr: logs. */
+  readonly log: (text: string) => void
+  /** Ends the server at once (SIGINT/SIGTERM): calls in flight are aborted, unanswered. */
+  readonly signal?: AbortSignal
+}
+
+/**
+ * Serves MCP on stdio until stdin ends (calls in flight are answered first) or the signal aborts. Lines that are not
+ * JSON answer a parse error (-32700); blank lines are skipped.
+ */
+export async function serveMcp(options: ServeOptions): Promise<void> {
+  const server = createMcpServer(options)
+  const send = (frame: RpcResponse) => options.write(`${JSON.stringify(frame)}\n`)
+  const pending = new Set<Promise<void>>()
+  const line = (text: string) => {
+    if (!text.trim()) return
+    let message: unknown
+    try {
+      message = JSON.parse(text)
+    } catch {
+      send(rpcError(null, RPC.parse, "parse error: not JSON"))
+      return
+    }
+    const task = server
+      .handle(message)
+      .then((answer) => {
+        if (answer) send(answer)
+      })
+      .catch((cause) => options.log(`hub mcp: ${cause instanceof Error ? cause.message : String(cause)}\n`))
+      .finally(() => pending.delete(task))
+    pending.add(task)
+  }
+
+  const stopped = new Promise<"stopped">((resolve) => {
+    if (options.signal?.aborted) resolve("stopped")
+    options.signal?.addEventListener("abort", () => resolve("stopped"), { once: true })
+  })
+  const iterator = options.input[Symbol.asyncIterator]()
+  const decoder = new TextDecoder()
+  let buffer = ""
+  for (;;) {
+    const next = await Promise.race([iterator.next(), stopped])
+    if (next === "stopped") {
+      server.close()
+      void iterator.return?.()
+      return
+    }
+    if (next.done) break
+    buffer += typeof next.value === "string" ? next.value : decoder.decode(next.value, { stream: true })
+    let end: number
+    while ((end = buffer.indexOf("\n")) >= 0) {
+      line(buffer.slice(0, end).replace(/\r$/, ""))
+      buffer = buffer.slice(end + 1)
+    }
+  }
+  line((buffer + decoder.decode()).replace(/\r$/, ""))
+  await Promise.race([Promise.allSettled([...pending]), stopped])
+  server.close()
+}

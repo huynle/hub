@@ -25,9 +25,9 @@ async function stdin(): Promise<string> {
   }
 }
 
-// Only `watch` runs until interrupted: Ctrl-C ends it cleanly (exit 0); other commands keep the default.
+// Only `watch` and `mcp` run until interrupted: Ctrl-C ends them cleanly (exit 0); other commands keep the default.
 const controller = new AbortController()
-if (argv[0] === "watch") for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => controller.abort())
+if (argv[0] === "watch" || argv[0] === "mcp") for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => controller.abort())
 
 process.exitCode = await run(argv, {
   env: process.env,
@@ -36,4 +36,7 @@ process.exitCode = await run(argv, {
   stderr: (s) => process.stderr.write(s),
   stdin,
   signal: controller.signal,
+  input: process.stdin,
 })
+// A signal ends `hub mcp` with its stdin still open; let go of it so the process can exit.
+if (argv[0] === "mcp") process.stdin.destroy()
