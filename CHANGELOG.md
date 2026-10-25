@@ -390,6 +390,52 @@ webhooks. See [docs/launches.md](docs/launches.md) and [docs/multi-user.md](docs
 - The sandbox image (`packages/runtime-openshell/image/`) with start and entry scripts and an upload fallback.
 - `hub node openshell check [--json]` reports whether a node can run sandboxed launches.
 
+### Cluster mode
+
+The hub can run as several pods behind one load balancer, sharing Postgres and Valkey (or Redis), with no sticky
+sessions and rolling updates without downtime ([docs/cluster.md](docs/cluster.md)). The single-process hub is
+unchanged (its files stay byte-identical) and remains the default.
+
+- **Configuration**: `HUB_DATABASE_URL` (`postgres://`) and `HUB_VALKEY_URL` (`redis://`, `rediss://`, `valkey://`,
+  `valkeys://`), or hub.json `cluster {database, valkey}`; both or neither. `HUB_POD_ID` names the pod (default the
+  hostname). Cluster mode requires `HUB_TOKEN_KEYS` (shared by every pod) and `HUB_AUTH=oidc`, and refuses pairing
+  mode. The URLs are never logged; a readable hub.json's URLs with a password are ignored.
+- **Shared state**: users, machines, devices, settings, push subscriptions, the audit log and agent data live in
+  Postgres (`hub_state`, `hub_claims`, `hub_schema`); pods cache them, tell each other what changed and reload every
+  30 s; writes are version-checked. Codes (pairing, login, link, enrollment), OIDC sign-in state, rate limits, push
+  cooldowns and answered-request markers live in Valkey, so a code issued on one pod works on another. No new
+  dependencies (Bun's own Postgres and Redis clients).
+- **Routing across pods**: each pod records its spoke and node connections in Valkey and serves requests for them
+  on `pod.<id>.rpc`; a request for a session on another pod is forwarded there (tenant checked again by the owning
+  pod). Every pod sees every connection through a shared cluster view, so status, `/api/agent/*`, placement and turn
+  routing work wherever a request lands. Pods re-check their sockets every 30 s and close those of revoked machines
+  and disabled users.
+- **Live events across pods**: console SSE (`/api/events`), `/api/agent/watch`, message and launch feeds reach every
+  pod; events (except streamed text) go to a per-user Valkey stream, so `Last-Event-ID` resumes on any pod.
+- **Leader jobs**: decision deadlines, message re-wakes, the launch supervisor and the webhook sender run on one pod
+  at a time under fenced 15 s leases, failing over when a pod drains or dies; a session's turn and message flush take
+  cluster-wide leases.
+- **Draining and readiness** (every mode): `GET /readyz` answers 503 while draining and, in cluster mode, when
+  Postgres or Valkey does not answer within 2 s (`/healthz` stays the liveness check). SIGTERM drains: new
+  WebSockets are refused (503, `Retry-After`), spokes and nodes get `bye {reason: "draining", retryAfterMs}` and
+  close code 4006 once their requests are answered, leader leases are released, SSE streams end with `retry:`, and
+  requests in flight get up to 50 s. A second signal stops at once (exit 1); SIGINT stops without draining.
+  Protocol (still version 1): `bye.retryAfterMs` (0–300000, optional); the OpenCode spoke and `hub node` reconnect
+  after a random 0–`retryAfterMs` instead of their usual backoff.
+- **`hub-server migrate`** applies the Postgres schema (idempotent, under an advisory lock); pods never migrate and
+  refuse an older schema. **`hub-server import --state <dir> [--dry-run] [--force] [--print-token-keys]`** copies a
+  single-process hub's state (state.json and agent data) into Postgres: idempotent, conflicts reported (overwritten
+  only with `--force`), machines and devices keep their tokens; `--print-token-keys` prints `token-keys.json` as the
+  `HUB_TOKEN_KEYS` value, which is never stored.
+- **Kubernetes manifests** in `deploy/k8s/`: Deployment (2 replicas, topology spread, `HUB_POD_ID` from the pod
+  name, `/readyz` and `/healthz` probes, `preStop` sleep, 60 s grace period, non-root, read-only root filesystem),
+  Service, Ingress example and Traefik notes for long WebSocket/SSE timeouts without buffering, Secret template,
+  PodDisruptionBudget, migrate Job, NetworkPolicy, Kustomization and a Flux example with SOPS; validated offline
+  (`kubeconform -strict`, `test/deploy-k8s.test.ts`).
+- **Tests**: backend contract suites run against memory and file backends by default and against real Postgres 16
+  and Valkey 8 containers with `HUB_IT_CLUSTER=1`; in-process multi-pod suites on shared memory backends run in
+  the default CI.
+
 ### Other changes
 
 - **Auto-name**: let OpenCode name a session with its Title agent, from the console. **Auto-name** in every
