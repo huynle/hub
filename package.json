@@ -81,6 +81,7 @@
     "packages/node",
     "packages/runtime-openshell",
     "packages/spoke-sdk",
+    "packages/testkit",
     "packages/claude-code"
   ],
   "engines": {

@@ -4,7 +4,8 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import { centralConfig } from "../src/central/config"
 import { startCentral, type Central, type CentralOptions } from "../src/central/http"
-import { encode, PROTOCOL_VERSION, type Hello, type SessionInfo, type SpokeMessage } from "../src/protocol"
+import { type Hello, type SessionInfo } from "../src/protocol"
+import { connectSpoke, helloFrame, sessionInfo, type FakeSpoke } from "../packages/testkit/src/index.ts"
 
 export const PUBLIC = "http://voice.test"
 
@@ -70,83 +71,13 @@ export async function harness(overrides: Partial<CentralOptions> & { env?: Recor
   return Object.assign(central, { cookie, api, notified, stateDir: config.stateDir })
 }
 
-export const hello = (processID: string, extra: Partial<Hello> = {}): Hello => ({
-  t: "hello",
-  v: PROTOCOL_VERSION,
-  processID,
-  kind: "standalone",
-  directory: "/work",
-  pid: 1,
-  mode: "always",
-  opencodeVersion: "2.0.0",
-  pluginVersion: "0.0.1",
-  ...extra,
-})
-
-export const session = (id: string, extra: Partial<SessionInfo> = {}): SessionInfo => ({
-  id,
-  title: `title ${id}`,
-  directory: "/work",
-  updated: 1,
-  owned: false,
-  ...extra,
-})
-
-export interface FakeSpoke {
-  ws: WebSocket
-  frames: any[]
-  closed: Promise<{ code: number; reason: string }>
-  send(message: SpokeMessage | Record<string, unknown> | string): void
-  next(predicate?: (frame: any) => boolean, timeoutMs?: number): Promise<any>
-  close(): void
-}
+// The client side of a spoke (frame builders and a recording WebSocket) lives in the testkit.
+export const hello = helloFrame
+export const session = sessionInfo
+export type { FakeSpoke }
 
 /** Opens a WebSocket to /spoke/ws. Does not send hello. */
-export async function connect(central: Central, token: string | undefined): Promise<FakeSpoke> {
-  const ws = new WebSocket(`${central.url.replace(/^http/, "ws")}/spoke/ws`, {
-    headers: token ? { authorization: `Bearer ${token}` } : {},
-  } as any)
-  const frames: any[] = []
-  const waiters: Array<() => void> = []
-  ws.addEventListener("message", (event) => {
-    frames.push(JSON.parse(String(event.data)))
-    for (const wake of waiters.splice(0)) wake()
-  })
-  const closed = new Promise<{ code: number; reason: string }>((resolve) =>
-    ws.addEventListener("close", (event) => {
-      resolve({ code: event.code, reason: event.reason })
-      for (const wake of waiters.splice(0)) wake()
-    }),
-  )
-  await new Promise<void>((resolve, reject) => {
-    ws.addEventListener("open", () => resolve(), { once: true })
-    ws.addEventListener("error", () => reject(new Error("websocket error")), { once: true })
-  })
-  let cursor = 0
-  return {
-    ws,
-    frames,
-    closed,
-    send: (message) => ws.send(typeof message === "string" ? message : encode(message as SpokeMessage)),
-    async next(predicate = () => true, timeoutMs = 2000) {
-      const deadline = Date.now() + timeoutMs
-      for (;;) {
-        while (cursor < frames.length) {
-          const frame = frames[cursor++]
-          if (predicate(frame)) return frame
-        }
-        if (ws.readyState === WebSocket.CLOSED) throw new Error("socket closed")
-        const left = deadline - Date.now()
-        if (left <= 0) throw new Error("timed out waiting for frame")
-        await new Promise<void>((resolve) => {
-          waiters.push(resolve)
-          setTimeout(resolve, left)
-        })
-      }
-    },
-    close: () => ws.close(),
-  }
-}
+export const connect = (central: Central, token: string | undefined): Promise<FakeSpoke> => connectSpoke(central.url, token)
 
 /** Enrolled machine + connected spoke that completed hello/welcome and reported sessions. */
 export async function spoke(

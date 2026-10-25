@@ -241,6 +241,8 @@ export interface CatalogProcess {
   readonly harness: string
   readonly harnessVersion: string
   readonly evidence: EvidenceLevel | "unknown"
+  /** What the process serves (spokeFeatures: core ops and optional features), sorted; consoles gate controls on it. */
+  readonly features: readonly string[]
   readonly connected: number
   readonly lastSeen: number
   readonly sessions: CatalogSession[]
@@ -1199,6 +1201,7 @@ export class Registry {
         opencodeVersion: opencodeVersion ?? "",
         pluginVersion,
         ...helloHarness(conn.hello),
+        features: [...conn.features].sort(),
         connected: conn.connected,
         lastSeen: conn.lastSeen,
         sessions: this.visible(conn).map((s) => {

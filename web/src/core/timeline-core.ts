@@ -434,5 +434,6 @@ export function storedMessageRow(sessionID: string, raw: unknown): TimelineInput
     message: { kind: m.kind, from: partyAddress(m.from), to: m.to, ...(typeof m.replyTo === "string" ? { replyTo: m.replyTo } : {}) },
     recipient: partyAddress(m.recipient),
     ...(typeof m.state === "string" ? { state: m.state } : {}),
+    ...(typeof m.delivery === "string" ? { delivery: m.delivery } : {}),
   }
 }

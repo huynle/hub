@@ -116,3 +116,17 @@ describe("transcriptBlocks: message rows", () => {
     expect(block).toEqual({ type: "message", key: "oc2:message", direction: "in", kind: "primer", label: "Hub identity note", text: "[hub] You are @api. …", primer: true })
   })
 })
+
+describe("hub message delivery (P7-T10)", () => {
+  test("a stored message keeps its delivery; its block labels only what is not delivered yet", () => {
+    expect(storedMessageRow("ses_me", stored("m5", { delivery: "queued" }))).toMatchObject({ delivery: "queued" })
+    expect(storedMessageRow("ses_me", stored("m6"))).not.toHaveProperty("delivery")
+    const t = new Timeline()
+    for (const [id, delivery] of [["q", "queued"], ["r", "retained"], ["s", "steer"], ["n", undefined]] as const) {
+      t.hubMessage(storedMessageRow("ses_me", stored(id, delivery ? { delivery, at: at + id.charCodeAt(0) } : { at: at + id.charCodeAt(0) }))!)
+    }
+    const blocks = transcriptBlocks(t.rows()).filter((b) => b.type === "message") as Array<{ key: string; delivery?: string }>
+    const byKey = Object.fromEntries(blocks.map((b) => [b.key, b.delivery]))
+    expect(byKey).toEqual({ "hubmsg:n": undefined, "hubmsg:q": "queued", "hubmsg:r": "held", "hubmsg:s": undefined })
+  })
+})
