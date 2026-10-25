@@ -7,6 +7,10 @@
 // connection per launch (a reconnect replaces the old one), closed when the launch ends (closeLaunch) or the token
 // expires; such a connection is bound to the launch in the Registry and gets no pairing or login codes.
 // Source addresses (loopback included: a sandbox reaches a loopback hub through its host) are never trusted.
+// Cluster mode (design §9, `cluster` option): each connection is recorded in the ConnDirectory (connID → pod); an op
+// for a connection another pod holds goes there over pod RPC (./cluster/rpc.ts) with the same per-op timeout, and the
+// owning pod re-checks the tenant before sending it. closeMachine / closeLaunch reach every pod. Session-token and
+// act-token pushes are sent only by the pod holding the connection. Without `cluster` everything is local.
 import type { Server, ServerWebSocket, WebSocketHandler } from "bun"
 import {
   encode,
@@ -31,6 +35,8 @@ import {
   type SpokeRequest,
 } from "../protocol"
 import type { LaunchBinding, LaunchVerifyResult } from "./agent/launch-tokens"
+import type { ConnDirectory } from "./cluster/directory"
+import type { CloseNotice, PodRpc, RpcCall } from "./cluster/rpc"
 import type { Auth } from "./auth"
 import type { NodeRegistry } from "./nodes"
 import type { NotificationKind, PushExtra } from "./push"
@@ -111,6 +117,23 @@ export interface SpokeHubOptions {
   readonly nodeTimeoutsMs?: Partial<Record<NodeOp, number>>
   /** Verifies launch-bound (hlt1) tokens; without it only machine tokens are accepted. */
   readonly launchTokens?: LaunchVerifier
+  /** Cluster mode: the shared connection directory and this pod's RPC (absent: every connection is local). */
+  readonly cluster?: SpokeCluster
+}
+
+export interface SpokeCluster {
+  readonly directory: ConnDirectory
+  readonly rpc: PodRpc
+}
+
+/** Per-request options. */
+export interface RequestOptions {
+  /**
+   * The user the caller acts for. For a connection on another pod, that pod refuses the op unless the connection's
+   * machine belongs to this user (default: the machine's owner as this pod sees it) and the session, if any, is
+   * not another user's.
+   */
+  readonly tenant?: string
 }
 
 /** Checks launch-bound tokens (implemented by LaunchTokens). */
@@ -147,6 +170,8 @@ const CLOSE_LAUNCH_EXPIRED = 4005
 /** Longest delay setTimeout takes; later expiries re-arm. */
 const MAX_TIMER_MS = 2 ** 31 - 1
 const LAUNCH_TOKEN = /^hlt1\./
+/** How long stop() waits for the cluster directory and RPC to be cleaned up. */
+const CLUSTER_STOP_MS = 1_000
 /** How many closed launches are remembered (launch IDs are never reused). */
 const CLOSED_LAUNCHES = 1000
 
@@ -160,10 +185,13 @@ export class SpokeHub {
   private readonly closedLaunches = new Map<string, string>()
   private readonly heartbeat: ReturnType<typeof setInterval>
   private seq = 0
+  /** Cluster mode: the directory heartbeat, RPC responder and close notices are set up. */
+  private readonly started: Promise<void>
   readonly websocket: WebSocketHandler<SpokeSocketData>
 
   constructor(private readonly options: SpokeHubOptions) {
     const staleMs = options.staleMs ?? 60_000
+    this.started = this.startCluster()
     this.heartbeat = setInterval(() => {
       const now = Date.now()
       for (const ws of this.sockets.values()) {
@@ -218,22 +246,23 @@ export class SpokeHub {
     return Response.json({ error: "Expected a WebSocket upgrade" }, { status: 426 })
   }
 
-  /** Sends a request to a connected spoke and resolves with its result. */
-  request<R extends ServerRequest>(connID: string, req: R): Promise<ResultFor[R["op"]]> {
+  /** Resolves once cluster mode is set up (at once without it). */
+  ready(): Promise<void> {
+    return this.started
+  }
+
+  /**
+   * Sends a request to a connected spoke and resolves with its result. In cluster mode a connection another pod
+   * holds is reached over pod RPC.
+   */
+  request<R extends ServerRequest>(connID: string, req: R, options: RequestOptions = {}): Promise<ResultFor[R["op"]]> {
     const ws = this.sockets.get(connID)
+    if (!ws && this.options.cluster) return this.remote({ kind: "spoke", connID, req, tenant: options.tenant ?? "" }) as Promise<ResultFor[R["op"]]>
     if (!ws?.data.ready || ws.data.role !== "spoke") return Promise.reject(new SpokeError("OpenCode process disconnected"))
     const id = `r${++this.seq}`
     const frame = encode({ t: "req", id, req })
     if (frame.length > MAX_FRAME) return Promise.reject(new RequestTooLargeError(req.op))
-    const base = this.options.requestTimeoutMs ?? 15_000
-    const timeoutMs =
-      req.op === "turn"
-        ? this.options.turnTimeoutMs + (this.options.turnGraceMs ?? TURN_GRACE_MS)
-        : req.op === "create" && req.herdrWorkspace
-          ? Math.max(base, CREATE_IN_HERDR_TIMEOUT_MS) // the spoke waits for OpenCode to start in the new tab
-          : req.op === "autoName"
-            ? Math.max(base, AUTO_NAME_TIMEOUT_MS)
-            : base
+    const timeoutMs = this.spokeTimeoutMs(req)
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
@@ -244,14 +273,18 @@ export class SpokeHub {
     })
   }
 
-  /** Sends an op to a connected node and resolves with its result, checked with nodeResultProblem. */
-  requestNode<R extends NodeRequest>(connID: string, req: R): Promise<NodeResultFor[R["op"]]> {
+  /**
+   * Sends an op to a connected node and resolves with its result, checked with nodeResultProblem. In cluster mode a
+   * node another pod holds is reached over pod RPC.
+   */
+  requestNode<R extends NodeRequest>(connID: string, req: R, options: RequestOptions = {}): Promise<NodeResultFor[R["op"]]> {
     const ws = this.sockets.get(connID)
+    if (!ws && this.options.cluster) return this.remote({ kind: "node", connID, req, tenant: options.tenant ?? "" }) as Promise<NodeResultFor[R["op"]]>
     if (!ws?.data.ready || ws.data.role !== NODE_ROLE) return Promise.reject(new NodeError("The node disconnected"))
     const id = `r${++this.seq}`
     const frame = encode({ t: "req", id, req } satisfies NodeServerMessage)
     if (frame.length > MAX_FRAME) return Promise.reject(new NodeError(`The ${req.op} request is too large to send to the node`))
-    const timeoutMs = this.options.nodeTimeoutsMs?.[req.op] ?? NODE_TIMEOUTS_MS[req.op] ?? this.options.requestTimeoutMs ?? 15_000
+    const timeoutMs = this.nodeTimeoutMs(req)
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
@@ -262,21 +295,103 @@ export class SpokeHub {
     })
   }
 
-  /** Disconnects the connections bound to a launch (when it ends). */
+  /** Disconnects the connections bound to a launch (when it ends), on every pod. */
   closeLaunch(launchID: string, reason = "launch ended"): void {
+    this.closeLaunchHere(launchID, reason)
+    this.publishClose({ kind: "launch", id: launchID, reason })
+  }
+
+  /** Disconnects every socket of a machine (after revocation), on every pod. */
+  closeMachine(machineID: string, reason: string): void {
+    this.closeMachineHere(machineID, reason)
+    this.publishClose({ kind: "machine", id: machineID, reason })
+  }
+
+  async stop(): Promise<void> {
+    clearInterval(this.heartbeat)
+    for (const ws of this.sockets.values()) this.bye(ws, "server shutting down", 1001)
+    const { cluster } = this.options
+    if (!cluster) return
+    // Best effort and bounded: the entries expire anyway, and an unreachable Valkey must not hold up shutdown.
+    const cleanup = this.started.catch(() => undefined).then(() => Promise.allSettled([cluster.rpc.stop(), cluster.directory.stop()]))
+    let timer: ReturnType<typeof setTimeout> | undefined
+    await Promise.race([cleanup, new Promise<void>((resolve) => (timer = setTimeout(resolve, CLUSTER_STOP_MS)))])
+    clearTimeout(timer)
+  }
+
+  private closeLaunchHere(launchID: string, reason: string): void {
     this.closedLaunches.set(launchID, reason)
     if (this.closedLaunches.size > CLOSED_LAUNCHES) this.closedLaunches.delete(this.closedLaunches.keys().next().value!)
     for (const ws of this.sockets.values()) if (ws.data.launch?.launchID === launchID) this.bye(ws, reason, CLOSE_LAUNCH_ENDED)
   }
 
-  /** Disconnects every socket of a machine (after revocation). */
-  closeMachine(machineID: string, reason: string): void {
+  private closeMachineHere(machineID: string, reason: string): void {
     for (const ws of this.sockets.values()) if (ws.data.machineID === machineID) this.bye(ws, reason, CLOSE_REVOKED)
   }
 
-  stop(): void {
-    clearInterval(this.heartbeat)
-    for (const ws of this.sockets.values()) this.bye(ws, "server shutting down", 1001)
+  private publishClose(notice: Omit<CloseNotice, "from">): void {
+    this.options.cluster?.rpc.publishClose(notice).catch((cause) => {
+      console.error(`[hub] close notice not sent to the other pods: ${cause instanceof Error ? cause.message : cause}`)
+    })
+  }
+
+  /** Cluster mode: heartbeat the directory, answer RPC for this pod's connections, apply other pods' close notices. */
+  private async startCluster(): Promise<void> {
+    const { cluster } = this.options
+    if (!cluster) return
+    await cluster.directory.start()
+    await cluster.rpc.serve((call) => this.serveRpc(call))
+    await cluster.rpc.onClose((notice) => {
+      if (notice.from === cluster.directory.podID) return
+      if (notice.kind === "machine") this.closeMachineHere(notice.id, notice.reason)
+      else this.closeLaunchHere(notice.id, notice.reason)
+    })
+  }
+
+  /** The hub-side wait for a spoke op. */
+  private spokeTimeoutMs(req: ServerRequest): number {
+    const base = this.options.requestTimeoutMs ?? 15_000
+    return req.op === "turn"
+      ? this.options.turnTimeoutMs + (this.options.turnGraceMs ?? TURN_GRACE_MS)
+      : req.op === "create" && req.herdrWorkspace
+        ? Math.max(base, CREATE_IN_HERDR_TIMEOUT_MS) // the spoke waits for OpenCode to start in the new tab
+        : req.op === "autoName"
+          ? Math.max(base, AUTO_NAME_TIMEOUT_MS)
+          : base
+  }
+
+  private nodeTimeoutMs(req: NodeRequest): number {
+    return this.options.nodeTimeoutsMs?.[req.op] ?? NODE_TIMEOUTS_MS[req.op] ?? this.options.requestTimeoutMs ?? 15_000
+  }
+
+  /** An op for a connection this pod does not hold: to the pod the directory names, over RPC. */
+  private async remote(call: RpcCall): Promise<unknown> {
+    const { directory, rpc } = this.options.cluster!
+    if (encode({ t: "req", id: "r0", req: call.req } as ServerMessage).length > MAX_FRAME) {
+      throw call.kind === "node" ? new NodeError(`The ${call.req.op} request is too large to send to the node`) : new RequestTooLargeError(call.req.op)
+    }
+    const entry = await directory.lookup(call.connID)
+    if (!entry || entry.pod === directory.podID) throw offlineError(call.kind)
+    const tenant = call.tenant || this.ownerOf(entry.machineID)
+    if (!tenant) throw offlineError(call.kind)
+    const timeoutMs = call.kind === "node" ? this.nodeTimeoutMs(call.req) : this.spokeTimeoutMs(call.req)
+    return rpc.call(entry.pod, { ...call, tenant } as RpcCall, timeoutMs, {
+      onGone: () => void directory.forget(call.connID, entry.pod).catch(() => undefined),
+    })
+  }
+
+  /** An op from another pod for a connection here: re-check the tenant, then send it like a local one. */
+  private async serveRpc(call: RpcCall): Promise<unknown> {
+    const ws = this.sockets.get(call.connID)
+    if (!ws?.data.ready) throw offlineError(call.kind)
+    const machine = this.options.store.machines().find((m) => m.id === ws.data.machineID)
+    if (!machine || machine.revoked || machine.ownerID !== call.tenant) throw offlineError(call.kind)
+    const sessionID = (call.req as { sessionID?: unknown }).sessionID
+    if (typeof sessionID === "string") {
+      const owner = this.options.registry.sessionTenant(sessionID)
+      if (owner !== undefined && owner !== call.tenant) throw new SpokeError("Unknown session")
+    }
+    return call.kind === "node" ? this.requestNode(call.connID, call.req) : this.request(call.connID, call.req)
   }
 
   private open(ws: Socket): void {
@@ -338,6 +453,7 @@ export class SpokeHub {
       ws.data.ready = true
       ws.data.role = "spoke"
       registry.connect(connID, { id: ws.data.machineID, name: ws.data.machineName }, message, launch ? { launchID: launch.launchID } : {})
+      this.registerConn(ws)
       void this.options.store.touchMachine(ws.data.machineID)
       // Older spokes ignore `features`; newer ones send a request a feature adds only when it is listed here.
       this.send(ws, { t: "welcome", v: PROTOCOL_VERSION, machineID: ws.data.machineID, publicURL: this.options.publicURL, features: [...HUB_FEATURES] })
@@ -405,6 +521,7 @@ export class SpokeHub {
     ws.data.ready = true
     ws.data.role = NODE_ROLE
     nodes.connect(ws.data.connID, { id: ws.data.machineID, name: ws.data.machineName }, hello)
+    this.registerConn(ws)
     void this.options.store.touchMachine(ws.data.machineID)
     this.send(ws, { t: "welcome", v: PROTOCOL_VERSION, machineID: ws.data.machineID, publicURL: this.options.publicURL, features: [...HUB_FEATURES] })
   }
@@ -487,8 +604,18 @@ export class SpokeHub {
       pending.reject(pending.node ? new NodeError("The node disconnected") : new SpokeError("OpenCode process disconnected"))
     }
     if (!ws.data.ready) return
+    this.options.cluster?.directory.unregister(connID).catch((cause) => {
+      console.error(`[hub] directory entry not removed: ${cause instanceof Error ? cause.message : cause}`)
+    })
     if (ws.data.role === NODE_ROLE) this.options.nodes.disconnect(connID)
     else this.options.registry.disconnect(connID)
+  }
+
+  /** Cluster mode: records a ready connection in the directory, so other pods route its ops here. */
+  private registerConn(ws: Socket): void {
+    this.options.cluster?.directory.register(ws.data.connID, ws.data.machineID).catch((cause) => {
+      console.error(`[hub] directory entry not written: ${cause instanceof Error ? cause.message : cause}`)
+    })
   }
 
   private bye(ws: Socket, reason: string, code = CLOSE_PROTOCOL): void {
@@ -499,4 +626,9 @@ export class SpokeHub {
   private send(ws: Socket, message: ServerMessage | NodeServerMessage): void {
     ws.send(encode(message))
   }
+}
+
+/** What a request to a connection that is gone rejects with. */
+function offlineError(kind: RpcCall["kind"]): Error {
+  return kind === "node" ? new NodeError("The node disconnected") : new SpokeError("OpenCode process disconnected")
 }
