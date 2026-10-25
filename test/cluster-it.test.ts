@@ -1,7 +1,7 @@
 // The opt-in docker harness for cluster integration tests (test/cluster-it.ts): unit tests against a fake
 // docker CLI (default CI), plus one real run (start, ready, fresh database / FLUSHDB, stop) with HUB_IT_CLUSTER=1.
 import { describe, expect, test } from "bun:test"
-import { dockerAvailable, ItCluster, itClusterEnabled, parsePort, removeContainers, type DockerExec, type ItClients } from "./cluster-it"
+import { dockerAvailable, ItCluster, itClusterEnabled, parsePort, reapOrphans, removeContainers, type DockerExec, type ItClients } from "./cluster-it"
 
 interface FakeDocker {
   exec: DockerExec
@@ -11,6 +11,8 @@ interface FakeDocker {
   imagesPresent: Set<string>
   ports: Record<string, string>
   failRun?: string
+  /** `docker ps` output: name, pid label, keep label (tab separated). */
+  ps?: string
 }
 
 function fakeDocker(): FakeDocker {
@@ -39,6 +41,8 @@ function fakeDocker(): FakeDocker {
           return { code: fake.pgReady.shift() ?? 0, stdout: "", stderr: "" }
         case "rm":
           return ok()
+        case "ps":
+          return ok(fake.ps ?? "")
         default:
           return { code: 1, stdout: "", stderr: `unexpected ${args.join(" ")}` }
       }
@@ -99,12 +103,49 @@ describe("cluster-it helpers", () => {
   })
 })
 
+describe("orphaned containers", () => {
+  test("reapOrphans removes hub-it-* containers whose process is gone, unless kept", async () => {
+    const fake = fakeDocker()
+    fake.ps = ["hub-it-postgres-a\t111\t", "hub-it-valkey-b\t222\t", "hub-it-valkey-c\t333\t1", "hub-it-old-d\t\t", "prod-db\t111\t", ""].join("\n")
+    const removed = await reapOrphans(fake.exec, (pid) => pid === 222)
+    expect(removed).toEqual(["hub-it-postgres-a", "hub-it-old-d"])
+    expect(fake.calls[0]).toEqual(["ps", "-a", "--filter", "name=hub-it-", "--format", '{{.Names}}\t{{.Label "hub-it.pid"}}\t{{.Label "hub-it.keep"}}'])
+    expect(fake.calls.filter((c) => c[0] === "rm")).toEqual([["rm", "-f", "-v", "hub-it-postgres-a", "hub-it-old-d"]])
+  })
+
+  test("nothing orphaned: no rm", async () => {
+    const fake = fakeDocker()
+    fake.ps = "hub-it-valkey-b\t222\t\n"
+    expect(await reapOrphans(fake.exec, () => true)).toEqual([])
+    expect(fake.calls.filter((c) => c[0] === "rm")).toEqual([])
+  })
+
+  test("containers carry the owning pid (and the keep mark with keep); the first start reaps orphans once", async () => {
+    const fake = fakeDocker()
+    const cluster = new ItCluster({ exec: fake.exec, clients: fakeClients().clients, sleep: noSleep, random, reap: true, keep: true })
+    await cluster.postgres()
+    await cluster.valkey()
+    const runs = fake.calls.filter((c) => c[0] === "run")
+    for (const run of runs) {
+      expect(run).toContain(`hub-it.pid=${process.pid}`)
+      expect(run).toContain("hub-it.keep=1")
+    }
+    expect(fake.calls.filter((c) => c[0] === "ps").length).toBe(1)
+    expect(fake.calls.findIndex((c) => c[0] === "ps")).toBeLessThan(fake.calls.findIndex((c) => c[0] === "run"))
+    const plain = fakeDocker()
+    await new ItCluster({ exec: plain.exec, clients: fakeClients().clients, sleep: noSleep, random, keep: false }).valkey()
+    const run = plain.calls.find((c) => c[0] === "run")!
+    expect(run).not.toContain("hub-it.keep=1")
+    expect(plain.calls.filter((c) => c[0] === "ps")).toEqual([])
+  })
+})
+
 describe("ItCluster with a fake docker", () => {
   test("postgres(): runs postgres:16 named hub-it-postgres-* on a random 127.0.0.1 port and waits for pg_isready", async () => {
     const fake = fakeDocker()
     fake.pgReady = [2, 1]
     const { clients, log } = fakeClients()
-    const cluster = new ItCluster({ exec: fake.exec, clients, sleep: noSleep, random })
+    const cluster = new ItCluster({ exec: fake.exec, clients, sleep: noSleep, random, keep: false })
     const pg = await cluster.postgres()
     const run = fake.calls.find((c) => c[0] === "run")!
     const name = run[run.indexOf("--name") + 1]!
@@ -125,7 +166,7 @@ describe("ItCluster with a fake docker", () => {
     const fake = fakeDocker()
     let pings = 0
     const { clients } = fakeClients({ valkeyReady: async () => ++pings >= 3 })
-    const cluster = new ItCluster({ exec: fake.exec, clients, sleep: noSleep, random })
+    const cluster = new ItCluster({ exec: fake.exec, clients, sleep: noSleep, random, keep: false })
     const valkey = await cluster.valkey()
     const run = fake.calls.find((c) => c[0] === "run")!
     expect(run[run.indexOf("--name") + 1]).toMatch(/^hub-it-valkey-/)
@@ -138,7 +179,7 @@ describe("ItCluster with a fake docker", () => {
   test("a missing image is pulled first (only the two known images)", async () => {
     const fake = fakeDocker()
     fake.imagesPresent.clear()
-    const cluster = new ItCluster({ exec: fake.exec, clients: fakeClients().clients, sleep: noSleep, random })
+    const cluster = new ItCluster({ exec: fake.exec, clients: fakeClients().clients, sleep: noSleep, random, keep: false })
     await cluster.postgres()
     await cluster.valkey()
     expect(fake.calls.filter((c) => c[0] === "pull")).toEqual([
@@ -149,7 +190,7 @@ describe("ItCluster with a fake docker", () => {
 
   test("each service starts once, also when asked concurrently", async () => {
     const fake = fakeDocker()
-    const cluster = new ItCluster({ exec: fake.exec, clients: fakeClients().clients, sleep: noSleep, random })
+    const cluster = new ItCluster({ exec: fake.exec, clients: fakeClients().clients, sleep: noSleep, random, keep: false })
     const [a, b] = await Promise.all([cluster.postgres(), cluster.postgres()])
     expect(a).toBe(b)
     expect(fake.calls.filter((c) => c[0] === "run").length).toBe(1)
@@ -158,7 +199,7 @@ describe("ItCluster with a fake docker", () => {
   test("freshDatabase creates a new database per call and returns its url; freshValkey flushes and returns the url", async () => {
     const fake = fakeDocker()
     const { clients, log } = fakeClients()
-    const cluster = new ItCluster({ exec: fake.exec, clients, sleep: noSleep, random })
+    const cluster = new ItCluster({ exec: fake.exec, clients, sleep: noSleep, random, keep: false })
     const one = await cluster.freshDatabase()
     const two = await cluster.freshDatabase()
     expect(one).not.toBe(two)
@@ -173,7 +214,7 @@ describe("ItCluster with a fake docker", () => {
 
   test("stop removes the containers it started (hub-it-* only), once", async () => {
     const fake = fakeDocker()
-    const cluster = new ItCluster({ exec: fake.exec, clients: fakeClients().clients, sleep: noSleep, random })
+    const cluster = new ItCluster({ exec: fake.exec, clients: fakeClients().clients, sleep: noSleep, random, keep: false })
     await cluster.postgres()
     await cluster.valkey()
     const names = cluster.containers()
@@ -198,7 +239,7 @@ describe("ItCluster with a fake docker", () => {
   test("a container that never gets ready is removed and the start fails", async () => {
     const fake = fakeDocker()
     const { clients } = fakeClients({ valkeyReady: async () => false })
-    const cluster = new ItCluster({ exec: fake.exec, clients, sleep: noSleep, random, readyAttempts: 5 })
+    const cluster = new ItCluster({ exec: fake.exec, clients, sleep: noSleep, random, keep: false, readyAttempts: 5 })
     await expect(cluster.valkey()).rejects.toThrow(/not ready/)
     const run = fake.calls.find((c) => c[0] === "run")!
     expect(fake.calls.at(-1)).toEqual(["rm", "-f", "-v", run[run.indexOf("--name") + 1]!])
@@ -208,7 +249,7 @@ describe("ItCluster with a fake docker", () => {
   test("a failing docker run rejects with docker's message and leaves nothing behind", async () => {
     const fake = fakeDocker()
     fake.failRun = "postgres:16"
-    const cluster = new ItCluster({ exec: fake.exec, clients: fakeClients().clients, sleep: noSleep, random })
+    const cluster = new ItCluster({ exec: fake.exec, clients: fakeClients().clients, sleep: noSleep, random, keep: false })
     await expect(cluster.postgres()).rejects.toThrow(/boom/)
     expect(cluster.containers()).toEqual([])
   })

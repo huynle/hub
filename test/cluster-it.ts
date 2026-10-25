@@ -5,6 +5,10 @@
 // containers when the suite ends, also when it fails (HUB_IT_KEEP=1 leaves them running to look at). It only
 // ever creates or removes containers named hub-it-*, and pulls no image but those two. Each service starts
 // lazily, on first use, at most once per ItCluster. Without docker, callers skip (dockerAvailable()).
+//
+// If a run dies before stop() (SIGKILL, a crash; `bun test` emits no process "exit" event), its containers
+// carry the label hub-it.pid=<pid>: the next ItCluster's first start removes hub-it-* containers whose process
+// is gone (reapOrphans), except the ones HUB_IT_KEEP=1 marked hub-it.keep=1. SIGINT/SIGTERM remove them at once.
 import { randomUUID } from "node:crypto"
 
 /** Runs the docker CLI with these arguments. Throws when the CLI cannot be started at all. */
@@ -39,8 +43,10 @@ export interface ItClusterOptions {
   readonly log?: (line: string) => void
   /** Readiness polls, 250 ms apart (default 240: one minute). */
   readonly readyAttempts?: number
-  /** Remove the containers when the process exits or is interrupted (default: when using the real docker CLI). */
+  /** Remove the containers on SIGINT/SIGTERM or process exit (default: when using the real docker CLI). */
   readonly exitCleanup?: boolean
+  /** Before the first start, remove hub-it-* containers left by dead processes (default: with the real docker CLI). */
+  readonly reap?: boolean
 }
 
 export const NAME_PREFIX = "hub-it-"
@@ -86,6 +92,33 @@ export async function removeContainers(exec: DockerExec, names: string[]): Promi
   assertOwnNames(names)
   if (!names.length) return
   await exec(["rm", "-f", "-v", ...names])
+}
+
+/** Whether a local process is running (signal 0: EPERM means it exists but is not ours). */
+export function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM"
+  }
+}
+
+/**
+ * Removes hub-it-* containers whose owning process (label hub-it.pid) is gone, except those marked kept
+ * (HUB_IT_KEEP=1): the last resort for runs killed before they could clean up. Returns the names removed.
+ */
+export async function reapOrphans(exec: DockerExec, isAlive: (pid: number) => boolean = processAlive): Promise<string[]> {
+  const ps = await exec(["ps", "-a", "--filter", `name=${NAME_PREFIX}`, "--format", '{{.Names}}\t{{.Label "hub-it.pid"}}\t{{.Label "hub-it.keep"}}'])
+  if (ps.code !== 0) return []
+  const orphans: string[] = []
+  for (const line of ps.stdout.split("\n")) {
+    const [name = "", pid = "", keep = ""] = line.trim().split("\t")
+    if (!name.startsWith(NAME_PREFIX) || keep === "1") continue
+    if (!/^\d+$/.test(pid) || !isAlive(Number(pid))) orphans.push(name)
+  }
+  await removeContainers(exec, orphans)
+  return orphans
 }
 
 /** The real services, through Bun.SQL and Bun.RedisClient. */
@@ -145,6 +178,8 @@ export class ItCluster {
   private pg?: Promise<ItService>
   private vk?: Promise<ItService>
   private exitHooked = false
+  private reaped?: Promise<unknown>
+  private readonly reap: boolean
 
   constructor(options: ItClusterOptions = {}) {
     this.exec = options.exec ?? dockerExec
@@ -155,6 +190,7 @@ export class ItCluster {
     this.log = options.log ?? (() => {})
     this.readyAttempts = options.readyAttempts ?? 240
     this.exitCleanup = options.exitCleanup ?? !options.exec
+    this.reap = options.reap ?? !options.exec
     this.password = `hubit${this.random()}`
   }
 
@@ -240,9 +276,14 @@ export class ItCluster {
       const pull = await this.exec(["pull", spec.image])
       if (pull.code !== 0) throw new Error(`docker pull ${spec.image} failed: ${pull.stderr.trim()}`)
     }
+    if (this.reap) {
+      this.reaped ??= reapOrphans(this.exec).then((names) => names.length && this.log(`removed orphaned ${names.join(", ")}`))
+      await this.reaped
+    }
     const name = `${NAME_PREFIX}${spec.kind}-${this.random()}`
     const env = spec.env.flatMap((e) => ["-e", e])
-    const run = await this.exec(["run", "-d", "--rm", "--name", name, "-p", `127.0.0.1::${spec.port}`, ...env, spec.image])
+    const labels = ["--label", `hub-it.pid=${process.pid}`, ...(this.keep ? ["--label", "hub-it.keep=1"] : [])]
+    const run = await this.exec(["run", "-d", "--rm", "--name", name, "-p", `127.0.0.1::${spec.port}`, ...labels, ...env, spec.image])
     if (run.code !== 0) throw new Error(`docker run ${spec.image} failed: ${run.stderr.trim()}`)
     this.live.add(name)
     this.hookExit()
