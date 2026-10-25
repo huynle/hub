@@ -18,7 +18,7 @@
 // cleanup  deletes the sandbox only when nothing would be lost (policy remove, no uncommitted work, every commit
 //          collected), else stops it and says why; the host clone goes through HostRuntime's rules.
 //
-// Names are deterministic (hub-<20 hex of sha256(launchID)>) and every op checks the sandbox's hub.launch label,
+// Names are deterministic (hub-<15 hex of sha256(launchID)>, OpenShell allows 19 characters) and every op checks the sandbox's hub.launch label,
 // so a restarted node finds its own sandboxes again and never touches anyone else's.
 import { createHash } from "node:crypto"
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
@@ -106,11 +106,13 @@ export interface OpenShellRuntimeOptions {
   readonly readyTimeoutMs?: number
 }
 
-const sha = (s: string) => createHash("sha256").update(s).digest("hex").slice(0, 20)
+const sha = (s: string, hex = 20) => createHash("sha256").update(s).digest("hex").slice(0, hex)
+/** OpenShell's limit for sandbox names (the gateway's MAX_ROUTABLE_NAME_LEN): "hub-" + 15 hex. */
+export const SANDBOX_NAME_MAX = 19
 
-/** The launch's sandbox: hub-<20 hex of sha256(launchID)>, a lowercase DNS label. */
+/** The launch's sandbox: hub-<15 hex of sha256(launchID)>, a lowercase DNS label within SANDBOX_NAME_MAX. */
 export function sandboxName(launchID: string): string {
-  return `hub-${sha(launchID)}`
+  return `hub-${sha(launchID, SANDBOX_NAME_MAX - 4)}`
 }
 
 /** A label value for an ID: the ID itself when it is a valid label value, else 20 hex of its sha256. */
