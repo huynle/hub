@@ -154,6 +154,17 @@ describe("route table", () => {
       "PUT /api/push/mute",
       "POST /api/push/test",
       "GET /api/agent/whoami",
+      "GET /api/sessions/:session/messages",
+      "POST /api/agent/msg",
+      "POST /api/agent/ask",
+      "POST /api/agent/reply",
+      "POST /api/agent/decline",
+      "GET /api/agent/inbox",
+      "GET /api/agent/messages/:id",
+      "POST /api/agent/mute",
+      "POST /api/agent/unmute",
+      "GET /api/agent/messaging",
+      "PUT /api/agent/messaging",
     ]) {
       expect(keys).toContain(required)
     }
@@ -214,6 +225,52 @@ describe("bob cannot reach alice's sessions", () => {
       expect({ route: route.path, status: res.status }).toEqual({ route: route.path, status: 403 })
     }
     expect(h.store.user(alice.id)?.disabled).toBeUndefined()
+  })
+})
+
+describe("bob cannot reach alice's agent messages", () => {
+  /** A message to alice's session, stored for alice. */
+  const aliceAsk = () =>
+    h.delivery.messages.send(alice.id, { from: { kind: "user" }, to: "ses_alice", recipient: { kind: "session", sessionID: "ses_alice" }, kind: "ask", text: "alice secret" })
+
+  test("every message route answers not_found for alice's sessions and message ids, like unknown ones", async () => {
+    const ask = await aliceAsk()
+    const cases: Array<[string, string, unknown?]> = [
+      ["POST", "/api/agent/msg", { to: "ses_alice", text: "hi" }],
+      ["POST", "/api/agent/msg", { to: "ses_unknown", text: "hi" }],
+      ["POST", "/api/agent/ask", { to: "ses_alice", text: "hi" }],
+      ["POST", "/api/agent/msg", { to: "ses_alice", text: "hi", all: true }],
+      ["POST", "/api/agent/reply", { replyTo: ask.id, text: "spoof" }],
+      ["POST", "/api/agent/reply", { replyTo: "msg_unknown", text: "spoof" }],
+      ["POST", "/api/agent/decline", { replyTo: ask.id, why: "spoof" }],
+      ["GET", `/api/agent/messages/${ask.id}`],
+      ["GET", "/api/agent/messages/msg_unknown"],
+      ["POST", "/api/agent/mute", { session: "ses_alice" }],
+      ["POST", "/api/agent/unmute", { session: "ses_alice" }],
+    ]
+    for (const [method, pathname, body] of cases) {
+      const res = await as(bob, pathname, body === undefined ? { method } : { method, json: body })
+      expect({ method, pathname, status: res.status }).toEqual({ method, pathname, status: 404 })
+      expect((await json(res)).error.code).toBe("not_found")
+    }
+    expect(JSON.stringify(await json(await as(bob, "/api/agent/inbox")))).not.toContain("alice secret")
+    expect((await h.delivery.messages.get(alice.id, ask.id))?.state).toBe("open")
+    expect(await h.delivery.messages.muted(alice.id, { kind: "session", sessionID: "ses_alice" })).toEqual([])
+    expect(alice.requests).toEqual([])
+    // admins get no extra agent powers
+    expect((await as(admin, `/api/agent/messages/${ask.id}`)).status).toBe(404)
+  })
+
+  test("bob's messaging switch is his own", async () => {
+    expect((await as(bob, "/api/agent/messaging", { method: "PUT", json: { enabled: false } })).status).toBe(200)
+    expect(await json(await as(alice, "/api/agent/messaging"))).toEqual({ enabled: true })
+  })
+
+  test("alice reads her session's messages on the console route (positive control)", async () => {
+    const ask = await aliceAsk()
+    const res = await as(alice, "/api/sessions/ses_alice/messages")
+    expect(res.status).toBe(200)
+    expect((await json(res)).messages.map((m: any) => m.id)).toEqual([ask.id])
   })
 })
 

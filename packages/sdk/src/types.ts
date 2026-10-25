@@ -144,6 +144,75 @@ export interface CreatedAppToken extends AppTokenView {
   readonly token: string
 }
 
+/** Who sends or receives a message: a session, the user (`@me`), or an app token. */
+export type Party =
+  | { readonly kind: "session"; readonly sessionID: string; readonly name?: string; readonly harness?: string; readonly machine?: string }
+  | { readonly kind: "user" }
+  | { readonly kind: "app"; readonly tokenID: string; readonly label?: string }
+
+export type MessageKind = "msg" | "ask" | "reply" | "decline"
+/** `sent` for msg/reply/decline; asks are open until answered, declined or expired. */
+export type MessageState = "sent" | "open" | "answered" | "declined" | "expired"
+/** How a message reached its recipient session. */
+export type MessageDelivery = "steer" | "turn" | "queued" | "retained" | "pending"
+
+/** A stored agent message. */
+export interface AgentMessage {
+  readonly id: string
+  readonly kind: MessageKind
+  /** The authenticated sender. */
+  readonly from: Party
+  /** The address as the sender wrote it. */
+  readonly to: string
+  /** The party it reached. */
+  readonly recipient: Party
+  /** The role holder generation it reached (role addresses). */
+  readonly generation?: number
+  readonly text: string
+  readonly replyTo?: string
+  readonly state: MessageState
+  readonly at: number
+  readonly hop: number
+  readonly expiresAt?: number
+  readonly delivery?: MessageDelivery
+  readonly deliveredAt?: number
+  /** The reply or decline that closed an ask. */
+  readonly answer?: { readonly id: string; readonly at: number }
+}
+
+/** POST /api/agent/msg and /ask: the stored message and how it was delivered (none: stored only). */
+export interface Sent {
+  readonly message: AgentMessage
+  readonly delivery?: MessageDelivery
+}
+
+/** POST /api/agent/msg or /ask with all: one per session. */
+export interface SentAll {
+  readonly sent: readonly Sent[]
+}
+
+/** POST /api/agent/ask (after any wait) and GET /api/agent/messages/:id: the message and, once closed, its answer. */
+export interface Asked extends Sent {
+  readonly answer?: AgentMessage
+}
+
+/** POST /api/agent/reply and /decline: the answer and the message it answered. */
+export interface Replied extends Sent {
+  readonly original: AgentMessage
+}
+
+/** GET /api/agent/inbox. */
+export interface Inbox {
+  /** Open asks to the caller, newest first. */
+  readonly asks: readonly AgentMessage[]
+  /** The caller's own open asks. */
+  readonly waiting: readonly AgentMessage[]
+  /** Recent messages to the caller. */
+  readonly messages: readonly AgentMessage[]
+  /** Session IDs the caller muted. */
+  readonly muted: readonly string[]
+}
+
 /** One server-sent event of GET /api/agent/watch (data is the raw text, JSON for hub events). */
 export interface WatchEvent {
   readonly event: string

@@ -14,8 +14,8 @@ import type { AppActor, BearerVerifier } from "./actor"
 import { AgentError } from "./errors"
 import type { AgentRoute } from "./routes"
 
-/** Scopes an app token may hold. */
-export const APP_SCOPES: readonly string[] = ["sessions:read"]
+/** Scopes an app token may hold: reading sessions; sending (msg, ask, reply, decline, mute) and reading messages. */
+export const APP_SCOPES: readonly string[] = ["sessions:read", "messages:send", "messages:read"]
 export const DEFAULT_APP_SCOPES: readonly string[] = ["sessions:read"]
 export const MAX_APP_TOKENS = 50
 export const MAX_APP_TOKEN_LABEL = 100

@@ -56,6 +56,13 @@ describe("POST /api/agent/app-tokens", () => {
     expect(body.scopes).toEqual(["sessions:read"])
   })
 
+  test("messaging scopes: messages:send and messages:read", async () => {
+    start()
+    const { res, body } = await create({ scopes: ["messages:send", "messages:read"] })
+    expect(res.status).toBe(201)
+    expect(body.scopes).toEqual(["messages:send", "messages:read"])
+  })
+
   test("only the sha256 hash reaches state.json", async () => {
     start()
     const { body } = await create({ label: "brain" })

@@ -520,7 +520,7 @@ export function startCentral(options: CentralOptions): Central {
   delivery.start()
 
   // One credential resolver for every /api request: device cookie, device token, session and app tokens.
-  const agentDeps = { store, sessionTokens, directory, registry, spokes, heartbeatMs, now }
+  const agentDeps = { store, sessionTokens, directory, registry, spokes, delivery, heartbeatMs, now }
   const resolveActor = createResolver({
     cookieName: COOKIE,
     findDevice: (token) => store.findDevice(token),
@@ -860,6 +860,14 @@ export function startCentral(options: CentralOptions): Central {
         if (cause instanceof SpokeError && cause.message.includes("Invalid timeline cursor")) return error(400, "Invalid timeline cursor")
         throw cause
       }
+    }),
+    // Agent messages the session sent or received (newest first), merged into the timeline by `at` (+ watch events).
+    route("GET", "/api/sessions/:session/messages", "session", async ({ params, url, user }) => {
+      const raw = url.searchParams.get("limit")
+      const limit = raw === null ? undefined : Number(raw)
+      if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 200)) return error(400, "limit must be 1–200")
+      const messages = await delivery.messages.list(user.id, { kind: "session", sessionID: params.session! }, limit === undefined ? {} : { limit })
+      return Response.json({ messages }, { headers: NO_STORE })
     }),
     route("GET", "/api/sessions/:session/timeline/messages/:message/parts/:part", "session", async ({ params }) =>
       Response.json(await spokes.request(ownerOf(params.session!), { op: "timelinePart", sessionID: params.session!, messageID: params.message!, partID: params.part! }), { headers: NO_STORE })),

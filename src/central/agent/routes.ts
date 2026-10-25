@@ -12,6 +12,8 @@ import { directoryRoutes } from "./directory-routes"
 import { readRoutes, type ReadRegistry, type SpokeRequester } from "./read-routes"
 import { agentAllows, type AgentActor, type AgentAllow, type BearerVerifier, type Credential, type Resolver } from "./actor"
 import { appTokenRoutes, appTokenVerifier } from "./app-tokens"
+import type { Delivery } from "./delivery"
+import { MessageFeed, messageRoutes } from "./message-routes"
 import type { SessionTokens } from "./session-tokens"
 import { AgentError, agentFailure } from "./errors"
 
@@ -50,6 +52,8 @@ export interface AgentDeps {
   readonly registry?: ReadRegistry
   /** Hub → spoke requests (show, log). */
   readonly spokes?: SpokeRequester
+  /** Agent messages (P2-T5): the message routes are added when given with the directory. */
+  readonly delivery?: Delivery
   /** Heartbeat of GET /api/agent/watch. */
   readonly heartbeatMs?: number
   readonly now?: () => number
@@ -72,9 +76,11 @@ const userView = (user: UserRecord) => ({
 
 /** The built-in /api/agent routes. */
 export function agentRoutes(deps: AgentDeps): AgentRoute[] {
+  const feed = new MessageFeed()
   return [
     ...(deps.directory ? directoryRoutes(deps.directory) : []),
-    ...(deps.directory && deps.registry ? readRoutes({ store: deps.store, directory: deps.directory, registry: deps.registry, ...(deps.spokes ? { spokes: deps.spokes } : {}), ...(deps.heartbeatMs !== undefined ? { heartbeatMs: deps.heartbeatMs } : {}), ...(deps.now ? { now: deps.now } : {}) }) : []),
+    ...(deps.directory && deps.delivery ? messageRoutes({ delivery: deps.delivery, directory: deps.directory, store: deps.store, feed }) : []),
+    ...(deps.directory && deps.registry ? readRoutes({ store: deps.store, directory: deps.directory, registry: deps.registry, ...(deps.delivery ? { feed } : {}), ...(deps.spokes ? { spokes: deps.spokes } : {}), ...(deps.heartbeatMs !== undefined ? { heartbeatMs: deps.heartbeatMs } : {}), ...(deps.now ? { now: deps.now } : {}) }) : []),
     {
       method: "GET",
       path: `${AGENT_PREFIX}/whoami`,

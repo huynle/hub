@@ -2,9 +2,30 @@
 // HubError (the envelope) or HubTransportError (errors.ts). Typed verbs are added on top of call()/request().
 import { envelopeOf, HubError, HubTransportError } from "./errors.ts"
 import { sseEvents } from "./sse.ts"
-import type { AppTokenView, CreatedAppToken, DirectoryEntry, LogRow, Named, RoleClaim, RoleRelease, SessionDetail, SessionView, Status, WatchEvent, Whoami } from "./types.ts"
+import type {
+  AppTokenView,
+  Asked,
+  CreatedAppToken,
+  DirectoryEntry,
+  Inbox,
+  LogRow,
+  Named,
+  Replied,
+  RoleClaim,
+  RoleRelease,
+  Sent,
+  SentAll,
+  SessionDetail,
+  SessionView,
+  Status,
+  WatchEvent,
+  Whoami,
+} from "./types.ts"
 
 const AGENT = "/api/agent"
+
+/** The longest wait the hub serves in one request (seconds); longer waits loop. */
+export const WAIT_POLL_MAX_S = 60
 
 export type QueryValue = string | number | boolean | readonly string[] | undefined
 
@@ -68,7 +89,23 @@ export interface RoleOptions extends TargetOptions {
   readonly project?: string
 }
 
+export interface MsgOptions extends CallOptions {
+  /** false: admit without starting a turn. */
+  readonly wake?: boolean
+  /** Steer into a running turn. */
+  readonly urgent?: boolean
+}
+
+export interface AskOptions extends MsgOptions {
+  /** Seconds until the ask expires (the hub's default when unset). */
+  readonly expires?: number
+  /** Seconds to wait for the answer; the hub serves at most WAIT_POLL_MAX_S per request, so longer waits loop. */
+  readonly wait?: number
+}
+
 const signalOf = (options: CallOptions) => (options.signal ? { signal: options.signal } : {})
+/** The wake and urgent fields of a send, when given. */
+const sendFields = (options: MsgOptions) => ({ ...(options.wake !== undefined ? { wake: options.wake } : {}), ...(options.urgent !== undefined ? { urgent: options.urgent } : {}) })
 /** The session and project fields of a role request, when given. */
 const roleTarget = (options: RoleOptions) => ({ ...(options.session ? { session: options.session } : {}), ...(options.project !== undefined ? { project: options.project } : {}) })
 
@@ -190,6 +227,73 @@ export class HubClient {
 
   releaseRole(role: string, options: RoleOptions = {}): Promise<RoleRelease> {
     return this.call("POST", `${AGENT}/roles/release`, { body: { role: bareRole(role), ...roleTarget(options) }, ...signalOf(options) })
+  }
+
+  // Messaging (messages:send / messages:read).
+
+  /** Tells a session something (fire and forget). */
+  msg(to: string, text: string, options?: MsgOptions & { readonly all?: false }): Promise<Sent>
+  /** To every session the address names (each holder of a role). */
+  msg(to: string, text: string, options: MsgOptions & { readonly all: true }): Promise<SentAll>
+  msg(to: string, text: string, options: MsgOptions & { readonly all?: boolean } = {}): Promise<Sent | SentAll> {
+    return this.call("POST", `${AGENT}/msg`, { body: { to, text, ...sendFields(options), ...(options.all ? { all: true } : {}) }, ...signalOf(options) })
+  }
+
+  /** Asks a session; with wait, polls (≤WAIT_POLL_MAX_S each) until it is answered, declined or expired, or the wait is spent. */
+  ask(to: string, text: string, options?: AskOptions & { readonly all?: false }): Promise<Asked>
+  /** To every session the address names (no wait: TypeError). */
+  ask(to: string, text: string, options: AskOptions & { readonly all: true }): Promise<SentAll>
+  async ask(to: string, text: string, options: AskOptions & { readonly all?: boolean } = {}): Promise<Asked | SentAll> {
+    if (options.all && options.wait !== undefined) throw new TypeError("ask: wait cannot be combined with all")
+    let left = options.wait ?? 0
+    const first = Math.min(left, WAIT_POLL_MAX_S)
+    left -= first
+    const body = {
+      to,
+      text,
+      ...sendFields(options),
+      ...(options.all ? { all: true } : {}),
+      ...(options.expires !== undefined ? { expiresIn: options.expires } : {}),
+      ...(options.wait !== undefined ? { wait: first } : {}),
+    }
+    const asked = await this.call<Asked | SentAll>("POST", `${AGENT}/ask`, { body, ...signalOf(options) })
+    if ("sent" in asked) return asked
+    let current: Asked = asked
+    while (current.message.state === "open" && left > 0 && !options.signal?.aborted) {
+      const wait = Math.min(left, WAIT_POLL_MAX_S)
+      left -= wait
+      current = { ...(asked.delivery ? { delivery: asked.delivery } : {}), ...(await this.message(current.message.id, { wait, ...signalOf(options) })) }
+    }
+    return current
+  }
+
+  /** One message the caller sent or received; wait (≤WAIT_POLL_MAX_S seconds) long-polls an open ask. */
+  message(id: string, options: CallOptions & { readonly wait?: number } = {}): Promise<Asked> {
+    return this.call("GET", `${AGENT}/messages/${segment(id)}`, { query: { wait: options.wait }, ...signalOf(options) })
+  }
+
+  /** Replies to a message (always to its real sender). */
+  reply(id: string, text: string, options: CallOptions & { readonly wake?: boolean } = {}): Promise<Replied> {
+    return this.call("POST", `${AGENT}/reply`, { body: { replyTo: id, text, ...(options.wake !== undefined ? { wake: options.wake } : {}) }, ...signalOf(options) })
+  }
+
+  /** Declines an ask, with a reason. */
+  decline(id: string, why: string, options: CallOptions = {}): Promise<Replied> {
+    return this.call("POST", `${AGENT}/decline`, { body: { replyTo: id, why }, ...signalOf(options) })
+  }
+
+  /** Open asks to the caller, its own waiting asks, recent messages and mutes. */
+  inbox(options: CallOptions = {}): Promise<Inbox> {
+    return this.call("GET", `${AGENT}/inbox`, signalOf(options))
+  }
+
+  /** Refuses messages from a session (an address). */
+  mute(session: string, options: CallOptions = {}): Promise<{ muted: string[] }> {
+    return this.call("POST", `${AGENT}/mute`, { body: { session }, ...signalOf(options) })
+  }
+
+  unmute(session: string, options: CallOptions = {}): Promise<{ muted: string[] }> {
+    return this.call("POST", `${AGENT}/unmute`, { body: { session }, ...signalOf(options) })
   }
 
   // App tokens (user credentials only).
