@@ -1,5 +1,7 @@
 // The pure grant policy (design §5, §7, §11.4; decision wvqeuis0).
 
+import type { Tier } from "./decisions"
+
 /** One permission rule: an OpenCode action (or action glob) and a resource glob (`*` when the action stands alone). */
 export interface Pattern {
   readonly action: string
@@ -175,4 +177,31 @@ function savedBy(pattern: Pattern, action: string, save: string): boolean {
   if (!wildcard(action, pattern.action)) return false
   if (action === "shell" && SHELL_META.test(save)) return pattern.resource === save
   return globCovers(pattern.resource, save)
+}
+
+/** OpenCode's built-in tools a console confirm may answer; everything else (shell, external_directory, MCP, unknown) is tap. */
+const CONFIRM_ACTIONS: ReadonlySet<string> = new Set(["read", "edit", "write", "glob", "grep", "list", "lsp", "webfetch", "websearch", "codesearch", "task", "skill", "todowrite", "todoread", "question"])
+
+/** The literal text of a glob before its first wildcard; at least 3 characters to count. */
+const NEAR_MIN = 3
+const literalPrefix = (glob: string): string => glob.replaceAll("\\", "/").split(/[*?]/, 1)[0]!.trim()
+
+/** A never rule hits, or nearly hits, the request: a resource matches or contains its literal text, a save pattern overlaps it. */
+function nearNever(action: string, request: PermissionRequest, never: readonly Pattern[]): boolean {
+  return never.some((pattern) => {
+    if (!wildcard(action, pattern.action)) return false
+    const literal = literalPrefix(pattern.resource)
+    const near = (r: string) => wildcard(r, pattern.resource) || (literal.length >= NEAR_MIN && r.replaceAll("\\", "/").includes(literal))
+    return request.resources.some(near) || (request.save ?? []).some((s) => globsOverlap(pattern.resource, s))
+  })
+}
+
+/**
+ * The tier of an escalation (decision wvqeuis0 §7): `tap` for shell, external_directory, MCP (and unknown)
+ * tools and anything near a never rule (hub and grant); `confirm` otherwise. The hub sets it, never the agent.
+ */
+export function riskTier(request: PermissionRequest, never: readonly Pattern[]): Tier {
+  const action = normaliseAction(request.action)
+  if (!CONFIRM_ACTIONS.has(action)) return "tap"
+  return nearNever(action, request, never) ? "tap" : "confirm"
 }

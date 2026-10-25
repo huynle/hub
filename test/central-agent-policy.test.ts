@@ -2,7 +2,7 @@
 // Wildcard semantics, bash→shell, every-resource matching, never beats allow (incl. save patterns), shell
 // metacharacters, risk tiers, grant schema and duration validation, project path boundaries.
 import { describe, expect, test } from "bun:test"
-import { allowsResource, evaluatePermission, forbidsResource, globCovers, globsOverlap, parsePattern, wildcard } from "../src/central/agent/policy"
+import { allowsResource, evaluatePermission, riskTier, forbidsResource, globCovers, globsOverlap, parsePattern, wildcard } from "../src/central/agent/policy"
 
 describe("wildcard (OpenCode Wildcard.match)", () => {
   test.each([
@@ -239,5 +239,46 @@ describe("evaluatePermission", () => {
       expect(evaluatePermission(read, { grant: rules(["read:src/*"]), always: true, allowAlways: true }).verdict).toBe("outside")
       expect(evaluatePermission(read, { grant: rules(["read"]), always: true, allowAlways: true })).toEqual({ verdict: "allow" })
     })
+  })
+})
+
+describe("riskTier (set by the hub, never by the agent)", () => {
+  const never = ["bash:git push*", "edit:.env*", "read:secrets/*"].map(p)
+
+  test.each([
+    ["shell", ["ls"]],
+    ["bash", ["ls"]],
+    ["external_directory", ["/etc"]],
+    ["github_create_issue", ["*"]], // MCP tools are <server>_<tool>
+    ["playwright_browser_navigate", ["*"]],
+    ["doom_loop", ["*"]],
+    ["something_new", ["*"]], // unknown actions are treated as MCP
+  ])("%s is tap", (action, resources) => {
+    expect(riskTier({ action, resources }, [])).toBe("tap")
+  })
+
+  test.each(["read", "edit", "write", "glob", "grep", "list", "lsp", "webfetch", "websearch", "codesearch", "task", "skill", "todowrite", "todoread", "question"])(
+    "%s is confirm",
+    (action) => {
+      expect(riskTier({ action, resources: ["src/a.ts"] }, never)).toBe("confirm")
+    },
+  )
+
+  test("near never is tap: a never rule matches a resource", () => {
+    expect(riskTier({ action: "edit", resources: ["src/a.ts", ".env.local"] }, never)).toBe("tap")
+    expect(riskTier({ action: "read", resources: ["secrets/key"] }, never)).toBe("tap")
+  })
+
+  test("near never is tap: a save pattern overlaps a never rule", () => {
+    expect(riskTier({ action: "edit", resources: ["src/a.ts"], save: ["*"] }, never)).toBe("tap")
+  })
+
+  test("near never is tap: a resource contains a never rule's literal text", () => {
+    expect(riskTier({ action: "read", resources: ["app/secrets/key"] }, never)).toBe("tap")
+    expect(riskTier({ action: "edit", resources: ["config/.env"] }, never)).toBe("tap")
+  })
+
+  test("near never ignores never rules of other actions", () => {
+    expect(riskTier({ action: "read", resources: [".env"] }, never)).toBe("confirm")
   })
 })
