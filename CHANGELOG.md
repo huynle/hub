@@ -300,6 +300,79 @@ a per-user audit. See the README's *Agent actions and grants* and
   `opencode serve`: `HUB_IT_OPENCODE=1 bun test test/e2e-phase3-live.it.test.ts` (one session's model approves
   another's shell permission through the `hub` tool) and `test/spoke-acting.it.test.ts` (hub prompts, deny reasons).
 
+### Launches
+
+You, a script or an app can now start a session on one of your machines and have it end by itself: a `hub node`
+daemon prepares a git worktree (or a checkout or a clone), the machine's OpenCode service creates the session in it,
+and the hub names it, gives it roles, labels and a first prompt, watches it to its end and tells apps through signed
+webhooks. See [docs/launches.md](docs/launches.md) and [docs/multi-user.md](docs/multi-user.md#launch-tenancy).
+
+- **Protocol** (still version 1): a node hello on `/spoke/ws` (role `node`: runtimes, labels, capacity and use,
+  workspace roots, draining, the launches it holds), node ops `prepare`, `collect`, `cleanup` and `cancel` with
+  `progress` and `capacity` frames, the launch spec and launch view types, and the spoke feature `launch` (a create
+  op carrying `launchID`, `agent` and `model`). Hub features `nodes` and `launches` are announced only by hubs that
+  serve them; the webhook signature format (`Hub-Signature: t=…,v1=…`, `Hub-Event`, `Hub-Delivery`) lives in the
+  protocol package.
+- **Launch spec and store**: `POST /api/agent/launches` bodies are validated strictly (unknown fields refused; git
+  branches per `git check-ref-format` with no option-like parts; https/ssh remotes only, without credentials;
+  absolute repo paths; bounded name, roles, prompt, labels and timeout) with defaults filled in (harness
+  `opencode`, mode `worktree`, runtime `host`, end `idle`, cleanup `keep`). Launches are stored per user with a
+  state machine `queued → placing → provisioning → running → ended{idle, needs_user, failed, timeout, stopped,
+  lost}`, a bounded step history and idempotency keys (same key and body: the same launch; another body:
+  `400 invalid`); ended launches are pruned after 7 days (at most 500 kept).
+- **Verb `launch` and scope `sessions:launch`**: grants may allow `launch` for their projects; app tokens may carry
+  `sessions:launch`.
+- **Nodes and placement**: the hub keeps a registry of connected `hub node` daemons per machine owner and places
+  each launch on one of the user's own nodes (runtime, harness, workspace root, a service spoke announcing
+  `launch`, `placement.machine` and labels as `require` or `prefer`, free slots), oldest first, under a per-user
+  lease so several hub processes never place the same launch. Per-user caps in `hub.json agents.launches`
+  (`maxQueued` 50, `maxActive` 4, `perHour` 60 by default).
+- **Spoke launch creates**: the OpenCode service spoke announces `launch` and creates a launch's session (with its
+  agent and model) only in a directory under the node's workspace roots, which it reads from `node.json` beside its
+  config.
+- **`hub node`** (packages `@huynle/hub-node` and `@huynle/hub-runtime-sdk`): the per-machine daemon, configured by
+  `node.json` (`workspaceRoots`, `labels`, `slots`, `memoryMB`) and connecting with the machine token it reads,
+  read-only, from the spoke's `config.json`. Its host runtime makes worktrees at `<repo>/.worktrees/<branch>`
+  (reused when the branch already has one), checkouts and clones, all resolved through symlinks under the roots;
+  git runs without a shell, only over https and ssh, without prompts or inherited `GIT_*` settings, with time
+  limits and cancellation. Cleanup never forces: it keeps reused workspaces, checkouts, roots, workspaces another
+  launch made (a marker in the git directory), uncommitted changes and unpushed clones. It reconnects with backoff,
+  waits 30 minutes between tries on a hub that does not serve nodes, and stops when its machine is revoked;
+  launchd and systemd unit templates in `scripts/`. Runs on Bun and Node.
+- **Launch engine**: each placed launch is prepared on the node, created through the machine's service spoke, given
+  its roles, its name and the hub's primer, then prompted once, and runs. It ends `idle` only after its prompt was
+  seen working and the session then stayed idle (no blockers, asks or open Decisions) for 30 seconds; `asked` also
+  ends `needs_user`; `never` only by a stop or `end.timeout`; a session unreported for 10 minutes, or a node gone
+  while provisioning, ends `lost`. At the end the hub stops the session when needed, collects artifacts (branch,
+  head, commits, dirty) and asks the node to clean up (later, when the node is away). A restarted hub re-places
+  queued launches, continues provisioning ones from their last step and watches running ones again.
+- **Launch API**: `POST`/`GET /api/agent/launches` (`?state=`, `?label=k=v`), `GET`/`DELETE
+  /api/agent/launches/:id` (`410 gone` once ended), for users, app tokens with `sessions:launch` and sessions through
+  their act token, each under a grant with verb `launch` covering the repo (users need none); the kill switches
+  pause apps and sessions (`423`); apps and sessions see and stop only their own launches; every launch and stop is
+  audited. Launch labels show on read routes and filter lists; every change is an SSE `launch` event and a `launch`
+  watch event; the welcome announces `launches`.
+- **Webhooks**: `POST`/`GET /api/agent/webhooks`, `GET`/`DELETE /api/agent/webhooks/:id` for users (all of theirs)
+  and app tokens with `sessions:launch` (only their own, and only events of launches they started). Each launch
+  change (`launch.queued`, `launch.provisioning`, `launch.running`, `launch.ended`) is POSTed as a CloudEvents-style
+  JSON body, signed with the registration's `whsec_…` secret (HMAC-SHA256 of `<t>.<body>`), from a durable outbox:
+  at least once, deduplicated, retried with backoff for about 8.5 hours. Targets must be `https://` on public hosts,
+  checked again (re-resolved) before every send, with no redirects, a 10 s timeout and a 64 KiB response cap;
+  `hub.json agents.webhooks.allowPrivate` admits `http://` and private hosts for self-hosted receivers. Push
+  targets share the same public-URL checks.
+- **Clients**: the SDK gains `hub.launches.create/list/get/stop` and `verifyWebhook` / `signWebhook` (constant-time,
+  5-minute tolerance, several secrets while rotating); the CLI `hub launch` (every spec field as a flag;
+  `--prompt -` reads stdin), `hub launches list/show/stop` and `hub node run/install/uninstall/status` (install
+  writes the unit and prints the commands that load it; it never runs them); `hub mcp` adds the tools `launch`,
+  `launches`, `launch_show` and `launch_stop`.
+- **Tests**: `test/e2e-phase4.test.ts` runs a hub, a fake OpenCode service spoke and a real `hub node` (host runtime)
+  on temporary git repositories: `hub launch` through every state into a real worktree with name, role, labels,
+  primer and prompt, the idle end with artifacts and the worktree removed, signed webhooks checked with
+  `verifyWebhook`, idempotent keys, `maxActive`, app tokens with and without a launch grant, the kill switch, a
+  session's shell token refused, tenancy and a node lost while preparing. Opt-in against a real
+  `opencode serve --service`: `HUB_IT_OPENCODE=1 bun test test/e2e-phase4-live.it.test.ts` (the launched session
+  runs in the node's worktree and the model receives the prompt).
+
 ### Other changes
 
 - **Auto-name**: let OpenCode name a session with its Title agent, from the console. **Auto-name** in every
