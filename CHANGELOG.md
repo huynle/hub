@@ -105,27 +105,83 @@ the protocol up:
 
 ### Agent messaging
 
-- **Protocol: `deliver` op and messaging features** (still version 1). The hub admits a message into a session
-  with `deliver {sessionID, messageID, text, wake, meta: {kind, from, to, replyTo?, delivery?}}`, answered with
-  `{delivered: "steer" | "turn" | "queued" | "retained", inboxID?}`. `kind` is `msg`, `ask`, `reply`,
-  `decline`, `primer` or `decision` (`reply` and `decline` need `replyTo`); `delivery` is `queue` or `steer`;
-  `text` is at most 16000 characters, ids and addresses at most 300, and addresses may not contain control,
-  bidi or zero-width characters (`deliverProblem`, `isDeliverResult`). Spokes announce `deliver` in
-  `SPOKE_FEATURES` (old OpenCode spokes do not imply it, so the hub must check before sending); the welcome's
-  `HUB_FEATURES` gains `messaging`. `session.inbox.delivered` may carry `origin: "user" | "hub"` (same event
-  type, so older hubs keep accepting it), and timeline rows gain the `message` kind (`TimelineMessageItem`).
-- **OpenCode spoke delivers hub messages** (`deliver` announced when OpenCode has `session.synthetic`). The
-  envelope goes in as a synthetic message with metadata `{source: "hub", messageID, kind, from, to, replyTo?}`
-  (the model sees only the text) and OpenCode's client id (the hub's `msg_…` id, else a stable `msg_hub…` id
-  derived from it), so a retry is applied once. An idle session gets a turn (`turn`); a busy one gets a plain
-  message after the running turn (`queued`) and an ask into it (`steer`) unless `meta.delivery` says otherwise;
-  with a form open OpenCode holds it (`retained`). `wake: false` and subagent sessions are admitted without
-  starting a turn (`queued`, steer without resume: it arrives with the next turn, or joins one already running).
-  A repeated `messageID` returns the first result without another admission (only a retry that now asks to wake
-  a message admitted without waking is sent again). No voice model, agent or conversation changes. For hubs
-  with `messaging`, `session.inbox.delivered` carries `origin: "user"` (typed or phone prompts) or `"hub"` (a
-  delivered message) when the spoke saw the item enqueued. Opt-in check against a real `opencode serve`:
-  `HUB_IT_OPENCODE=1 bun test test/spoke-deliver.it.test.ts`.
+Sessions, scripts, apps and you message each other through the hub: `msg`, `ask`, `reply`, `decline`, `inbox` and
+`mute` in the `hub` CLI, the OpenCode `hub` tool, the TUI's `/msg` and `/who`, and `hub mcp`; asks to `@me` become
+Decisions answered in the console. Messages reach OpenCode sessions as hub messages in their conversation, in an
+envelope that marks them as not coming from the user. See the README's *Agent messaging* section and
+[docs/multi-user.md](docs/multi-user.md#messaging-tenancy).
+
+- **Delivery engine**: messages go only through spokes that announce `deliver` (an older spoke or another harness
+  without it: `unsupported {feature: "deliver"}`, nothing stored; no fallback through steer). A role address picks
+  one holder (the idle one, else the most recently active); `all` sends to each. Offline recipients get the message
+  when they come back (pending for 24 h); an open ask to an idle recipient is re-woken after 5, 15 and 45 minutes,
+  then the user is notified. Messages, asks, pending deliveries, Decisions and mutes live under
+  `<HUB_STATE_DIR>/agent/` (one file per user and collection, 0600), not in `state.json`.
+- **Envelope**: `[hub] <kind> from <sender> <to> · <time> · <id>`, the body between two boundary lines carrying the
+  message id, and a reply hint. Body lines that look like a header, boundary or hint are escaped; control, ANSI,
+  bidi and zero-width characters are stripped from the text and from names.
+- **Identity primer**: once per session (when it is first named explicitly or gets its first message), a short
+  note without a turn: who the session is, how to message others, and that `[hub]` messages are not the user's.
+- **Loop protection**: per 10 minutes, 20 messages per sender→recipient pair and 300 per user (`429
+  rate_limited` with `retryAfter`), 30 turns started per recipient (then delivered without waking); 8 hops of
+  agent-to-agent replies without a human turn (then delivered without waking, the user notified once). Mutes
+  refuse a sender (`403 forbidden`); the per-user messaging switch refuses all sends (`423 paused`).
+- **The name `me` is reserved**: `@me` always means the user, so no session can be named `me` (`400 invalid`) and
+  a title like "Me" derives `me-2`.
+- **CLI messaging verbs**: `hub msg`, `hub ask [--wait] [--expires]`, `hub reply`, `hub decline --why`, `hub
+  inbox`, `hub mute` / `unmute`, with `--all`, `--no-wake`, `--urgent` and `-` for text on stdin. Exit codes: 5
+  `forbidden`/`paused`, 6 `rate_limited`, 7 `unsupported`, 8 `gone` (or an expired ask); a waiting ask exits 1
+  when declined or not answered in time.
+- **`hub mcp`**: a Model Context Protocol server on stdio (newline-delimited JSON-RPC; `initialize`, `ping`,
+  `tools/list`, `tools/call`) whose tools are the CLI's verbs, acting as the CLI's credential (in practice the
+  app token from `hub login`). Only protocol frames go to stdout.
+- **Console message rows**: hub messages show in a session's conversation, "from @y" for received ones (from the
+  spoke's timeline) and "to @@r (→ @x)" for sent ones (from the hub, `GET /api/sessions/:session/messages` and SSE
+  `message` events), merged by time; the primer folds into one line.
+- **OpenCode `hub` tool**: the plugin adds one tool `hub {verb, …}` (verbs `msg`, `ask`, `reply`, `decline`,
+  `inbox`, `who`, `status`, `whoami`; JSON Schema input, not in code mode) that calls `/api/agent` through the SDK
+  as the calling session, with that session's own token (never in the tool's output or metadata; redacted should
+  a hub echo it). Answers and inbox items show in the hub's sanitised envelope; the description and results say
+  messages from other sessions are not from the user. `ask` waits at most 10 minutes (`wait` seconds) and stops
+  when the tool call is aborted, naming the still-open ask. Readable errors when the session has no token yet
+  or the hub lacks `messaging` (messaging verbs only). Opt-in check: `HUB_IT_OPENCODE=1 bun test
+  test/spoke-hub-tool.it.test.ts`.
+- **TUI `/who` and `/msg`**: `/who [project | @@role]` lists the hub's named and role-holding sessions (name,
+  project, state, online, roles) in a dialog; `/msg @name text` (also `@@role`, `@name.project`, `ses_…`, `@me`)
+  sends the text word for word as the session on screen, with that session's own hub token, and toasts where it
+  went (`Sent to @bob (queued)`). `/msg` alone (or from the palette) asks for `@name text`. On the home screen
+  both say to open a session first. New RPC methods `hubWho {sessionID, project?, role?}` and `hubMsg
+  {sessionID, to, text}` (error `unsupported` when the hub lacks `messaging`); Hub commands may now take slash
+  arguments (`HubCommand.arguments`, `run(input?)`).
+- **Prompt references**: `@name`, `@name.project`, `@@role` and `@@role.project` typed into an OpenCode prompt
+  still go to that session unchanged; the plugin's prompt hook adds one attached text file
+  (`hub-references.txt`, a `data:` URI the model sees inside the same message) listing each address that names
+  one of your sessions (name, session ID, harness, machine, project, state, your open asks to it) and saying to
+  contact it with the `hub` tool. OpenCode's own `@` meanings win (an attached file or agent mention for the same
+  `@x` is left alone), `@me` and unknown or other users' names add nothing, and hub-delivered prompts are skipped.
+  The lookup (`who`, `status`, `inbox` as the session) runs only when an address appears, gives up after 1.5 s,
+  fails open and is cached for 10 s per session. Opt-in check: `HUB_IT_OPENCODE=1 bun test
+  test/spoke-prompt-refs.it.test.ts`.
+- **Decisions and `@me`**: `@me` addresses the user. `msg @me` is stored in the user's inbox; `ask @me` opens a
+  Decision (`dec_…`: question, `options [{id, label, safe?}]`, `recommendation {option, why?}`, `urgency`,
+  `tier` confirm|tap, `deadline` seconds, `onTimeout`, `about` addresses), answered only by the user on the console:
+  `GET /api/decisions?state=`, `GET /api/decisions/:id`, `POST /api/decisions/:id/answer {option, text?}`
+  (`tap`: the console cookie only). The first answer wins (later: `409 gone`) and goes back to the asker as the
+  user's reply; at the deadline only a `safe` `onTimeout` answers it (`answeredBy: "timeout"`), otherwise it stays
+  open and is pushed once more. Agents read their own with `GET /api/agent/decisions[/:id]`; a Decision's ask
+  cannot be replied to through `/api/agent/reply`. SDK `ask` takes the Decision fields, plus `decisions`,
+  `decision`, `answerDecision`; CLI `hub ask @me --option id=label[:safe] --recommend id --why … --urgency …
+  --deadline 2h --on-timeout id --tier … --about @x` and `hub decisions list [--state S]`.
+- **Decision cards in the console**: open Decisions show on Home and in the session view of the asking session
+  and the sessions they are about: question, options (the recommended one marked, with why; safe ones marked),
+  urgency, a live deadline countdown with the timeout's option, and "Answer here (tap)" for `tap` Decisions.
+  Answer with an option (and an optional note) or text; an answer that lost the race says "Already answered or
+  expired". SSE `{type: "decision", decision}` goes to the user's streams whenever a Decision opens, is
+  answered (also by timeout), escalates or expires; a `decision` push carries `decisionID` and its tap opens
+  `/s/<session>?decision=<id>` (or `/?decision=…`), which marks the card.
+- **Push kinds `decision` and `message`** (both on by default, high urgency, sent even while a device shows the
+  session, generic bodies): a Decision opened or escalated; a `msg` to `@me`, an unanswered ask after every
+  re-wake, or a message loop (these two were `question` before).
 - **Message routes on `/api/agent`**: `POST msg {to, text, wake?, urgent?, all?}`, `POST ask {…, expiresIn?,
   wait?}` (seconds; `wait` ≤ 60 long-polls for the answer), `POST reply {replyTo, text, wake?}`, `POST decline
   {replyTo, why}`, `GET inbox` (`{asks, waiting, messages, muted}`), `GET messages/:id?wait=`, `POST mute` /
@@ -138,50 +194,33 @@ the protocol up:
   sent and received messages, newest first.
 - **SDK messaging verbs**: `msg`, `ask` (with `wait` looping over polls of at most 60 s), `message`, `reply`,
   `decline`, `inbox`, `mute`, `unmute`.
-- **OpenCode `hub` tool**: the plugin adds one tool `hub {verb, …}` (verbs `msg`, `ask`, `reply`, `decline`,
-  `inbox`, `who`, `status`, `whoami`; JSON Schema input, not in code mode) that calls `/api/agent` through the SDK
-  as the calling session, with that session's own token (never in the tool's output or metadata; redacted should
-  a hub echo it). Answers and inbox items show in the hub's sanitised envelope; the description and results say
-  messages from other sessions are not from the user. `ask` waits at most 10 minutes (`wait` seconds) and stops
-  when the tool call is aborted, naming the still-open ask. Readable errors when the session has no token yet
-  or the hub lacks `messaging` (messaging verbs only). Opt-in check: `HUB_IT_OPENCODE=1 bun test
-  test/spoke-hub-tool.it.test.ts`.
-- **Decisions and `@me`**: `@me` addresses the user. `msg @me` is stored in the user's inbox; `ask @me` opens a
-  Decision (`dec_…`: question, `options [{id, label, safe?}]`, `recommendation {option, why?}`, `urgency`,
-  `tier` confirm|tap, `deadline` seconds, `onTimeout`, `about` addresses), answered only by the user on the console:
-  `GET /api/decisions?state=`, `GET /api/decisions/:id`, `POST /api/decisions/:id/answer {option, text?}`
-  (`tap`: the console cookie only). The first answer wins (later: `409 gone`) and goes back to the asker as the
-  user's reply; at the deadline only a `safe` `onTimeout` answers it (`answeredBy: "timeout"`), otherwise it stays
-  open and is pushed once more. Agents read their own with `GET /api/agent/decisions[/:id]`; a Decision's ask
-  cannot be replied to through `/api/agent/reply`. SDK `ask` takes the Decision fields, plus `decisions`,
-  `decision`, `answerDecision`; CLI `hub ask @me --option id=label[:safe] --recommend id --why … --urgency …
-  --deadline 2h --on-timeout id --tier … --about @x` and `hub decisions list [--state S]`.
-- **Push kinds `decision` and `message`** (both on by default, high urgency, sent even while a device shows the
-  session, generic bodies): a Decision opened or escalated; a `msg` to `@me`, an unanswered ask after every
-  re-wake, or a message loop (these two were `question` before).
-- **Decision cards in the console**: open Decisions show on Home and in the session view of the asking session
-  and the sessions they are about: question, options (the recommended one marked, with why; safe ones marked),
-  urgency, a live deadline countdown with the timeout's option, and "Answer here (tap)" for `tap` Decisions.
-  Answer with an option (and an optional note) or text; an answer that lost the race says "Already answered or
-  expired". SSE `{type: "decision", decision}` goes to the user's streams whenever a Decision opens, is
-  answered (also by timeout), escalates or expires; a `decision` push carries `decisionID` and its tap opens
-  `/s/<session>?decision=<id>` (or `/?decision=…`), which marks the card.
-- **Prompt references**: `@name`, `@name.project`, `@@role` and `@@role.project` typed into an OpenCode prompt
-  still go to that session unchanged; the plugin's prompt hook adds one attached text file
-  (`hub-references.txt`, a `data:` URI the model sees inside the same message) listing each address that names
-  one of your sessions (name, session ID, harness, machine, project, state, your open asks to it) and saying to
-  contact it with the `hub` tool. OpenCode's own `@` meanings win (an attached file or agent mention for the same
-  `@x` is left alone), `@me` and unknown or other users' names add nothing, and hub-delivered prompts are skipped.
-  The lookup (`who`, `status`, `inbox` as the session) runs only when an address appears, gives up after 1.5 s,
-  fails open and is cached for 10 s per session. Opt-in check: `HUB_IT_OPENCODE=1 bun test
-  test/spoke-prompt-refs.it.test.ts`.
-- **TUI `/who` and `/msg`**: `/who [project | @@role]` lists the hub's named and role-holding sessions (name,
-  project, state, online, roles) in a dialog; `/msg @name text` (also `@@role`, `@name.project`, `ses_…`, `@me`)
-  sends the text word for word as the session on screen, with that session's own hub token, and toasts where it
-  went (`Sent to @bob (queued)`). `/msg` alone (or from the palette) asks for `@name text`. On the home screen
-  both say to open a session first. New RPC methods `hubWho {sessionID, project?, role?}` and `hubMsg
-  {sessionID, to, text}` (error `unsupported` when the hub lacks `messaging`); Hub commands may now take slash
-  arguments (`HubCommand.arguments`, `run(input?)`).
+- **OpenCode spoke delivers hub messages** (`deliver` announced when OpenCode has `session.synthetic`). The
+  envelope goes in as a synthetic message with metadata `{source: "hub", messageID, kind, from, to, replyTo?}`
+  (the model sees only the text) and OpenCode's client id (the hub's `msg_…` id, else a stable `msg_hub…` id
+  derived from it), so a retry is applied once. An idle session gets a turn (`turn`); a busy one gets a plain
+  message after the running turn (`queued`) and an ask into it (`steer`) unless `meta.delivery` says otherwise;
+  with a form open OpenCode holds it (`retained`). `wake: false` and subagent sessions are admitted without
+  starting a turn (`queued`, steer without resume: it arrives with the next turn, or joins one already running).
+  A repeated `messageID` returns the first result without another admission (only a retry that now asks to wake
+  a message admitted without waking is sent again). No voice model, agent or conversation changes. For hubs
+  with `messaging`, `session.inbox.delivered` carries `origin: "user"` (typed or phone prompts) or `"hub"` (a
+  delivered message) when the spoke saw the item enqueued. Opt-in check against a real `opencode serve`:
+  `HUB_IT_OPENCODE=1 bun test test/spoke-deliver.it.test.ts`.
+- **Protocol: `deliver` op and messaging features** (still version 1). The hub admits a message into a session
+  with `deliver {sessionID, messageID, text, wake, meta: {kind, from, to, replyTo?, delivery?}}`, answered with
+  `{delivered: "steer" | "turn" | "queued" | "retained", inboxID?}`. `kind` is `msg`, `ask`, `reply`,
+  `decline`, `primer` or `decision` (`reply` and `decline` need `replyTo`); `delivery` is `queue` or `steer`;
+  `text` is at most 16000 characters, ids and addresses at most 300, and addresses may not contain control,
+  bidi or zero-width characters (`deliverProblem`, `isDeliverResult`). Spokes announce `deliver` in
+  `SPOKE_FEATURES` (old OpenCode spokes do not imply it, so the hub must check before sending); the welcome's
+  `HUB_FEATURES` gains `messaging`. `session.inbox.delivered` may carry `origin: "user" | "hub"` (same event
+  type, so older hubs keep accepting it), and timeline rows gain the `message` kind (`TimelineMessageItem`).
+- **Tests**: `test/e2e-phase2.test.ts` runs messaging end to end in process (a spoke with and one without
+  `deliver`, the CLI as sessions, an app and two users, the `hub` tool's code path, `hub mcp` over pipes, a Decision
+  answered on the console route, mutes, the pair limit and the messaging switch). Opt-in against a real `opencode
+  serve`: `HUB_IT_OPENCODE=1 bun test test/e2e-phase2-live.it.test.ts` (one session's model messages another).
+- **Internal**: the pure envelope renderer, sanitiser and address parser moved into `packages/sdk` (shared by the
+  hub, the plugin and `hub mcp`); the Docker image now copies `packages/sdk/src`.
 
 ### Other changes
 

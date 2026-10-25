@@ -127,7 +127,7 @@ const isID = (value: unknown): value is string => typeof value === "string" && v
 const ESCAPED = /^(\s*)\\(\\*(?:\[hub\]|-{3,}|↩))/i
 
 /**
- * The body of a hub envelope (src/central/agent/envelope.ts renderEnvelope): the lines between its boundaries,
+ * The body of a hub envelope (packages/sdk/src/envelope.ts renderEnvelope): the lines between its boundaries,
  * unescaped. Text without boundaries (a reminder) shows its first line without the "[hub]" tag.
  */
 function messageBody(text: string, id: string): string {

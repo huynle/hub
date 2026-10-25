@@ -157,6 +157,13 @@ describe("derived names", () => {
     expect(nameOf(h, h.bob, "ses_b")).toBe("api-refactor")
   })
 
+  test("a title slugged to the reserved name me derives me-2 (@me is always the user)", () => {
+    const h = setup()
+    h.report(h.alice, root("ses_a", "Me!"), root("ses_b", "Me, myself"))
+    h.dir.sync(h.alice)
+    expect([nameOf(h, h.alice, "ses_a"), nameOf(h, h.alice, "ses_b")]).toEqual(["me-2", "me-myself"])
+  })
+
   test("a title without usable characters is skipped for good (derived once)", () => {
     const h = setup()
     h.report(h.alice, root("ses_a", "日本語"))
@@ -177,6 +184,16 @@ describe("explicit names", () => {
     h.report(h.alice, root("ses_a", "Real title"))
     h.dir.sync(h.alice)
     expect(nameOf(h, h.alice, "ses_a")).toBe("api")
+  })
+
+  test("the name me is reserved for the user (invalid, even with a leading @); me-something is fine", () => {
+    const h = setup()
+    h.report(h.alice, root("ses_a", "New session"))
+    const err = failure(() => h.dir.setName(h.alice, "ses_a", "@me"))
+    expect(err.code).toBe("invalid")
+    expect(err.message).toContain("reserved")
+    expect(nameOf(h, h.alice, "ses_a")).toBeUndefined()
+    expect(h.dir.setName(h.alice, "ses_a", "me-too").name).toBe("me-too")
   })
 
   test("a taken name fails with name_taken; an invalid one with invalid; an unknown session with not_found", () => {

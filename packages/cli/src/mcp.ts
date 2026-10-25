@@ -1,7 +1,6 @@
 // `hub mcp`: a Model Context Protocol server on stdio (JSON-RPC 2.0, one JSON message per line), hand-written so
 // the CLI keeps no dependencies. It answers initialize, ping, tools/list and tools/call; notifications get no answer.
-import { WAIT_POLL_MAX_S, type AgentMessage, type Asked, type HubClient, type Inbox, type Sent, type SentAll } from "../../sdk/src/index.ts"
-import { renderEnvelope, sanitizeText } from "../../../src/central/agent/envelope"
+import { renderEnvelope, sanitizeText, WAIT_POLL_MAX_S, type AgentMessage, type Asked, type HubClient, type Inbox, type Sent, type SentAll } from "../../sdk/src/index.ts"
 import { UsageError } from "./args"
 import type { Credentials } from "./credentials"
 import { logText, oneLine, sessionsText, showText, statusText, whoamiText, whoText } from "./format"

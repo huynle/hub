@@ -24,7 +24,7 @@
 import { roleKey, type AgentData, type AgentName, type AgentRole, type AgentSession } from "../agent-data"
 import type { Store } from "../store"
 import { AgentError } from "./errors"
-import { isPlaceholderTitle, isReservedRole, parseAddress, slugify, validName, withSuffix, type Address } from "./names"
+import { isPlaceholderTitle, isReservedName, isReservedRole, parseAddress, slugify, validName, withSuffix, type Address } from "./names"
 
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
@@ -182,6 +182,7 @@ export class Directory {
   private assignName(userID: string, sessionID: string, requested: string): { sessionID: string; name: string; alias?: string } {
     const name = requested.replace(/^@/, "")
     if (!validName(name)) throw new AgentError("invalid", "A name is 2–40 characters: a-z, 0-9 and -")
+    if (isReservedName(name)) throw new AgentError("invalid", "@me is reserved: it always means the user")
     return this.update(userID, (draft) => {
       const record = this.known(draft, sessionID)
       const held = draft.names.find((n) => n.name === name)
@@ -412,7 +413,7 @@ export class Directory {
       const slug = slugify(live.title)
       if (!slug || draft.names.some((n) => n.sessionID === live.sessionID && n.expiresAt === undefined)) continue
       const taken = new Set(draft.names.map((n) => n.name))
-      draft.names.push({ name: withSuffix(slug, (n) => taken.has(n)), sessionID: live.sessionID, created: t })
+      draft.names.push({ name: withSuffix(slug, (n) => taken.has(n) || isReservedName(n)), sessionID: live.sessionID, created: t })
     }
   }
 

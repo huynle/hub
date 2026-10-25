@@ -1,11 +1,10 @@
-// Pure helpers for @name / @@role addressing (design §2.1): name and role syntax, OpenCode's placeholder
-// titles, slugs for derived names, conflict suffixes, reserved roles and address parsing.
+// Pure helpers for @name / @@role addressing (design §2.1): OpenCode's placeholder titles, slugs for derived names,
+// conflict suffixes, the reserved name and reserved roles. Name syntax and address parsing live in the SDK (packages/sdk/src/address.ts)
+// and are re-exported here.
 
-/** Names and roles: lowercase letters, digits and dashes, 2–40 characters. */
-export const NAME_MAX = 40
-const NAME = /^[a-z0-9-]{2,40}$/
+import { NAME_MAX, validName } from "../../../packages/sdk/src/address.ts"
 
-export const validName = (name: string): boolean => NAME.test(name)
+export { NAME_MAX, parseAddress, validName, type Address } from "../../../packages/sdk/src/address.ts"
 
 /**
  * OpenCode's fallback titles: "New session" / "Child session" (display labels) and the historical
@@ -40,24 +39,10 @@ export function withSuffix(base: string, taken: (name: string) => boolean): stri
   }
 }
 
+/** `me` always addresses the user (@me), so no session may hold it, explicitly or derived. Only the exact name. */
+export const isReservedName = (name: string): boolean => name === "me"
+
 /** Roles only the user may claim in phase 1 (grants including `roles` come in phase 3). */
 const RESERVED_ROLES = ["orchestrator", "concierge"]
 
 export const isReservedRole = (role: string): boolean => RESERVED_ROLES.some((prefix) => role.startsWith(prefix))
-
-export type Address = { kind: "id"; id: string } | { kind: "name"; name: string; project?: string } | { kind: "role"; role: string; project?: string }
-
-/** A project scope: any non-empty run of characters without dots, slashes or spaces, compared lowercased. */
-const SCOPED = /^([a-z0-9-]{2,40})(?:\.([^./\s]+))?$/i
-
-/** `ses_…` (an ID or ID prefix), `@name[.project]` or `@@role[.project]`; undefined when malformed. */
-export function parseAddress(addr: string): Address | undefined {
-  if (addr.startsWith("ses_")) return /^ses_[A-Za-z0-9]+$/.test(addr) ? { kind: "id", id: addr } : undefined
-  const role = addr.startsWith("@@")
-  if (!role && !addr.startsWith("@")) return undefined
-  const match = SCOPED.exec(addr.slice(role ? 2 : 1))
-  if (!match || !validName(match[1]!)) return undefined
-  const project = match[2]?.toLowerCase()
-  const scope = project ? { project } : {}
-  return role ? { kind: "role", role: match[1]!, ...scope } : { kind: "name", name: match[1]!, ...scope }
-}

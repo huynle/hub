@@ -1,7 +1,7 @@
 // Pure helpers for @name / @@role addressing (design §2): name syntax, title placeholders, slugs, suffixes,
 // reserved roles and address parsing.
 import { describe, expect, test } from "bun:test"
-import { isPlaceholderTitle, isReservedRole, parseAddress, slugify, validName, withSuffix } from "../src/central/agent/names"
+import { isPlaceholderTitle, isReservedName, isReservedRole, parseAddress, slugify, validName, withSuffix } from "../src/central/agent/names"
 
 describe("validName", () => {
   test("[a-z0-9-], 2–40 characters", () => {
@@ -59,6 +59,15 @@ describe("withSuffix", () => {
     const next = withSuffix(long, (n) => n === long)
     expect(next).toBe(`${"a".repeat(38)}-2`)
     expect(validName(next)).toBe(true)
+  })
+})
+
+describe("isReservedName", () => {
+  test("only me (the user's address) is reserved", () => {
+    expect(isReservedName("me")).toBe(true)
+    expect(isReservedName("me-2")).toBe(false)
+    expect(isReservedName("meet")).toBe(false)
+    expect(isReservedName("api")).toBe(false)
   })
 })
 

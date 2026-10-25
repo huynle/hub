@@ -1,7 +1,5 @@
 // Prompt references (design §2.4): hub addresses typed into a prompt get context, never routing.
-import { HubClient, type AgentMessage, type DirectoryEntry, type Status } from "../../packages/sdk/src/index.ts"
-import { sanitizeLabel } from "../central/agent/envelope"
-import { parseAddress } from "../central/agent/names"
+import { HubClient, parseAddress, sanitizeLabel, type AgentMessage, type DirectoryEntry, type Status } from "../../packages/sdk/src/index.ts"
 import { isHubPrompt } from "./conversation"
 import type { HubToolSpoke } from "./hub-tool"
 
@@ -20,7 +18,7 @@ export interface PromptLike {
 
 /**
  * `@name`, `@name.project`, `@@role`, `@@role.project`: names and roles are 2–40 lowercase letters, digits and
- * dashes (src/central/agent/names.ts); not part of a word, email or path, and not followed by one.
+ * dashes (packages/sdk/src/address.ts); not part of a word, email or path, and not followed by one.
  */
 const ADDRESS = /(?<![\w@./\\-])(@@?)([a-z0-9-]{2,40})(?:\.([A-Za-z0-9_-]+))?(?![\w@/\\-]|\.[\w/\\-])/g
 

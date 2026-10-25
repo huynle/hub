@@ -38,6 +38,9 @@ Formerly **opencode-voice** and, briefly, **opencode-hub**
 - **Agent identity**: every session's shells carry its own hub identity, so an agent can run `hub status`, name
   itself (`@scout`), claim a role (`@@reviewer`) and read other sessions, with app tokens for scripts and device
   tokens for apps ([Agent identity](#agent-identity-agent-api)).
+- **Agent messaging**: sessions, scripts and you message each other through the hub (`hub msg @reviewer …`,
+  `hub ask`, the OpenCode `hub` tool, `/msg`, `hub mcp`); asks to `@me` become Decisions you answer from the
+  console ([Agent messaging](#agent-messaging)).
 - **Session details**: context usage, todos, MCP status, branch and per-file diffs, on demand; unread
   marks synced per user.
 - **Self-hostable**: a hub on your computer with nothing extra to install, or your own hub for phones
@@ -245,7 +248,8 @@ own sessions only:
 | Address | Means |
 |---|---|
 | `ses_…` | a session ID, or an unambiguous prefix of one |
-| `@name` | a named root session. Names are `[a-z0-9-]`, 2–40 characters; each root session gets one from its first real title (`-2`, `-3` on a clash) and can be renamed (`hub name @scout`); the old name stays an alias for 24 h |
+| `@name` | a named root session. Names are `[a-z0-9-]`, 2–40 characters; each root session gets one from its first real title (`-2`, `-3` on a clash) and can be renamed (`hub name @scout`); the old name stays an alias for 24 h. `me` is reserved (`@me` is always the user): a title like "Me" derives `me-2` |
+| `@me` | the user (messages and Decisions; never a session) |
 | `@@role` | the session(s) holding a role (`hub role claim reviewer`); `--exclusive` claims fail while another live holder exists |
 | `@name.project`, `@@role.project` | scoped to a project (its name, else the folder name) |
 
@@ -306,6 +310,76 @@ minClientVersion, auth, features}` for apps and CLIs.
 **Apps.** A native app links with a code from Settings → Devices → **Add app** (`POST /api/devices/link`, then
 `POST /api/devices/redeem` from the app; see [Multi-user](#multi-user-sign-in-with-google)) and uses the device
 token as a user actor, on console routes and `/api/agent` alike. Revoking the device ends it.
+
+## Agent messaging
+
+Sessions, scripts, apps and you can message each other through the hub. Everything goes through the
+[`/api/agent` routes](#agent-identity-agent-api) above; the sender is always the credential that made the request
+(a session token, an app token or your device), never a field of the request.
+
+**Addresses.** `@name` (a session's name), `@@role` (the session holding a role: the idle holder, else the most
+recently active one; `--all` sends to every holder), `@name.project` / `@@role.project`, `ses_…`, and `@me` for
+you. Addresses resolve among your own sessions only; another user's sessions do not exist (`not_found`).
+
+**Verbs.** The same verbs exist in the CLI (`hub …`), the OpenCode `hub` tool, `hub mcp` and the SDK:
+
+| Verb | What it does |
+|---|---|
+| `msg <addr> "text"` | tells a session something (fire and forget) |
+| `ask <addr> "question"` | an ask, open until answered, declined or expired (1 minute to 7 days, default 24 h); `--wait` blocks for the answer |
+| `reply <msgID> "text"` · `decline <msgID> --why "…"` | answers a message you received; it goes to the message's real sender, never through the role |
+| `inbox` | asks waiting for your answer, your own open asks, recent messages, mutes |
+| `mute <addr>` · `unmute <addr>` | refuses (or accepts again) messages from a session (`forbidden`, exit 5) |
+| `who` | named and role-holding sessions |
+
+`--no-wake` admits a message without starting a turn and `--urgent` steers it into a running turn. Texts are at
+most 10,000 characters (a decline's reason 1,000).
+
+**Delivery.** A message reaches an OpenCode session as a hub message in its conversation (the spoke's `deliver`,
+OpenCode's synthetic message; it shows in the console's conversation as a message row). An idle session gets a
+turn; a busy one gets a plain `msg` after its running turn and an `ask` steered into it; subagent sessions and
+`--no-wake` messages wait for the next turn. A session that is offline gets it when it comes back (pending, for 24
+hours). A session on a spoke that cannot take messages (an older plugin, another harness without `deliver`) answers
+`unsupported` (exit 7) and nothing is stored. An open ask to an idle session is re-woken with a short reminder
+after waits of 5, 15 and 45 minutes in turn, then you are notified. Messages to you and to apps are stored in an inbox (`hub inbox`).
+
+**Envelope.** The recipient sees the message framed so its body cannot pose as anything else:
+
+```
+[hub] ask from @api (laptop) to @@reviewer → you · 10-24 08:15Z · msg_7f3a…
+----- msg_7f3a… -----
+please review the login fix
+----- msg_7f3a… -----
+↩ hub reply msg_7f3a… "…" · hub decline msg_7f3a… --why "…" · expires 10-25 08:15Z
+```
+
+The boundary carries the message's own id; body lines that look like a header, a boundary or a reply hint are
+escaped with a leading backslash; control characters, ANSI escapes, bidi overrides and zero-width characters are
+removed from the text and from every interpolated name.
+
+**Primer.** Once per session, the first time it is named explicitly or gets its first message, the hub adds a short
+note without starting a turn: who the session is (`@name`, its roles), how to message others (`hub msg`, `hub who`),
+and that messages headed `[hub]` come from other sessions or apps, not from the user.
+
+**Decisions.** `ask @me` from a session or app opens a Decision (question, options, a recommendation, urgency, a
+deadline with an optional safe `onTimeout`). You answer it from the console (cards on Home and in the sessions it
+concerns, a `decision` push); the answer goes back to the asker as your reply. Only users answer Decisions, never
+sessions or apps; see [Decisions and `@me`](#agent-identity-agent-api) for the routes.
+
+**Where agents send from.**
+- In a shell of an OpenCode session: `hub msg @reviewer "…"` acts as that session ([hub CLI](#hub-cli)).
+- The model itself: the plugin's `hub` tool (verbs `msg`, `ask`, `reply`, `decline`, `inbox`, `who`, `status`,
+  `whoami`), as the calling session ([Spoke](#spoke-opencode-plugin)).
+- You, in the OpenCode TUI: `/msg @name text` (as the session on screen) and `/who`.
+- Other agents and tools: [`hub mcp`](#hub-mcp-mcp-server), as the app token you logged in with.
+- Scripts: `hub login` with an app token that has the `messages:send` (and `messages:read`) scopes.
+
+**Limits.** Per 10 minutes: 20 messages per sender→recipient pair and 300 per user (`rate_limited`, exit 6, with
+`retryAfter`), and 30 turns started per recipient (more messages are still delivered, without waking it). A chain of
+replies between agents may run 8 hops without a human turn; past that, messages are delivered without waking and
+you are notified once. Typing into a session (console, Voice, the harness) starts its chain over. You can switch
+messaging off for your account (`PUT /api/agent/messaging {enabled: false}`): sends then answer `paused` (exit 5),
+reading still works.
 
 ## hub CLI
 
@@ -1377,6 +1451,13 @@ Console development: `bun test/web-mock-hub.ts 4311` fakes a hub with fixtures (
 `npm run dev:web` serves the console with hot reload, proxying `/api` to it (`HUB_URL` for a real hub).
 `npm run test:e2e` runs a headless Chromium smoke test against the mock hub at desktop and phone sizes
 (`CHROMIUM_PATH` if Playwright's browsers are not installed; screenshots go to the temp dir).
+
+`test/e2e-phase2.test.ts` does the same for messaging: the OpenCode spoke (with `deliver`) and a spoke without it,
+`hub msg`/`ask`/`mute` as session tokens, replies through the `hub` tool's code path, an app token with the
+`messages:*` scopes, `hub mcp` over pipes, a Decision answered on the console route, a second user who cannot see or
+answer any of it, the pair rate limit and the messaging switch. The opt-in `HUB_IT_OPENCODE=1 bun test
+test/e2e-phase2-live.it.test.ts` connects a private `opencode serve` to a real in-process hub: one session's (stub)
+model calls `hub msg` to another session, whose model is then handed the envelope.
 
 `test/e2e-phase1.test.ts` (part of `npm test`) runs agent identity end to end in process: a hub, the OpenCode spoke
 and a second spoke of another harness, and the `hub` CLI as a session token, an app token, a linked device and a
