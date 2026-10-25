@@ -259,6 +259,17 @@ interface Conn {
   sessionsKey: string
   /** sessionID → activity sequence number of the last event this process sent for it. */
   activity: Map<string, number>
+  /**
+   * The launch this connection is bound to (it authenticated with that launch's token, phase 5). Such a
+   * connection is never the machine's service nor an exposure target.
+   */
+  readonly launchID?: string
+}
+
+/** How a connection was authenticated, beyond its machine. */
+export interface ConnectOptions {
+  /** The launch whose launch-bound token the connection presented (checked by /spoke/ws). */
+  readonly launchID?: string
 }
 
 /** Streamed text of one session waiting for its next send window. */
@@ -464,9 +475,10 @@ export class Registry {
     return () => this.humanTurnListeners.delete(listener)
   }
 
-  connect(connID: string, machine: MachineRef, hello: Hello): void {
+  connect(connID: string, machine: MachineRef, hello: Hello, options: ConnectOptions = {}): void {
     const t = this.now()
     this.conns.set(connID, {
+      ...(options.launchID !== undefined ? { launchID: options.launchID } : {}),
       id: connID,
       machine,
       hello,
@@ -927,16 +939,28 @@ export class Registry {
     return reported ? false : undefined
   }
 
-  /** Process to change a session's exposure: a reporting service process, else the most recent reporter. */
+  /** Process to change a session's exposure: a reporting service process, else the most recent reporter (never launch-bound). */
   exposeTarget(sessionID: string): string | undefined {
-    const reporters = [...this.conns.values()].filter((c) => this.reports(c, sessionID))
+    const reporters = [...this.conns.values()].filter((c) => c.launchID === undefined && this.reports(c, sessionID))
     const services = reporters.filter((c) => c.hello.kind === "service")
     return this.recent(services.length ? services : reporters, sessionID)
   }
 
-  /** The machine's (most recently connected) background service process. */
+  /** The launch a connection is bound to (undefined for ordinary connections and unknown ones). */
+  launchOf(connID: string): string | undefined {
+    return this.conns.get(connID)?.launchID
+  }
+
+  /** The (most recent) connection bound to a launch. */
+  launchConn(launchID: string): string | undefined {
+    let found: Conn | undefined
+    for (const conn of this.conns.values()) if (conn.launchID === launchID && (!found || conn.seq > found.seq)) found = conn
+    return found?.id
+  }
+
+  /** The machine's (most recently connected) background service process; never a launch-bound connection. */
   serviceFor(machineID: string): string | undefined {
-    const services = [...this.conns.values()].filter((c) => c.machine.id === machineID && c.hello.kind === "service")
+    const services = [...this.conns.values()].filter((c) => c.machine.id === machineID && c.hello.kind === "service" && c.launchID === undefined)
     return services.sort((a, b) => b.seq - a.seq)[0]?.id
   }
 

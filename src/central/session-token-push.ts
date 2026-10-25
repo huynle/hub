@@ -10,7 +10,8 @@
 //
 // Act tokens (typ "act", decision #1 of phase 3) follow the same rules in a lane of their own: the actTokens op,
 // sent only to connections announcing "actTokens" (never inside a sessionTokens frame, which older spokes hand to
-// shells), without a hub URL, deduped and retried separately from the shell tokens.
+// shells), without a hub URL, deduped and retried separately from the shell tokens. Launch-bound connections (a
+// spoke in a sandbox, phase 5 decision #5) get session tokens but never act tokens.
 // Tokens are never logged.
 import {
   batchActTokens,
@@ -34,6 +35,8 @@ export interface PushRegistry {
   connMachine(connID: string): string | undefined
   /** Sessions the connection reports for its own tenant. */
   reportedSessions(connID: string): string[]
+  /** The launch a connection is bound to (a sandboxed spoke, phase 5): such connections get no act tokens. */
+  launchOf?(connID: string): string | undefined
 }
 
 /** Mints tokens (SessionTokens). */
@@ -69,6 +72,8 @@ interface Sent {
 /** One kind of token: the feature a connection must announce, how to mint one and how to batch them. */
 interface Lane {
   readonly feature: SpokeFeature
+  /** Launch-bound connections are left out of this lane. */
+  readonly skipLaunchBound?: boolean
   mint(machineID: string, sessionID: string): { token: string; exp: number; stamp: string } | undefined
   batch(tokens: readonly SessionToken[]): Array<SessionTokensRequest | ActTokensRequest>
   /** connID → sessionID → the token last sent (or being sent). */
@@ -106,7 +111,7 @@ export class SessionTokenPush {
       sent: new Map(),
     }
     const mintAct = tokens.mintAct?.bind(tokens)
-    const act: Lane | undefined = mintAct && { feature: "actTokens", mint: mintAct, batch: (batch) => batchActTokens(batch, max), sent: new Map() }
+    const act: Lane | undefined = mintAct && { feature: "actTokens", skipLaunchBound: true, mint: mintAct, batch: (batch) => batchActTokens(batch, max), sent: new Map() }
     this.#lanes = act ? [session, act] : [session]
   }
 
@@ -163,7 +168,8 @@ export class SessionTokenPush {
   async #syncLane(lane: Lane, connID: string): Promise<void> {
     const { registry, tokens } = this.options
     const machineID = registry.connMachine(connID)
-    if (machineID === undefined || !registry.supports(connID, lane.feature)) {
+    const excluded = lane.skipLaunchBound === true && registry.launchOf?.(connID) !== undefined
+    if (machineID === undefined || excluded || !registry.supports(connID, lane.feature)) {
       lane.sent.delete(connID)
       return
     }
