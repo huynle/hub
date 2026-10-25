@@ -1,0 +1,12 @@
+{
+  "name": "@huynle/hub-claude-code",
+  "version": "0.6.1",
+  "private": true,
+  "description": "The Claude Code hooks spoke: per-user daemon, hook bridge, plugin dir, `hub claude` wrapper and daemon-backed MCP server (internal; shipped inside @huynle/hub, not published on its own).",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./package.json": "./package.json"
+  }
+}
