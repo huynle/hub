@@ -267,10 +267,11 @@ export interface Hello {
   readonly pid: number
   readonly mode: SpokeMode
   /**
-   * OpenCode's version. Required by hubs that predate `harness`, so every spoke sends it: OpenCode spokes their
-   * OpenCode version, other harnesses their own version (or "").
+   * OpenCode's version: required in an OpenCode hello (no `harness`, or harness "opencode"), optional for other
+   * harnesses. Hubs that predate `harness` require it from every spoke, so a non-OpenCode spoke that wants to reach
+   * them sends it anyway (its own version, or "").
    */
-  readonly opencodeVersion: string
+  readonly opencodeVersion?: string
   readonly pluginVersion: string
   /** Optional ops this spoke supports (see SPOKE_FEATURES); older spokes send none. */
   readonly features?: readonly string[]
@@ -357,7 +358,7 @@ export const HUB_FEATURES: readonly HubFeature[] = ["harness", "messaging", "nod
 
 /** A spoke's harness, version and evidence level; a hello without `harness` is an OpenCode native spoke. */
 export function helloHarness(hello: Hello): { readonly harness: string; readonly harnessVersion: string; readonly evidence: EvidenceLevel | "unknown" } {
-  if (hello.harness === undefined) return { harness: HARNESS_OPENCODE, harnessVersion: hello.opencodeVersion, evidence: "native" }
+  if (hello.harness === undefined) return { harness: HARNESS_OPENCODE, harnessVersion: hello.opencodeVersion ?? "", evidence: "native" }
   const evidence = (EVIDENCE_LEVELS as readonly string[]).includes(hello.evidence ?? "") ? (hello.evidence as EvidenceLevel) : "unknown"
   return { harness: hello.harness, harnessVersion: hello.harnessVersion ?? "", evidence }
 }
@@ -992,7 +993,7 @@ export function parseSpokeMessage(raw: string | Buffer): SpokeMessage | undefine
         str(m.directory) &&
         num(m.pid) &&
         (m.mode === "always" || m.mode === "session") &&
-        str(m.opencodeVersion) &&
+        (str(m.opencodeVersion) || (m.opencodeVersion === undefined && m.harness !== undefined && m.harness !== HARNESS_OPENCODE)) &&
         str(m.pluginVersion) &&
         (m.features === undefined || featureList(m.features)) &&
         (m.harness === undefined || token(m.harness, 64)) &&

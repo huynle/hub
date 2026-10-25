@@ -1161,7 +1161,7 @@ export class Registry {
         directory,
         pid,
         mode,
-        opencodeVersion,
+        opencodeVersion: opencodeVersion ?? "",
         pluginVersion,
         ...helloHarness(conn.hello),
         connected: conn.connected,

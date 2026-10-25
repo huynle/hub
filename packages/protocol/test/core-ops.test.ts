@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test"
 import {
   CORE_OPS,
   featureForOp,
+  helloHarness,
   HUB_FEATURES,
   IMPLIED_OPENCODE_FEATURES,
   KNOWN_SPOKE_FEATURES,
@@ -76,5 +77,23 @@ describe("core ops", () => {
     }
     expect([...SPOKE_FEATURES]).toEqual([...IMPLIED_OPENCODE_FEATURES, "autoName", "sessionTokens", "deliver", "hubPrompt", "permissionMessage", "actTokens", "launch"])
     expect([...HUB_FEATURES]).toEqual(["harness", "messaging", "nodes", "launches"])
+  })
+})
+
+describe("opencodeVersion", () => {
+  const { opencodeVersion: _v, ...noVersion } = oldHello
+
+  test("optional for a non-OpenCode harness hello", () => {
+    const hello = parsed({ ...noVersion, harness: "claude-code", harnessVersion: "2.1.296", evidence: "hooks" })
+    expect(hello).toBeDefined()
+    expect(helloHarness(hello)).toEqual({ harness: "claude-code", harnessVersion: "2.1.296", evidence: "hooks" })
+  })
+
+  test("still required for an OpenCode hello (no harness, or harness 'opencode') and must be text when sent", () => {
+    expect(parsed(noVersion)).toBeUndefined()
+    expect(parsed({ ...noVersion, harness: "opencode", harnessVersion: "2.0.25", evidence: "native" })).toBeUndefined()
+    expect(parsed({ ...noVersion, harness: "codex", opencodeVersion: 5 })).toBeUndefined()
+    // A non-OpenCode spoke that wants to reach hubs predating `harness` keeps sending it (e.g. "").
+    expect(parsed({ ...oldHello, opencodeVersion: "", harness: "codex", evidence: "rpc" })).toBeDefined()
   })
 })
