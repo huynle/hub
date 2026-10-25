@@ -27,7 +27,8 @@ export function promptedText(b: Prompted): string {
 
 export const stoppedText = (b: Stopped): string => `stopped ${b.sessionID}${inParens([grantText(b.grant)])}`
 
-const DELIVERIES: readonly PromptDelivery[] = ["queue", "steer"]
+/** The deliveries of a prompt. */
+export const DELIVERIES: readonly PromptDelivery[] = ["queue", "steer"]
 
 /** The --delivery of `hub prompt`. */
 export function deliveryArg(value: string | undefined): PromptDelivery | undefined {
