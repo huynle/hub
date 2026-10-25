@@ -1,4 +1,4 @@
-// /settings: account, notifications, voice, speech, machines (with approvals), devices and admin screens.
+// /settings: account, notifications, voice, speech, machines (with approvals), devices, agents and admin screens.
 import { For, Show, createResource, createSignal, onCleanup, onMount, type JSX } from "solid-js"
 import {
   USER_FILTERS,
@@ -24,6 +24,7 @@ import { ACTIVITY_MINUTES, describeTestResult, localTimeZone, NOTIFY_GROUPS, NOT
 import { currentSubscription, disableNotifications, enableNotifications, mutedSessions, notifyEnv, pushRevision, sendTestNotification, type PushPrefsView } from "./push"
 import { location$, navigate } from "./router"
 import { SpeechSettingsPanel } from "./SpeechSettings"
+import { AgentsSection } from "./AgentsSettings"
 import { toast } from "./toast"
 import { Dialog, IconButton, ago, now, plural } from "./ui"
 import { linkCountdown, linkDeadline, linkedDevice } from "../core/link-core"
@@ -40,6 +41,7 @@ const SECTIONS: Array<[string, string]> = [
   ["speech", "Speech"],
   ["machines", "Machines"],
   ["devices", "Devices"],
+  ["agents", "Agents"],
   ["admin", "Admin"],
 ]
 
@@ -86,6 +88,7 @@ export function Settings() {
           </Section>
           <MachinesSection />
           <DevicesSection />
+          <AgentsSection />
           <Show when={isAdmin(me())}>
             <AdminSection />
           </Show>

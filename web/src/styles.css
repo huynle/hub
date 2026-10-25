@@ -381,6 +381,28 @@ pre.code { white-space: pre; font-size: 0.75rem; }
 .decision-why { margin: 6px 0; }
 .decision-note, .decision textarea { width: 100%; margin: 6px 0; }
 .decision-tier { margin: 4px 0 8px; }
+/* Escalations (an agent's approval outside its grant), recommendations on blockers, who answered. */
+.decision .badge-pill.agent-request { color: var(--warn); border-color: var(--warn); }
+.escalation-details { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0 0 10px; }
+.escalation-details dt { color: var(--muted); }
+.escalation-details dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.escalation-resource { display: inline-block; margin: 0 6px 2px 0; }
+.blocker-recommendation { margin: -4px 0 10px; color: var(--accent); }
+.answered-by { margin: 6px 0; }
+.blocker .answered-by { margin: 8px 0 0; }
+/* Settings → Agents */
+.grant-row .grant-facts { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 4px 0 0; }
+.grant-row .grant-facts dt { color: var(--muted); }
+.grant-row .grant-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.grant-row.ended { opacity: 0.6; }
+.badge-pill.active { color: var(--ok); border-color: var(--ok); }
+.grant-form { display: flex; flex-direction: column; gap: 12px; }
+.grant-form label.text-field { display: flex; flex-direction: column; gap: 4px; }
+.grant-form textarea, .grant-form input[type="text"] { width: 100%; }
+.grant-verbs { display: flex; flex-wrap: wrap; gap: 4px 14px; border: 0; padding: 0; margin: 0; }
+.audit-row .audit-result.ok { color: var(--ok); }
+.audit-row .audit-result.warn { color: var(--warn); }
+.audit-row .audit-result.err { color: var(--err); }
 .form-card fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
 .form-card fieldset:disabled { opacity: 0.6; }
 .form-field { margin: 0 0 12px; display: flex; flex-direction: column; gap: 4px; }
