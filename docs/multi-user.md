@@ -143,10 +143,14 @@ What each actor may do:
   routes (`403`), no token management, no messaging switch.
 - **app**: what its scopes allow: `sessions:read` (status, sessions, show, log, watch, who), `messages:send`
   (msg, ask, reply, decline, mute, unmute, grant requests), `messages:read` (inbox, messages/:id, its own `message`
-  watch events) and `sessions:act` (approve, deny, answer, prompt, stop, under a grant); `whoami` always. No other
-  writes, no console routes, no token management (`403`).
+  watch events), `sessions:act` (approve, deny, answer, prompt, stop, under a grant) and `sessions:launch` (launch,
+  list and stop its own launches under a grant with verb `launch`; register its own webhooks); `whoami` always. No
+  other writes, no console routes, no token management (`403`).
 - **acting**: only a session's act token (never its shell token: `403`) and app tokens with `sessions:act` act, and
   only under a grant of their user (see *Grants tenancy*). Users act on their own sessions without a grant.
+- **launching**: users always; a session's act token (never its shell token: `403`) and app tokens with
+  `sessions:launch`, only under a grant of their user with verb `launch` covering the repository (see *Launch
+  tenancy*).
 
 Messages are per user like everything else: another user's session, name, role or message id answers
 `404 not_found` on every message route, exactly like one that does not exist, and admins get no access to them.
@@ -251,6 +255,30 @@ Grants, escalations, grant requests and the agent audit are per user, like messa
   summary per entry for admins: `{actor: <user id>, action: "agent.<verb>", detail: <actor kind>}`, never targets,
   reasons, holders or patterns; grant changes add `grant.create` / `grant.update` / `grant.revoke` with the grant id.
 
+### Launch tenancy
+
+Launches ([launches.md](launches.md)), their idempotency keys, webhooks and webhook deliveries are per user:
+
+- **Placement** uses only the launching user's own connected nodes (a node is its machine's owner's); another
+  user's machines are never candidates, whatever the spec's `placement.machine` or labels say.
+- **Another user's** launch or webhook answers `404 not_found` on every route (`GET`/`DELETE
+  /api/agent/launches/:id`, `/api/agent/webhooks/:id`), exactly like an unknown one, for every credential; lists
+  (`GET /api/agent/launches`, `?label=` filters, webhooks) never include them. Keys are per user: another user's
+  key gets a launch of their own. Admins get no access either.
+- **Within a user**: the user sees and stops all their launches; an app token or a session sees and stops only the
+  launches it started (`by`); any other answers `404`. An app's own key never returns another launcher's launch.
+- **Grants**: an app or session launches only under a grant of its user with verb `launch` whose projects cover
+  `workspace.repo`; each new launch spends one action. The kill switches answer `423 paused` for them; the user's own
+  launches are not paused. A launched session gets no powers beyond its launcher's.
+- **Caps** (`hub.json agents.launches`: `maxQueued`, `maxActive`, `perHour`) count per user, so one user's launches
+  cannot use up another's.
+- **Events**: `launch` SSE events and watch events go only to the launch's user.
+- **Webhooks** belong to a user (`by: "user"`) or to one of their app tokens (`by: "app:<id>"`). Users manage all of
+  their registrations; an app token only its own, and its registrations get only the events of launches it
+  started and stop when the token is revoked or loses `sessions:launch`. Sessions cannot register webhooks. The
+  secret is shown once and never listed. Creating and deleting a webhook is in the hub audit (`webhook.create`
+  with the URL's host, `webhook.delete`).
+
 ## Speech settings precedence
 
 user settings field → server default (admin, stored in `state.speech`) → `hub.json` → env. A user's
@@ -263,8 +291,9 @@ provider/baseURL drops the stored key of that scope (existing rule).
 `machine.revoke`, `user.role`, `user.disable`, `user.enable`, `speech.default`, `migrate.local`,
 `device.link` (an app link code issued), `app-token.create`, `app-token.revoke`, `messaging.pause`,
 `messaging.resume`, `decision.answer` (the chosen option, or `text`), `grant.create`, `grant.update`,
-`grant.revoke` (the grant id), `agents.acting.pause`, `agents.acting.resume` (the admin's switch), and
-`agent.<verb>` summaries of the agent audit (`agent.approve`, `agent.acting.pause`, …; detail: the actor kind).
+`grant.revoke` (the grant id), `webhook.create` (the host), `webhook.delete`, `agents.acting.pause`, `agents.acting.resume` (the admin's switch), and
+`agent.<verb>` summaries of the agent audit (`agent.approve`, `agent.launch`, `agent.launch.stop`,
+`agent.acting.pause`, …; detail: the actor kind).
 Never include tokens, codes, keys or session content.
 
 ## Implementation notes (server, 0.3.0)
