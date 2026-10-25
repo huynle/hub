@@ -1,5 +1,5 @@
-// The hub CLI (`hub` / `hubctl`, design §2.2, §4, §8): reads and names sessions through the hub's /api/agent, with
-// the hub SDK (packages/sdk) as its client.
+// The hub CLI (`hub` / `hubctl`, design §2.2, §3, §4, §8): reads, names and messages sessions through the hub's
+// /api/agent, with the hub SDK (packages/sdk) as its client.
 // `run(argv, io)` is the whole program (main.ts wires it to the process); it returns the exit code.
 import type { Asked, HubClient, Sent, SentAll } from "../../sdk/src/index.ts"
 import pkg from "../package.json" with { type: "json" }
@@ -7,7 +7,7 @@ import { parse, str, UsageError, type CommandSpec, type Parsed } from "./args"
 import { loginFile, readLogin, removeLogin, resolveCredentials, writeLogin, type Credentials, type Env } from "./credentials"
 import { atName, logText, whoamiText, type Actor, roleText, sessionsText, showText, statusText, whoText } from "./format"
 import { CliError, EXIT, withHub } from "./http"
-import { ASK_EXPIRES_DEFAULT_S, askOutcome, durationArg, sentText, textArg } from "./messaging"
+import { ASK_EXPIRES_DEFAULT_S, askOutcome, declinedText, durationArg, inboxText, mutedText, repliedText, sentText, textArg } from "./messaging"
 import { watch } from "./watch"
 
 export { EXIT } from "./http"
@@ -40,6 +40,16 @@ Identity
   hub name <@name> [--session <addr>]
   hub role claim <role[.project]> [--exclusive] [--session <addr>]
   hub role release <role[.project]> [--session <addr>]
+
+Messaging (text "-" reads it from stdin)
+  hub msg <addr> "text" [--all] [--no-wake] [--urgent]   tell: fire and forget
+  hub ask <addr> "text" [--wait [secs]] [--expires 2h] [--all] [--no-wake] [--urgent]
+                                      tracked until answered, declined or expired; --wait alone waits until
+                                      it expires; exit 0 answered, 1 declined or no answer yet, 8 expired
+  hub reply <msgID> "text" [--no-wake]   goes to the real sender
+  hub decline <msgID> --why "reason"
+  hub inbox                           asks to answer, your open asks, recent messages, mutes
+  hub mute <addr> · hub unmute <addr>    refuse (or accept again) messages from a session
 
 Login (outside a hub session)
   hub login [--url URL] [--token APP_TOKEN]   store an app token (token read from stdin when not given)
@@ -199,6 +209,48 @@ const COMMANDS: Record<string, Command> = {
       answer(context, body, () => outcome.text)
       if (outcome.note) context.io.stderr(`hub: ${outcome.note}\n`)
       return outcome.exit
+    },
+  },
+  reply: {
+    args: ["<msgID>", "<text>"],
+    flags: { "no-wake": "bool" },
+    async handle(context) {
+      const { flags, args } = context.parsed
+      const text = await textArg(args[1]!, context.io.stdin)
+      const body = await context.hub((hub) => hub.reply(args[0]!, text, flags["no-wake"] === true ? { wake: false } : {}))
+      answer(context, body, repliedText)
+    },
+  },
+  decline: {
+    args: ["<msgID>"],
+    flags: { why: "string" },
+    async handle(context) {
+      const { flags, args } = context.parsed
+      const why = str(flags, "why")
+      if (why === undefined) throw new UsageError('needs --why "reason"')
+      const reason = await textArg(why, context.io.stdin, "reason")
+      const body = await context.hub((hub) => hub.decline(args[0]!, reason))
+      answer(context, body, declinedText)
+    },
+  },
+  inbox: {
+    async handle(context) {
+      const body = await context.hub((hub) => hub.inbox())
+      answer(context, body, inboxText)
+    },
+  },
+  mute: {
+    args: ["<addr>"],
+    async handle(context) {
+      const body = await context.hub((hub) => hub.mute(context.parsed.args[0]!))
+      answer(context, body, (b) => mutedText(b.muted))
+    },
+  },
+  unmute: {
+    args: ["<addr>"],
+    async handle(context) {
+      const body = await context.hub((hub) => hub.unmute(context.parsed.args[0]!))
+      answer(context, body, (b) => mutedText(b.muted))
     },
   },
   login: {

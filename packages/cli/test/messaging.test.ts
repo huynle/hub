@@ -245,3 +245,101 @@ describe("hub ask", () => {
     expect(hub.seen[0]!.body.text).toBe("a long\nquestion")
   })
 })
+
+describe("hub reply and hub decline", () => {
+  test("reply: POST /api/agent/reply {replyTo, text}; text names the real sender it went to", async () => {
+    hub.routes["POST /api/agent/reply"] = () => Response.json({ message: reply(), delivery: "turn", original: ask({ state: "answered" }) }, { status: 201 })
+    const r = await cli(["reply", "msg_1", "yes, go"])
+    expect(r.code).toBe(0)
+    expect(hub.seen).toEqual([{ method: "POST", path: "/api/agent/reply", body: { replyTo: "msg_1", text: "yes, go" } }])
+    expect(r.stdout).toContain("reply msg_r")
+    expect(r.stdout).toContain("@api-refactor")
+    expect(r.stdout).toContain("msg_1")
+  })
+
+  test("reply --no-wake and stdin text", async () => {
+    hub.routes["POST /api/agent/reply"] = () => Response.json({ message: reply(), original: ask() }, { status: 201 })
+    expect((await cli(["reply", "msg_1", "-", "--no-wake"], { stdin: "done\n" })).code).toBe(0)
+    expect(hub.seen[0]!.body).toEqual({ replyTo: "msg_1", text: "done", wake: false })
+  })
+
+  test("decline: POST /api/agent/decline {replyTo, why}; --why is required (stdin with -)", async () => {
+    hub.routes["POST /api/agent/decline"] = () => Response.json({ message: reply({ kind: "decline", text: "busy" }), delivery: "queued", original: ask({ state: "declined" }) }, { status: 201 })
+    const r = await cli(["decline", "msg_1", "--why", "busy"])
+    expect(r.code).toBe(0)
+    expect(hub.seen[0]).toEqual({ method: "POST", path: "/api/agent/decline", body: { replyTo: "msg_1", why: "busy" } })
+    expect(r.stdout).toContain("declined msg_1")
+    expect((await cli(["decline", "msg_1", "--why", "-"], { stdin: "on leave\n" })).code).toBe(0)
+    expect(hub.seen[1]!.body.why).toBe("on leave")
+    hub.seen.length = 0
+    expect((await cli(["decline", "msg_1"])).code).toBe(2)
+    expect((await cli(["decline", "msg_1", "--why", " "])).code).toBe(2)
+    expect(hub.seen).toEqual([])
+  })
+
+  test("an answered or expired ask is gone (exit 8); a foreign id not_found (exit 3)", async () => {
+    hub.routes["POST /api/agent/reply"] = fail(410, "gone", "That ask was already answered")
+    expect((await cli(["reply", "msg_1", "late"])).code).toBe(8)
+    hub.routes["POST /api/agent/decline"] = fail(404, "not_found", "No such message")
+    expect((await cli(["decline", "msg_x", "--why", "no"])).code).toBe(3)
+  })
+})
+
+describe("hub inbox", () => {
+  const INBOX = {
+    asks: [message({ id: "msg_a", kind: "ask", from: WEB, recipient: API, to: "@api-refactor", text: "can you\nreview?", state: "open", expiresAt: Date.UTC(2026, 9, 25) })],
+    waiting: [ask({ id: "msg_w" })],
+    messages: [message({ id: "msg_m", from: { kind: "user" }, recipient: API, to: "ses_api", text: "lunch at 12" })],
+    muted: ["ses_noisy"],
+  }
+
+  test("GET /api/agent/inbox; text lists asks to answer (with how), own open asks, messages and mutes", async () => {
+    hub.routes["GET /api/agent/inbox"] = () => Response.json(INBOX)
+    const r = await cli(["inbox"])
+    expect(r.code).toBe(0)
+    expect(hub.seen).toEqual([{ method: "GET", path: "/api/agent/inbox" }])
+    const out = r.stdout
+    expect(out).toContain("msg_a")
+    expect(out).toContain("@web-work")
+    expect(out).toContain("can you review?")
+    expect(out).toContain('hub reply msg_a "…"')
+    expect(out).toContain("msg_w")
+    expect(out).toContain("msg_m")
+    expect(out).toContain("@me")
+    expect(out).toContain("lunch at 12")
+    expect(out).toContain("ses_noisy")
+    expect(out.indexOf("msg_a")).toBeLessThan(out.indexOf("msg_w"))
+    expect(out.indexOf("msg_w")).toBeLessThan(out.indexOf("msg_m"))
+  })
+
+  test("an empty inbox says so; --json prints the hub's answer", async () => {
+    hub.routes["GET /api/agent/inbox"] = () => Response.json({ asks: [], waiting: [], messages: [], muted: [] })
+    expect((await cli(["inbox"])).stdout.trim()).toBe("inbox empty")
+    hub.routes["GET /api/agent/inbox"] = () => Response.json(INBOX)
+    expect(JSON.parse((await cli(["inbox", "--json"])).stdout)).toEqual(INBOX)
+  })
+})
+
+describe("hub mute and hub unmute", () => {
+  test("POST /api/agent/mute|unmute {session}; text lists who is muted", async () => {
+    hub.routes["POST /api/agent/mute"] = () => Response.json({ muted: ["ses_noisy", "ses_web"] })
+    hub.routes["POST /api/agent/unmute"] = () => Response.json({ muted: [] })
+    const muted = await cli(["mute", "@web-work"])
+    expect(muted.code).toBe(0)
+    expect(hub.seen[0]).toEqual({ method: "POST", path: "/api/agent/mute", body: { session: "@web-work" } })
+    expect(muted.stdout).toContain("ses_noisy")
+    expect(muted.stdout).toContain("ses_web")
+    const unmuted = await cli(["unmute", "@web-work"])
+    expect(hub.seen[1]).toEqual({ method: "POST", path: "/api/agent/unmute", body: { session: "@web-work" } })
+    expect(unmuted.stdout).toContain("nobody")
+    expect(JSON.parse((await cli(["unmute", "@web-work", "--json"])).stdout)).toEqual({ muted: [] })
+    expect((await cli(["mute"])).code).toBe(2)
+  })
+})
+
+describe("help", () => {
+  test("usage lists the messaging verbs", async () => {
+    const r = await cli(["help"])
+    for (const verb of ["hub msg", "hub ask", "hub reply", "hub decline", "hub inbox", "hub mute", "hub unmute", "--wait", "--expires", "--no-wake", "--urgent", "--all", "--why"]) expect(r.stdout).toContain(verb)
+  })
+})

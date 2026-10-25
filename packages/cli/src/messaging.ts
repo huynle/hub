@@ -1,7 +1,8 @@
 // The messaging verbs' helpers (design §3): text arguments (or "-" for stdin) and the short text of what the hub
 // answers to msg, ask, reply, decline, inbox and mute. The shapes are packages/sdk's types (message-routes.ts).
-import type { AgentMessage, Asked, MessageDelivery, Party, Sent } from "../../sdk/src/index.ts"
+import type { AgentMessage, Asked, Inbox, MessageDelivery, Party, Replied, Sent } from "../../sdk/src/index.ts"
 import { UsageError } from "./args"
+import { oneLine } from "./format"
 
 /** A text argument: the value, or all of stdin for "-" (one trailing newline dropped); never empty. */
 export async function textArg(value: string, stdin: (() => Promise<string>) | undefined, what = "text"): Promise<string> {
@@ -74,3 +75,34 @@ export function askOutcome(asked: Asked, waited: number | undefined): { text: st
     }
   }
 }
+
+/** `reply msg_r to @api: delivered (started a turn) (answers msg_1)` */
+export const repliedText = (replied: Replied): string => `${sentText(replied)} (answers ${replied.original.id})`
+
+/** `declined msg_1 (decline msg_d to @api: queued …)` */
+export const declinedText = (replied: Replied): string => `declined ${replied.original.id} (${sentText(replied)})`
+
+/** Open asks to answer (with how), the caller's own open asks, recent messages, mutes. */
+export function inboxText(inbox: Inbox): string {
+  const lines: string[] = []
+  const until = (m: AgentMessage) => (m.expiresAt !== undefined ? `  (open until ${iso(m.expiresAt)})` : "")
+  if (inbox.asks.length) {
+    lines.push("asks to answer:")
+    for (const m of inbox.asks) {
+      lines.push(`  ${m.id} from ${partyText(m.from)}  ${iso(m.at)}: ${oneLine(m.text, 200)}${until(m)}`)
+      lines.push(`    ↩ hub reply ${m.id} "…" · hub decline ${m.id} --why "…"`)
+    }
+  }
+  if (inbox.waiting.length) {
+    lines.push("waiting for answers:")
+    for (const m of inbox.waiting) lines.push(`  ${m.id} to ${toText(m)}  ${iso(m.at)}: ${oneLine(m.text, 200)}${until(m)}`)
+  }
+  if (inbox.messages.length) {
+    lines.push("messages:")
+    for (const m of inbox.messages) lines.push(`  ${m.id} ${m.kind} from ${partyText(m.from)}  ${iso(m.at)}${m.replyTo ? ` (re ${m.replyTo})` : ""}: ${oneLine(m.text, 200)}`)
+  }
+  if (inbox.muted.length) lines.push(mutedText(inbox.muted))
+  return lines.length ? lines.join("\n") : "inbox empty"
+}
+
+export const mutedText = (muted: readonly string[]): string => `muted: ${muted.length ? muted.join(", ") : "nobody"}`
