@@ -165,6 +165,11 @@ describe("route table", () => {
       "POST /api/agent/unmute",
       "GET /api/agent/messaging",
       "PUT /api/agent/messaging",
+      "GET /api/agent/decisions",
+      "GET /api/agent/decisions/:id",
+      "GET /api/decisions",
+      "GET /api/decisions/:id",
+      "POST /api/decisions/:id/answer",
     ]) {
       expect(keys).toContain(required)
     }
@@ -259,6 +264,24 @@ describe("bob cannot reach alice's agent messages", () => {
     expect(alice.requests).toEqual([])
     // admins get no extra agent powers
     expect((await as(admin, `/api/agent/messages/${ask.id}`)).status).toBe(404)
+  })
+
+  test("alice's Decisions: bob gets not_found on the console and agent routes, like unknown ids, and cannot answer", async () => {
+    const actor = { kind: "app" as const, userID: alice.id, tokenID: "tok_alice", scopes: ["messages:send"] }
+    const { decision } = await h.decisions.ask(alice.id, actor, { question: "alice secret?", options: [{ id: "go", label: "Go" }] })
+    for (const id of [decision.id, "dec_unknown"]) {
+      expect((await as(bob, `/api/decisions/${id}`)).status).toBe(404)
+      expect((await as(bob, `/api/decisions/${id}/answer`, { method: "POST", json: { option: "go" } })).status).toBe(404)
+      const agent = await as(bob, `/api/agent/decisions/${id}`)
+      expect(agent.status).toBe(404)
+      expect((await json(agent)).error.code).toBe("not_found")
+    }
+    expect(JSON.stringify(await json(await as(bob, "/api/decisions")))).not.toContain("alice secret")
+    expect(JSON.stringify(await json(await as(bob, "/api/agent/decisions")))).not.toContain("alice secret")
+    expect((await as(admin, `/api/decisions/${decision.id}`)).status).toBe(404)
+    expect((await h.decisions.get(alice.id, decision.id))?.state).toBe("open")
+    // positive control
+    expect((await as(alice, `/api/decisions/${decision.id}/answer`, { method: "POST", json: { option: "go" } })).status).toBe(200)
   })
 
   test("bob's messaging switch is his own", async () => {
