@@ -26,6 +26,7 @@ import { Acting, type ActingRegistry, type Escalate } from "./acting"
 import { actingRoutes } from "./acting-routes"
 import type { Actions } from "../actions"
 import { type LaunchFeed, launchRoutes, type RouteLaunches } from "./launch-routes"
+import { type RouteWebhooks, webhookRoutes } from "./webhook-routes"
 
 export const AGENT_PREFIX = "/api/agent"
 
@@ -84,6 +85,8 @@ export interface AgentDeps {
    * routes show the labels of launched sessions.
    */
   readonly launches?: RouteLaunches
+  /** Webhooks (P4-T10): the /api/agent/webhooks routes when given. */
+  readonly webhooks?: RouteWebhooks
   /** Launch changes: the watch stream's launch events. */
   readonly launchFeed?: Pick<LaunchFeed, "subscribe">
   /** needs_user escalations of the act verbs (P3-T8 opens a Decision); without it needs_user is only answered. */
@@ -133,6 +136,7 @@ export function agentRoutes(deps: AgentDeps): AgentRoute[] {
     ...(deps.launches && deps.grants && deps.acting && deps.audit
       ? launchRoutes({ launches: deps.launches, grants: deps.grants, acting: deps.acting, audit: deps.audit, ...(deps.directory ? { directory: deps.directory } : {}) })
       : []),
+    ...(deps.webhooks ? webhookRoutes(deps.webhooks, deps.store) : []),
   ]
 }
 

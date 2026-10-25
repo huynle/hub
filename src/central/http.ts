@@ -15,6 +15,8 @@ import { emailAllowed, type CentralConfig } from "./config"
 import { authPage, cookieValue, deviceName, OIDC_COOKIE, OidcClient, OidcError } from "./oidc"
 import { isNotificationKind, Push, type PushSender } from "./push"
 import { pushEndpointProblem, resolveHost as systemResolveHost, type ResolveHost } from "./push-target"
+import { Webhooks } from "./agent/webhooks"
+import { WEBHOOK_SCOPE } from "./agent/webhook-routes"
 import { fileBackends, type Backends } from "./backend"
 import { createResolver, type AgentActor, type BearerVerifier, type CredentialMode } from "./agent/actor"
 import { ActingSwitch } from "./agent/acting-switch"
@@ -66,7 +68,7 @@ export interface CentralOptions {
   readonly notifier?: Notifier
   /** Overrides web-push delivery (tests; web-push itself needs https push services). */
   readonly pushSender?: PushSender
-  /** Resolves push endpoint hosts at subscribe time (SSRF check); the system resolver by default. */
+  /** Resolves push endpoint and webhook hosts (SSRF checks); the system resolver by default. */
   readonly resolveHost?: ResolveHost
   /** Clock for sign-in expiry, the store, the registry and the backends (tests). */
   readonly now?: () => number
@@ -110,6 +112,8 @@ export interface Central {
   readonly launches: LaunchEngine
   /** Every launch change, per user (SSE 'launch' events and the agent watch subscribe; webhooks hang off it). */
   readonly launchFeed: LaunchFeed
+  /** Webhooks (P4-T10): registrations and the outbox sender; launch changes are published to it. */
+  readonly webhooks: Webhooks
   /** The JSON API's route table (method, path, access), for audits and tests. */
   readonly routes: readonly RouteInfo[]
   stop(): Promise<void>
@@ -596,6 +600,23 @@ export function startCentral(options: CentralOptions): Central {
     onLaunchChanged: (launch) => launchFeed.publish(launch.owner, launch),
   })
   void launches.start().catch((cause) => console.error(`[hub] launches did not start: ${(cause as Error).message}`))
+  // Webhooks (P4-T10): launch changes go to the owner's matching registrations through the durable outbox; URLs
+  // are checked again at every send; private targets only with hub.json agents.webhooks.allowPrivate.
+  const webhooks = new Webhooks({
+    state: backends.state,
+    locks: backends.locks,
+    now,
+    source: publicURL,
+    users: () => store.users().map((u) => u.id),
+    resolve: options.resolveHost ?? systemResolveHost,
+    ...(config.webhooksAllowPrivate ? { allowPrivate: true } : {}),
+    appAlive: (userID, tokenID) => store.agentData(userID).appTokens?.some((t) => t.id === tokenID && Array.isArray(t.scopes) && t.scopes.includes(WEBHOOK_SCOPE)) === true,
+    userAgent: `hub/${options.version ?? "0.0.0"}`,
+  })
+  launchFeed.subscribe((userID, launch) => {
+    void webhooks.onLaunch(userID, launch, launchInfo(launch)).catch((cause) => console.error(`[hub] webhook queue failed: ${(cause as Error).message}`))
+  })
+  webhooks.start()
 
   // One credential resolver for every /api request: device cookie, device token, session and app tokens.
   // Every stored agent message also goes to the user's console streams (live transcript rows).
@@ -642,7 +663,7 @@ export function startCentral(options: CentralOptions): Central {
     void escalations.closed(tenant, requestID).catch((cause) => console.error(`[hub] escalation close failed: ${(cause as Error).message}`))
   })
   const escalate: Escalate = (escalation) => escalations.escalate(escalation)
-  const agentDeps = { store, sessionTokens, directory, registry, spokes, delivery, decisions, feed, heartbeatMs, now, audit, grants, grantRequests, acting, actions, escalate, launches, launchFeed, maxPromptChars: MAX_PROMPT_CHARS }
+  const agentDeps = { store, sessionTokens, directory, registry, spokes, delivery, decisions, feed, heartbeatMs, now, audit, grants, grantRequests, acting, actions, escalate, launches, launchFeed, webhooks, maxPromptChars: MAX_PROMPT_CHARS }
   const resolveActor = createResolver({
     cookieName: COOKIE,
     findDevice: (token) => store.findDevice(token),
@@ -1570,9 +1591,11 @@ export function startCentral(options: CentralOptions): Central {
     acting,
     launches,
     launchFeed,
+    webhooks,
     routes: [...routes.map(({ method, path, access }) => ({ method, path, access })), ...agent.routes.map(({ method, path }) => ({ method, path, access: "agent" as const }))],
     async stop() {
       launches.shutdown()
+      webhooks.stop()
       tokenPush.stop()
       delivery.stop()
       decisions.stop()
