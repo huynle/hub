@@ -4,7 +4,7 @@
 // (which sessions speak their replies on the phone).
 import path from "node:path"
 import { helloHarness, spokeFeatures, type EvidenceLevel, type ForwardedEvent, type Hello, type HerdrWorkspace, type ProcessKind, type SessionInfo, type SpokeFeature, type SpokeMode, type TerminalInfo, type Terminals } from "../protocol"
-import { StatusBoard, type Blocker, type SessionStatus } from "../status"
+import { StatusBoard, permissionRequest, type Blocker, type PermissionRequest, type SessionStatus } from "../status"
 import { DoneWatch } from "./done"
 import { SentenceStream } from "./say-stream"
 import type { ActivityStep, NotificationKind } from "./push"
@@ -299,7 +299,7 @@ export class Registry {
    * permission requestID → its session and every connection that forwarded it, first first. Usually one
    * process holds it, but several may report the session; a reply tries them in order.
    */
-  private readonly permissions = new Map<string, { connIDs: string[]; sessionID: string }>()
+  private readonly permissions = new Map<string, { connIDs: string[]; sessionID: string; request?: PermissionRequest }>()
   /** Sessions with a hub turn in flight, with how to end the waiting request early (stop/interrupt). */
   private readonly active = new Map<string, { readonly cancel?: () => void }>()
   private readonly listeners = new Set<(message: RegistryMessage, tenant?: string) => void>()
@@ -549,7 +549,8 @@ export class Registry {
         if (!known.connIDs.includes(connID)) known.connIDs.push(connID)
         return
       }
-      this.permissions.set(data.id, { connIDs: [connID], sessionID })
+      const request = permissionRequest(data)
+      this.permissions.set(data.id, { connIDs: [connID], sessionID, ...(request ? { request } : {}) })
       this.alert("permission", sessionID, { requestID: data.id })
     }
     if (event.type === "form.created" && sessionID) {
@@ -1110,7 +1111,7 @@ export class Registry {
   }
 
   /** Root session of the status board that contains `sessionID`. */
-  private rootOf(sessionID: string): string | undefined {
+  rootOf(sessionID: string): string | undefined {
     if (this.boards.has(sessionID)) return sessionID
     for (const [rootID, board] of this.boards) if (board.get(sessionID)) return rootID
     return undefined
@@ -1390,6 +1391,16 @@ export class Registry {
     return origin.connIDs
       .filter((connID) => this.conns.has(connID) && this.connTenant(connID) === tenant)
       .map((connID) => ({ connID, sessionID: origin.sessionID }))
+  }
+
+  /**
+   * A pending permission: the session that asked and what it asks (bounded, without metadata; absent when the
+   * request had no usable action). Callers check tenancy (owns) and that it is still pending in the tree.
+   */
+  permissionRequest(requestID: string): { sessionID: string; request?: PermissionRequest } | undefined {
+    const origin = this.permissions.get(requestID)
+    if (!origin) return undefined
+    return { sessionID: origin.sessionID, ...(origin.request ? { request: structuredClone(origin.request) } : {}) }
   }
 
   /** Every connected process of the session's tenant that forwarded the pending form, first first. */

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { StatusBoard } from "../src/status"
+import { BLOCKER_MAX_RESOURCES, PERMISSION_MAX_RESOURCES, PERMISSION_TEXT_MAX, StatusBoard, permissionRequest } from "../src/status"
 
 const ev = (type: string, data: Record<string, unknown>) => ({ type, data })
 
@@ -39,6 +39,25 @@ describe("StatusBoard", () => {
     })
     board.observe(ev("permission.replied", { sessionID: "ses_root", requestID: "per_1", reply: "once" }))
     expect(board.get("ses_root")).toMatchObject({ state: "working", blockers: [] })
+  })
+
+  test("a permission blocker carries its action and resources, bounded", () => {
+    const board = new StatusBoard("ses_root", "Main")
+    const resources = Array.from({ length: BLOCKER_MAX_RESOURCES + 5 }, (_, i) => `cmd ${i} ${"x".repeat(1000)}`)
+    board.observe(ev("permission.asked", { id: "per_1", sessionID: "ses_root", action: "shell", resources, metadata: { diff: "big" } }))
+    const blocker = board.get("ses_root")!.blockers[0]!
+    expect(blocker).toMatchObject({ kind: "permission", id: "per_1", action: "shell" })
+    expect(blocker.resources).toHaveLength(BLOCKER_MAX_RESOURCES)
+    expect(blocker.resources![0]!.length).toBeLessThanOrEqual(500)
+    expect(blocker).not.toHaveProperty("metadata")
+    board.observe(ev("permission.asked", { id: "per_2", sessionID: "ses_root" }))
+    expect(board.get("ses_root")!.blockers[1]).toEqual({ kind: "permission", id: "per_2", summary: "" })
+  })
+
+  test("a form blocker has no action or resources", () => {
+    const board = new StatusBoard("ses_root", "Main")
+    board.observe(ev("form.created", { form: { id: "frm_1", sessionID: "ses_root", title: "Pick one", fields: [] } }))
+    expect(board.get("ses_root")!.blockers[0]).toEqual({ kind: "form", id: "frm_1", summary: "Pick one" })
   })
 
   test("a pending form (question) blocks until replied or cancelled", () => {
@@ -200,5 +219,66 @@ describe("StatusBoard: a seeded busy session goes idle when its run ends", () =>
     expect(board.settled()).toBe(true)
     board.observe(ev("session.status", { sessionID: "ses_root", status: { type: "retry", attempt: 2 } }))
     expect(board.settled()).toBe(false)
+  })
+})
+
+describe("permissionRequest", () => {
+  test("keeps action, resources, save and source; drops metadata", () => {
+    const raw = {
+      id: "per_1",
+      sessionID: "ses_1",
+      action: "shell",
+      resources: ["git push origin main"],
+      save: ["git push *"],
+      metadata: { files: [{ diff: "x".repeat(100_000) }] },
+      source: { type: "tool", messageID: "msg_1", id: "call_1", extra: "dropped" },
+    }
+    expect(permissionRequest(raw)).toEqual({
+      action: "shell",
+      resources: ["git push origin main"],
+      save: ["git push *"],
+      source: { type: "tool", messageID: "msg_1", id: "call_1" },
+    })
+  })
+
+  test("minimal request: action and empty resources only", () => {
+    expect(permissionRequest({ id: "per_1", action: "read" })).toEqual({ action: "read", resources: [] })
+  })
+
+  test("no action: undefined", () => {
+    expect(permissionRequest({ id: "per_1", resources: ["a"] })).toBeUndefined()
+    expect(permissionRequest({ id: "per_1", action: "" })).toBeUndefined()
+    expect(permissionRequest(undefined)).toBeUndefined()
+  })
+
+  test("non-string resources and save patterns are dropped and mark the request truncated", () => {
+    expect(permissionRequest({ action: "edit", resources: ["a.ts", 3, null], save: [{}, "*"] })).toEqual({
+      action: "edit",
+      resources: ["a.ts"],
+      save: ["*"],
+      truncated: true,
+    })
+  })
+
+  test("caps the number and length of resources and marks the request truncated", () => {
+    const many = Array.from({ length: PERMISSION_MAX_RESOURCES + 1 }, (_, i) => `r${i}`)
+    const cut = permissionRequest({ action: "shell", resources: many })!
+    expect(cut.resources).toHaveLength(PERMISSION_MAX_RESOURCES)
+    expect(cut.truncated).toBe(true)
+    const long = permissionRequest({ action: "shell", resources: ["git status " + "x".repeat(PERMISSION_TEXT_MAX)] })!
+    expect(long.resources[0]!.length).toBe(PERMISSION_TEXT_MAX)
+    expect(long.truncated).toBe(true)
+    const save = permissionRequest({ action: "shell", resources: ["ls"], save: many })!
+    expect(save.save).toHaveLength(PERMISSION_MAX_RESOURCES)
+    expect(save.truncated).toBe(true)
+  })
+
+  test("an over-long action is not usable: undefined", () => {
+    expect(permissionRequest({ action: "x".repeat(1000), resources: [] })).toBeUndefined()
+  })
+
+  test("a source without the tool shape is dropped", () => {
+    expect(permissionRequest({ action: "read", resources: ["*"], source: { type: "tool", messageID: 1 } })).toEqual({ action: "read", resources: ["*"] })
+    expect(permissionRequest({ action: "read", resources: ["*"], source: "x" })).toEqual({ action: "read", resources: ["*"] })
   })
 })

@@ -8,7 +8,8 @@ import type { PermissionDecision } from "../protocol"
 export interface PermissionLocation {
   readonly directory: string
   get(input: { sessionID: string; requestID: string }): Promise<unknown>
-  reply(input: { sessionID: string; requestID: string; decision: PermissionDecision }): Promise<unknown>
+  /** `message`: a reject's reason (OpenCode's reply message). */
+  reply(input: { sessionID: string; requestID: string; decision: PermissionDecision; message?: string }): Promise<unknown>
 }
 
 /**
@@ -17,7 +18,7 @@ export interface PermissionLocation {
  */
 export async function replyPermission(
   locations: readonly PermissionLocation[],
-  input: { sessionID: string; requestID: string; decision: PermissionDecision },
+  input: { sessionID: string; requestID: string; decision: PermissionDecision; message?: string },
   directory?: string,
 ): Promise<"replied" | "gone"> {
   const ordered = [...locations.filter((l) => l.directory === directory), ...locations.filter((l) => l.directory !== directory)]
