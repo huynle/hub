@@ -147,6 +147,7 @@ describe("hub decisions list", () => {
     expect((await cli(["decisions", "list"])).stdout.trim()).toBe("no decisions")
     expect(JSON.parse((await cli(["decisions", "list", "--json"])).stdout)).toEqual({ decisions: [] })
     expect((await cli(["decisions", "list", "--state", "bogus"])).code).toBe(2)
+    expect((await cli(["decisions", "list", "--state", "closed"])).code).toBe(0)
     expect((await cli(["decisions"])).code).toBe(2)
   })
 })
