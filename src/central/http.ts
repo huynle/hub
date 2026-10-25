@@ -18,6 +18,7 @@ import { pushEndpointProblem, resolveHost as systemResolveHost, type ResolveHost
 import { fileBackends, type Backends } from "./backend"
 import { createResolver, type BearerVerifier, type CredentialMode } from "./agent/actor"
 import { AgentAudit } from "./agent/audit"
+import { Grants } from "./agent/grants"
 import { Decisions, type Decision } from "./agent/decisions"
 import { Delivery } from "./agent/delivery"
 import { AgentError } from "./agent/errors"
@@ -552,7 +553,8 @@ export function startCentral(options: CentralOptions): Central {
   // Every stored agent message also goes to the user's console streams (live transcript rows).
   feed.subscribe((userID, message) => broadcast({ type: "message", message }, { tenant: userID }))
   const audit = new AgentAudit({ state: backends.state, now, admin: store, recorded: (userID, entry) => broadcast({ type: "agent", entry }, { tenant: userID }) })
-  const agentDeps = { store, sessionTokens, directory, registry, spokes, delivery, decisions, feed, heartbeatMs, now, audit }
+  const grants = new Grants({ state: backends.state, counters: backends.counters, directory, store, admin: store, now })
+  const agentDeps = { store, sessionTokens, directory, registry, spokes, delivery, decisions, feed, heartbeatMs, now, audit, grants }
   const resolveActor = createResolver({
     cookieName: COOKIE,
     findDevice: (token) => store.findDevice(token),
