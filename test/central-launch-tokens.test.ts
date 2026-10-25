@@ -98,3 +98,128 @@ describe("mint", () => {
     expect(await tokens.mint(machineID, "lch_1")).toBeUndefined()
   })
 })
+
+describe("verify", () => {
+  const mint = async () => (await tokens.mint(machineID, "lch_1"))!.token
+
+  test("a fresh token resolves to its user, machine, launch and expiry", async () => {
+    const minted = (await tokens.mint(machineID, "lch_1"))!
+    expect(await tokens.verify(minted.token)).toEqual({ userID: "local", machineID, launchID: "lch_1", exp: minted.exp })
+  })
+
+  test("valid while the launch moves from provisioning to running", async () => {
+    const token = await mint()
+    setLaunch("lch_1", { state: "running", machineID })
+    expect(await tokens.verify(token)).toMatchObject({ launchID: "lch_1" })
+  })
+
+  test("expired once the clock reaches exp (genuine token)", async () => {
+    const minted = (await tokens.mint(machineID, "lch_1"))!
+    clock = minted.exp - 1
+    expect(await tokens.verify(minted.token)).toBeDefined()
+    clock = minted.exp
+    expect(await tokens.verify(minted.token)).toBe("expired")
+  })
+
+  test("refused once the launch ends, disappears or is placed elsewhere", async () => {
+    const token = await mint()
+    setLaunch("lch_1", { state: "ended", machineID })
+    expect(await tokens.verify(token)).toBeUndefined()
+    launches.clear()
+    expect(await tokens.verify(token)).toBeUndefined()
+    setLaunch("lch_1", { state: "running", machineID: "mch_other" })
+    expect(await tokens.verify(token)).toBeUndefined()
+  })
+
+  test("looks the launch up for the token's user", async () => {
+    const token = await mint()
+    launches.clear()
+    setLaunch("lch_1", { state: "running", machineID }, "bob")
+    expect(await tokens.verify(token)).toBeUndefined()
+  })
+
+  test("refused after a user or machine epoch bump", async () => {
+    const token = await mint()
+    store.bumpUserEpoch("local")
+    expect(await tokens.verify(token)).toBeUndefined()
+    const again = await mint()
+    store.bumpMachineEpoch(machineID)
+    expect(await tokens.verify(again)).toBeUndefined()
+  })
+
+  test("refused for a revoked machine or a disabled user (valid again once re-enabled)", async () => {
+    const token = await mint()
+    store.setUser("local", { disabled: true })
+    expect(await tokens.verify(token)).toBeUndefined()
+    store.setUser("local", { disabled: false })
+    expect(await tokens.verify(token)).toBeDefined()
+    store.revokeMachine(machineID)
+    expect(await tokens.verify(token)).toBeUndefined()
+  })
+
+  test("refused for another audience", async () => {
+    const token = await mint()
+    expect(await make("http://elsewhere.test").verify(token)).toBeUndefined()
+  })
+
+  test("refused for an unknown kid, a tampered payload or signature, or a bad signature length", async () => {
+    const token = await mint()
+    const { payload, sig, claims } = parts(token)
+    expect(await tokens.verify(forge({ ...claims, kid: "k_unknown" }))).toBeUndefined()
+    const tampered = b64(JSON.stringify({ ...claims, lid: "lch_2" }))
+    setLaunch("lch_2", { state: "running", machineID })
+    expect(await tokens.verify(`hlt1.${tampered}.${sig}`)).toBeUndefined()
+    const flipped = Buffer.from(sig, "base64url")
+    flipped[0] = flipped[0]! ^ 1
+    expect(await tokens.verify(`hlt1.${payload}.${flipped.toString("base64url")}`)).toBeUndefined()
+    expect(await tokens.verify(`hlt1.${payload}.${sig.slice(0, 20)}`)).toBeUndefined()
+  })
+
+  test("still valid under an older key after rotation", async () => {
+    const token = await mint()
+    keys.rotate()
+    expect(await tokens.verify(token)).toBeDefined()
+  })
+
+  test("only the hlt1 form: other prefixes, part counts, non-canonical base64url and extra or missing claims fail", async () => {
+    const token = await mint()
+    const { payload, sig, claims } = parts(token)
+    expect(await tokens.verify(`hst1.${payload}.${sig}`)).toBeUndefined()
+    expect(await tokens.verify(forge(claims, keys.active().secret, "hst1"))).toBeUndefined()
+    expect(await tokens.verify(`${token}.x`)).toBeUndefined()
+    expect(await tokens.verify(`hlt1.${payload}=.${sig}`)).toBeUndefined()
+    expect(await tokens.verify(forge({ ...claims, extra: 1 }))).toBeUndefined()
+    const { aud: _aud, ...missing } = claims
+    expect(await tokens.verify(forge(missing))).toBeUndefined()
+    expect(await tokens.verify(forge({ ...claims, exp: "never" }))).toBeUndefined()
+    expect(await tokens.verify(forge({ ...claims, lid: "" }))).toBeUndefined()
+    expect(await tokens.verify(forge({ ...claims, me: -1 }))).toBeUndefined()
+    expect(await tokens.verify(forge([claims] as unknown as Record<string, unknown>))).toBeUndefined()
+    expect(await tokens.verify(`hlt1.${b64("not json")}.${sig}`)).toBeUndefined()
+    expect(await tokens.verify("")).toBeUndefined()
+    expect(await tokens.verify("x".repeat(5000))).toBeUndefined()
+    expect(await tokens.verify(undefined as unknown as string)).toBeUndefined()
+  })
+
+  test("a session token (hst1) signed with the same keys is not a launch token", async () => {
+    const hst1 = forge({ typ: "session", uid: "local", mid: machineID, sid: "ses_1", exp: clock + 1000, kid: keys.active().kid, ue: 0, me: 0, aud: PUBLIC }, keys.active().secret, "hst1")
+    expect(await tokens.verify(hst1)).toBeUndefined()
+  })
+
+  test("a launch the lookup throws on is refused, not thrown", async () => {
+    const token = await mint()
+    const failing = new LaunchTokens({ keys, store, publicURL: PUBLIC, now: () => clock, launches: { launch: async () => { throw new Error("state down") } } })
+    expect(await failing.verify(token)).toBeUndefined()
+  })
+})
+
+describe("never serialised", () => {
+  test("JSON and inspect show no secrets or tokens", async () => {
+    const token = (await tokens.mint(machineID, "lch_1"))!.token
+    const shown = JSON.stringify(tokens) + inspect(tokens, { showHidden: true, depth: 5 })
+    expect(shown).not.toContain(token.split(".")[2]!)
+    expect(shown).not.toContain(keys.active().secret.toString("base64"))
+    expect(JSON.parse(JSON.stringify(tokens))).toEqual({ audience: PUBLIC, lifetimeMs: LAUNCH_TOKEN_LIFETIME_MS })
+    expect(inspect(tokens)).toBe(`LaunchTokens(${PUBLIC})`)
+  })
+})
