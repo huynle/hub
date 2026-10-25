@@ -11,7 +11,7 @@
 // another one and reaches it through SpokeHub.request (pod RPC). Events, alerts and speech stay with the pod that
 // holds the connection; remote state is never re-exported.
 import path from "node:path"
-import { helloHarness, spokeFeatures, type EvidenceLevel, type ForwardedEvent, type Hello, type HerdrWorkspace, type ProcessKind, type SessionInfo, type SpokeFeature, type SpokeMode, type TerminalInfo, type Terminals } from "../protocol"
+import { HARNESS_OPENCODE, helloHarness, spokeFeatures, type EvidenceLevel, type ForwardedEvent, type Hello, type HerdrWorkspace, type ProcessKind, type SessionInfo, type SpokeFeature, type SpokeMode, type TerminalInfo, type Terminals } from "../protocol"
 import { StatusBoard, permissionRequest, type Blocker, type BlockerRecommendation, type PermissionRequest, type SessionStatus } from "../status"
 import { sanitizeLabel } from "./agent/envelope"
 import { DoneWatch } from "./done"
@@ -1051,10 +1051,28 @@ export class Registry {
     return found?.id
   }
 
-  /** The machine's (most recently connected) background service process; never a launch-bound connection. */
-  serviceFor(machineID: string): string | undefined {
-    const services = this.all().filter((c) => c.machine.id === machineID && c.hello.kind === "service" && c.launchID === undefined)
+  /**
+   * The machine's (most recently connected) background service process of a harness (default OpenCode); never a
+   * launch-bound connection. Each harness has its own service: a Claude Code service never hides the OpenCode one.
+   */
+  serviceFor(machineID: string, harness: string = HARNESS_OPENCODE): string | undefined {
+    const services = this.services(machineID).filter((c) => helloHarness(c.hello).harness === harness)
     return services.sort((a, b) => b.seq - a.seq)[0]?.id
+  }
+
+  /** The harnesses that have a background service process (serviceFor) on the machine. */
+  serviceHarnesses(machineID: string): string[] {
+    return [...new Set(this.services(machineID).map((c) => helloHarness(c.hello).harness))]
+  }
+
+  /** A connection's harness ("opencode" for hellos that predate harness); undefined for an unknown connection. */
+  harnessOf(connID: string): string | undefined {
+    const conn = this.conn(connID)
+    return conn && helloHarness(conn.hello).harness
+  }
+
+  private services(machineID: string): Conn[] {
+    return this.all().filter((c) => c.machine.id === machineID && c.hello.kind === "service" && c.launchID === undefined)
   }
 
   /**
