@@ -18,8 +18,14 @@
 //   reported as waiting and does not hold back later ones; earlier launches always pick first. Reservations are
 //   launches provisioning or running on a machine that its node does not report (yet); slots taken in the pass
 //   count at once. Reasons go on the launch only when it moves; waiting reasons are returned for the engine.
+// - PlacementLoop runs passes: kick(user) when something changed (a launch queued or ended, a node connected or
+//   reported capacity, a service spoke came), coalescing kicks during a pass into one more, plus a sweep over
+//   users() every intervalMs for whatever a kick missed (e.g. another process held the lease). Each placed launch
+//   goes to onPlaced (the launch engine starts provisioning); failures go to onError and never stop the loop.
+// - Node and spoke info come through PlacementNodes / PlacementSpokes, which the launch engine adapts from the
+//   NodeRegistry and the Registry; memory is not matched (a spec has no memory need yet).
 import type { NodeCapacity, NodeRuntimeInfo } from "../../protocol"
-import type { Clock, Counters, Locks } from "../backend/types"
+import type { Clock, Counters, Locks, Timers } from "../backend/types"
 import type { HubLaunches } from "../config"
 import { AgentError } from "./errors"
 import type { LaunchSpec } from "./launch-spec"
@@ -296,5 +302,111 @@ async function skipGone<T>(step: Promise<T>): Promise<T | undefined> {
   } catch (cause) {
     if (cause instanceof LaunchTransitionError) return undefined
     throw cause
+  }
+}
+
+
+// ---- the loop ---------------------------------------------------------------------------------------------
+
+export const PLACEMENT_SWEEP_MS = 5_000
+
+export interface PlacementLoopDeps {
+  readonly placement: Pick<Placement, "place">
+  /** The users that may have launches to place (e.g. the store's users). */
+  readonly users: () => Promise<readonly string[]>
+  /** The engine takes a placed (provisioning) launch from here. */
+  readonly onPlaced: (placed: Placed) => void | Promise<void>
+  readonly onError?: (cause: unknown, userID?: string) => void
+  readonly timers?: Timers
+  readonly intervalMs?: number
+}
+
+const defaultTimers: Timers = { set: (fn, ms) => setTimeout(fn, ms), clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>) }
+
+/** Runs placement passes: on kick(user) (a launch queued or ended, a node's capacity changed) and on a sweep. */
+export class PlacementLoop {
+  private readonly runs = new Map<string, { again: boolean; done: Promise<void> }>()
+  private readonly timers: Timers
+  private readonly intervalMs: number
+  private readonly onError: (cause: unknown, userID?: string) => void
+  private timer: unknown
+  private running = false
+
+  constructor(private readonly deps: PlacementLoopDeps) {
+    this.timers = deps.timers ?? defaultTimers
+    this.intervalMs = deps.intervalMs ?? PLACEMENT_SWEEP_MS
+    this.onError = deps.onError ?? ((cause, userID) => console.error(`[hub] placement failed${userID ? ` for ${userID}` : ""}:`, cause))
+  }
+
+  /** A pass for the user; a kick during a pass makes one more pass after it. Resolves when they are done. */
+  kick(userID: string): Promise<void> {
+    const current = this.runs.get(userID)
+    if (current) {
+      current.again = true
+      return current.done
+    }
+    const run = { again: false, done: Promise.resolve() }
+    this.runs.set(userID, run)
+    run.done = (async () => {
+      try {
+        do {
+          run.again = false
+          await this.pass(userID)
+        } while (run.again)
+      } finally {
+        this.runs.delete(userID)
+      }
+    })()
+    return run.done
+  }
+
+  /** Sweeps every intervalMs (idempotent). */
+  start(): void {
+    this.running = true
+    if (this.timer === undefined) this.schedule()
+  }
+
+  stop(): void {
+    this.running = false
+    if (this.timer !== undefined) this.timers.clear(this.timer)
+    this.timer = undefined
+  }
+
+  /** A pass for every user, one after another. */
+  async sweep(): Promise<void> {
+    let users: readonly string[]
+    try {
+      users = await this.deps.users()
+    } catch (cause) {
+      this.onError(cause)
+      return
+    }
+    for (const userID of users) await this.kick(userID)
+  }
+
+  private schedule(): void {
+    this.timer = this.timers.set(() => {
+      this.timer = undefined
+      void this.sweep().finally(() => {
+        if (this.running && this.timer === undefined) this.schedule()
+      })
+    }, this.intervalMs)
+  }
+
+  private async pass(userID: string): Promise<void> {
+    let result: PassResult
+    try {
+      result = await this.deps.placement.place(userID)
+    } catch (cause) {
+      this.onError(cause, userID)
+      return
+    }
+    for (const placed of result.placed) {
+      try {
+        await this.deps.onPlaced(placed)
+      } catch (cause) {
+        this.onError(cause, userID)
+      }
+    }
   }
 }

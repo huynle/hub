@@ -5,7 +5,16 @@
 import { describe, expect, test } from "bun:test"
 import { type LaunchSpec, validateLaunchSpec } from "../src/central/agent/launch-spec"
 import { LaunchStore } from "../src/central/agent/launch-store"
-import { type Candidate, DEFAULT_LAUNCH_CAPS, matchNode, Placement, type PlacementNode } from "../src/central/agent/placement"
+import {
+  type Candidate,
+  DEFAULT_LAUNCH_CAPS,
+  matchNode,
+  type PassResult,
+  type Placed,
+  Placement,
+  PlacementLoop,
+  type PlacementNode,
+} from "../src/central/agent/placement"
 import type { HubLaunches } from "../src/central/config"
 import { MemoryCounters, MemoryLocks } from "../src/central/backend/memory-counters"
 import { MemoryStateStore } from "../src/central/backend/memory-state"
@@ -409,5 +418,163 @@ describe("Placement.place: the per-user lease", () => {
       ["provisioning", "Placed on mbp"],
     ])
     expect(result.waiting.map((w) => w.launchID)).toEqual([b.id])
+  })
+})
+
+// ---- the loop ---------------------------------------------------------------------------------------------
+
+class FakeTimers {
+  pending = new Map<number, { fn: () => void; ms: number }>()
+  private next = 0
+  set(fn: () => void, ms: number) {
+    const id = ++this.next
+    this.pending.set(id, { fn, ms })
+    return id
+  }
+  clear(handle: unknown) {
+    this.pending.delete(handle as number)
+  }
+  /** Runs every pending timer once. */
+  fire() {
+    const due = [...this.pending.values()]
+    this.pending.clear()
+    for (const timer of due) timer.fn()
+  }
+}
+
+const flush = async () => {
+  for (let i = 0; i < 100; i++) await Promise.resolve()
+}
+
+function fakePlacement() {
+  const calls: string[] = []
+  let gate: Promise<void> | undefined
+  let open: () => void = () => {}
+  const results = new Map<string, PassResult>()
+  const placement = {
+    calls,
+    results,
+    hold() {
+      gate = new Promise((resolve) => (open = resolve))
+    },
+    release() {
+      gate = undefined
+      open()
+    },
+    async place(userID: string): Promise<PassResult> {
+      calls.push(userID)
+      if (gate) await gate
+      return results.get(userID) ?? { leased: true, placed: [], waiting: [] }
+    },
+  }
+  return placement
+}
+
+const placedOf = (launchID: string): Placed => ({
+  userID: U,
+  launch: { id: launchID } as Placed["launch"],
+  node: live(),
+  preferred: true,
+  fence: 1,
+})
+
+describe("PlacementLoop", () => {
+  test("kick runs a pass and hands each placed launch to onPlaced", async () => {
+    const placement = fakePlacement()
+    placement.results.set(U, { leased: true, placed: [placedOf("l_1"), placedOf("l_2")], waiting: [] })
+    const handed: string[] = []
+    const loop = new PlacementLoop({ placement, users: async () => [], timers: new FakeTimers(), onPlaced: (p) => void handed.push(p.launch.id) })
+    await loop.kick(U)
+    expect(placement.calls).toEqual([U])
+    expect(handed).toEqual(["l_1", "l_2"])
+  })
+
+  test("kicks during a running pass coalesce into one more pass; users run independently", async () => {
+    const placement = fakePlacement()
+    const loop = new PlacementLoop({ placement, users: async () => [], timers: new FakeTimers(), onPlaced: () => {} })
+    placement.hold()
+    const first = loop.kick(U)
+    await flush()
+    const second = loop.kick(U)
+    const third = loop.kick(U)
+    const other = loop.kick("u2")
+    await flush()
+    expect(placement.calls).toEqual([U, "u2"])
+    placement.release()
+    await Promise.all([first, second, third, other])
+    expect(placement.calls).toEqual([U, "u2", U])
+    await loop.kick(U)
+    expect(placement.calls).toEqual([U, "u2", U, U])
+  })
+
+  test("start sweeps every intervalMs over the users; stop ends it", async () => {
+    const placement = fakePlacement()
+    const timers = new FakeTimers()
+    const loop = new PlacementLoop({ placement, users: async () => [U, "u2"], timers, intervalMs: 2_000, onPlaced: () => {} })
+    loop.start()
+    expect([...timers.pending.values()].map((t) => t.ms)).toEqual([2_000])
+    timers.fire()
+    await flush()
+    expect(placement.calls).toEqual([U, "u2"])
+    expect(timers.pending.size).toBe(1)
+    loop.start()
+    expect(timers.pending.size).toBe(1)
+    timers.fire()
+    await flush()
+    expect(placement.calls).toEqual([U, "u2", U, "u2"])
+    loop.stop()
+    expect(timers.pending.size).toBe(0)
+  })
+
+  test("failures go to onError and never stop the loop", async () => {
+    const errors: [unknown, string | undefined][] = []
+    let fail = true
+    const placement = {
+      async place(userID: string): Promise<PassResult> {
+        if (fail && userID === U) throw new Error("store down")
+        return { leased: true, placed: [placedOf("l_9")], waiting: [] }
+      },
+    }
+    const timers = new FakeTimers()
+    let usersFail = true
+    const loop = new PlacementLoop({
+      placement,
+      users: async () => {
+        if (usersFail) throw new Error("no users")
+        return [U, "u2"]
+      },
+      timers,
+      onPlaced: () => {
+        throw new Error("engine down")
+      },
+      onError: (cause, userID) => void errors.push([(cause as Error).message, userID]),
+    })
+    await loop.kick(U)
+    loop.start()
+    timers.fire()
+    await flush()
+    usersFail = false
+    timers.fire()
+    await flush()
+    fail = false
+    await loop.kick(U)
+    expect(errors).toEqual([
+      ["store down", U],
+      ["no users", undefined],
+      ["store down", U],
+      ["engine down", "u2"],
+      ["engine down", U],
+    ])
+    loop.stop()
+  })
+
+  test("end to end with the real Placement: a kick moves a queued launch to provisioning", async () => {
+    const { placement, store, launch } = setup()
+    const a = await launch()
+    const handed: Placed[] = []
+    const loop = new PlacementLoop({ placement, users: async () => [U], timers: new FakeTimers(), onPlaced: (p) => void handed.push(p) })
+    await loop.kick(U)
+    expect(handed.map((p) => p.launch.id)).toEqual([a.id])
+    expect((await store.get(U, a.id))?.state).toBe("provisioning")
   })
 })
