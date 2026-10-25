@@ -46,6 +46,12 @@ describe("parseDecision", () => {
     }
   })
 
+  test("a Decision closed elsewhere (P3-T8) parses and leaves the open list", () => {
+    const closed = { ...decision(), state: "closed", closed: { at: T0 + 1, reason: "The request was answered elsewhere or ended" } }
+    expect(parseDecision(closed)?.state).toBe("closed")
+    expect(applyDecision([decision()], parseDecision(closed)!)).toEqual([])
+  })
+
   test("drops malformed options", () => {
     const parsed = parseDecision({ ...decision(), options: [{ id: "go", label: "Proceed" }, { id: 1, label: "x" }, null, { id: "hold" }] })
     expect(parsed?.options).toEqual([{ id: "go", label: "Proceed" }])
