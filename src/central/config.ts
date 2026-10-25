@@ -64,6 +64,8 @@ export interface CentralConfig {
   readonly agentsNever: readonly string[]
   /** hub.json `agents.launches`: per-user launch caps, only those set (placement fills in its defaults). */
   readonly launchCaps?: HubLaunches
+  /** hub.json `agents.webhooks.allowPrivate`: webhooks may target http, loopback, private and local hosts (admin opt-in). */
+  readonly webhooksAllowPrivate?: true
 }
 
 /** hub.json `agents.launches`: per-user launch caps (design §6.2, §7). */
@@ -81,6 +83,13 @@ export interface HubAgents {
   /** Normalised `action[:glob]` patterns (see agent/policy.ts), duplicates dropped. */
   readonly never?: readonly string[]
   readonly launches?: HubLaunches
+  readonly webhooks?: HubWebhooks
+}
+
+/** hub.json `agents.webhooks` (decision znbg8xa5 #8). */
+export interface HubWebhooks {
+  /** Lets webhook URLs use http and private or local targets (self-hosted receivers); off by default (SSRF). */
+  readonly allowPrivate?: boolean
 }
 
 /** hub.json, validated. */
@@ -97,7 +106,8 @@ export interface HubFile {
 type Env = Readonly<Record<string, string | undefined>>
 
 const HUB_KEYS = new Set(["host", "port", "publicURL", "stateDir", "speech", "auth", "agents"])
-const AGENTS_KEYS = new Set(["never", "launches"])
+const AGENTS_KEYS = new Set(["never", "launches", "webhooks"])
+const WEBHOOK_KEYS = new Set(["allowPrivate"])
 const LAUNCH_CAP_KEYS = ["maxQueued", "maxActive", "perHour"] as const
 const LAUNCH_CAP_MAX = 100_000
 const AUTH_KEYS = new Set(["mode", "issuer", "clientId", "clientSecret", "allowed", "admins"])
@@ -239,7 +249,16 @@ function readHubAgents(raw: unknown, file: string, warnings: string[], fail: (me
   for (const key of Object.keys(input)) if (!AGENTS_KEYS.has(key)) warnings.push(`${file}: unknown key "agents.${key}" ignored`)
   const launches = input.launches === undefined ? undefined : readHubLaunches(input.launches, file, warnings, fail)
   const never = input.never === undefined ? undefined : readNever(input.never, fail)
-  return { ...(never ? { never } : {}), ...(launches ? { launches } : {}) }
+  const webhooks = input.webhooks === undefined ? undefined : readHubWebhooks(input.webhooks, file, warnings, fail)
+  return { ...(never ? { never } : {}), ...(launches ? { launches } : {}), ...(webhooks ? { webhooks } : {}) }
+}
+
+function readHubWebhooks(raw: unknown, file: string, warnings: string[], fail: (message: string) => never): HubWebhooks {
+  if (!isObj(raw)) fail("agents.webhooks must be an object")
+  const input = raw as Record<string, unknown>
+  for (const key of Object.keys(input)) if (!WEBHOOK_KEYS.has(key)) warnings.push(`${file}: unknown key "agents.webhooks.${key}" ignored`)
+  if (input.allowPrivate !== undefined && typeof input.allowPrivate !== "boolean") fail("agents.webhooks.allowPrivate must be true or false")
+  return input.allowPrivate === undefined ? {} : { allowPrivate: input.allowPrivate as boolean }
 }
 
 function readHubLaunches(raw: unknown, file: string, warnings: string[], fail: (message: string) => never): HubLaunches {
@@ -346,6 +365,7 @@ export function centralConfig(rawEnv: Env = process.env, home: string = homedir(
     auth: authConfig(env, file.auth),
     agentsNever: [...(file.agents?.never ?? [])],
     ...(file.agents?.launches ? { launchCaps: { ...file.agents.launches } } : {}),
+    ...(file.agents?.webhooks?.allowPrivate === true ? { webhooksAllowPrivate: true as const } : {}),
   }
 }
 
