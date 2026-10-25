@@ -11,6 +11,7 @@ import { sessionRows, stableRows, type SessionRow } from "../lib/sessions"
 import { LiveFeeds, applyMessage, findSession, initialHub, type HubState } from "../lib/store"
 import { StreamKeeper, type StreamScope } from "../core/stream-core"
 import { applyDecision, openDecisions, parseDecision, type DecisionView } from "../core/decision-core"
+import { applyAgentEntry, parseAuditEntry, type AuditEntryView } from "../core/agents-core"
 import { api, enc, errorText, getJSON, HttpError, sessionPath, setUnauthorized } from "./api"
 import { navigate, route } from "./router"
 import { toast } from "./toast"
@@ -27,6 +28,8 @@ export const [speechReady, setSpeechReady] = createSignal<SpeechReadyView | null
 export const [enrollments, setEnrollments] = createSignal<Array<{ userCode: string; machineName: string; created: number }>>([])
 /** The user's open Decisions (asks to @me), newest first: GET /api/decisions?state=open, then SSE 'decision'. */
 export const [decisions, setDecisions] = createSignal<DecisionView[]>([])
+/** Agent actions recorded since this page loaded (SSE 'agent' {entry}), newest first: who answered what. */
+export const [agentEntries, setAgentEntries] = createSignal<AuditEntryView[]>([])
 
 type Listener = (message: Record<string, any>) => void
 const listeners = new Set<Listener>()
@@ -225,6 +228,10 @@ export function dispatch(message: Record<string, any>): void {
     if (message.type === "decision") {
       const decision = parseDecision(message.decision)
       if (decision) setDecisions((list) => applyDecision(list, decision))
+    }
+    if (message.type === "agent") {
+      const entry = parseAuditEntry(message.entry)
+      if (entry) setAgentEntries((list) => applyAgentEntry(list, entry))
     }
     // The hub could not replay what this page missed: refresh what is not in the catalog.
     if (message.type === "resync") {
