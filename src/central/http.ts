@@ -41,7 +41,7 @@ import { createActions } from "./actions"
 import { audioFormat, SpeechError } from "./speech/provider"
 import { SpeechService } from "./speech/service"
 import { NodeRegistry } from "./nodes"
-import { randomBytes } from "node:crypto"
+import { randomBytes, randomUUID } from "node:crypto"
 import { LaunchEngine } from "./agent/launch-engine"
 import { LaunchTokens } from "./agent/launch-tokens"
 import { LaunchFeed, launchInfo } from "./agent/launch-routes"
@@ -271,9 +271,14 @@ export function startCentral(options: CentralOptions): Central {
   const heartbeatMs = options.timing?.heartbeatMs ?? SSE_HEARTBEAT_MS
   const web: WebAssets = options.web ?? diskAssets(options.webDir ?? path.join(import.meta.dir, "..", "..", "web", "dist"))
   const now = options.now ?? Date.now
-  /** Used only by new code; existing state stays in the store, registry and event log. Selected first: cluster mode fails before touching the state dir. */
+  /** The bundle for the config (or the one given). Cluster mode never touches the state dir. */
+  const ownBackends = !options.backends
   const backends = options.backends ?? hubBackends(config, { now })
-  const store = Store.open(config.stateDir, now, { mode: config.auth.mode })
+  // Cluster mode: the records are rows in the shared StateStore, cached per pod (loaded on first use; no data
+  // migration runs on start). Otherwise state.json in the state dir.
+  const store = config.cluster
+    ? Store.shared({ state: backends.state, bus: backends.bus, now, instanceID: `${config.cluster.podID}-${randomUUID().slice(0, 8)}` })
+    : Store.open(config.stateDir, now, { mode: config.auth.mode })
   // A machine's tenant is its owner (read live: ownership moves on migration).
   const registry = new Registry(now, undefined, (machineID) => store.machines().find((m) => m.id === machineID)?.ownerID)
   const nodes = new NodeRegistry((machineID) => store.machines().find((m) => m.id === machineID)?.ownerID, now)
@@ -1631,6 +1636,8 @@ export function startCentral(options: CentralOptions): Central {
       // resolves even though the listener is closed. Don't wait on it forever.
       await Promise.race([server.stop(true), Bun.sleep(250)])
       await backends.state.flush?.().catch((cause) => console.error(`[hub] agent state not saved: ${(cause as Error).message}`))
+      await store.close()
+      if (ownBackends) await backends.close?.().catch((cause) => console.error(`[hub] backends not closed: ${(cause as Error).message}`))
     },
   }
 }

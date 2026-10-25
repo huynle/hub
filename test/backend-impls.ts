@@ -22,7 +22,7 @@ import { MemoryStateStore } from "../src/central/backend/memory-state"
 import type { Backends, Clock } from "../src/central/backend/types"
 import { dockerAvailable, ItCluster, itClusterEnabled } from "./cluster-it"
 
-export type BackendKind = keyof Backends
+export type BackendKind = Exclude<keyof Backends, "close">
 export const BACKEND_KINDS: readonly BackendKind[] = ["state", "bus", "events", "counters", "locks", "catalog", "kv"]
 
 /**
