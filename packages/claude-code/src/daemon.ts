@@ -4,15 +4,25 @@
 // the machine over a Unix socket in a private directory. ClaudeSessions holds the sessions' state; this file wires
 // it to the hub (HarnessSpoke: ops permission and stop, deliver, prompt messages, reject messages) and to the socket.
 //
+// With `launch` options it also starts Claude Code for hub launches (features create, launch, turn, interrupt):
+// a create's directory must be under the node's workspace roots (node.json); the daemon reports the new session at
+// once and runs its claude headless (launcher.ts) with the hub plugin, so its hooks come back here like any other
+// session's. turn and interrupt reach only those sessions (stdin user messages, control requests); a terminal
+// session refuses them. stop interrupts a launched session's running turn at once, besides the hook-level stop.
+// Stopping the daemon ends the claude processes it started.
+//
 // A `hub claude` run registers its pid ("launch"); the daemon checks it now and then and ends the run's sessions
 // when the process is gone (Claude Code killed without SessionEnd), and at once when the wrapper reports its exit.
+import { randomBytes, randomUUID } from "node:crypto"
 import { chmodSync, lstatSync, unlinkSync } from "node:fs"
 import { createServer, type Server, type Socket } from "node:net"
 import path from "node:path"
-import { HarnessSpoke, type HarnessSpokeOptions } from "../../spoke-sdk/src/index.ts"
+import type { ResultFor, ServerRequest } from "../../protocol/src/index.ts"
+import { HarnessSpoke, type HarnessSpokeOptions, type ModifierFeature, type OpHandlers } from "../../spoke-sdk/src/index.ts"
 import { parseHookInput } from "./hook-input.ts"
 import { ensurePrivateDir, SOCKET_PATH_MAX } from "./paths.ts"
 import { createMcpRouter, MCP_END, type McpRouter } from "./mcp.ts"
+import { ClaudeLauncher, launchAgent, launchDirectory, launchModel } from "./launcher.ts"
 import { hubReferences } from "./references.ts"
 import { ClaudeSessions, type SessionsOptions } from "./sessions.ts"
 import { ask, onLines, WIRE_VERSION } from "./wire.ts"
@@ -20,6 +30,18 @@ import { ask, onLines, WIRE_VERSION } from "./wire.ts"
 export const HARNESS = "claude-code"
 const DEFAULT_LIVENESS_MS = 30_000
 const LAUNCHES_MAX = 1000
+
+/** What the daemon needs to start Claude Code for hub launches (features create, launch, turn, interrupt). */
+export interface DaemonLaunchOptions {
+  /** The claude executable. */
+  readonly bin: string
+  /** The hub plugin directory launched sessions load (written on demand). */
+  readonly pluginDir: () => string
+  /** The node's workspace roots (node.json): a create's directory must be under one. */
+  readonly roots: () => readonly string[]
+  /** The environment claude starts with (default the daemon's). */
+  readonly env?: Readonly<Record<string, string | undefined>>
+}
 
 export interface DaemonOptions {
   readonly socketPath: string
@@ -38,6 +60,8 @@ export interface DaemonOptions {
   readonly log?: (line: string) => void
   readonly socket?: HarnessSpokeOptions["socket"]
   readonly backoff?: HarnessSpokeOptions["backoff"]
+  /** Start Claude Code for hub launches; absent: the daemon only follows sessions started in terminals. */
+  readonly launch?: DaemonLaunchOptions
 }
 
 export interface ClaudeDaemon {
@@ -77,6 +101,78 @@ export async function startDaemon(options: DaemonOptions): Promise<ClaudeDaemon>
   await claimSocket(options.socketPath)
   const log = options.log ?? (() => {})
   let sessions!: ClaudeSessions
+  /** Launch key (HUB_CLAUDE_LAUNCH) of each session the daemon started, by its native ID. */
+  const launchKeys = new Map<string, string>()
+  const launch = options.launch
+  const launcher = launch
+    ? new ClaudeLauncher({
+        bin: launch.bin,
+        env: launch.env ?? process.env,
+        log,
+        onExit: (native) => {
+          const key = launchKeys.get(native)
+          launchKeys.delete(native)
+          if (key) sessions.endLaunch(key)
+        },
+      })
+    : undefined
+
+  /** The native ID of a session the daemon launched (and still runs); throws for any other. */
+  const launchedNative = (sessionID: string): string => {
+    const native = sessions.nativeOf(sessionID)
+    if (native === undefined || !launcher?.has(native)) throw new Error(`Session ${sessionID} runs in a terminal, not launched by the hub: Claude Code takes hub turns and interrupts only in sessions the hub launched (send it a message instead)`)
+    return native
+  }
+
+  async function create(req: Extract<ServerRequest, { op: "create" }>): Promise<ResultFor["create"]> {
+    if (!launch || !launcher) throw new Error("This Claude Code daemon does not start sessions")
+    if (req.herdrWorkspace !== undefined) throw new Error("Claude Code sessions cannot be opened in a Herdr workspace yet")
+    const directory = launchDirectory(req.directory, launch.roots())
+    const agent = launchAgent(req.agent)
+    const model = launchModel(req.model)
+    const native = randomUUID()
+    const key = `cl_${randomBytes(8).toString("hex")}`
+    const sessionID = sessions.launched({ sessionID: native, cwd: directory, launch: key, ...(req.title ? { title: req.title } : {}) })
+    launchKeys.set(native, key)
+    try {
+      await launcher.start({ sessionID: native, directory, launch: key, pluginDir: launch.pluginDir(), socketPath: options.socketPath, ...(model ? { model } : {}), ...(agent ? { agent } : {}) })
+    } catch (cause) {
+      launchKeys.delete(native)
+      sessions.endLaunch(key)
+      throw cause
+    }
+    log(`launched claude for ${sessionID}${req.launchID ? ` (launch ${req.launchID})` : ""} in ${directory}`)
+    return { sessionID }
+  }
+
+  async function turn(req: Extract<ServerRequest, { op: "turn" }>): Promise<ResultFor["turn"]> {
+    const native = launchedNative(req.sessionID)
+    sessions.hubPrompt(native)
+    const result = await launcher!.turn(native, req.text, req.images ?? [])
+    sessions.turnEnded(native, result.outcome, "message" in result ? result.message : undefined)
+    return result
+  }
+
+  async function interrupt(req: Extract<ServerRequest, { op: "interrupt" }>): Promise<ResultFor["interrupt"]> {
+    await launcher!.interrupt(launchedNative(req.sessionID))
+    return {}
+  }
+
+  async function stop(req: Extract<ServerRequest, { op: "stop" }>): Promise<ResultFor["stop"]> {
+    const native = sessions.nativeOf(req.sessionID)
+    const running = native !== undefined && launcher?.running(native) === true
+    const stopped = sessions.stop(req)
+    if (!running) return stopped
+    await launcher!.interrupt(native!)
+    return { stopped: stopped.stopped.length ? stopped.stopped : [req.sessionID] }
+  }
+
+  const handlers: OpHandlers = {
+    permission: (req) => sessions.permission(req),
+    stop,
+    ...(launcher ? { create, turn, interrupt } : {}),
+  }
+  const features: ModifierFeature[] = ["permissionMessage", "hubPrompt", ...(launcher ? (["launch"] as const) : [])]
   const spoke = new HarnessSpoke({
     server: options.server,
     token: options.token,
@@ -87,9 +183,9 @@ export async function startDaemon(options: DaemonOptions): Promise<ClaudeDaemon>
     directory: options.directory,
     kind: "service",
     mode: "always",
-    handlers: { permission: (req) => sessions.permission(req), stop: (req) => sessions.stop(req) },
+    handlers,
     deliver: (req) => sessions.deliver(req),
-    features: ["permissionMessage", "hubPrompt"],
+    features,
     onState: (state, error) => log(`hub connection ${state}${error ? `: ${error}` : ""}`),
     ...(options.socket ? { socket: options.socket } : {}),
     ...(options.backoff ? { backoff: options.backoff } : {}),
@@ -231,6 +327,7 @@ export async function startDaemon(options: DaemonOptions): Promise<ClaudeDaemon>
       if (stopped) return
       stopped = true
       clearInterval(liveness)
+      await launcher?.stopAll()
       spoke.stop()
       for (const conn of connections) conn.destroy()
       await new Promise<void>((resolve) => server.close(() => resolve()))

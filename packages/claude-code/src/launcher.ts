@@ -7,7 +7,9 @@
 // When claude exits its open turns fail and onExit reports it; stopAll closes stdin (claude ends after the running
 // turn) and kills what lingers.
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
-import type { PromptImage, TurnResult } from "../../protocol/src/index.ts"
+import { realpathSync, statSync } from "node:fs"
+import path from "node:path"
+import type { ModelSelection, PromptImage, TurnResult } from "../../protocol/src/index.ts"
 
 type Env = Readonly<Record<string, string | undefined>>
 
@@ -56,6 +58,53 @@ const STDERR_KEEP = 2000
 
 const record = (v: unknown): Record<string, any> => (typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, any>) : {})
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+const AGENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/
+const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:@/\[\]-]{0,299}$/
+/** The providers whose models Claude Code runs (its own model IDs or aliases). */
+const PROVIDERS = new Set(["anthropic", "claude-code"])
+
+/**
+ * The real path of a launch's directory: an existing directory under one of the node's workspace roots (both
+ * resolved through symlinks). Throws with the reason otherwise.
+ */
+export function launchDirectory(directory: string, roots: readonly string[]): string {
+  if (typeof directory !== "string" || !path.isAbsolute(directory) || directory.split("/").some((part) => part === "." || part === "..")) {
+    throw new Error(`${JSON.stringify(directory)} is not an absolute path without . or .. segments`)
+  }
+  let real: string
+  try {
+    real = realpathSync(directory)
+  } catch {
+    throw new Error(`${directory} does not exist`)
+  }
+  if (!statSync(real).isDirectory()) throw new Error(`${directory} is not a directory`)
+  for (const root of roots) {
+    let base: string
+    try {
+      base = realpathSync(root)
+    } catch {
+      continue
+    }
+    if (real === base || real.startsWith(base.endsWith(path.sep) ? base : base + path.sep)) return real
+  }
+  throw new Error(`${directory} is not under this machine's node workspace roots (node.json workspaceRoots${roots.length ? `: ${roots.join(", ")}` : ", none set"})`)
+}
+
+/** The --agent value for a launch's agent; throws for a name Claude Code could read as an option. */
+export function launchAgent(agent: string | undefined): string | undefined {
+  if (agent === undefined) return undefined
+  if (!AGENT.test(agent)) throw new Error(`Claude Code cannot take agent ${JSON.stringify(agent)} (letters, digits, ".", "_" and "-")`)
+  return agent
+}
+
+/** The --model value for a launch's model; throws for another provider's model or a name that is not a model ID. */
+export function launchModel(model: ModelSelection | undefined): string | undefined {
+  if (model === undefined) return undefined
+  if (!PROVIDERS.has(model.providerID)) throw new Error(`Claude Code cannot run model ${model.providerID}/${model.modelID} (only anthropic models)`)
+  if (!MODEL.test(model.modelID)) throw new Error(`Claude Code cannot take model ${JSON.stringify(model.modelID)}`)
+  return model.modelID
+}
 
 /** The claude arguments of a headless launch. */
 export function launchArgs(input: LaunchInput): string[] {
