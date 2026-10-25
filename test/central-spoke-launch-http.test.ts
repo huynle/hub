@@ -16,7 +16,7 @@ const USER = "local"
 
 /** A launch provisioning on a new machine, with a launch token for it. */
 async function provisioning(central: Harness) {
-  const { machine, token: machineToken } = central.store.addMachine("box-host")
+  const { machine, token: machineToken } = await central.store.addMachine("box-host")
   const { launch } = await central.launches.store.create(USER, validateLaunchSpec({ workspace: { repo: "/p/hub", branch: "feat/x" } }))
   await central.launches.store.transition(USER, launch.id, "placing", { reason: "Placing" })
   const placed = await central.launches.store.transition(USER, launch.id, "provisioning", { reason: "Placed", machineID: machine.id })
@@ -33,7 +33,7 @@ async function boxed(central: Harness, token: string, launchID: string, features
 
 describe("launch tokens in the hub", () => {
   test("Central.launchTokens mints for a provisioning launch; the token connects a bound spoke", async () => {
-    h = harness()
+    h = await harness()
     const { token, launch, machineID } = await provisioning(h)
     expect(token).toStartWith("hlt1.")
     expect(await h.launchTokens.verify(token)).toMatchObject({ userID: USER, machineID, launchID: launch.id })
@@ -44,7 +44,7 @@ describe("launch tokens in the hub", () => {
   })
 
   test("the launch's end on launchFeed closes its connection", async () => {
-    h = harness()
+    h = await harness()
     const { token, launch } = await provisioning(h)
     const client = await boxed(h, token, launch.id)
     expect(client.first.t).toBe("welcome")
@@ -56,7 +56,7 @@ describe("launch tokens in the hub", () => {
   })
 
   test("a running launch's change keeps its connection", async () => {
-    h = harness()
+    h = await harness()
     const { token, launch } = await provisioning(h)
     const client = await boxed(h, token, launch.id)
     const running = await h.launches.store.transition(USER, launch.id, "running", { reason: "Started", sessionID: "ses_1", name: "w" })
@@ -67,7 +67,7 @@ describe("launch tokens in the hub", () => {
   })
 
   test("a sandboxed spoke gets session tokens but never act tokens", async () => {
-    h = harness()
+    h = await harness()
     const { token, launch } = await provisioning(h)
     const client = await boxed(h, token, launch.id, ["launch", "sessionTokens", "actTokens"])
     client.send({ t: "sessions", sessions: [session("ses_box")] })
@@ -79,7 +79,7 @@ describe("launch tokens in the hub", () => {
   })
 
   test("an hlt1 token is no credential for the API, from loopback too", async () => {
-    h = harness({ noDevice: true })
+    h = await harness({ noDevice: true })
     const { token } = await provisioning(h)
     const res = await h.api("/api/machines", { headers: { authorization: `Bearer ${token}` }, cookie: "" })
     expect(res.status).toBe(401)

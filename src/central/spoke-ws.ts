@@ -190,7 +190,8 @@ export class SpokeHub {
     const match = /^Bearer\s+(\S+)$/i.exec(request.headers.get("authorization") ?? "")
     const token = match?.[1]
     if (token && LAUNCH_TOKEN.test(token)) return this.upgradeLaunch(request, server, token)
-    const machine = token ? this.options.store.findMachine(token) : undefined
+    const machine = token ? await this.options.store.findMachine(token) : undefined
+    if (machine) await this.options.store.recheck({ users: [machine.ownerID] })
     const owner = machine && this.options.store.user(machine.ownerID)
     if (!machine || !owner || owner.disabled) return Response.json({ error: "Invalid or revoked machine token" }, { status: 401 })
     return this.accept(request, server, { connID: newID("conn"), machineID: machine.id, machineName: machine.name, ready: false, lastSeen: Date.now() })
@@ -337,7 +338,7 @@ export class SpokeHub {
       ws.data.ready = true
       ws.data.role = "spoke"
       registry.connect(connID, { id: ws.data.machineID, name: ws.data.machineName }, message, launch ? { launchID: launch.launchID } : {})
-      this.options.store.touchMachine(ws.data.machineID)
+      void this.options.store.touchMachine(ws.data.machineID)
       // Older spokes ignore `features`; newer ones send a request a feature adds only when it is listed here.
       this.send(ws, { t: "welcome", v: PROTOCOL_VERSION, machineID: ws.data.machineID, publicURL: this.options.publicURL, features: [...HUB_FEATURES] })
       return
@@ -404,7 +405,7 @@ export class SpokeHub {
     ws.data.ready = true
     ws.data.role = NODE_ROLE
     nodes.connect(ws.data.connID, { id: ws.data.machineID, name: ws.data.machineName }, hello)
-    this.options.store.touchMachine(ws.data.machineID)
+    void this.options.store.touchMachine(ws.data.machineID)
     this.send(ws, { t: "welcome", v: PROTOCOL_VERSION, machineID: ws.data.machineID, publicURL: this.options.publicURL, features: [...HUB_FEATURES] })
   }
 

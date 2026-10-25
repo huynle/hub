@@ -25,7 +25,7 @@ afterEach(async () => {
   await h?.stop()
 })
 
-const start = () => (h = harness({ agent: { verifiers: [sessionVerifier], routes: testRoutes } }))
+const start = async () => (h = await harness({ agent: { verifiers: [sessionVerifier], routes: testRoutes } }))
 const bearer = (pathname: string, token: string, init: RequestInit & { json?: unknown } = {}) =>
   h.api(pathname, { ...init, cookie: null, origin: null, headers: { ...(init.headers as Record<string, string>), authorization: `Bearer ${token}` } })
 const json = async (r: Response) => (await r.json()) as any
@@ -37,7 +37,7 @@ const state = () => readFileSync(path.join(h.stateDir, "state.json"), "utf8")
 
 describe("POST /api/agent/app-tokens", () => {
   test("creates a token, shown once: hat_<id>_<secret>, default scope sessions:read", async () => {
-    start()
+    await start()
     const { res, body } = await create({ label: "brain" })
     expect(res.status).toBe(201)
     expect(res.headers.get("cache-control")).toBe("no-store")
@@ -49,7 +49,7 @@ describe("POST /api/agent/app-tokens", () => {
   })
 
   test("no label: none stored; explicit scopes kept, duplicates dropped", async () => {
-    start()
+    await start()
     const { res, body } = await create({ scopes: ["sessions:read", "sessions:read"] })
     expect(res.status).toBe(201)
     expect(body.label).toBeUndefined()
@@ -57,21 +57,21 @@ describe("POST /api/agent/app-tokens", () => {
   })
 
   test("messaging scopes: messages:send and messages:read", async () => {
-    start()
+    await start()
     const { res, body } = await create({ scopes: ["messages:send", "messages:read"] })
     expect(res.status).toBe(201)
     expect(body.scopes).toEqual(["messages:send", "messages:read"])
   })
 
   test("launch scope: sessions:launch (phase 4)", async () => {
-    start()
+    await start()
     const { res, body } = await create({ scopes: ["sessions:launch", "sessions:read"] })
     expect(res.status).toBe(201)
     expect(body.scopes).toEqual(["sessions:launch", "sessions:read"])
   })
 
   test("only the sha256 hash reaches state.json", async () => {
-    start()
+    await start()
     const { body } = await create({ label: "brain" })
     const saved = state()
     expect(saved).not.toContain(body.token)
@@ -80,7 +80,7 @@ describe("POST /api/agent/app-tokens", () => {
   })
 
   test("rejects bad input with 400 invalid", async () => {
-    start()
+    await start()
     for (const bad of [[], "x", { label: 5 }, { label: "x".repeat(101) }, { scopes: "sessions:read" }, { scopes: ["sessions:write"] }, { scopes: [1] }]) {
       const { res, body } = await create(bad)
       expect({ bad, status: res.status }).toEqual({ bad, status: 400 })
@@ -90,7 +90,7 @@ describe("POST /api/agent/app-tokens", () => {
   })
 
   test("at most 50 tokens per user", async () => {
-    start()
+    await start()
     for (let i = 0; i < 50; i++) expect((await create()).res.status).toBe(201)
     const { res, body } = await create()
     expect(res.status).toBe(429)
@@ -98,7 +98,7 @@ describe("POST /api/agent/app-tokens", () => {
   })
 
   test("audits creation without the token", async () => {
-    start()
+    await start()
     const { body } = await create({ label: "brain" })
     const entry = h.store.auditLog().find((e) => e.action === "app-token.create")
     expect(entry).toMatchObject({ actor: "local", target: body.id })
@@ -108,7 +108,7 @@ describe("POST /api/agent/app-tokens", () => {
 
 describe("GET /api/agent/app-tokens", () => {
   test("lists the user's tokens without secrets or hashes", async () => {
-    start()
+    await start()
     const a = (await create({ label: "a" })).body
     const b = (await create()).body
     const res = await h.api("/api/agent/app-tokens")
@@ -126,7 +126,7 @@ describe("GET /api/agent/app-tokens", () => {
 
 describe("DELETE /api/agent/app-tokens/:id", () => {
   test("revokes: 204, gone from the list, the token answers 401, audited", async () => {
-    start()
+    await start()
     const { body } = await create()
     expect((await bearer("/api/agent/whoami", body.token)).status).toBe(200)
     const res = await h.api(`/api/agent/app-tokens/${body.id}`, { method: "DELETE" })
@@ -139,17 +139,17 @@ describe("DELETE /api/agent/app-tokens/:id", () => {
   })
 
   test("unknown id: 404 not_found", async () => {
-    start()
+    await start()
     const res = await h.api("/api/agent/app-tokens/nope", { method: "DELETE" })
     expect(res.status).toBe(404)
     expect((await json(res)).error.code).toBe("not_found")
   })
 
   test("another user's token: 404, still works", async () => {
-    start()
+    await start()
     const { body } = await create()
     // A second user, with their own device, tries to revoke it.
-    const second = addUser(h)
+    const second = await addUser(h)
     const res = await h.api(`/api/agent/app-tokens/${body.id}`, { method: "DELETE", cookie: second })
     expect(res.status).toBe(404)
     expect((await bearer("/api/agent/whoami", body.token)).status).toBe(200)
@@ -157,14 +157,14 @@ describe("DELETE /api/agent/app-tokens/:id", () => {
 })
 
 /** A second user with a device; returns its cookie. */
-function addUser(central: Harness): string {
-  const user = central.store.upsertUser({ email: "other@example.com", role: "user" })
-  return `voice_device=${central.store.addDevice("other phone", user.id).token}`
+async function addUser(central: Harness): Promise<string> {
+  const user = await central.store.upsertUser({ email: "other@example.com", role: "user" })
+  return `voice_device=${(await central.store.addDevice("other phone", user.id)).token}`
 }
 
 describe("the app verifier", () => {
   test("an app token is an app actor on whoami", async () => {
-    start()
+    await start()
     const { body } = await create({ label: "brain" })
     const res = await bearer("/api/agent/whoami", body.token)
     expect(res.status).toBe(200)
@@ -172,7 +172,7 @@ describe("the app verifier", () => {
   })
 
   test("scopes decide which routes it reaches", async () => {
-    start()
+    await start()
     const { body } = await create()
     expect((await bearer("/api/agent/test/read", body.token)).status).toBe(200)
     const res = await bearer("/api/agent/test/x", body.token)
@@ -181,7 +181,7 @@ describe("the app verifier", () => {
   })
 
   test("refused on console routes with 403", async () => {
-    start()
+    await start()
     const { body } = await create()
     for (const pathname of ["/api/me", "/api/sessions", "/api/admin/users"]) {
       const res = await bearer(pathname, body.token)
@@ -190,7 +190,7 @@ describe("the app verifier", () => {
   })
 
   test("session and app tokens cannot create, list or revoke app tokens", async () => {
-    start()
+    await start()
     const { body } = await create()
     for (const token of [SESSION_TOKEN, body.token]) {
       for (const [method, pathname] of [
@@ -207,21 +207,21 @@ describe("the app verifier", () => {
   })
 
   test("the device token (bearer) may manage app tokens", async () => {
-    start()
+    await start()
     const res = await bearer("/api/agent/app-tokens", h.cookie.slice("voice_device=".length), { method: "POST", json: {} })
     expect(res.status).toBe(201)
   })
 
   test("disabled user: 401", async () => {
-    start()
+    await start()
     const { body } = await create()
-    h.store.setUser("local", { disabled: true })
+    await h.store.setUser("local", { disabled: true })
     const res = await bearer("/api/agent/whoami", body.token)
     expect(res.status).toBe(401)
   })
 
   test("wrong secret, unknown id or garbage: 401", async () => {
-    start()
+    await start()
     const { body } = await create()
     const secret = body.token.slice(`hat_${body.id}_`.length)
     const flipped = secret[0] === "A" ? `B${secret.slice(1)}` : `A${secret.slice(1)}`

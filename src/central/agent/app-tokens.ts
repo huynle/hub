@@ -41,19 +41,18 @@ const scopesOf = (token: AppToken): string[] => (Array.isArray(token.scopes) ? t
 export function appTokenVerifier(store: Store): BearerVerifier {
   return {
     kind: "app",
-    verify(token: string): AppActor | undefined {
+    async verify(token: string): Promise<AppActor | undefined> {
       const match = TOKEN.exec(token)
       if (!match) return undefined
       const id = match[1]!
-      const hash = hashToken(token)
-      for (const user of store.users()) {
-        const record = user.agent?.appTokens?.find((t) => t.id === id)
-        if (!record) continue
-        if (!sameHash(record.tokenHash, hash)) return undefined
-        const label = typeof record.label === "string" ? record.label : undefined
-        return { kind: "app", userID: user.id, tokenID: record.id, scopes: scopesOf(record), ...(label ? { label } : {}) }
-      }
-      return undefined
+      const owner = store.users().find((user) => user.agent?.appTokens?.some((t) => t.id === id))
+      if (!owner) return undefined
+      // A revocation on another pod applies at once: read the owner again (a no-op for the file store).
+      await store.recheck({ users: [owner.id] })
+      const record = store.user(owner.id)?.agent?.appTokens?.find((t) => t.id === id)
+      if (!record || !sameHash(record.tokenHash, hashToken(token))) return undefined
+      const label = typeof record.label === "string" ? record.label : undefined
+      return { kind: "app", userID: owner.id, tokenID: record.id, scopes: scopesOf(record), ...(label ? { label } : {}) }
     },
   }
 }
@@ -102,8 +101,9 @@ export function appTokenRoutes(store: Store): AgentRoute[] {
         const token = `hat_${id}_${randomBytes(32).toString("base64url")}`
         const record: AppToken = { id, tokenHash: hashToken(token), ...(input.label ? { label: input.label } : {}), scopes: input.scopes, created: Date.now() }
         let full = false
-        store.updateAgentData(user.id, (data) => {
+        await store.updateAgentData(user.id, (data) => {
           const tokens = data.appTokens ?? []
+          full = false
           if (tokens.length >= MAX_APP_TOKENS) {
             full = true
             return
@@ -111,7 +111,7 @@ export function appTokenRoutes(store: Store): AgentRoute[] {
           data.appTokens = [...tokens, record]
         })
         if (full) throw new AgentError("rate_limited", `At most ${MAX_APP_TOKENS} app tokens per user`, { hint: "Revoke unused tokens" })
-        store.audit({ actor: user.id, action: "app-token.create", target: id, ...(input.label ? { detail: input.label } : {}) })
+        await store.audit({ actor: user.id, action: "app-token.create", target: id, ...(input.label ? { detail: input.label } : {}) })
         return Response.json({ ...view(record), token }, { status: 201, headers: NO_STORE })
       },
     },
@@ -125,16 +125,16 @@ export function appTokenRoutes(store: Store): AgentRoute[] {
       method: "DELETE",
       path: `${PREFIX}/:id`,
       allow: {},
-      handle({ params, user }) {
+      async handle({ params, user }) {
         const id = params.id!
         let found = false
-        store.updateAgentData(user.id, (data) => {
+        await store.updateAgentData(user.id, (data) => {
           const tokens = data.appTokens ?? []
           found = tokens.some((t) => t.id === id)
           if (found) data.appTokens = tokens.filter((t) => t.id !== id)
         })
         if (!found) throw new AgentError("not_found", "No such app token")
-        store.audit({ actor: user.id, action: "app-token.revoke", target: id })
+        await store.audit({ actor: user.id, action: "app-token.revoke", target: id })
         return new Response(null, { status: 204, headers: NO_STORE })
       },
     },

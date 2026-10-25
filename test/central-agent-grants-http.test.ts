@@ -23,8 +23,8 @@ const GRANT = { holder: "@@orchestrator", scope: { projects: ["/Users/huy/projec
 const PREFIX = "/api/agent/grants"
 
 describe("/api/agent/grants", () => {
-  test("its routes are agent routes", () => {
-    h = harness({ agent: { verifiers } } as any)
+  test("its routes are agent routes", async () => {
+    h = await harness({ agent: { verifiers } } as any)
     for (const [method, path] of [
       ["POST", PREFIX],
       ["GET", PREFIX],
@@ -37,7 +37,7 @@ describe("/api/agent/grants", () => {
   })
 
   test("the user creates, lists, reads, edits and revokes a grant", async () => {
-    h = harness({ agent: { verifiers } } as any)
+    h = await harness({ agent: { verifiers } } as any)
     const created = await h.api(PREFIX, { method: "POST", json: GRANT })
     expect(created.status).toBe(201)
     expect(created.headers.get("cache-control")).toBe("no-store")
@@ -62,14 +62,14 @@ describe("/api/agent/grants", () => {
   })
 
   test("a device token (bearer) may manage grants too", async () => {
-    h = harness({ agent: { verifiers } } as any)
+    h = await harness({ agent: { verifiers } } as any)
     const deviceToken = h.cookie.slice("voice_device=".length)
     const res = await bearer(PREFIX, deviceToken, { method: "POST", json: GRANT })
     expect(res.status).toBe(201)
   })
 
   test("invalid grants and unknown ids answer the agent envelope", async () => {
-    h = harness({ agent: { verifiers } } as any)
+    h = await harness({ agent: { verifiers } } as any)
     const bad = await h.api(PREFIX, { method: "POST", json: { ...GRANT, allow: ["delete"] } })
     expect(bad.status).toBe(400)
     expect((await json(bad)).error.code).toBe("invalid")
@@ -81,14 +81,14 @@ describe("/api/agent/grants", () => {
   })
 
   test("a cross-origin cookie write is refused", async () => {
-    h = harness({ agent: { verifiers } } as any)
+    h = await harness({ agent: { verifiers } } as any)
     const res = await h.api(PREFIX, { method: "POST", json: GRANT, origin: "http://evil.test" })
     expect(res.status).toBe(403)
     expect((await json(await h.api(PREFIX))).grants).toEqual([])
   })
 
   test("session and app tokens can neither create nor read grants (403 forbidden)", async () => {
-    h = harness({ agent: { verifiers } } as any)
+    h = await harness({ agent: { verifiers } } as any)
     const id = (await json(await h.api(PREFIX, { method: "POST", json: GRANT }))).grant.id
     for (const token of [SESSION_TOKEN, APP_TOKEN]) {
       for (const [method, path, body] of [

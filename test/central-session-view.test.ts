@@ -38,8 +38,8 @@ const WORKSPACES = [
 
 describe("open sessions and terminals", () => {
   test("open and terminal pass through to the catalog and the session view (open from any reporter)", async () => {
-    h = harness()
-    const { machine, token } = h.store.addMachine("laptop")
+    h = await harness()
+    const { machine, token } = await h.store.addMachine("laptop")
     await spoke(h, {
       machine: { token },
       processID: "p_service",
@@ -58,8 +58,8 @@ describe("open sessions and terminals", () => {
   })
 
   test("the machine's terminals frame shows in GET /api/machines and the SSE catalog; it goes when its process does", async () => {
-    h = harness()
-    const { token } = h.store.addMachine("laptop")
+    h = await harness()
+    const { token } = await h.store.addMachine("laptop")
     const events = sse(await h.api("/api/events"))
     const service = await spoke(h, { machine: { token }, processID: "p_service", hello: { kind: "service" } })
     service.send({ t: "terminals", herdr: { workspaces: WORKSPACES } })
@@ -80,7 +80,7 @@ describe("open sessions and terminals", () => {
 
 describe("POST /api/machines/:machineID/sessions with herdrWorkspace", () => {
   async function machine() {
-    const { machine, token } = h.store.addMachine("laptop")
+    const { machine, token } = await h.store.addMachine("laptop")
     const client = await spoke(h, {
       machine: { token },
       hello: { kind: "service" },
@@ -93,7 +93,7 @@ describe("POST /api/machines/:machineID/sessions with herdrWorkspace", () => {
   const post = (path: string, json: unknown) => h.api(path, { method: "POST", json })
 
   test("forwards herdrWorkspace and returns openedIn; a Herdr pane folder is a valid directory", async () => {
-    h = harness()
+    h = await harness()
     const { machineID, client } = await machine()
     const seen = answer(client, (req) => (req.op === "create" ? { sessionID: "ses_new", openedIn: "herdr" } : undefined))
     const res = await post(`/api/machines/${machineID}/sessions`, { directory: "/home/user/notes", title: "Idea", herdrWorkspace: "w7" })
@@ -103,7 +103,7 @@ describe("POST /api/machines/:machineID/sessions with herdrWorkspace", () => {
   })
 
   test("Herdr failed: 201 without openedIn, with the spoke's warning (or a generic one)", async () => {
-    h = harness()
+    h = await harness()
     const { machineID, client } = await machine()
     let reply: unknown = { sessionID: "ses_new", warning: "Could not open the session in Herdr: boom" }
     answer(client, () => reply)
@@ -120,7 +120,7 @@ describe("POST /api/machines/:machineID/sessions with herdrWorkspace", () => {
   })
 
   test("validates herdrWorkspace", async () => {
-    h = harness()
+    h = await harness()
     const { machineID, client } = await machine()
     const seen = answer(client, () => ({ sessionID: "ses_new" }))
     for (const bad of [5, "", "x".repeat(101)]) {
@@ -136,7 +136,7 @@ describe("view preferences", () => {
   const put = (json: unknown, init: { cookie?: string; origin?: string | null } = {}) => h.api("/api/prefs/view", { method: "PUT", json, ...init })
 
   test("GET defaults to empty lists; PUT replaces only the lists given; stored on the user record", async () => {
-    h = harness()
+    h = await harness()
     expect(await json(await h.api("/api/prefs/view"))).toEqual({ prefs: EMPTY })
     const first = await put({ hiddenSessions: ["ses_a", "ses_a", "ses_b"], pinnedWorkspaces: ["herdr:w5", "/home/user/app"] })
     expect(first.status).toBe(200)
@@ -148,7 +148,7 @@ describe("view preferences", () => {
   })
 
   test("refuses bad input and cross-origin writes", async () => {
-    h = harness()
+    h = await harness()
     for (const bad of [
       { hiddenSessions: "ses_a" },
       { hiddenSessions: [3] },
@@ -172,7 +172,7 @@ describe("view preferences", () => {
 
   test("SSE prefs reach the user's other devices, not the device that changed them, and never another user", async () => {
     idp = fakeProvider()
-    h = harness({ env: oidcEnv(idp), noDevice: true })
+    h = await harness({ env: oidcEnv(idp), noDevice: true })
     const phone = (await signIn(h.url, idp, "alice@example.com")).cookie!
     const laptop = (await signIn(h.url, idp, "alice@example.com")).cookie!
     const bob = (await signIn(h.url, idp, "bob@example.com")).cookie!

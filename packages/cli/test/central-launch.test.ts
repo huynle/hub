@@ -8,7 +8,7 @@ import path from "node:path"
 import { harness } from "../../../test/central-harness"
 import { EXIT, run } from "../src/cli"
 
-const hub = harness()
+const hub = await harness()
 afterAll(() => hub.stop())
 const home = mkdtempSync(path.join(tmpdir(), "hub-cli-central-launch-"))
 

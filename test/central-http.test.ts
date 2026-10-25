@@ -11,13 +11,13 @@ const post = (json: unknown) => ({ method: "POST", json })
 
 describe("health and auth", () => {
   test("healthz needs no auth", async () => {
-    h = harness()
+    h = await harness()
     const res = await h.api("/healthz", { cookie: null })
     expect(await res.json()).toEqual({ ok: true, version: "9.9.9", spokes: 0, nodes: 0 })
   })
 
   test("/api/* requires the device cookie even from 127.0.0.1", async () => {
-    h = harness()
+    h = await harness()
     for (const path of ["/api/me", "/api/machines", "/api/events", "/api/devices", "/api/enrollments"]) {
       const res = await h.api(path, { cookie: null })
       expect(res.status).toBe(401)
@@ -31,7 +31,7 @@ describe("health and auth", () => {
   })
 
   test("cookie POST/DELETE needs a same-origin Origin or Referer", async () => {
-    h = harness()
+    h = await harness()
     const start = (await (await h.api("/spoke/enroll", { ...post({ machineName: "m" }), cookie: null, origin: null })).json()) as any
     const url = `/api/enrollments/${start.userCode}/approve`
     expect((await h.api(url, { method: "POST", origin: null })).status).toBe(403)
@@ -43,7 +43,7 @@ describe("health and auth", () => {
 
 describe("machine enrollment over HTTP", () => {
   test("start → pending → owner approves → token once → token works on the WebSocket", async () => {
-    h = harness()
+    h = await harness()
     const events = await h.api("/api/events")
     const startRes = await h.api("/spoke/enroll", { ...post({ machineName: "laptop" }), cookie: null, origin: null })
     expect(startRes.status).toBe(200)
@@ -67,7 +67,7 @@ describe("machine enrollment over HTTP", () => {
   })
 
   test("deny, unknown code 404, invalid name 400", async () => {
-    h = harness()
+    h = await harness()
     const start = (await (await h.api("/spoke/enroll", { ...post({ machineName: "laptop" }), cookie: null })).json()) as any
     expect((await h.api(`/api/enrollments/${start.userCode}/deny`, { method: "POST" })).status).toBe(204)
     const poll = await h.api("/spoke/enroll/poll", { ...post({ deviceCode: start.deviceCode }), cookie: null })
@@ -78,7 +78,7 @@ describe("machine enrollment over HTTP", () => {
   })
 
   test("enroll start is rate limited", async () => {
-    h = harness()
+    h = await harness()
     for (let i = 0; i < 5; i++) await h.api("/spoke/enroll", { ...post({ machineName: `m${i}` }), cookie: null })
     expect((await h.api("/spoke/enroll", { ...post({ machineName: "m" }), cookie: null })).status).toBe(429)
   })
@@ -86,7 +86,7 @@ describe("machine enrollment over HTTP", () => {
 
 describe("devices", () => {
   test("pair rejects bad codes and rate limits failed attempts", async () => {
-    h = harness()
+    h = await harness()
     for (let i = 0; i < 10; i++) {
       expect((await h.api("/api/pair", { ...post({ code: "999999x", deviceName: "p" }), cookie: null })).status).toBe(401)
     }
@@ -95,15 +95,15 @@ describe("devices", () => {
   })
 
   test("pair cookie is Secure when the public URL is https", async () => {
-    h = harness({ env: { HUB_PUBLIC_URL: "https://voice.example.com" } })
+    h = await harness({ env: { HUB_PUBLIC_URL: "https://voice.example.com" } })
     const { code } = h.auth.issuePairCode()
     const res = await h.api("/api/pair", { ...post({ code, deviceName: "p" }), cookie: null, origin: "https://voice.example.com" })
     expect(res.headers.get("set-cookie")).toContain("; Secure")
   })
 
   test("list, delete, logout", async () => {
-    h = harness()
-    const other = h.store.addDevice("tablet")
+    h = await harness()
+    const other = await h.store.addDevice("tablet")
     const list = (await (await h.api("/api/devices")).json()) as any
     expect(list.devices.map((d: any) => [d.name, d.current])).toEqual([
       ["test phone", true],
@@ -119,8 +119,8 @@ describe("devices", () => {
   })
 
   test("machines list includes offline enrolled machines; unknown revoke is 404", async () => {
-    h = harness()
-    h.store.addMachine("offline box")
+    h = await harness()
+    await h.store.addMachine("offline box")
     const body = (await (await h.api("/api/machines")).json()) as any
     expect(body.machines).toEqual([expect.objectContaining({ name: "offline box", online: false, processes: [] })])
     expect((await h.api("/api/machines/mch_nope", { method: "DELETE" })).status).toBe(404)
@@ -129,7 +129,7 @@ describe("devices", () => {
 
 describe("login links", () => {
   test("rejects off-site or odd next targets", async () => {
-    h = harness()
+    h = await harness()
     for (const next of ["//evil.test/s/x", "https://evil.test/", "/api/me", "/\\evil.test", "s/x", "/s/x?voice=2", "/s/x?next=//evil.test", "/?voice=1", "/s/x?voice=1&x=1"]) {
       const { code } = h.auth.issueLoginCode()
       const res = await h.api(`/login?code=${code}&next=${encodeURIComponent(next)}`, { cookie: null, origin: null })
@@ -149,7 +149,7 @@ describe("login links", () => {
 
 describe("static files", () => {
   test("app routes serve index.html; sw.js headers; traversal and missing files are 404", async () => {
-    h = harness()
+    h = await harness()
     for (const path of ["/", "/s/ses_1", "/pair", "/approve"]) {
       const res = await h.api(path, { cookie: null })
       expect(res.status).toBe(200)
@@ -170,7 +170,7 @@ describe("static files", () => {
 
 describe("speech", () => {
   test("transcribe maps content type, enforces size and type", async () => {
-    h = harness({ env: { HUB_MAX_AUDIO_BYTES: "100" } })
+    h = await harness({ env: { HUB_MAX_AUDIO_BYTES: "100" } })
     const audio = (type: string, size: number) => h.api("/api/transcribe", { method: "POST", headers: { "content-type": type }, body: new Uint8Array(size) })
     const ok = await audio("audio/webm;codecs=opus", 10)
     expect(await ok.json()).toEqual({ text: "heard 10 webm" })
@@ -180,14 +180,14 @@ describe("speech", () => {
   })
 
   test("speak makes the text speakable and capped; OpenRouter errors are 502", async () => {
-    h = harness({ env: { HUB_MAX_SPEECH_CHARS: "20" } })
+    h = await harness({ env: { HUB_MAX_SPEECH_CHARS: "20" } })
     const res = await h.api("/api/speak", post({ text: "**Hello** there, this is a long reply" }))
     expect(res.headers.get("content-type")).toBe("audio/mpeg")
     expect(await res.text()).toBe("mp3:Hello there, this…")
     expect((await h.api("/api/speak", post({ text: "```x```" }))).status).toBe(200)
     expect((await h.api("/api/speak", post({ text: "" }))).status).toBe(400)
     await h.stop()
-    h = harness({
+    h = await harness({
       speech: {
         transcribe: async () => "",
         speak: async () => {

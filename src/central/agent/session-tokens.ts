@@ -114,7 +114,7 @@ export class SessionTokens {
     this.#aud = options.publicURL
     this.#now = options.now ?? Date.now
     this.lifetimeMs = options.lifetimeMs ?? SESSION_TOKEN_LIFETIME_MS
-    this.verifier = { kind: "session", verify: (token) => this.verify(token) }
+    this.verifier = { kind: "session", verify: (token) => this.verifyFresh(token) }
   }
 
   /** The owner of an enrolled, unrevoked machine whose user exists and is enabled. */
@@ -169,8 +169,25 @@ export class SessionTokens {
     return { token: `${SESSION_TOKEN_PREFIX}.${payload}.${sign(secret, payload).toString("base64url")}`, exp, stamp }
   }
 
-  /** The session actor of a valid token, "expired" for a genuine token past its expiry, else undefined. */
+  /** The session actor of a valid token, "expired" for a genuine token past its expiry, else undefined (from memory). */
   verify(token: string): VerifyResult {
+    const claims = this.#genuine(token)
+    return claims && claims !== "expired" ? this.#current(claims) : claims
+  }
+
+  /**
+   * verify, after reading the token's user and machine again (a shared store's security re-check: a revocation,
+   * epoch bump or disabled user on another pod applies at once). The bearer verifier uses this.
+   */
+  async verifyFresh(token: string): Promise<VerifyResult> {
+    const claims = this.#genuine(token)
+    if (!claims || claims === "expired") return claims
+    await this.#store.recheck({ users: [claims.uid], machines: [claims.mid] })
+    return this.#current(claims)
+  }
+
+  /** The claims of a token signed with a known key for this hub, "expired" past its expiry, else undefined. */
+  #genuine(token: string): Claims | "expired" | undefined {
     if (typeof token !== "string" || token.length > SESSION_TOKEN_MAX_CHARS) return undefined
     const parts = token.split(".")
     if (parts.length !== 3 || parts[0] !== SESSION_TOKEN_PREFIX) return undefined
@@ -186,6 +203,11 @@ export class SessionTokens {
     if (expected.length !== sig.length || !timingSafeEqual(expected, sig)) return undefined
     if (claims.aud !== this.#aud) return undefined
     if (this.#now() >= claims.exp) return "expired"
+    return claims
+  }
+
+  /** The session actor while the token's epochs, machine, user and session are all still current. */
+  #current(claims: Claims): VerifyResult {
     if (claims.ue !== this.#store.userEpoch(claims.uid) || claims.me !== this.#store.machineEpoch(claims.mid)) return undefined
     const machine = this.#store.machines().find((m) => m.id === claims.mid)
     if (!machine || machine.revoked || machine.ownerID !== claims.uid) return undefined

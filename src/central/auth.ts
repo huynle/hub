@@ -182,14 +182,14 @@ export class Auth {
   }
 
   /** Approved and denied results are delivered once; afterwards the code reads as expired. */
-  pollEnrollment(deviceCode: unknown): EnrollPoll {
+  async pollEnrollment(deviceCode: unknown): Promise<EnrollPoll> {
     this.sweep()
     const enrollment = typeof deviceCode === "string" ? this.enrollments.get(deviceCode) : undefined
     if (!enrollment) return { status: "expired" }
     if (enrollment.status === "pending") return { status: "pending" }
     this.enrollments.delete(enrollment.deviceCode)
     if (enrollment.status === "denied") return { status: "denied" }
-    const { machine, token } = this.store.addMachine(enrollment.machineName, enrollment.ownerID ?? LOCAL_USER)
+    const { machine, token } = await this.store.addMachine(enrollment.machineName, enrollment.ownerID ?? LOCAL_USER)
     return { status: "approved", machineID: machine.id, machineToken: token }
   }
 
@@ -244,7 +244,7 @@ export class Auth {
    * Redeems a pairing code. Throws RateLimitError after too many recent failures. A code whose owner
    * is gone or disabled counts as invalid.
    */
-  pair(code: unknown, deviceName: unknown): { device: DeviceRecord; token: string } | undefined {
+  async pair(code: unknown, deviceName: unknown): Promise<{ device: DeviceRecord; token: string } | undefined> {
     if (!this.pairFailures.allowed()) throw new RateLimitError()
     this.sweep()
     const key = typeof code === "string" ? code.trim() : ""
@@ -255,7 +255,7 @@ export class Auth {
     }
     this.pairCodes.delete(key)
     if (!this.active(grant.ownerID)) return undefined
-    return this.store.addDevice(name(deviceName, "device name", "Device"), grant.ownerID)
+    return await this.store.addDevice(name(deviceName, "device name", "Device"), grant.ownerID)
   }
 
   // ---------- login links ----------
@@ -298,7 +298,7 @@ export class Auth {
    * deleted before the device is created. No rate limiter: 256-bit codes cannot be guessed, and a shared
    * limiter would let bad redeems lock out pairing.
    */
-  redeemLink(code: unknown, deviceName: unknown, key?: unknown): { device: DeviceRecord; token: string } | undefined {
+  async redeemLink(code: unknown, deviceName: unknown, key?: unknown): Promise<{ device: DeviceRecord; token: string } | undefined> {
     const label = deviceLabel(deviceName, "App")
     const pk = publicKey(key)
     this.sweep()
@@ -306,7 +306,7 @@ export class Auth {
     if (!grant) return undefined
     this.linkCodes.delete(code as string)
     if (!this.active(grant.ownerID)) return undefined
-    return this.store.addDevice(label, grant.ownerID, pk ? { publicKey: pk } : {})
+    return await this.store.addDevice(label, grant.ownerID, pk ? { publicKey: pk } : {})
   }
 
   private active(userID: string): boolean {

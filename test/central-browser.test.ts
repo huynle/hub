@@ -29,7 +29,7 @@ const post = (path: string, json?: unknown, init: { origin?: string | null; cook
 
 /** A machine with a service process reporting one exposed and one unexposed session. */
 async function machine(options: { kind?: "service" | "standalone" } = {}) {
-  const { machine, token } = h.store.addMachine("laptop")
+  const { machine, token } = await h.store.addMachine("laptop")
   const client = await spoke(h, {
     machine: { token },
     hello: { kind: options.kind ?? "service", mode: "session" },
@@ -43,7 +43,7 @@ async function machine(options: { kind?: "service" | "standalone" } = {}) {
 
 describe("catalog", () => {
   test("sessions carry exposure, workspace, owner process and machine, state and blockers", async () => {
-    h = harness()
+    h = await harness()
     const { machineID } = await machine()
     const body = (await (await h.api("/api/machines")).json()) as any
     const sessions = body.machines[0].processes[0].sessions
@@ -63,7 +63,7 @@ describe("catalog", () => {
 
 describe("sessions without voice", () => {
   test("speech endpoints answer 403 not_exposed and never reach the spoke", async () => {
-    h = harness()
+    h = await harness()
     const { client } = await machine()
     const seen = answer(client, () => ({}))
     for (const [action, json] of [["utterance", { text: "hi" }], ["conversation", { on: true }]] as const) {
@@ -75,7 +75,7 @@ describe("sessions without voice", () => {
   })
 
   test("inspection and typed control reach the spoke without Voice", async () => {
-    h = harness()
+    h = await harness()
     const { client } = await machine()
     const seen = answer(client, (req) => {
       if (req.op === "turn") return { outcome: "succeeded", reply: "ok" }
@@ -99,7 +99,7 @@ describe("sessions without voice", () => {
   })
 
   test("rename trims the title, reaches the owner spoke (also without Voice) and answers the title", async () => {
-    h = harness()
+    h = await harness()
     const { client } = await machine()
     const seen = answer(client, (req) => (req.op === "rename" ? { title: req.title } : {}))
     const res = await post("/api/sessions/ses_off/rename", { title: "  Ship the release  " })
@@ -109,7 +109,7 @@ describe("sessions without voice", () => {
   })
 
   test("rename refuses a missing, empty or too long title without asking the spoke", async () => {
-    h = harness()
+    h = await harness()
     const { client } = await machine()
     const seen = answer(client, () => ({ title: "x" }))
     for (const json of [{}, { title: 5 }, { title: "" }, { title: "   " }, { title: "x".repeat(201) }]) {
@@ -122,8 +122,8 @@ describe("sessions without voice", () => {
   })
 
   test("rename falls back to another process reporting the session when the owner fails", async () => {
-    h = harness()
-    const { token } = h.store.addMachine("laptop")
+    h = await harness()
+    const { token } = await h.store.addMachine("laptop")
     const owner = await spoke(h, { machine: { token }, processID: "p_owner", hello: { kind: "standalone" }, sessions: [session("ses_x", { owned: true })] })
     const other = await spoke(h, { machine: { token }, processID: "p_other", hello: { kind: "service" }, sessions: [session("ses_x")] })
     let otherFails = false
@@ -145,12 +145,12 @@ describe("sessions without voice", () => {
 
   describe("auto-name (rename with {auto: true})", () => {
     async function autoMachine(features: string[] | undefined) {
-      const { token } = h.store.addMachine("laptop")
+      const { token } = await h.store.addMachine("laptop")
       return spoke(h, { machine: { token }, hello: { kind: "service", ...(features ? { features } : {}) }, sessions: [session("ses_x", { owned: true })] })
     }
 
     test("asks the spoke to generate the title and answers what came back", async () => {
-      h = harness()
+      h = await harness()
       const client = await autoMachine(["autoName"])
       let result: unknown = { title: "Fix the login bug" }
       const seen = answer(client, (req) => (req.op === "autoName" ? result : {}))
@@ -169,7 +169,7 @@ describe("sessions without voice", () => {
     })
 
     test("an older spoke (no autoName feature) gets a clear error and is never asked", async () => {
-      h = harness()
+      h = await harness()
       const client = await autoMachine(undefined)
       const seen = answer(client, () => ({}))
       const res = await post("/api/sessions/ses_x/rename", { auto: true })
@@ -179,7 +179,7 @@ describe("sessions without voice", () => {
     })
 
     test("spoke errors pass through; a non-boolean auto is a bad request", async () => {
-      h = harness()
+      h = await harness()
       const client = await autoMachine(["autoName"])
       answer(client, () => new Error("This OpenCode process cannot auto-name sessions"))
       const failed = await post("/api/sessions/ses_x/rename", { auto: true })
@@ -190,7 +190,7 @@ describe("sessions without voice", () => {
   })
 
   test("a typed turn steers while the session tree is running", async () => {
-    h = harness()
+    h = await harness()
     const { client } = await machine()
     const seen = answer(client, (req) => (req.op === "steer" ? { inboxID: "inb_1" } : undefined))
     client.send({ t: "event", event: { type: "session.execution.started", data: { sessionID: "ses_off" } } })
@@ -202,7 +202,7 @@ describe("sessions without voice", () => {
   })
 
   test("GET /api/sessions/:id returns basic info with exposed:false", async () => {
-    h = harness()
+    h = await harness()
     await machine()
     const res = await h.api("/api/sessions/ses_off")
     expect(res.status).toBe(200)
@@ -213,7 +213,7 @@ describe("sessions without voice", () => {
 
 describe("right rail and unread", () => {
   test("summary and diff proxy to the owning spoke with validation; read marks are per user", async () => {
-    h = harness()
+    h = await harness()
     const { client } = await machine()
     const seen = answer(client, (req) => {
       if (req.op === "summary") return { directory: "/u/webshop", changes: { files: [], additions: 0, deletions: 0 } }
@@ -244,7 +244,7 @@ describe("right rail and unread", () => {
 
 describe("POST /api/sessions/:id/expose", () => {
   test("asks a reporting process (service first) and returns its answer", async () => {
-    h = harness()
+    h = await harness()
     const { client } = await machine()
     const seen = answer(client, (req) => (req.op === "expose" ? { exposed: req.on } : undefined))
     const res = await post("/api/sessions/ses_off/expose", { on: true })
@@ -259,7 +259,7 @@ describe("POST /api/sessions/:id/expose", () => {
   })
 
   test("validates the body, unknown sessions, origin and cookie; spoke errors are 502", async () => {
-    h = harness()
+    h = await harness()
     const { client } = await machine()
     answer(client, () => new Error("Unknown session"))
     expect((await post("/api/sessions/ses_off/expose", { on: "yes" })).status).toBe(400)
@@ -274,7 +274,7 @@ describe("POST /api/sessions/:id/expose", () => {
 
 describe("POST /api/machines/:machineID/sessions", () => {
   test("creates a session through the machine's service process in a reported workspace", async () => {
-    h = harness()
+    h = await harness()
     const { machineID, client } = await machine()
     const seen = answer(client, (req) => (req.op === "create" ? { sessionID: "ses_new" } : undefined))
     const res = await post(`/api/machines/${machineID}/sessions`, { directory: "/u/voice", title: "Voice idea" })
@@ -287,7 +287,7 @@ describe("POST /api/machines/:machineID/sessions", () => {
   })
 
   test("refuses unknown workspaces, bad input, unknown machines and machines without a service", async () => {
-    h = harness()
+    h = await harness()
     const { machineID, client } = await machine()
     const seen = answer(client, () => ({ sessionID: "ses_new" }))
     const unknown = await post(`/api/machines/${machineID}/sessions`, { directory: "/etc" })
@@ -309,7 +309,7 @@ describe("POST /api/machines/:machineID/sessions", () => {
 
 describe("per-session models", () => {
   test("lists models and persists user-owned session preferences through the spoke", async () => {
-    h = harness()
+    h = await harness()
     const { client } = await machine()
     const seen = answer(client, (req) => {
       if (req.op === "models") return { models: [{ providerID: "anthropic", modelID: "claude", name: "Claude", enabled: true, status: "active", variants: ["fast"] }] }
@@ -327,7 +327,7 @@ describe("per-session models", () => {
   })
 
   test("model routes preserve session isolation and validate selections", async () => {
-    h = harness()
+    h = await harness()
     const { client } = await machine()
     const seen = answer(client, () => ({ models: [] }))
     expect((await h.api("/api/sessions/ses_missing/models")).status).toBe(404)
@@ -338,7 +338,7 @@ describe("per-session models", () => {
   })
 
   test("PUT model-prefs rejects a model or variant that is not in the session's catalog", async () => {
-    h = harness()
+    h = await harness()
     const { client } = await machine()
     const seen = answer(client, (req) => {
       if (req.op === "models") return { models: [{ providerID: "anthropic", modelID: "claude", name: "Claude", enabled: true, status: "active", variants: ["fast"] }] }
@@ -359,7 +359,7 @@ describe("per-session models", () => {
   })
 
   test("PUT model-prefs answers 502 when the catalog cannot be fetched, and stores nothing", async () => {
-    h = harness()
+    h = await harness()
     const { client } = await machine()
     const seen = answer(client, (req) => (req.op === "models" ? new Error("catalog down") : { prefs: {}, defaults: {} }))
     const res = await h.api("/api/sessions/ses_on/model-prefs", { method: "PUT", json: { voice: { providerID: "anthropic", modelID: "claude" } } })
@@ -371,7 +371,7 @@ describe("per-session models", () => {
 
 describe("timeline history and details", () => {
   test("proxies bounded pages and full details for owned sessions, with or without Voice", async () => {
-    h = harness()
+    h = await harness()
     const { client } = await machine()
     const seen = answer(client, (req) => {
       if (req.op === "timeline") return { items: [{ key: "u1:text", kind: "user", text: "hi" }], cursor: "next" }
@@ -390,7 +390,7 @@ describe("timeline history and details", () => {
   })
 
   test("newest-first pages: order=desc and before=<key> reach the spoke; bad input and unknown cursors are 400", async () => {
-    h = harness()
+    h = await harness()
     const { client } = await machine()
     const seen = answer(client, (req) => {
       if (req.op !== "timeline") return undefined
@@ -424,7 +424,7 @@ describe("image prompts", () => {
   const image = { mime: "image/png", data: png, name: "shot.png" }
 
   test("a turn forwards images; image-only prompts are allowed", async () => {
-    h = harness()
+    h = await harness()
     const { client } = await machine()
     const seen = answer(client, (req) => (req.op === "turn" ? { outcome: "succeeded", reply: "a cat" } : undefined))
     const res = await post("/api/sessions/ses_off/turn", { text: "  ", images: [image] })
@@ -436,7 +436,7 @@ describe("image prompts", () => {
   })
 
   test("a steer while running forwards images too", async () => {
-    h = harness()
+    h = await harness()
     const { client } = await machine()
     const seen = answer(client, (req) => (req.op === "steer" ? { inboxID: "inb_1" } : undefined))
     client.send({ t: "event", event: { type: "session.execution.started", data: { sessionID: "ses_off" } } })
@@ -447,7 +447,7 @@ describe("image prompts", () => {
   })
 
   test("invalid images answer 400 with a clear message and never reach the spoke", async () => {
-    h = harness()
+    h = await harness()
     const { client } = await machine()
     const seen = answer(client, () => ({}))
     const big = pngBytes(Math.floor(512 * 1024 * 0.9)).toString("base64")
@@ -470,7 +470,7 @@ describe("image prompts", () => {
   })
 
   test("serves a user message's image with its type, uncached; 404 without one, 413 when too large", async () => {
-    h = harness()
+    h = await harness()
     const { client } = await machine()
     const seen = answer(client, (req) => {
       if (req.op !== "timelineFile") return undefined

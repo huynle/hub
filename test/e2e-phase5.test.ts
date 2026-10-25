@@ -264,8 +264,8 @@ beforeAll(async () => {
   fake = createFakeOpenShell()
 
   const config = centralConfig({ HUB_PORT: "0", HUB_PUBLIC_URL: PUBLIC, HUB_STATE_DIR: dir("state") }, "/home/none", { agents: { launches: { maxActive: 4 } } })
-  h = harness({ config, now: () => Date.now() + skew })
-  const machine = h.store.addMachine("mbp")
+  h = await harness({ config, now: () => Date.now() + skew })
+  const machine = await h.store.addMachine("mbp")
   machineID = machine.machine.id
 
   const configDir = dir("spoke-config")
@@ -488,8 +488,8 @@ describe("profiles and failures", () => {
 
 describe("tenancy", () => {
   test("another user sees none of these launches (GET and DELETE 404), and the user's node never takes theirs", async () => {
-    const bob = h.store.upsertUser({ email: "bob@example.com", role: "user" })
-    const cookie = `voice_device=${h.store.addDevice("bob phone", bob.id).token}`
+    const bob = await h.store.upsertUser({ email: "bob@example.com", role: "user" })
+    const cookie = `voice_device=${(await h.store.addDevice("bob phone", bob.id)).token}`
     const mine = await h.launches.list(USER)
     expect(mine.filter((l) => l.spec.runtime.kind === "openshell").length).toBeGreaterThanOrEqual(5)
     expect((await body(await h.api("/api/agent/launches", { cookie }))).launches).toEqual([])

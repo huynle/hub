@@ -15,9 +15,9 @@ import { LOCAL_USER, Store } from "../src/central/store"
 
 const USER_ACTOR: AgentActor = { kind: "user", userID: LOCAL_USER, deviceID: "dev_1", via: "cookie" }
 
-function setup(never: readonly string[] = []) {
+async function setup(never: readonly string[] = []) {
   const store = Store.open(mkdtempSync(path.join(tmpdir(), "hub-acting-")))
-  const bob = store.upsertUser({ email: "bob@example.com", role: "user" })
+  const bob = await store.upsertUser({ email: "bob@example.com", role: "user" })
   const audit = new AgentAudit({ state: new MemoryStateStore(), admin: store })
   const acting = new ActingSwitch({ store, never, audit })
   return { store, bob, audit, acting }
@@ -34,23 +34,23 @@ const paused = (fn: () => void): AgentError => {
 
 describe("ActingSwitch", () => {
   test("isActingPaused: per user, or hub-wide for everyone", async () => {
-    const { store, bob, acting } = setup()
+    const { store, bob, acting } = await setup()
     expect(acting.isActingPaused(LOCAL_USER)).toBe(false)
     await acting.setUserActing(LOCAL_USER, USER_ACTOR, false)
     expect(store.agentData(LOCAL_USER).actingPaused).toBe(true)
     expect(acting.isActingPaused(LOCAL_USER)).toBe(true)
     expect(acting.isActingPaused(bob.id)).toBe(false)
-    store.setActingPaused(true)
+    await store.setActingPaused(true)
     expect(acting.isActingPaused(bob.id)).toBe(true)
     await acting.setUserActing(LOCAL_USER, USER_ACTOR, true)
     expect(store.agentData(LOCAL_USER).actingPaused).toBeUndefined()
     expect(acting.isActingPaused(LOCAL_USER)).toBe(true)
-    store.setActingPaused(false)
+    await store.setActingPaused(false)
     expect(acting.isActingPaused(LOCAL_USER)).toBe(false)
   })
 
   test("ensureActing throws paused (423), naming which switch is on", async () => {
-    const { store, acting } = setup()
+    const { store, acting } = await setup()
     expect(() => acting.ensureActing(LOCAL_USER)).not.toThrow()
     await acting.setUserActing(LOCAL_USER, USER_ACTOR, false)
     const user = paused(() => acting.ensureActing(LOCAL_USER))
@@ -59,22 +59,22 @@ describe("ActingSwitch", () => {
     expect(user.message).toMatch(/this user/)
     expect(agentFailure(user).status).toBe(423)
     await acting.setUserActing(LOCAL_USER, USER_ACTOR, true)
-    store.setActingPaused(true)
+    await store.setActingPaused(true)
     const hub = paused(() => acting.ensureActing(LOCAL_USER))
     expect(hub.code).toBe("paused")
     expect(hub.message).toMatch(/hub admin/)
   })
 
-  test("hubNever: the hub.json agents.never patterns, parsed", () => {
-    expect(setup().acting.hubNever()).toEqual([])
-    expect(setup(["shell:git push*", "external_directory"]).acting.hubNever()).toEqual([
+  test("hubNever: the hub.json agents.never patterns, parsed", async () => {
+    expect((await setup()).acting.hubNever()).toEqual([])
+    expect((await setup(["shell:git push*", "external_directory"])).acting.hubNever()).toEqual([
       { action: "shell", resource: "git push*" },
       { action: "external_directory", resource: "*" },
     ])
   })
 
   test("each change is in the user's agent audit (and the admin summary)", async () => {
-    const { store, audit, acting } = setup()
+    const { store, audit, acting } = await setup()
     await acting.setUserActing(LOCAL_USER, USER_ACTOR, false)
     await acting.setUserActing(LOCAL_USER, USER_ACTOR, true)
     const { entries } = await audit.list(LOCAL_USER)
@@ -112,7 +112,7 @@ describe("GET/PUT /api/agent/acting", () => {
   }
 
   test("users only; GET shows both switches; PUT {enabled} sets the user's", async () => {
-    const { store, acting } = setup()
+    const { store, acting } = await setup()
     const routes = actingSwitchRoutes(acting)
     expect(routes.map((r) => [r.method, r.path, r.allow])).toEqual([
       ["GET", "/api/agent/acting", {}],
@@ -122,14 +122,14 @@ describe("GET/PUT /api/agent/acting", () => {
     const off = await call(routes, store, "PUT", { enabled: false })
     expect(off.status).toBe(200)
     expect(await off.json()).toEqual({ enabled: false, hubEnabled: true })
-    store.setActingPaused(true)
+    await store.setActingPaused(true)
     expect(await (await call(routes, store, "GET")).json()).toEqual({ enabled: false, hubEnabled: false })
     expect(await (await call(routes, store, "PUT", { enabled: true })).json()).toEqual({ enabled: true, hubEnabled: false })
     expect(acting.isActingPaused(LOCAL_USER)).toBe(true)
   })
 
   test("PUT needs enabled true or false", async () => {
-    const { store, acting } = setup()
+    const { store, acting } = await setup()
     const routes = actingSwitchRoutes(acting)
     for (const body of [{}, { enabled: "no" }, [], null]) {
       const res = await call(routes, store, "PUT", body)

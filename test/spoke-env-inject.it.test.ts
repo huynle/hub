@@ -227,9 +227,9 @@ describe.skipIf(!run)("session env injection against a private opencode serve", 
 
   test("against a real hub, `hub whoami` in the session's shell prints the session actor", async () => {
     const MARK = "HUBWHO"
-    const h = harness()
+    const h = await harness()
     cleanups.push(() => h.stop())
-    const machine = h.store.addMachine("it-box")
+    const machine = await h.store.addMachine("it-box")
     const { line, sessionID } = await serveTurn(cleanups, {
       server: h.url,
       token: machine.token,

@@ -11,7 +11,7 @@ const event = (type: string, data: Record<string, unknown>) => ({ t: "event" as 
 
 describe("activity", () => {
   test("SSE carries create and state changes with sessionID and rootID; GET includes the root's recent items", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, {
       sessions: [session("ses_1", { owned: true }), session("ses_kid", { parentID: "ses_1" })],
     })
@@ -38,7 +38,7 @@ describe("activity", () => {
   })
 
   test("SSE streams subagent text and reasoning with rootID, and reasoning.ended closes the thinking item", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, {
       sessions: [session("ses_1", { owned: true }), session("ses_kid", { parentID: "ses_1" })],
     })
@@ -54,7 +54,7 @@ describe("activity", () => {
   })
 
   test("a subagent tool item learns its child session; text deltas keep their text part ordinal", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     const events = sse(await h.api("/api/events"))
     const tool = { sessionID: "ses_1", assistantMessageID: "msg_1", id: "tool_s" }
@@ -69,7 +69,7 @@ describe("activity", () => {
   })
 
   test("a session without activity has an empty list", async () => {
-    h = harness()
+    h = await harness()
     await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     await waitFor(() => h.registry.hasSession("ses_1"))
     expect(((await (await h.api("/api/sessions/ses_1")).json()) as any).activity).toEqual([])

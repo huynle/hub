@@ -39,8 +39,8 @@ function serve(client: { ws: WebSocket; send(frame: any): void }, reply: (req: a
 }
 
 test("Central.launches places a launch on the node, creates and prompts its session, and stops it with cleanup", async () => {
-  h = harness()
-  const { token } = h.store.addMachine("mbp")
+  h = await harness()
+  const { token } = await h.store.addMachine("mbp")
   const node = await connect(h, token)
   node.send({ ...nodeHello })
   await node.next((f) => f.t === "welcome")
@@ -62,7 +62,8 @@ test("Central.launches places a launch on the node, creates and prompts its sess
     if (req.op === "stop") return { ok: true, result: { stopped: [req.sessionID] } }
     return { ok: true, result: {} }
   })
-  await waitFor(() => h.nodes.count() === 1 && h.registry.serviceFor(h.store.findMachine(token)!.id) !== undefined)
+  const machineID = (await h.store.findMachine(token))!.id
+  await waitFor(() => h.nodes.count() === 1 && h.registry.serviceFor(machineID) !== undefined)
 
   const { launch } = await h.launches.accept("local", { name: "api", workspace: { repo: "/p/hub", branch: "feat/x" }, prompt: "Go", labels: { app: "brain" } }, { by: "user" })
   let current = launch
@@ -83,8 +84,8 @@ test("Central.launches places a launch on the node, creates and prompts its sess
 })
 
 test("an openshell launch: the node starts the harness with the hub's URL and an hlt1 token; the launch-bound spoke creates the session", async () => {
-  h = harness()
-  const { token } = h.store.addMachine("box")
+  h = await harness()
+  const { token } = await h.store.addMachine("box")
   const node = await connect(h, token)
   node.send({ ...nodeHello, features: ["sandbox"], runtimes: [{ kind: "openshell", harnesses: ["opencode"] }] })
   await node.next((f) => f.t === "welcome")

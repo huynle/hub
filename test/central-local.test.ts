@@ -10,8 +10,8 @@ afterEach(async () => {
 })
 
 /** A hub on 127.0.0.1 with its public URL on the same loopback origin. */
-function local(): Harness {
-  const h = harness({ env: { HUB_HOST: "127.0.0.1", HUB_PUBLIC_URL: "" } })
+async function local(): Promise<Harness> {
+  const h = await harness({ env: { HUB_HOST: "127.0.0.1", HUB_PUBLIC_URL: "" } })
   running.push(h)
   return h
 }
@@ -20,7 +20,7 @@ const port = (h: Harness) => new URL(h.url).port
 
 describe("loopback origins", () => {
   test("a loopback public URL accepts localhost, 127.0.0.1 and [::1] on the same port", async () => {
-    const h = local()
+    const h = await local()
     expect(h.publicURL).toBe(`http://127.0.0.1:${port(h)}`)
     for (const origin of [`http://localhost:${port(h)}`, `http://127.0.0.1:${port(h)}`, `http://[::1]:${port(h)}`]) {
       const res = await h.api("/api/push/prefs", { method: "PUT", json: { finished: true }, origin })
@@ -29,7 +29,7 @@ describe("loopback origins", () => {
   })
 
   test("other ports, schemes and hosts are still refused", async () => {
-    const h = local()
+    const h = await local()
     const other = String(Number(port(h)) + 1)
     for (const origin of [`http://localhost:${other}`, `https://localhost:${port(h)}`, "http://evil.example", "null"]) {
       const res = await h.api("/api/push/prefs", { method: "PUT", json: { finished: true }, origin })
@@ -38,7 +38,7 @@ describe("loopback origins", () => {
   })
 
   test("a Referer on another loopback name counts when no Origin is sent", async () => {
-    const h = local()
+    const h = await local()
     const res = await h.api("/api/push/prefs", {
       method: "PUT",
       json: { finished: true },
@@ -49,14 +49,14 @@ describe("loopback origins", () => {
   })
 
   test("a public (non-loopback) URL does not accept loopback origins", async () => {
-    const h = harness()
+    const h = await harness()
     running.push(h)
     const res = await h.api("/api/push/prefs", { method: "PUT", json: { finished: true }, origin: `http://localhost:${port(h)}` })
     expect(res.status).toBe(403)
   })
 
   test("pairing on localhost sets a cookie without Secure that works on the next request", async () => {
-    const h = local()
+    const h = await local()
     const origin = `http://localhost:${port(h)}`
     const { code } = h.auth.issuePairCode()
     const res = await h.api("/api/pair", { method: "POST", json: { code, deviceName: "laptop" }, origin, cookie: null })
@@ -83,14 +83,14 @@ describe("first machine on a local hub", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ deviceCode }),
     }).then((r) => r.json() as Promise<Record<string, any>>)
-  const fresh = (env: Record<string, string> = {}) => {
-    const h = harness({ noDevice: true, env: { HUB_HOST: "127.0.0.1", HUB_PUBLIC_URL: "", ...env } })
+  const fresh = async (env: Record<string, string> = {}) => {
+    const h = await harness({ noDevice: true, env: { HUB_HOST: "127.0.0.1", HUB_PUBLIC_URL: "", ...env } })
     running.push(h)
     return h
   }
 
   test("is approved at once when the hub binds to loopback, the request is from loopback, and nothing is enrolled or paired", async () => {
-    const h = fresh()
+    const h = await fresh()
     const start = await enroll(h)
     expect(start.autoApproved).toBe(true)
     const first = await poll(h, start.deviceCode)
@@ -99,7 +99,7 @@ describe("first machine on a local hub", () => {
   })
 
   test("a second machine is not auto-approved, before or after the first one picked up its token", async () => {
-    const h = fresh()
+    const h = await fresh()
     const a = await enroll(h)
     const b = await enroll(h)
     expect(a.autoApproved).toBe(true)
@@ -113,15 +113,15 @@ describe("first machine on a local hub", () => {
   })
 
   test("not when a device is already paired", async () => {
-    const h = fresh()
-    h.store.addDevice("phone")
+    const h = await fresh()
+    await h.store.addDevice("phone")
     const start = await enroll(h)
     expect(start.autoApproved).toBeUndefined()
     expect((await poll(h, start.deviceCode)).status).toBe("pending")
   })
 
   test("not when the request was forwarded by a proxy", async () => {
-    const h = fresh()
+    const h = await fresh()
     const headers: Array<Record<string, string>> = [{ "x-forwarded-for": "203.0.113.9" }, { forwarded: "for=203.0.113.9" }, { "x-real-ip": "203.0.113.9" }]
     for (const header of headers) {
       const start = await enroll(h, header)
@@ -131,14 +131,14 @@ describe("first machine on a local hub", () => {
   })
 
   test("not when the public URL is not loopback (a hub behind a reverse proxy)", async () => {
-    const h = fresh({ HUB_PUBLIC_URL: "https://voice.example.com" })
+    const h = await fresh({ HUB_PUBLIC_URL: "https://voice.example.com" })
     const start = await enroll(h)
     expect(start.autoApproved).toBeUndefined()
     expect(start.approveURL).toStartWith("https://voice.example.com/approve?code=")
   })
 
   test("not when the hub listens on every interface", async () => {
-    const h = fresh({ HUB_HOST: "0.0.0.0", HUB_PUBLIC_URL: "http://127.0.0.1:4999" })
+    const h = await fresh({ HUB_HOST: "0.0.0.0", HUB_PUBLIC_URL: "http://127.0.0.1:4999" })
     const start = await enroll(h, {}, `http://127.0.0.1:${port(h)}`)
     expect(start.autoApproved).toBeUndefined()
   })

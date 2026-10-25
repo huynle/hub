@@ -42,12 +42,12 @@ const forge = (claims: Record<string, unknown>, secret: Buffer = keys.active().s
   return `hst1.${payload}.${sig}`
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   clock = 1_800_000_000_000
   const dir = mkdtempSync(path.join(tmpdir(), "hub-session-tokens-"))
   store = Store.open(dir, () => clock)
   keys = TokenKeys.open(dir, { env: {}, now: () => clock })
-  machineID = store.addMachine("laptop").machine.id
+  machineID = (await store.addMachine("laptop")).machine.id
   reported = new Map()
   tenants = new Map()
   report(machineID, "ses_1")
@@ -65,41 +65,41 @@ describe("mint", () => {
     expect(Buffer.from(sig, "base64url").length).toBe(32)
   })
 
-  test("carries the current user and machine epochs", () => {
-    store.bumpUserEpoch("local")
-    store.bumpMachineEpoch(machineID)
-    store.bumpMachineEpoch(machineID)
+  test("carries the current user and machine epochs", async () => {
+    await store.bumpUserEpoch("local")
+    await store.bumpMachineEpoch(machineID)
+    await store.bumpMachineEpoch(machineID)
     const { claims } = parts(tokens.mint(machineID, "ses_1")!.token)
     expect([claims.ue, claims.me]).toEqual([1, 2])
   })
 
-  test("nothing for a session another tenant owns, an unknown session, or a revoked or unknown machine", () => {
+  test("nothing for a session another tenant owns, an unknown session, or a revoked or unknown machine", async () => {
     report(machineID, "ses_bob", "bob")
     expect(tokens.mint(machineID, "ses_bob")).toBeUndefined()
     expect(tokens.mint(machineID, "ses_nobody")).toBeUndefined()
     expect(tokens.mint("mch_unknown", "ses_1")).toBeUndefined()
-    store.revokeMachine(machineID)
+    await store.revokeMachine(machineID)
     expect(tokens.mint(machineID, "ses_1")).toBeUndefined()
   })
 
-  test("nothing for a disabled owner", () => {
-    const bob = store.upsertUser({ email: "bob@example.com", role: "user" })
-    const bobs = store.addMachine("bob laptop", bob.id).machine.id
+  test("nothing for a disabled owner", async () => {
+    const bob = await store.upsertUser({ email: "bob@example.com", role: "user" })
+    const bobs = (await store.addMachine("bob laptop", bob.id)).machine.id
     report(bobs, "ses_b", bob.id)
     expect(tokens.mint(bobs, "ses_b")).toBeDefined()
-    store.setUser(bob.id, { disabled: true })
+    await store.setUser(bob.id, { disabled: true })
     expect(tokens.mint(bobs, "ses_b")).toBeUndefined()
   })
 })
 
 describe("stamp", () => {
-  test("changes with the user epoch, the machine epoch and the active key; minted tokens carry it", () => {
+  test("changes with the user epoch, the machine epoch and the active key; minted tokens carry it", async () => {
     const first = tokens.stamp(machineID)!
     expect(tokens.mint(machineID, "ses_1")!.stamp).toBe(first)
-    store.bumpUserEpoch("local")
+    await store.bumpUserEpoch("local")
     const second = tokens.stamp(machineID)!
     expect(second).not.toBe(first)
-    store.bumpMachineEpoch(machineID)
+    await store.bumpMachineEpoch(machineID)
     const third = tokens.stamp(machineID)!
     expect(third).not.toBe(second)
     keys.rotate()
@@ -107,19 +107,19 @@ describe("stamp", () => {
     expect(tokens.mint(machineID, "ses_1")!.stamp).toBe(tokens.stamp(machineID)!)
   })
 
-  test("undefined for a revoked or unknown machine", () => {
+  test("undefined for a revoked or unknown machine", async () => {
     expect(tokens.stamp("mch_unknown")).toBeUndefined()
-    store.revokeMachine(machineID)
+    await store.revokeMachine(machineID)
     expect(tokens.stamp(machineID)).toBeUndefined()
   })
 })
 
 describe("verify", () => {
-  test("round trip: the session actor of the machine's owner", () => {
+  test("round trip: the session actor of the machine's owner", async () => {
     const { token } = tokens.mint(machineID, "ses_1")!
     expect(tokens.verify(token)).toEqual({ kind: "session", userID: "local", machineID, sessionID: "ses_1", via: "shell" })
     expect(tokens.verifier.kind).toBe("session")
-    expect(tokens.verifier.verify(token)).toEqual({ kind: "session", userID: "local", machineID, sessionID: "ses_1", via: "shell" })
+    expect(await tokens.verifier.verify(token)).toEqual({ kind: "session", userID: "local", machineID, sessionID: "ses_1", via: "shell" })
   })
 
   test("expired at exp, valid just before", () => {
@@ -190,21 +190,21 @@ describe("verify", () => {
     expect(tokens.verify(token)).toBeUndefined()
   })
 
-  test("a user epoch bump invalidates the user's tokens", () => {
+  test("a user epoch bump invalidates the user's tokens", async () => {
     const { token } = tokens.mint(machineID, "ses_1")!
-    store.bumpUserEpoch("local")
+    await store.bumpUserEpoch("local")
     expect(tokens.verify(token)).toBeUndefined()
   })
 
-  test("a machine epoch bump invalidates the machine's tokens", () => {
+  test("a machine epoch bump invalidates the machine's tokens", async () => {
     const { token } = tokens.mint(machineID, "ses_1")!
-    store.bumpMachineEpoch(machineID)
+    await store.bumpMachineEpoch(machineID)
     expect(tokens.verify(token)).toBeUndefined()
   })
 
-  test("a revoked machine's tokens are refused", () => {
+  test("a revoked machine's tokens are refused", async () => {
     const { token } = tokens.mint(machineID, "ses_1")!
-    store.revokeMachine(machineID)
+    await store.revokeMachine(machineID)
     expect(tokens.verify(token)).toBeUndefined()
   })
 
@@ -214,9 +214,9 @@ describe("verify", () => {
     expect(tokens.verify(token)).toBeUndefined()
   })
 
-  test("reported only by another machine of the same user: refused", () => {
+  test("reported only by another machine of the same user: refused", async () => {
     const { token } = tokens.mint(machineID, "ses_1")!
-    const other = store.addMachine("desktop").machine.id
+    const other = (await store.addMachine("desktop")).machine.id
     reported.get(machineID)!.delete("ses_1")
     report(other, "ses_1")
     expect(tokens.verify(token)).toBeUndefined()
@@ -228,8 +228,8 @@ describe("verify", () => {
     expect(tokens.verify(token)).toBeUndefined()
   })
 
-  test("the machine moved to another owner: refused", () => {
-    const bob = store.upsertUser({ email: "bob@example.com", role: "user" })
+  test("the machine moved to another owner: refused", async () => {
+    const bob = await store.upsertUser({ email: "bob@example.com", role: "user" })
     const { claims } = parts(tokens.mint(machineID, "ses_1")!.token)
     expect(tokens.verify(forge({ ...claims, uid: bob.id }))).toBeUndefined()
   })
@@ -276,12 +276,12 @@ describe("act tokens (typ act)", () => {
     expect(tokens.mintAct("mch_unknown", "ses_1")).toBeUndefined()
   })
 
-  test("the same verifier checks: expiry, epochs, liveness", () => {
+  test("the same verifier checks: expiry, epochs, liveness", async () => {
     const { token, exp } = tokens.mintAct(machineID, "ses_1")!
     clock = exp
     expect(tokens.verify(token)).toBe("expired")
     clock = exp - 1
-    store.bumpMachineEpoch(machineID)
+    await store.bumpMachineEpoch(machineID)
     expect(tokens.verify(token)).toBeUndefined()
     const fresh = tokens.mintAct(machineID, "ses_1")!.token
     reported.get(machineID)!.delete("ses_1")

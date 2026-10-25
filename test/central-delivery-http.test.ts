@@ -31,7 +31,7 @@ function answer(client: FakeSpoke, result: DeliverResult = { delivered: "turn" }
 }
 
 async function start(features: string[] = ["deliver"]) {
-  h = harness()
+  h = await harness()
   const client = await spoke(h, { hello: { harness: "opencode", harnessVersion: "2.1.4", evidence: "native", features }, sessions })
   await waitFor(() => (h.store.agentData(USER).names?.length ?? 0) === 2)
   return { client, requests: answer(client) }

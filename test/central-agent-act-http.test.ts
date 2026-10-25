@@ -32,7 +32,7 @@ const event = (type: string, data: Record<string, unknown>) => ({ t: "event" as 
 
 /** A machine with ses_1 (the worker, /work/hub) and ses_orch (the orchestrator, its own tree), one pending permission. */
 async function start(options: { features?: string[]; gone?: boolean } = {}) {
-  h = harness({ agent: { verifiers } } as any)
+  h = await harness({ agent: { verifiers } } as any)
   const requests: any[] = []
   const client = await spoke(h, {
     hello: { harness: "opencode", harnessVersion: "2.1.4", evidence: "native", features: options.features ?? ["deliver", "hubPrompt", "permissionMessage"] } as any,

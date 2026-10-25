@@ -19,7 +19,7 @@ let reply: (call: Call) => Response
 let logged: string[]
 let restore: Array<() => void>
 
-beforeEach(() => {
+beforeEach(async () => {
   calls = []
   reply = () => new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "audio/mpeg" } })
   logged = []
@@ -27,7 +27,7 @@ beforeEach(() => {
     const spy = spyOn(console, level).mockImplementation((...args: unknown[]) => void logged.push(args.map(String).join(" ")))
     return () => spy.mockRestore()
   })
-  h = harness({
+  h = await harness({
     speech: undefined,
     env: { OPENROUTER_API_KEY: ENV_KEY },
     fetch: (async (url: string | URL | Request, init?: RequestInit) => {

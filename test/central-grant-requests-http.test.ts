@@ -45,7 +45,7 @@ const json = async (r: Response) => (await r.json()) as any
 const bearer = (token: string, body: unknown = BODY) => h.api(PATH, { method: "POST", cookie: null, origin: null, headers: { authorization: `Bearer ${token}` }, json: body })
 
 async function start() {
-  h = harness({ agent: { verifiers } } as any)
+  h = await harness({ agent: { verifiers } } as any)
   const client = await spoke(h, {
     hello: { harness: "opencode", harnessVersion: "2.1.4", evidence: "native", features: ["deliver", "hubPrompt"] } as any,
     sessions: [session("ses_orch", { title: "Orchestrator", owned: true, directory: "/work/hub" }), session("ses_w", { title: "Worker", owned: true, directory: "/work/hub" })],
@@ -60,7 +60,7 @@ async function start() {
 
 describe("POST /api/agent/grants/requests", () => {
   test("is an agent route", async () => {
-    h = harness({ agent: { verifiers } } as any)
+    h = await harness({ agent: { verifiers } } as any)
     expect(h.routes).toContainEqual({ method: "POST", path: PATH, access: "agent" })
   })
 

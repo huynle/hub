@@ -44,7 +44,7 @@ export function webhookRoutes(webhooks: RouteWebhooks, store?: Pick<Store, "audi
       async handle({ request, actor, user }) {
         const input = await bodyOf(request)
         const result = await webhooks.register(user.id, ownerOf(actor) ?? "user", { url: input.url, events: input.events, label: input.label })
-        store?.audit({ actor: user.id, action: "webhook.create", target: result.webhook.id, detail: new URL(result.webhook.url).host })
+        await store?.audit({ actor: user.id, action: "webhook.create", target: result.webhook.id, detail: new URL(result.webhook.url).host })
         return Response.json(result, { status: 201, headers: NO_STORE })
       },
     },
@@ -70,7 +70,7 @@ export function webhookRoutes(webhooks: RouteWebhooks, store?: Pick<Store, "audi
       allow: ALLOW,
       async handle({ params, actor, user }) {
         if (!(await webhooks.remove(user.id, params.id!, ownerOf(actor)))) throw notFound(params.id!)
-        store?.audit({ actor: user.id, action: "webhook.delete", target: params.id! })
+        await store?.audit({ actor: user.id, action: "webhook.delete", target: params.id! })
         return new Response(null, { status: 204, headers: NO_STORE })
       },
     },

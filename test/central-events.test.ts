@@ -102,7 +102,7 @@ const isType = (type: string) => (f: { data?: any }) => f.data?.type === type
 
 describe("/api/events: ids and replay", () => {
   test("every message carries an id; the first catalog carries the latest one", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     const stream = frames(await h.api("/api/events"))
     const catalog = await stream.next(isType("catalog"))
@@ -115,7 +115,7 @@ describe("/api/events: ids and replay", () => {
   })
 
   test("reconnecting with Last-Event-ID replays what was missed instead of starting over", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     const first = frames(await h.api("/api/events"))
     await first.next(isType("catalog"))
@@ -136,7 +136,7 @@ describe("/api/events: ids and replay", () => {
   })
 
   test("?last= works like Last-Event-ID (a new EventSource cannot set the header)", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     const first = frames(await h.api("/api/events"))
     const catalog = await first.next(isType("catalog"))
@@ -149,7 +149,7 @@ describe("/api/events: ids and replay", () => {
   })
 
   test("an id the hub cannot cover gets a fresh catalog and a resync marker", async () => {
-    h = harness()
+    h = await harness()
     await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     const stream = frames(await h.api("/api/events", { headers: { "last-event-id": "oldepoch.42" } }))
     await stream.next(isType("catalog"))
@@ -159,7 +159,7 @@ describe("/api/events: ids and replay", () => {
   })
 
   test("heartbeats are named ping events (visible to the page) without an id", async () => {
-    h = harness({ timing: { heartbeatMs: 30 } } as any)
+    h = await harness({ timing: { heartbeatMs: 30 } } as any)
     const stream = frames(await h.api("/api/events"))
     const ping = await stream.next((f) => f.event === "ping")
     expect(ping.id).toBeUndefined()
@@ -169,7 +169,7 @@ describe("/api/events: ids and replay", () => {
 
 describe("/api/events: lite and per-session streams", () => {
   test("?lite=1 leaves out streamed text and reasoning but keeps status and activity", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     const lite = frames(await h.api("/api/events?lite=1"))
     await lite.next(isType("catalog"))
@@ -184,7 +184,7 @@ describe("/api/events: lite and per-session streams", () => {
   })
 
   test("?lite=1&session=<id> still streams that session's tree, not others", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true }), session("ses_kid", { parentID: "ses_1" }), session("ses_2", { owned: true })] })
     const stream = frames(await h.api("/api/events?lite=1&session=ses_1"))
     await stream.next(isType("catalog"))
@@ -197,7 +197,7 @@ describe("/api/events: lite and per-session streams", () => {
   })
 
   test("replay applies the same filter", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     const first = frames(await h.api("/api/events?lite=1"))
     const catalog = await first.next(isType("catalog"))

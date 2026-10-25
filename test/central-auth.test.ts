@@ -44,37 +44,37 @@ describe("machine enrollment", () => {
     expect(() => auth.startEnrollment("x".repeat(65))).toThrow(/machine name/i)
   })
 
-  test("happy path: pending → approved, token returned exactly once", () => {
+  test("happy path: pending → approved, token returned exactly once", async () => {
     const start = auth.startEnrollment("laptop")
-    expect(auth.pollEnrollment(start.deviceCode)).toEqual({ status: "pending" })
+    expect(await auth.pollEnrollment(start.deviceCode)).toEqual({ status: "pending" })
     expect(auth.approveEnrollment(start.userCode.toLowerCase().replace("-", ""))).toBe(true)
-    const poll = auth.pollEnrollment(start.deviceCode)
+    const poll = await auth.pollEnrollment(start.deviceCode)
     expect(poll.status).toBe("approved")
     if (poll.status !== "approved") throw new Error("unreachable")
-    expect(store.findMachine(poll.machineToken)?.id).toBe(poll.machineID)
-    expect(store.findMachine(poll.machineToken)?.name).toBe("laptop")
-    expect(auth.pollEnrollment(start.deviceCode)).toEqual({ status: "expired" })
+    expect((await store.findMachine(poll.machineToken))?.id).toBe(poll.machineID)
+    expect((await store.findMachine(poll.machineToken))?.name).toBe("laptop")
+    expect(await auth.pollEnrollment(start.deviceCode)).toEqual({ status: "expired" })
     expect(auth.pendingEnrollments()).toEqual([])
   })
 
-  test("deny", () => {
+  test("deny", async () => {
     const start = auth.startEnrollment("laptop")
     expect(auth.denyEnrollment(start.userCode)).toBe(true)
-    expect(auth.pollEnrollment(start.deviceCode)).toEqual({ status: "denied" })
-    expect(auth.pollEnrollment(start.deviceCode)).toEqual({ status: "expired" })
+    expect(await auth.pollEnrollment(start.deviceCode)).toEqual({ status: "denied" })
+    expect(await auth.pollEnrollment(start.deviceCode)).toEqual({ status: "expired" })
     expect(store.machines()).toHaveLength(0)
   })
 
-  test("expiry", () => {
+  test("expiry", async () => {
     const start = auth.startEnrollment("laptop")
     now += 10 * 60_000 + 1
     expect(auth.approveEnrollment(start.userCode)).toBe(false)
-    expect(auth.pollEnrollment(start.deviceCode)).toEqual({ status: "expired" })
+    expect(await auth.pollEnrollment(start.deviceCode)).toEqual({ status: "expired" })
     expect(auth.pendingEnrollments()).toEqual([])
   })
 
-  test("unknown codes", () => {
-    expect(auth.pollEnrollment("nope")).toEqual({ status: "expired" })
+  test("unknown codes", async () => {
+    expect(await auth.pollEnrollment("nope")).toEqual({ status: "expired" })
     expect(auth.approveEnrollment("BBBB-BBBB")).toBe(false)
     expect(auth.denyEnrollment("BBBB-BBBB")).toBe(false)
   })
@@ -88,40 +88,40 @@ describe("machine enrollment", () => {
 })
 
 describe("device pairing", () => {
-  test("6-digit code, single use, creates a device", () => {
+  test("6-digit code, single use, creates a device", async () => {
     const { code, expiresAt } = auth.issuePairCode()
     expect(code).toMatch(/^\d{6}$/)
     expect(expiresAt).toBe(now + 5 * 60_000)
-    const paired = auth.pair(code, "phone")
-    expect(paired && store.findDevice(paired.token)?.name).toBe("phone")
-    expect(auth.pair(code, "phone2")).toBeUndefined()
+    const paired = await auth.pair(code, "phone")
+    expect(paired && (await store.findDevice(paired.token))?.name).toBe("phone")
+    expect(await auth.pair(code, "phone2")).toBeUndefined()
     expect(store.devices()).toHaveLength(1)
   })
 
-  test("expired codes fail", () => {
+  test("expired codes fail", async () => {
     const { code } = auth.issuePairCode()
     now += 5 * 60_000 + 1
-    expect(auth.pair(code, "phone")).toBeUndefined()
+    expect(await auth.pair(code, "phone")).toBeUndefined()
   })
 
-  test("defaults and trims the device name", () => {
-    const paired = auth.pair(auth.issuePairCode().code, "  ")
+  test("defaults and trims the device name", async () => {
+    const paired = await auth.pair(auth.issuePairCode().code, "  ")
     expect(paired?.device.name).toBe("Device")
   })
 
-  test("failed attempts are rate limited globally, even for a valid code", () => {
+  test("failed attempts are rate limited globally, even for a valid code", async () => {
     const { code } = auth.issuePairCode()
     const wrong = code === "000000" ? "000001" : "000000"
-    for (let i = 0; i < 10; i++) expect(auth.pair(wrong, "x")).toBeUndefined()
-    expect(() => auth.pair(code, "phone")).toThrow(RateLimitError)
+    for (let i = 0; i < 10; i++) expect(await auth.pair(wrong, "x")).toBeUndefined()
+    await expect(auth.pair(code, "phone")).rejects.toThrow(RateLimitError)
     now += 60_001
-    expect(auth.pair(code, "phone")).toBeDefined()
+    expect(await auth.pair(code, "phone")).toBeDefined()
   })
 
-  test("bootstrap code only while no devices exist", () => {
+  test("bootstrap code only while no devices exist", async () => {
     const boot = auth.bootstrapCode()
     expect(boot?.code).toMatch(/^\d{6}$/)
-    auth.pair(boot!.code, "first")
+    await auth.pair(boot!.code, "first")
     expect(auth.bootstrapCode()).toBeUndefined()
   })
 })
@@ -146,15 +146,15 @@ describe("login links", () => {
 describe("app link codes", () => {
   const KEY = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE" + "A".repeat(88)
 
-  test("256-bit base64url code, 5 minutes, single use, creates a device with a token", () => {
+  test("256-bit base64url code, 5 minutes, single use, creates a device with a token", async () => {
     const { code, expiresAt } = auth.issueLinkCode()
     expect(code).toMatch(/^[A-Za-z0-9_-]{43}$/)
     expect(LINK_TTL_MS).toBe(5 * 60_000)
     expect(expiresAt).toBe(now + LINK_TTL_MS)
-    const linked = auth.redeemLink(code, "Android (Pixel 9)")
-    expect(linked && store.findDevice(linked.token)?.id).toBe(linked!.device.id)
+    const linked = await auth.redeemLink(code, "Android (Pixel 9)")
+    expect(linked && (await store.findDevice(linked.token))?.id).toBe(linked!.device.id)
     expect(linked?.device.name).toBe("Android (Pixel 9)")
-    expect(auth.redeemLink(code, "again")).toBeUndefined()
+    expect(await auth.redeemLink(code, "again")).toBeUndefined()
     expect(store.devices()).toHaveLength(1)
   })
 
@@ -162,73 +162,73 @@ describe("app link codes", () => {
     expect(auth.issueLinkCode().code).not.toBe(auth.issueLinkCode().code)
   })
 
-  test("expired link codes fail", () => {
+  test("expired link codes fail", async () => {
     const { code } = auth.issueLinkCode()
     now += LINK_TTL_MS + 1
-    expect(auth.redeemLink(code, "phone")).toBeUndefined()
+    expect(await auth.redeemLink(code, "phone")).toBeUndefined()
     expect(store.devices()).toHaveLength(0)
   })
 
-  test("still valid right at expiry", () => {
+  test("still valid right at expiry", async () => {
     const { code } = auth.issueLinkCode()
     now += LINK_TTL_MS
-    expect(auth.redeemLink(code, "phone")).toBeDefined()
+    expect(await auth.redeemLink(code, "phone")).toBeDefined()
   })
 
-  test("the device belongs to the issuing user", () => {
-    const user = store.upsertUser({ email: "a@example.com", role: "user" })
-    const linked = auth.redeemLink(auth.issueLinkCode(user.id).code, "phone")
+  test("the device belongs to the issuing user", async () => {
+    const user = await store.upsertUser({ email: "a@example.com", role: "user" })
+    const linked = await auth.redeemLink(auth.issueLinkCode(user.id).code, "phone")
     expect(linked?.device.ownerID).toBe(user.id)
   })
 
-  test("a disabled (or missing) owner cannot redeem, and the code is spent", () => {
-    const user = store.upsertUser({ email: "a@example.com", role: "user" })
+  test("a disabled (or missing) owner cannot redeem, and the code is spent", async () => {
+    const user = await store.upsertUser({ email: "a@example.com", role: "user" })
     const { code } = auth.issueLinkCode(user.id)
-    store.setUser(user.id, { disabled: true })
-    expect(auth.redeemLink(code, "phone")).toBeUndefined()
-    store.setUser(user.id, { disabled: false })
-    expect(auth.redeemLink(code, "phone")).toBeUndefined()
-    expect(auth.redeemLink(auth.issueLinkCode("usr_gone").code, "phone")).toBeUndefined()
+    await store.setUser(user.id, { disabled: true })
+    expect(await auth.redeemLink(code, "phone")).toBeUndefined()
+    await store.setUser(user.id, { disabled: false })
+    expect(await auth.redeemLink(code, "phone")).toBeUndefined()
+    expect(await auth.redeemLink(auth.issueLinkCode("usr_gone").code, "phone")).toBeUndefined()
     expect(store.devices()).toHaveLength(0)
   })
 
-  test("sanitises the device name: default, whitespace, control characters, 64 characters", () => {
-    expect(auth.redeemLink(auth.issueLinkCode().code, undefined)?.device.name).toBe("App")
-    expect(auth.redeemLink(auth.issueLinkCode().code, "   ")?.device.name).toBe("App")
-    expect(auth.redeemLink(auth.issueLinkCode().code, 42)?.device.name).toBe("App")
-    expect(auth.redeemLink(auth.issueLinkCode().code, "  My\n\tPhone\u0000 \u202e ")?.device.name).toBe("My Phone")
-    const long = auth.redeemLink(auth.issueLinkCode().code, "x".repeat(200))?.device.name
+  test("sanitises the device name: default, whitespace, control characters, 64 characters", async () => {
+    expect((await auth.redeemLink(auth.issueLinkCode().code, undefined))?.device.name).toBe("App")
+    expect((await auth.redeemLink(auth.issueLinkCode().code, "   "))?.device.name).toBe("App")
+    expect((await auth.redeemLink(auth.issueLinkCode().code, 42))?.device.name).toBe("App")
+    expect((await auth.redeemLink(auth.issueLinkCode().code, "  My\n\tPhone\u0000 \u202e "))?.device.name).toBe("My Phone")
+    const long = (await auth.redeemLink(auth.issueLinkCode().code, "x".repeat(200)))?.device.name
     expect(long).toBe("x".repeat(64))
   })
 
-  test("stores an optional public key; rejects malformed or oversized ones without spending the code", () => {
-    const linked = auth.redeemLink(auth.issueLinkCode().code, "phone", KEY)
+  test("stores an optional public key; rejects malformed or oversized ones without spending the code", async () => {
+    const linked = await auth.redeemLink(auth.issueLinkCode().code, "phone", KEY)
     expect(linked?.device.publicKey).toBe(KEY)
     const pem = `-----BEGIN PUBLIC KEY-----\n${KEY.slice(0, 64)}\n${KEY.slice(64)}\n-----END PUBLIC KEY-----\n`
-    expect(auth.redeemLink(auth.issueLinkCode().code, "phone", pem)?.device.publicKey).toBe(pem.trim())
-    expect(auth.redeemLink(auth.issueLinkCode().code, "phone")?.device.publicKey).toBeUndefined()
-    expect(auth.redeemLink(auth.issueLinkCode().code, "phone", "")?.device.publicKey).toBeUndefined()
+    expect((await auth.redeemLink(auth.issueLinkCode().code, "phone", pem))?.device.publicKey).toBe(pem.trim())
+    expect((await auth.redeemLink(auth.issueLinkCode().code, "phone"))?.device.publicKey).toBeUndefined()
+    expect((await auth.redeemLink(auth.issueLinkCode().code, "phone", ""))?.device.publicKey).toBeUndefined()
     const { code } = auth.issueLinkCode()
-    expect(() => auth.redeemLink(code, "phone", "not a key!")).toThrow(ValidationError)
-    expect(() => auth.redeemLink(code, "phone", "A".repeat(4097))).toThrow(ValidationError)
-    expect(() => auth.redeemLink(code, "phone", 7)).toThrow(ValidationError)
-    expect(() => auth.redeemLink(code, "phone", "abc")).toThrow(ValidationError)
-    expect(auth.redeemLink(code, "phone")).toBeDefined()
+    await expect(auth.redeemLink(code, "phone", "not a key!")).rejects.toThrow(ValidationError)
+    await expect(auth.redeemLink(code, "phone", "A".repeat(4097))).rejects.toThrow(ValidationError)
+    await expect(auth.redeemLink(code, "phone", 7)).rejects.toThrow(ValidationError)
+    await expect(auth.redeemLink(code, "phone", "abc")).rejects.toThrow(ValidationError)
+    expect(await auth.redeemLink(code, "phone")).toBeDefined()
   })
 
-  test("link codes are purpose-bound: not pairing codes or login codes, and vice versa", () => {
+  test("link codes are purpose-bound: not pairing codes or login codes, and vice versa", async () => {
     const link = auth.issueLinkCode().code
-    expect(auth.pair(link, "phone")).toBeUndefined()
+    expect(await auth.pair(link, "phone")).toBeUndefined()
     expect(auth.redeemLogin(link)).toBeUndefined()
-    expect(auth.redeemLink(link, "phone")).toBeDefined()
-    expect(auth.redeemLink(auth.issueLoginCode().code, "phone")).toBeUndefined()
-    expect(auth.redeemLink(auth.issuePairCode().code, "phone")).toBeUndefined()
-    expect(auth.redeemLink(undefined, "phone")).toBeUndefined()
+    expect(await auth.redeemLink(link, "phone")).toBeDefined()
+    expect(await auth.redeemLink(auth.issueLoginCode().code, "phone")).toBeUndefined()
+    expect(await auth.redeemLink(auth.issuePairCode().code, "phone")).toBeUndefined()
+    expect(await auth.redeemLink(undefined, "phone")).toBeUndefined()
     expect(store.devices()).toHaveLength(1)
   })
 
-  test("failed redeems do not touch the pairing rate limiter", () => {
-    for (let i = 0; i < 50; i++) expect(auth.redeemLink(`bad${i}`, "x")).toBeUndefined()
-    expect(auth.pair(auth.issuePairCode().code, "phone")).toBeDefined()
+  test("failed redeems do not touch the pairing rate limiter", async () => {
+    for (let i = 0; i < 50; i++) expect(await auth.redeemLink(`bad${i}`, "x")).toBeUndefined()
+    expect(await auth.pair(auth.issuePairCode().code, "phone")).toBeDefined()
   })
 })

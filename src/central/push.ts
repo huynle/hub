@@ -4,7 +4,7 @@
 // transcript beyond one spoken text or a short reason, shortened. Each device picks the kinds it wants, may set quiet
 // hours, and users mute sessions.
 import webpush from "web-push"
-import { type PushPrefs, type PushTarget, type QuietHours, type Store } from "./store"
+import { type PushPrefs, type PushTarget, type QuietHours, type Store, type VapidKeys } from "./store"
 
 export { DEFAULT_PUSH_PREFS, type PushPrefs } from "./store"
 
@@ -351,8 +351,8 @@ export class Push {
   }
 
   /** The VAPID public key (applicationServerKey); generated and persisted on first use. */
-  publicKey(): string {
-    return this.keys().publicKey
+  async publicKey(): Promise<string> {
+    return (await this.keys()).publicKey
   }
 
   /**
@@ -410,7 +410,7 @@ export class Push {
     targets: readonly { endpoint: string; keys: PushTarget["keys"] }[],
     payload: PushPayload,
   ): Promise<{ delivered: number; failed: Array<{ host: string; status?: number }> }> {
-    const keys = this.keys()
+    const keys = await this.keys()
     const options: PushSendOptions = {
       ...sendOptionsFor(payload.kind),
       timeout: SEND_TIMEOUT_MS,
@@ -427,7 +427,9 @@ export class Push {
       const status = statusOf(result.reason)
       const endpoint = targets[index]!.endpoint
       failed.push({ host: hostOf(endpoint), ...(status !== undefined ? { status } : {}) })
-      if (status === 404 || status === 410) this.store.dropPushSubscription(endpoint)
+      if (status === 404 || status === 410) {
+        void this.store.dropPushSubscription(endpoint).catch((cause: unknown) => console.error(`[hub] push subscription not dropped: ${(cause as Error)?.message ?? cause}`))
+      }
       else console.error(`[hub] push to ${hostOf(endpoint)} failed: ${status ?? (result.reason as Error)?.message}`)
     })
     return { delivered, failed }
@@ -442,12 +444,11 @@ export class Push {
     return true
   }
 
-  private keys() {
+  /** The stored keys; the first call generates a pair (when pods race, every pod gets the pair stored first). */
+  private async keys(): Promise<VapidKeys> {
     const existing = this.store.vapid()
     if (existing) return existing
-    const keys = webpush.generateVAPIDKeys()
-    this.store.setVapid(keys)
-    return keys
+    return this.store.setVapid(webpush.generateVAPIDKeys())
   }
 }
 

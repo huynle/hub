@@ -307,8 +307,8 @@ describe.skipIf(!run || !hubImage)("a full sandboxed launch (needs HUB_IT_OPENSH
       // (from the hub's public URL) name the same hub: host.openshell.internal:<port>.
       const port = freePort()
       const config = centralConfig({ HUB_PORT: String(port), HUB_PUBLIC_URL: `http://127.0.0.1:${port}`, HUB_STATE_DIR: mkdtempSync(path.join(tmp, "state-")) })
-      h = harness({ config })
-      const machine = h.store.addMachine("hub-it")
+      h = await harness({ config })
+      const machine = await h.store.addMachine("hub-it")
       const root = path.join(tmp, "full")
       mkdirSync(root, { recursive: true })
       const profiles = normalizeOpenShellProfiles(provider ? { default: { providers: [provider] } } : undefined)

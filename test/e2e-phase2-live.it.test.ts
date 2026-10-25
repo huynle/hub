@@ -69,9 +69,9 @@ describe.skipIf(!run)("live: a session messages another through a real hub", () 
   })
 
   test("session 1's model calls hub msg; session 2's model is handed the envelope", async () => {
-    const h = harness()
+    const h = await harness()
     cleanups.push(() => h.stop())
-    const machine = h.store.addMachine("it-box")
+    const machine = await h.store.addMachine("it-box")
     let peer = ""
     const model = stubModel(() => peer)
     cleanups.push(() => model.stop())

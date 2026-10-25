@@ -27,7 +27,7 @@ const as = (sessionID: string, pathname: string, body: unknown) =>
   h.api(pathname, { method: "POST", json: body, cookie: null, origin: null, headers: { authorization: `Bearer ${TOKENS[sessionID]!}` } })
 
 async function start() {
-  h = harness({ agent: { verifiers } } as any)
+  h = await harness({ agent: { verifiers } } as any)
   const client = await spoke(h, {
     hello: { harness: "opencode", harnessVersion: "2.1.4", evidence: "native", features: ["deliver"] },
     sessions: [session("ses_1", { title: "API refactor", owned: true }), session("ses_2", { title: "Web work", owned: true })],

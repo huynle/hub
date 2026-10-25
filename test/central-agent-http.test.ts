@@ -27,7 +27,7 @@ afterEach(async () => {
   idp = undefined
 })
 
-const start = (extra: Parameters<typeof harness>[0] = {}) => (h = harness({ agent: { verifiers }, ...extra } as any))
+const start = async (extra: Parameters<typeof harness>[0] = {}) => (h = await harness({ agent: { verifiers }, ...extra } as any))
 /** The device token: the same secret as the device cookie. */
 const deviceToken = () => h.cookie.slice("voice_device=".length)
 /** A bearer request: no cookie and no Origin (a native app or CLI). */
@@ -37,7 +37,7 @@ const json = async (r: Response) => (await r.json()) as any
 
 describe("GET /.well-known/hub", () => {
   test("public discovery document, no credential needed, cached briefly", async () => {
-    start()
+    await start()
     const res = await h.api("/.well-known/hub", { cookie: null, origin: null })
     expect(res.status).toBe(200)
     expect(res.headers.get("cache-control")).toBe("public, max-age=60")
@@ -52,7 +52,7 @@ describe("GET /.well-known/hub", () => {
 
   test("an OIDC hub names its issuer; pairing codes still work there", async () => {
     idp = fakeProvider()
-    start({ env: oidcEnv(idp), noDevice: true })
+    await start({ env: oidcEnv(idp), noDevice: true })
     const body = await json(await h.api("/.well-known/hub", { cookie: null, origin: null }))
     expect(body.auth).toEqual({ modes: ["oidc", "pairing"], oidc: { issuer: idp.issuer } })
   })
@@ -60,7 +60,7 @@ describe("GET /.well-known/hub", () => {
 
 describe("GET /api/agent/whoami", () => {
   test("cookie: the user actor via cookie", async () => {
-    start()
+    await start()
     const me = await json(await h.api("/api/me"))
     const res = await h.api("/api/agent/whoami")
     expect(res.status).toBe(200)
@@ -71,7 +71,7 @@ describe("GET /api/agent/whoami", () => {
   })
 
   test("device token: the same device via device-token", async () => {
-    start()
+    await start()
     const me = await json(await h.api("/api/me"))
     const res = await bearer("/api/agent/whoami", deviceToken())
     expect(res.status).toBe(200)
@@ -79,7 +79,7 @@ describe("GET /api/agent/whoami", () => {
   })
 
   test("session and app tokens see their own actor", async () => {
-    start()
+    await start()
     expect((await json(await bearer("/api/agent/whoami", SESSION_TOKEN))).actor).toEqual({ kind: "session", userID: "local", machineID: "mch_x", sessionID: "ses_1" })
     expect((await json(await bearer("/api/agent/whoami", APP_TOKEN))).actor).toEqual({ kind: "app", userID: "local", tokenID: "tok_1", scopes: ["sessions:read"] })
   })
@@ -87,7 +87,7 @@ describe("GET /api/agent/whoami", () => {
 
 describe("device token on console routes (native apps)", () => {
   test("reads and writes like the cookie, without Origin", async () => {
-    start()
+    await start()
     const viaCookie = await json(await h.api("/api/me"))
     const res = await bearer("/api/me", deviceToken())
     expect(res.status).toBe(200)
@@ -98,7 +98,7 @@ describe("device token on console routes (native apps)", () => {
   })
 
   test("session ownership and admin checks apply as for the cookie", async () => {
-    start()
+    await start()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     try {
       expect((await bearer("/api/sessions/ses_1", deviceToken())).status).toBe(200)
@@ -110,7 +110,7 @@ describe("device token on console routes (native apps)", () => {
   })
 
   test("the cookie still needs the same origin for writes", async () => {
-    start()
+    await start()
     const res = await h.api("/api/prefs/view", { method: "PUT", origin: null, json: { pinnedSessions: [] } })
     expect(res.status).toBe(403)
     expect(await res.json()).toEqual({ error: "Cross-origin request refused" })
@@ -119,7 +119,7 @@ describe("device token on console routes (native apps)", () => {
 
 describe("session and app tokens never reach console routes", () => {
   test("every non-public console route refuses them with 403 forbidden (old envelope) and nothing runs", async () => {
-    start()
+    await start()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     try {
       const consoleRoutes = h.routes.filter((r) => r.access !== "public" && r.access !== "agent")
@@ -143,7 +143,7 @@ describe("session and app tokens never reach console routes", () => {
 
 describe("credential errors", () => {
   test("cookie and bearer together: 400 invalid, in each route class's envelope", async () => {
-    start()
+    await start()
     const mixed = { headers: { authorization: `Bearer ${deviceToken()}` } }
     const consoleRes = await h.api("/api/me", mixed)
     expect(consoleRes.status).toBe(400)
@@ -154,7 +154,7 @@ describe("credential errors", () => {
   })
 
   test("a foreign bearer next to the cookie (auth proxy) is ignored; the same-origin check still applies", async () => {
-    start()
+    await start()
     const proxied = { headers: { authorization: "Bearer proxy-issued-jwt" } }
     const consoleRes = await h.api("/api/me", proxied)
     expect(consoleRes.status).toBe(200)
@@ -166,7 +166,7 @@ describe("credential errors", () => {
   })
 
   test("unknown bearer: 401 with the agent envelope on /api/agent, the old envelope elsewhere", async () => {
-    start()
+    await start()
     const agentRes = await bearer("/api/agent/whoami", "nope")
     expect(agentRes.status).toBe(401)
     expect((await agentRes.json()).error).toMatchObject({ code: "unauthorized" })
@@ -178,7 +178,7 @@ describe("credential errors", () => {
   })
 
   test("expired token: 401 token_expired", async () => {
-    start()
+    await start()
     const agentRes = await bearer("/api/agent/whoami", EXPIRED_TOKEN)
     expect(agentRes.status).toBe(401)
     expect((await agentRes.json()).error.code).toBe("token_expired")
@@ -186,7 +186,7 @@ describe("credential errors", () => {
   })
 
   test("no credential on /api/agent: 401 unauthorized envelope; console keeps its message", async () => {
-    start()
+    await start()
     const res = await h.api("/api/agent/whoami", { cookie: null })
     expect(res.status).toBe(401)
     expect((await res.json()).error.code).toBe("unauthorized")
@@ -194,14 +194,14 @@ describe("credential errors", () => {
   })
 
   test("unknown agent route: 404 not_found once signed in", async () => {
-    start()
+    await start()
     const res = await h.api("/api/agent/nope")
     expect(res.status).toBe(404)
     expect((await res.json()).error.code).toBe("not_found")
   })
 })
 
-describe("/api/agent route classes and same-origin", () => {
+describe("/api/agent route classes and same-origin", async () => {
   const routes = [
     { method: "POST", path: "/api/agent/test/echo/:addr", allow: { session: true }, handle: ({ actor, params }: any) => Response.json({ kind: actor.kind, addr: params.addr }) },
     { method: "POST", path: "/api/agent/test/manage", allow: {}, handle: () => Response.json({ ok: true }) },
@@ -209,10 +209,10 @@ describe("/api/agent route classes and same-origin", () => {
     { method: "POST", path: "/api/agent/test/launch", allow: { scope: "sessions:launch" }, handle: () => Response.json({ ok: true }) },
     { method: "POST", path: "/api/agent/test/boom", allow: {}, handle: () => { throw new Error("internal detail") } },
   ]
-  const startWithRoutes = () => start({ agent: { verifiers, routes } } as any)
+  const startWithRoutes = async () => await start({ agent: { verifiers, routes } } as any)
 
   test("bearer POST without Origin is accepted (device, session token); cookie POST needs the same origin", async () => {
-    startWithRoutes()
+    await startWithRoutes()
     expect(await json(await bearer("/api/agent/test/echo/%40api", deviceToken(), { method: "POST", json: {} }))).toEqual({ kind: "user", addr: "@api" })
     expect(await json(await bearer("/api/agent/test/echo/x", SESSION_TOKEN, { method: "POST", json: {} }))).toEqual({ kind: "session", addr: "x" })
     expect(await json(await h.api("/api/agent/test/echo/x", { method: "POST", json: {} }))).toEqual({ kind: "user", addr: "x" })
@@ -224,7 +224,7 @@ describe("/api/agent route classes and same-origin", () => {
   })
 
   test("user-only routes (token management) refuse session and app tokens", async () => {
-    startWithRoutes()
+    await startWithRoutes()
     expect((await bearer("/api/agent/test/manage", deviceToken(), { method: "POST" })).status).toBe(200)
     for (const token of [SESSION_TOKEN, APP_TOKEN]) {
       const res = await bearer("/api/agent/test/manage", token, { method: "POST" })
@@ -234,7 +234,7 @@ describe("/api/agent route classes and same-origin", () => {
   })
 
   test("app tokens by scope only", async () => {
-    startWithRoutes()
+    await startWithRoutes()
     expect((await bearer("/api/agent/test/read", APP_TOKEN, { method: "POST" })).status).toBe(200)
     expect((await bearer("/api/agent/test/launch", APP_TOKEN, { method: "POST" })).status).toBe(403)
     expect((await bearer("/api/agent/test/echo/x", APP_TOKEN, { method: "POST" })).status).toBe(403)
@@ -242,7 +242,7 @@ describe("/api/agent route classes and same-origin", () => {
   })
 
   test("handler failures answer the agent envelope without internals", async () => {
-    startWithRoutes()
+    await startWithRoutes()
     const original = console.error
     console.error = () => {}
     try {
@@ -254,8 +254,8 @@ describe("/api/agent route classes and same-origin", () => {
     }
   })
 
-  test("agent routes are in the route table as access agent", () => {
-    startWithRoutes()
+  test("agent routes are in the route table as access agent", async () => {
+    await startWithRoutes()
     expect(h.routes).toContainEqual({ method: "GET", path: "/api/agent/whoami", access: "agent" })
     expect(h.routes).toContainEqual({ method: "POST", path: "/api/agent/test/echo/:addr", access: "agent" })
   })

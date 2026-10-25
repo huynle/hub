@@ -39,7 +39,7 @@ const OPTIONS = [
 ]
 
 async function start() {
-  h = harness({ agent: { verifiers } } as any)
+  h = await harness({ agent: { verifiers } } as any)
   const sessions = [session("ses_1", { title: "API refactor", owned: true }), session("ses_2", { title: "Web work", owned: true })]
   const client = await spoke(h, { hello: { harness: "opencode", harnessVersion: "2.1.4", evidence: "native", features: ["deliver"] }, sessions })
   const requests: any[] = []
@@ -173,7 +173,7 @@ describe("answering on the console", () => {
   test("tap Decisions: a device token (native app) is forbidden, the console cookie answers", async () => {
     await start()
     const { decision } = await json(await askMe({ tier: "tap" }))
-    const { token } = h.store.addDevice("phone app")
+    const { token } = await h.store.addDevice("phone app")
     const res = await bearer(`/api/decisions/${decision.id}/answer`, token, { method: "POST", json: { option: "go" } })
     expect(res.status).toBe(403)
     expect(await json(res)).toMatchObject({ code: "forbidden" })
@@ -183,7 +183,7 @@ describe("answering on the console", () => {
   test("confirm Decisions answer from a device token too", async () => {
     await start()
     const { decision } = await json(await askMe())
-    const { token } = h.store.addDevice("phone app")
+    const { token } = await h.store.addDevice("phone app")
     expect((await bearer(`/api/decisions/${decision.id}/answer`, token, { method: "POST", json: { option: "go" } })).status).toBe(200)
   })
 })

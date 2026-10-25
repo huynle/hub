@@ -180,8 +180,8 @@ beforeAll(async () => {
   const config = centralConfig({ HUB_PORT: "0", HUB_PUBLIC_URL: PUBLIC, HUB_STATE_DIR: dir("state") }, "/home/none", {
     agents: { launches: { maxActive: 1 }, webhooks: { allowPrivate: true } },
   })
-  h = harness({ config, now: () => Date.now() + skew })
-  const machine = h.store.addMachine("mbp")
+  h = await harness({ config, now: () => Date.now() + skew })
+  const machine = await h.store.addMachine("mbp")
   machineID = machine.machine.id
 
   // The machine as `hub node` finds it: config.json (the spoke's: hub URL, machine token) and node.json beside it.
@@ -437,8 +437,8 @@ describe("app tokens", () => {
 
 describe("tenancy", () => {
   test("another user sees none of these launches or webhooks; GET and DELETE of a launch are 404", async () => {
-    const bob = h.store.upsertUser({ email: "bob@example.com", role: "user" })
-    const cookie = `voice_device=${h.store.addDevice("bob phone", bob.id).token}`
+    const bob = await h.store.upsertUser({ email: "bob@example.com", role: "user" })
+    const cookie = `voice_device=${(await h.store.addDevice("bob phone", bob.id)).token}`
     const mine = await h.launches.list(USER)
     expect(mine.length).toBeGreaterThan(0)
     expect((await body(await h.api("/api/agent/launches", { cookie }))).launches).toEqual([])

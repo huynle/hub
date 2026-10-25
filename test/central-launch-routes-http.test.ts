@@ -18,7 +18,7 @@ test("HUB_FEATURES announces launches", () => {
 })
 
 test("a user launches, lists, reads and stops a launch; each change is an SSE launch event and reaches launchFeed", async () => {
-  h = harness()
+  h = await harness()
   const fed: Array<{ userID: string; id: string; state: string }> = []
   h.launchFeed.subscribe((userID, launch) => void fed.push({ userID, id: launch.id, state: launch.state }))
   const events = sse(await h.api("/api/events"))
@@ -51,7 +51,7 @@ test("a user launches, lists, reads and stops a launch; each change is an SSE la
 })
 
 test("an app token launches only with sessions:launch and a launch grant on the repo; the kill switch pauses it", async () => {
-  h = harness()
+  h = await harness()
   const token = await json(await h.api("/api/agent/app-tokens", { method: "POST", json: { scopes: ["sessions:launch"] } }))
   const asApp = (pathname: string, init: RequestInit & { json?: unknown } = {}) => h.api(pathname, { ...init, cookie: null, origin: null, headers: { authorization: `Bearer ${token.token}` } })
   expect((await asApp("/api/agent/launches", { method: "POST", json: body })).status).toBe(403)

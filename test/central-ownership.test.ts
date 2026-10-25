@@ -13,9 +13,9 @@ afterEach(async () => {
   h = idp = undefined
 })
 
-function oidcHub(env: Record<string, string> = {}): Harness {
+async function oidcHub(env: Record<string, string> = {}): Promise<Harness> {
   idp = fakeProvider()
-  h = harness({ env: oidcEnv(idp, env), noDevice: true })
+  h = await harness({ env: oidcEnv(idp, env), noDevice: true })
   return h
 }
 
@@ -30,7 +30,7 @@ async function enroll(hub: Harness, name = "laptop") {
 
 describe("enrollment", () => {
   test("the approving user owns the machine; approve and deny are audited", async () => {
-    const hub = oidcHub()
+    const hub = await oidcHub()
     const alice = await signIn(hub.url, idp!, "alice@example.com")
     const aliceID = (await userOf(hub, alice.cookie!)).id
     const { start, poll } = await enroll(hub)
@@ -45,7 +45,7 @@ describe("enrollment", () => {
   })
 
   test("pairing mode: the local owner owns approved machines", async () => {
-    h = harness()
+    h = await harness()
     const { start, poll } = await enroll(h)
     await h.api(`/api/enrollments/${start.userCode}/approve`, { method: "POST" })
     const approved = await poll()
@@ -54,7 +54,7 @@ describe("enrollment", () => {
 
   test("oidc mode: no loopback auto-approve and no bootstrap pairing code", async () => {
     idp = fakeProvider()
-    h = harness({ env: oidcEnv(idp, { HUB_HOST: "127.0.0.1", HUB_PUBLIC_URL: "" }), noDevice: true })
+    h = await harness({ env: oidcEnv(idp, { HUB_HOST: "127.0.0.1", HUB_PUBLIC_URL: "" }), noDevice: true })
     const { start, poll } = await enroll(h)
     expect(start.autoApproved).toBeUndefined()
     expect(await poll()).toEqual({ status: "pending" })
@@ -62,7 +62,7 @@ describe("enrollment", () => {
   })
 
   test("pairing mode keeps loopback auto-approve and the bootstrap code", async () => {
-    h = harness({ env: { HUB_HOST: "127.0.0.1", HUB_PUBLIC_URL: "" }, noDevice: true })
+    h = await harness({ env: { HUB_HOST: "127.0.0.1", HUB_PUBLIC_URL: "" }, noDevice: true })
     expect(h.auth.bootstrapCode()).toBeDefined()
     const { start } = await enroll(h)
     expect(start.autoApproved).toBe(true)
@@ -71,9 +71,9 @@ describe("enrollment", () => {
 
 describe("spoke pairing codes and login links", () => {
   test("pairCode from a spoke pairs a device for the machine's owner (audited)", async () => {
-    const hub = oidcHub()
-    const bob = hub.store.upsertUser({ email: "bob@example.com", role: "user" })
-    const { token } = hub.store.addMachine("bob laptop", bob.id)
+    const hub = await oidcHub()
+    const bob = await hub.store.upsertUser({ email: "bob@example.com", role: "user" })
+    const { token } = await hub.store.addMachine("bob laptop", bob.id)
     const client = await connect(hub, token)
     client.send(hello("p1"))
     await client.next((f) => f.t === "welcome")
@@ -88,10 +88,10 @@ describe("spoke pairing codes and login links", () => {
   })
 
   test("openLink signs a browser in as the machine's owner, replacing another user's cookie", async () => {
-    const hub = oidcHub()
+    const hub = await oidcHub()
     const alice = await signIn(hub.url, idp!, "alice@example.com")
-    const bob = hub.store.upsertUser({ email: "bob@example.com", role: "user" })
-    const { token } = hub.store.addMachine("bob laptop", bob.id)
+    const bob = await hub.store.upsertUser({ email: "bob@example.com", role: "user" })
+    const { token } = await hub.store.addMachine("bob laptop", bob.id)
     const client = await connect(hub, token)
     client.send(hello("p1"))
     await client.next((f) => f.t === "welcome")
@@ -109,8 +109,8 @@ describe("spoke pairing codes and login links", () => {
   })
 
   test("openLink with a cookie of the same owner keeps the device", async () => {
-    h = harness()
-    const client = await connect(h, h.store.addMachine("m").token)
+    h = await harness()
+    const client = await connect(h, (await h.store.addMachine("m")).token)
     client.send(hello("p1"))
     await client.next((f) => f.t === "welcome")
     client.send({ t: "req", id: "r3", req: { op: "openLink" } })
@@ -125,11 +125,11 @@ describe("spoke pairing codes and login links", () => {
 
 describe("disabled users", () => {
   test("their devices get 401 and their machines cannot connect", async () => {
-    const hub = oidcHub()
+    const hub = await oidcHub()
     const alice = await signIn(hub.url, idp!, "alice@example.com")
     const aliceID = (await userOf(hub, alice.cookie!)).id
-    const { token } = hub.store.addMachine("alice laptop", aliceID)
-    hub.store.setUser(aliceID, { disabled: true })
+    const { token } = await hub.store.addMachine("alice laptop", aliceID)
+    await hub.store.setUser(aliceID, { disabled: true })
     expect((await hub.api("/api/me", { cookie: alice.cookie })).status).toBe(401)
     expect((await hub.api("/api/machines", { cookie: alice.cookie })).status).toBe(401)
     await expect(connect(hub, token)).rejects.toThrow()
@@ -138,11 +138,11 @@ describe("disabled users", () => {
   })
 
   test("pairing codes and login links issued for a disabled owner are refused", async () => {
-    const hub = oidcHub()
-    const bob = hub.store.upsertUser({ email: "bob@example.com", role: "user" })
+    const hub = await oidcHub()
+    const bob = await hub.store.upsertUser({ email: "bob@example.com", role: "user" })
     const pair = hub.auth.issuePairCode(bob.id)
     const login = hub.auth.issueLoginCode(bob.id)
-    hub.store.setUser(bob.id, { disabled: true })
+    await hub.store.setUser(bob.id, { disabled: true })
     expect((await hub.api("/api/pair", { ...post({ code: pair.code, deviceName: "x" }), cookie: null })).status).toBe(401)
     expect((await hub.api(`/login?code=${login.code}&next=/`, { cookie: null })).status).toBe(401)
     expect(hub.store.devices().length).toBe(0)

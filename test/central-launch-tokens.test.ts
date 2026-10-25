@@ -37,12 +37,12 @@ const forge = (claims: Record<string, unknown>, secret: Buffer = keys.active().s
   return `${prefix}.${payload}.${sig}`
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   clock = 1_800_000_000_000
   const dir = mkdtempSync(path.join(tmpdir(), "hub-launch-tokens-"))
   store = Store.open(dir, () => clock)
   keys = TokenKeys.open(dir, { env: {}, now: () => clock })
-  machineID = store.addMachine("laptop").machine.id
+  machineID = (await store.addMachine("laptop")).machine.id
   launches = new Map()
   setLaunch("lch_1", { state: "provisioning", machineID })
   tokens = make()
@@ -60,9 +60,9 @@ describe("mint", () => {
   })
 
   test("carries the current user and machine epochs", async () => {
-    store.bumpUserEpoch("local")
-    store.bumpMachineEpoch(machineID)
-    store.bumpMachineEpoch(machineID)
+    await store.bumpUserEpoch("local")
+    await store.bumpMachineEpoch(machineID)
+    await store.bumpMachineEpoch(machineID)
     const { claims } = parts((await tokens.mint(machineID, "lch_1"))!.token)
     expect([claims.ue, claims.me]).toEqual([1, 2])
   })
@@ -83,7 +83,7 @@ describe("mint", () => {
     expect(await tokens.mint(machineID, "lch_nobody")).toBeUndefined()
     setLaunch("lch_bob", { state: "running", machineID }, "bob")
     expect(await tokens.mint(machineID, "lch_bob")).toBeUndefined()
-    const other = store.addMachine("desktop").machine.id
+    const other = (await store.addMachine("desktop")).machine.id
     expect(await tokens.mint(other, "lch_1")).toBeUndefined()
     setLaunch("lch_2", { state: "provisioning" })
     expect(await tokens.mint(machineID, "lch_2")).toBeUndefined()
@@ -91,10 +91,10 @@ describe("mint", () => {
 
   test("nothing for a revoked or unknown machine, or a disabled owner", async () => {
     expect(await tokens.mint("mch_unknown", "lch_1")).toBeUndefined()
-    store.setUser("local", { disabled: true })
+    await store.setUser("local", { disabled: true })
     expect(await tokens.mint(machineID, "lch_1")).toBeUndefined()
-    store.setUser("local", { disabled: false })
-    store.revokeMachine(machineID)
+    await store.setUser("local", { disabled: false })
+    await store.revokeMachine(machineID)
     expect(await tokens.mint(machineID, "lch_1")).toBeUndefined()
   })
 })
@@ -140,20 +140,20 @@ describe("verify", () => {
 
   test("refused after a user or machine epoch bump", async () => {
     const token = await mint()
-    store.bumpUserEpoch("local")
+    await store.bumpUserEpoch("local")
     expect(await tokens.verify(token)).toBeUndefined()
     const again = await mint()
-    store.bumpMachineEpoch(machineID)
+    await store.bumpMachineEpoch(machineID)
     expect(await tokens.verify(again)).toBeUndefined()
   })
 
   test("refused for a revoked machine or a disabled user (valid again once re-enabled)", async () => {
     const token = await mint()
-    store.setUser("local", { disabled: true })
+    await store.setUser("local", { disabled: true })
     expect(await tokens.verify(token)).toBeUndefined()
-    store.setUser("local", { disabled: false })
+    await store.setUser("local", { disabled: false })
     expect(await tokens.verify(token)).toBeDefined()
-    store.revokeMachine(machineID)
+    await store.revokeMachine(machineID)
     expect(await tokens.verify(token)).toBeUndefined()
   })
 

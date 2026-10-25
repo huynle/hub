@@ -22,7 +22,7 @@ let admin: string
 beforeEach(async () => {
   calls = []
   idp = fakeProvider()
-  h = harness({
+  h = await harness({
     speech: undefined,
     noDevice: true,
     env: oidcEnv(idp, { OPENROUTER_API_KEY: ENV_KEY }),
@@ -105,7 +105,7 @@ describe("GET/PUT /api/settings/speech (per user)", () => {
     await h.stop()
     idp.stop()
     idp = fakeProvider()
-    h = harness({ speech: undefined, noDevice: true, env: oidcEnv(idp) })
+    h = await harness({ speech: undefined, noDevice: true, env: oidcEnv(idp) })
     const a = (await signIn(h.url, idp, "alice@example.com")).cookie!
     const b = (await signIn(h.url, idp, "bob@example.com")).cookie!
     expect((await get(b, "/api/settings/speech")).body.ready.stt).toBe(false)
@@ -171,7 +171,7 @@ describe("speech requests use the caller's settings", () => {
 
 describe("pairing mode is unchanged", () => {
   test("GET has no scope; PUT writes the stored (default) settings", async () => {
-    const p = harness({ speech: undefined })
+    const p = await harness({ speech: undefined })
     try {
       const view = (await (await p.api("/api/settings/speech")).json()) as any
       expect(view.scope).toBeUndefined()

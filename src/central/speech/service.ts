@@ -24,10 +24,10 @@ const MODELS_TIMEOUT_MS = 10_000
 export interface SpeechSettingsStore {
   /** The server default. */
   speechSettings(): StoredSpeech
-  setSpeechSettings(settings: StoredSpeech): void
+  setSpeechSettings(settings: StoredSpeech): void | Promise<void>
   /** A user's own settings (multi-user hubs). */
   userSpeech?(userID: string): StoredSpeech
-  setUserSpeech?(userID: string, settings: StoredSpeech): void
+  setUserSpeech?(userID: string, settings: StoredSpeech): void | Promise<void>
 }
 
 /** Speech for one scope: a user (their settings over the default) or, without a user, the server default. */
@@ -69,17 +69,24 @@ export class SpeechService {
     return userSpeechView(stored, this.options.defaults, this.userSettings(userID) ?? {})
   }
 
-  /** Partial update of the server default, or of a user's own settings; throws ValidationError without saving anything. */
-  update(input: unknown, userID?: string): SpeechView | UserSpeechView {
+  /**
+   * Partial update of the server default, or of a user's own settings; throws ValidationError (synchronously)
+   * without saving anything. Resolves with the new view once saved.
+   */
+  update(input: unknown, userID?: string): Promise<SpeechView | UserSpeechView> {
     const { store, defaults } = this.options
-    if (userID === undefined) store.setSpeechSettings(updateSpeech(store.speechSettings(), input, defaults.file))
+    let saved: void | Promise<void>
+    if (userID === undefined) saved = store.setSpeechSettings(updateSpeech(store.speechSettings(), input, defaults.file))
     else {
       if (!store.setUserSpeech) throw new Error("per-user speech settings are not supported by this store")
       // Validated against (and keys dropped relative to) the layers below: server default and hub.json.
-      store.setUserSpeech(userID, updateSpeech(this.userSettings(userID) ?? {}, input, lowerLayers(store.speechSettings(), defaults)))
+      saved = store.setUserSpeech(userID, updateSpeech(this.userSettings(userID) ?? {}, input, lowerLayers(store.speechSettings(), defaults)))
     }
     this.cache.clear()
-    return this.view(userID)
+    return Promise.resolve(saved).then(() => {
+      this.cache.clear()
+      return this.view(userID)
+    })
   }
 
   /** Speech with a user's effective settings (undefined: the server default). */

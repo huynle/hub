@@ -23,21 +23,21 @@ function answer(client: Awaited<ReturnType<typeof spoke>>, reply: (req: any) => 
 
 describe("spoke authentication", () => {
   test("upgrade without, with invalid, or with revoked token is refused with 401", async () => {
-    h = harness()
+    h = await harness()
     const ws = `${h.url}/spoke/ws`
     const upgrade = { connection: "Upgrade", upgrade: "websocket", "sec-websocket-version": "13", "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==" }
     expect((await fetch(ws, { headers: upgrade })).status).toBe(401)
     expect((await fetch(ws, { headers: { ...upgrade, authorization: "Bearer nope" } })).status).toBe(401)
-    const { machine, token } = h.store.addMachine("old")
-    h.store.revokeMachine(machine.id)
+    const { machine, token } = await h.store.addMachine("old")
+    await h.store.revokeMachine(machine.id)
     expect((await fetch(ws, { headers: { ...upgrade, authorization: `Bearer ${token}` } })).status).toBe(401)
     expect((await fetch(`${ws}?token=${token}`, { headers: upgrade })).status).toBe(401)
     await expect(connect(h, "nope")).rejects.toThrow()
   })
 
   test("hello with the wrong protocol version gets bye and close", async () => {
-    h = harness()
-    const client = await connect(h, h.store.addMachine("m").token)
+    h = await harness()
+    const client = await connect(h, (await h.store.addMachine("m")).token)
     client.send(hello("p1", { v: PROTOCOL_VERSION + 1 }))
     expect(await client.next((f) => f.t === "bye")).toEqual({ t: "bye", reason: expect.stringContaining("version") })
     await client.closed
@@ -45,15 +45,15 @@ describe("spoke authentication", () => {
   })
 
   test("a first frame other than hello is a protocol error", async () => {
-    h = harness()
-    const client = await connect(h, h.store.addMachine("m").token)
+    h = await harness()
+    const client = await connect(h, (await h.store.addMachine("m")).token)
     client.send({ t: "sessions", sessions: [] })
     expect((await client.next((f) => f.t === "bye")).reason).toBe("protocol error")
     await client.closed
   })
 
   test("invalid frames after hello are a protocol error", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h)
     client.send("{not json")
     expect((await client.next((f) => f.t === "bye")).reason).toBe("protocol error")
@@ -62,15 +62,15 @@ describe("spoke authentication", () => {
   })
 
   test("hello must arrive within the hello timeout", async () => {
-    h = harness({ timing: { helloTimeoutMs: 50 } })
-    const client = await connect(h, h.store.addMachine("m").token)
+    h = await harness({ timing: { helloTimeoutMs: 50 } })
+    const client = await connect(h, (await h.store.addMachine("m")).token)
     expect((await client.next((f) => f.t === "bye")).reason).toContain("hello")
     await client.closed
   })
 
   test("welcome carries machine ID, public URL and the hub's features; catalog shows reported sessions", async () => {
-    h = harness()
-    const { machine, token } = h.store.addMachine("laptop")
+    h = await harness()
+    const { machine, token } = await h.store.addMachine("laptop")
     const client = await connect(h, token)
     client.send(hello("p1"))
     expect(await client.next()).toEqual({ t: "welcome", v: PROTOCOL_VERSION, machineID: machine.id, publicURL: PUBLIC, features: [...HUB_FEATURES] })
@@ -86,7 +86,7 @@ describe("spoke authentication", () => {
 
   test("stale sockets are dropped by the heartbeat", async () => {
     // Several heartbeats fit in the sleep below; staleMs leaves room for pong latency under load.
-    h = harness({ timing: { heartbeatMs: 20, staleMs: 400 } })
+    h = await harness({ timing: { heartbeatMs: 20, staleMs: 400 } })
     const client = await spoke(h)
     // The Bun client answers pings automatically, so a live socket stays connected.
     await Bun.sleep(150)
@@ -96,20 +96,20 @@ describe("spoke authentication", () => {
   })
 
   test("revoking a machine closes its sockets with bye revoked", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h)
-    const machineID = h.store.findMachine(client.token)!.id
+    const machineID = (await h.store.findMachine(client.token))!.id
     const res = await h.api(`/api/machines/${machineID}`, { method: "DELETE" })
     expect(res.status).toBe(204)
     expect((await client.next((f) => f.t === "bye")).reason).toBe("revoked")
     await client.closed
-    expect(h.store.findMachine(client.token)).toBeUndefined()
+    expect(await h.store.findMachine(client.token)).toBeUndefined()
   })
 })
 
 describe("status and SSE", () => {
   test("events update status and SSE emits status and delta", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     const events = sse(await h.api("/api/events"))
     expect((await events.next()).type).toBe("catalog")
@@ -124,8 +124,8 @@ describe("status and SSE", () => {
 
 describe("turns", () => {
   test("routes to the owned standalone process with voiceStyle, returns its TurnResult", async () => {
-    h = harness()
-    const machine = h.store.addMachine("laptop")
+    h = await harness()
+    const machine = await h.store.addMachine("laptop")
     const svc = await spoke(h, { machine, processID: "svc", hello: { kind: "service" }, sessions: [session("ses_1")] })
     const svcSeen = answer(svc, () => ({ outcome: "succeeded", reply: "from service" }))
     const tui = await spoke(h, { machine, processID: "tui", sessions: [session("ses_1", { owned: true })] })
@@ -138,8 +138,8 @@ describe("turns", () => {
   })
 
   test("falls back to the service process when nobody owns the session", async () => {
-    h = harness()
-    const machine = h.store.addMachine("laptop")
+    h = await harness()
+    const machine = await h.store.addMachine("laptop")
     const tui = await spoke(h, { machine, processID: "tui", sessions: [session("ses_1")] })
     const tuiSeen = answer(tui, () => ({ outcome: "succeeded", reply: "tui" }))
     const svc = await spoke(h, { machine, processID: "svc", hello: { kind: "service" } })
@@ -150,7 +150,7 @@ describe("turns", () => {
   })
 
   test("second turn while one runs is 409; unreported session is 404; empty text is 400", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true }), session("ses_2")] })
     let finish: (() => void) | undefined
     client.ws.addEventListener("message", (event) => {
@@ -173,7 +173,7 @@ describe("turns", () => {
   })
 
   test("a prompt over 100,000 characters is 400 and never reaches the spoke", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     const seen = answer(client, () => ({ outcome: "succeeded", reply: "ok" }))
     const res = await h.api("/api/sessions/ses_1/turn", { method: "POST", json: { text: "x".repeat(100_001) } })
@@ -185,7 +185,7 @@ describe("turns", () => {
   })
 
   test("a request too large for one frame is refused at once instead of hanging", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     const seen = answer(client, () => ({}))
     const connID = h.registry.owner("ses_1")!
@@ -197,7 +197,7 @@ describe("turns", () => {
 
   for (const action of ["stop", "interrupt"] as const) {
     test(`${action} releases the hub's turn lock and ends the in-flight turn request`, async () => {
-      h = harness()
+      h = await harness()
       const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
       let turns = 0
       answer(client, (req) => {
@@ -220,7 +220,7 @@ describe("turns", () => {
 
   test("the hub waits a grace period past the turn timeout so the spoke's own timeout result wins", async () => {
     expect(TURN_GRACE_MS).toBe(15_000)
-    h = harness({ env: { HUB_TURN_TIMEOUT_MS: "100" }, timing: { turnGraceMs: 400 } })
+    h = await harness({ env: { HUB_TURN_TIMEOUT_MS: "100" }, timing: { turnGraceMs: 400 } })
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     client.ws.addEventListener("message", (event) => {
       const frame = JSON.parse(String(event.data))
@@ -233,7 +233,7 @@ describe("turns", () => {
   })
 
   test("turn timeout is 504 and releases the session", async () => {
-    h = harness({ env: { HUB_TURN_TIMEOUT_MS: "100" }, timing: { turnGraceMs: 50 } })
+    h = await harness({ env: { HUB_TURN_TIMEOUT_MS: "100" }, timing: { turnGraceMs: 50 } })
     await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     const res = await h.api("/api/sessions/ses_1/turn", { method: "POST", json: { text: "slow" } })
     expect(res.status).toBe(504)
@@ -241,7 +241,7 @@ describe("turns", () => {
   })
 
   test("spoke error response is 502; disconnect mid-turn is 502", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     client.ws.addEventListener("message", (event) => {
       const frame = JSON.parse(String(event.data))
@@ -259,7 +259,7 @@ describe("turns", () => {
     const async = { "prefer": "respond-async" }
 
     test("a slow turn answers 202 at once; the lock holds until it ends; its result comes over SSE", async () => {
-      h = harness({ timing: { turnAcceptMs: 50 } })
+      h = await harness({ timing: { turnAcceptMs: 50 } })
       const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
       let finish: (() => void) | undefined
       client.ws.addEventListener("message", (event) => {
@@ -282,7 +282,7 @@ describe("turns", () => {
     })
 
     test("a turn that settles within the accept window answers as before (result or error)", async () => {
-      h = harness({ timing: { turnAcceptMs: 2000 } })
+      h = await harness({ timing: { turnAcceptMs: 2000 } })
       const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
       client.ws.addEventListener("message", (event) => {
         const frame = JSON.parse(String(event.data))
@@ -298,7 +298,7 @@ describe("turns", () => {
     })
 
     test("a background turn that errors (spoke gone) reports failed over SSE and releases the lock", async () => {
-      h = harness({ timing: { turnAcceptMs: 50 } })
+      h = await harness({ timing: { turnAcceptMs: 50 } })
       const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
       let drop: (() => void) | undefined
       client.ws.addEventListener("message", (event) => {
@@ -315,7 +315,7 @@ describe("turns", () => {
   })
 
   test("context is fetched from the owner", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, { sessions: [session("ses_1", { owned: true })] })
     answer(client, (req) => (req.op === "context" ? { messages: [{ role: "user", text: "hi" }] } : undefined))
     const res = await h.api("/api/sessions/ses_1/context")
@@ -325,8 +325,8 @@ describe("turns", () => {
 
 describe("permissions", () => {
   test("routed only when pending, to the process that asked, with the asking session", async () => {
-    h = harness()
-    const machine = h.store.addMachine("laptop")
+    h = await harness()
+    const machine = await h.store.addMachine("laptop")
     const owner = await spoke(h, { machine, processID: "a", sessions: [session("ses_1", { owned: true })] })
     const ownerSeen = answer(owner, () => ({}))
     const other = await spoke(h, { machine, processID: "b", hello: { kind: "service" }, sessions: [session("ses_1")] })
@@ -348,8 +348,8 @@ describe("permissions", () => {
 
 describe("permissions asked where several processes see them", () => {
   async function twoForwarders(firstReply: (req: any) => unknown, secondReply: (req: any) => unknown) {
-    h = harness()
-    const machine = h.store.addMachine("laptop")
+    h = await harness()
+    const machine = await h.store.addMachine("laptop")
     const first = await spoke(h, { machine, processID: "a", hello: { kind: "service" }, sessions: [session("ses_1")] })
     const firstSeen = answer(first, firstReply)
     const second = await spoke(h, { machine, processID: "b", sessions: [session("ses_1", { owned: true })] })
@@ -392,8 +392,8 @@ describe("permissions asked where several processes see them", () => {
 
 describe("forms (questions)", () => {
   test("answered from the hub through the process that asked; cancel too; validation and gone", async () => {
-    h = harness()
-    const machine = h.store.addMachine("laptop")
+    h = await harness()
+    const machine = await h.store.addMachine("laptop")
     const client = await spoke(h, { machine, processID: "a", sessions: [session("ses_1", { owned: true })] })
     const seen = answer(client, (req) => (req.formID === "frm_gone" ? { gone: true } : {}))
     const post = (json: unknown) => h.api("/api/sessions/ses_1/form", { method: "POST", json })
@@ -420,7 +420,7 @@ describe("forms (questions)", () => {
 
 describe("spoke requests", () => {
   test("pairCode returns a code that pairs a device exactly once", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h)
     client.send({ t: "req", id: "r1", req: { op: "pairCode" } })
     const res = await client.next((f) => f.t === "res" && f.id === "r1")
@@ -443,7 +443,7 @@ describe("spoke requests", () => {
   })
 
   test("openLink returns a login URL that signs a browser in and redirects to the session", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h)
     client.send({ t: "req", id: "r2", req: { op: "openLink", sessionID: "ses_1" } })
     const res = await client.next((f) => f.t === "res" && f.id === "r2")
@@ -460,7 +460,7 @@ describe("spoke requests", () => {
   })
 
   test("openLink with voice lands on the session with ?voice=1 through the sign-in redirect", async () => {
-    h = harness({ env: { OPENROUTER_API_KEY: "sk-or-v1-test-0123456789" } })
+    h = await harness({ env: { OPENROUTER_API_KEY: "sk-or-v1-test-0123456789" } })
     const client = await spoke(h)
     client.send({ t: "req", id: "r2", req: { op: "openLink", sessionID: "ses_1", voice: true } })
     const res = await client.next((f) => f.t === "res" && f.id === "r2")
@@ -476,7 +476,7 @@ describe("spoke requests", () => {
   })
 
   test("openLink without a session signs in to the home page; with speech ready there is no setup detour", async () => {
-    h = harness({ env: { OPENROUTER_API_KEY: "sk-or-v1-test-0123456789" } })
+    h = await harness({ env: { OPENROUTER_API_KEY: "sk-or-v1-test-0123456789" } })
     const client = await spoke(h)
     client.send({ t: "req", id: "r2", req: { op: "openLink" } })
     const res = await client.next((f) => f.t === "res" && f.id === "r2")
@@ -489,7 +489,7 @@ describe("spoke requests", () => {
   })
 
   test("handoff emits SSE and notifies", async () => {
-    h = harness()
+    h = await harness()
     const client = await spoke(h, { sessions: [session("ses_1", { title: "Fix bug" })] })
     const events = sse(await h.api("/api/events"))
     client.send({ t: "req", id: "r3", req: { op: "handoff", sessionID: "ses_1" } })

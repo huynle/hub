@@ -335,13 +335,29 @@ export class Directory {
     const reported = new Map(this.source.reported(userID).map((s) => [s.sessionID, s]))
     const archived = this.source.archived(userID)
     let done = false
+    let failed: { error: unknown } | undefined
     let result: T | undefined
-    this.store.updateAgentData(userID, (data) => {
-      const draft = this.refresh(userID, data, reported, archived)
-      result = change(draft)
-      this.write(draft)
-      done = true
-    })
+    // Synchronous: the change runs inside the call (the file store saves before returning; a loaded shared store
+    // writes afterwards). Its error is rethrown here; a failed shared write is logged (the cache is put back).
+    // TODO(P6-T10): make the directory async for cluster mode (before its first load a shared store runs the
+    // change later, and a retry after a version conflict happens after this returns).
+    this.store
+      .updateAgentData(userID, (data) => {
+        try {
+          const draft = this.refresh(userID, data, reported, archived)
+          result = change(draft)
+          this.write(draft)
+          done = true
+          failed = undefined
+        } catch (error) {
+          failed = { error }
+          throw error
+        }
+      })
+      .catch((cause: unknown) => {
+        if (failed?.error !== cause) console.error(`[hub] agent directory not saved: ${(cause as Error)?.message ?? cause}`)
+      })
+    if (failed) throw failed.error
     if (!done) throw new AgentError("not_found", "No such user")
     this.online.set(userID, new Set(reported.keys()))
     return result as T

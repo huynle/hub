@@ -13,9 +13,9 @@ afterEach(async () => {
   await h?.stop()
 })
 
-const start = () => {
+const start = async () => {
   clock = 1_800_000_000_000
-  h = harness({ now: () => clock })
+  h = await harness({ now: () => clock })
 }
 const bearer = (pathname: string, token: string, init: RequestInit = {}) =>
   h.api(pathname, { ...init, cookie: null, origin: null, headers: { authorization: `Bearer ${token}` } })
@@ -45,11 +45,11 @@ async function tokenSpoke(sessions: string[], options: { machine?: { token: stri
   return { client, requests }
 }
 const tokensOf = (requests: any[]) => new Map<string, string>(requests.filter((r) => r.op === "sessionTokens").flatMap((r) => r.tokens.map((t: any) => [t.sessionID, t.token])))
-const machineOf = (client: Client) => h.store.findMachine(client.token)!.id
+const machineOf = (client: Client) => h.store.cachedMachine(client.token)!.id
 
 describe("push", () => {
   test("a spoke announcing sessionTokens gets a token for each session, subagents included, with the hub URL", async () => {
-    start()
+    await start()
     const { requests } = await tokenSpoke(["ses_1", "ses_child"])
     await waitFor(() => tokensOf(requests).size === 2)
     const req = requests.find((r) => r.op === "sessionTokens")
@@ -61,7 +61,7 @@ describe("push", () => {
   })
 
   test("an older spoke without the feature gets no tokens", async () => {
-    start()
+    await start()
     const client = await spoke(h, { sessions: [session("ses_1")] })
     const requests = answer(client)
     client.send({ t: "sessions", sessions: [session("ses_1"), session("ses_2")] })
@@ -71,8 +71,8 @@ describe("push", () => {
   })
 
   test("the same snapshot again sends nothing; a reconnect gets every token again", async () => {
-    start()
-    const machine = h.store.addMachine("laptop")
+    await start()
+    const machine = await h.store.addMachine("laptop")
     const first = await tokenSpoke(["ses_1"], { machine })
     await waitFor(() => tokensOf(first.requests).size === 1)
     first.client.send({ t: "sessions", sessions: [session("ses_1")] })
@@ -86,9 +86,9 @@ describe("push", () => {
   })
 
   test("no token for a session another user's process owns", async () => {
-    start()
-    const bob = h.store.upsertUser({ email: "bob@example.com", role: "user" })
-    const bobs = await tokenSpoke(["ses_shared"], { machine: h.store.addMachine("bob laptop", bob.id), processID: "pb" })
+    await start()
+    const bob = await h.store.upsertUser({ email: "bob@example.com", role: "user" })
+    const bobs = await tokenSpoke(["ses_shared"], { machine: await h.store.addMachine("bob laptop", bob.id), processID: "pb" })
     await waitFor(() => tokensOf(bobs.requests).size === 1)
     const mine = await tokenSpoke(["ses_shared", "ses_mine"], { processID: "pm" })
     await waitFor(() => tokensOf(mine.requests).size >= 1)
@@ -97,7 +97,7 @@ describe("push", () => {
   })
 
   test("the signing keys live in token-keys.json (0600) in the state dir", async () => {
-    start()
+    await start()
     const { requests } = await tokenSpoke(["ses_1"])
     await waitFor(() => tokensOf(requests).size === 1)
     expect(statSync(path.join(h.stateDir, "token-keys.json")).mode & 0o777).toBe(0o600)
@@ -112,7 +112,7 @@ describe("verify over HTTP", () => {
   }
 
   test("whoami answers the session actor, for subagents too", async () => {
-    start()
+    await start()
     const { token, child, machineID } = await minted()
     const res = await bearer("/api/agent/whoami", token)
     expect(res.status).toBe(200)
@@ -121,7 +121,7 @@ describe("verify over HTTP", () => {
   })
 
   test("refused on console routes (403)", async () => {
-    start()
+    await start()
     const { token } = await minted()
     for (const pathname of ["/api/me", "/api/sessions"]) {
       const res = await bearer(pathname, token)
@@ -130,7 +130,7 @@ describe("verify over HTTP", () => {
   })
 
   test("expired: 401 token_expired", async () => {
-    start()
+    await start()
     const { token } = await minted()
     clock += DAY
     const res = await bearer("/api/agent/whoami", token)
@@ -139,7 +139,7 @@ describe("verify over HTTP", () => {
   })
 
   test("tampered: 401 unauthorized", async () => {
-    start()
+    await start()
     const { token } = await minted()
     const res = await bearer("/api/agent/whoami", `${token.slice(0, -1)}${token.endsWith("A") ? "B" : "A"}`)
     expect(res.status).toBe(401)
@@ -147,7 +147,7 @@ describe("verify over HTTP", () => {
   })
 
   test("a session the machine no longer reports: 401", async () => {
-    start()
+    await start()
     const { client, token, child } = await minted()
     client.send({ t: "sessions", sessions: [session("ses_child")] })
     await waitFor(() => !h.registry.hasSession("ses_1"))
@@ -156,7 +156,7 @@ describe("verify over HTTP", () => {
   })
 
   test("the spoke disconnecting ends its tokens: 401", async () => {
-    start()
+    await start()
     const { client, token } = await minted()
     client.close()
     await waitFor(() => h.registry.connections() === 0)
@@ -164,7 +164,7 @@ describe("verify over HTTP", () => {
   })
 
   test("revoking the machine bumps its epoch and ends its tokens", async () => {
-    start()
+    await start()
     const { token, machineID } = await minted()
     const before = h.store.machineEpoch(machineID)
     expect((await h.api(`/api/machines/${machineID}`, { method: "DELETE" })).status).toBe(204)
@@ -173,9 +173,9 @@ describe("verify over HTTP", () => {
   })
 
   test("disabling the user bumps their epoch: their tokens stay dead after re-enabling", async () => {
-    start()
-    const bob = h.store.upsertUser({ email: "bob@example.com", role: "user" })
-    const { client, requests } = await tokenSpoke(["ses_b"], { machine: h.store.addMachine("bob laptop", bob.id) })
+    await start()
+    const bob = await h.store.upsertUser({ email: "bob@example.com", role: "user" })
+    const { client, requests } = await tokenSpoke(["ses_b"], { machine: await h.store.addMachine("bob laptop", bob.id) })
     await waitFor(() => tokensOf(requests).size === 1)
     const token = tokensOf(requests).get("ses_b")!
     expect((await bearer("/api/agent/whoami", token)).status).toBe(200)
@@ -189,8 +189,8 @@ describe("verify over HTTP", () => {
   })
 
   test("a role change alone does not bump the user epoch", async () => {
-    start()
-    const bob = h.store.upsertUser({ email: "bob@example.com", role: "user" })
+    await start()
+    const bob = await h.store.upsertUser({ email: "bob@example.com", role: "user" })
     const before = h.store.userEpoch(bob.id)
     expect((await h.api(`/api/admin/users/${bob.id}`, { method: "PUT", json: { role: "admin" } })).status).toBe(200)
     expect(h.store.userEpoch(bob.id)).toBe(before)
@@ -201,7 +201,7 @@ describe("act tokens over HTTP", () => {
   const actOf = (requests: any[]) => new Map<string, string>(requests.filter((r) => r.op === "actTokens").flatMap((r) => r.tokens.map((t: any) => [t.sessionID, t.token])))
 
   test("a spoke announcing actTokens gets an act token per session in its own op; it resolves via act", async () => {
-    start()
+    await start()
     const { requests } = await tokenSpoke(["ses_1", "ses_child"], { features: ["sessionTokens", "actTokens"] })
     await waitFor(() => actOf(requests).size === 2 && tokensOf(requests).size === 2)
     const act = actOf(requests).get("ses_1")!
@@ -217,7 +217,7 @@ describe("act tokens over HTTP", () => {
   })
 
   test("a spoke announcing only sessionTokens never gets an act token", async () => {
-    start()
+    await start()
     const { requests } = await tokenSpoke(["ses_1"])
     await waitFor(() => tokensOf(requests).size === 1)
     await Bun.sleep(50)
@@ -225,7 +225,7 @@ describe("act tokens over HTTP", () => {
   })
 
   test("an act token is refused on console routes and dies with the session", async () => {
-    start()
+    await start()
     const { client, requests } = await tokenSpoke(["ses_1"], { features: ["sessionTokens", "actTokens"] })
     await waitFor(() => actOf(requests).size === 1)
     const act = actOf(requests).get("ses_1")!

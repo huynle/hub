@@ -142,9 +142,9 @@ beforeAll(async () => {
     ...centralConfig({ HUB_PORT: "0", HUB_PUBLIC_URL: PUBLIC, HUB_STATE_DIR: mkdtempSync(path.join(tmpdir(), "voice-state-")) }),
     agentsNever: ["shell:git push*"],
   }
-  h = harness({ config })
-  const a = h.store.addMachine("laptop-a")
-  const b = h.store.addMachine("laptop-b")
+  h = await harness({ config })
+  const a = await h.store.addMachine("laptop-a")
+  const b = await h.store.addMachine("laptop-b")
 
   const configFile = path.join(tmp, "spoke-a.json")
   writeConfig(configFile, { ...defaults("laptop-a"), server: h.url, mode: "always", token: a.token, autoStartLocalHub: false, herdr: false })

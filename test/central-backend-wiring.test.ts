@@ -133,28 +133,28 @@ describe("startCentral backends", () => {
     hub = undefined
   })
 
-  test("keeps state in files under its stateDir by default, the rest in memory", () => {
-    hub = harness()
+  test("keeps state in files under its stateDir by default, the rest in memory", async () => {
+    hub = await harness()
     expect(hub.backends.state).toBeInstanceOf(FileStateStore)
     expect(hub.backends.bus).toBeInstanceOf(MemoryBus)
   })
 
   test("stop flushes pending state; a restarted hub reads it back; state.json stays untouched", async () => {
-    hub = harness()
+    hub = await harness()
     const { stateDir } = hub
     await hub.backends.state.put("alice", "messages", "m1", { text: "kept" })
     await hub.backends.state.claim("alice:names", "scout", "agent_1")
     expect(existsSync(path.join(stateDir, "agent"))).toBe(false)
     await hub.stop()
-    hub = harness({ env: { HUB_STATE_DIR: stateDir } })
+    hub = await harness({ env: { HUB_STATE_DIR: stateDir } })
     expect(await hub.backends.state.get("alice", "messages", "m1")).toEqual({ value: { text: "kept" }, version: 1 })
     expect((await hub.backends.state.claimOf("alice:names", "scout"))!.owner).toBe("agent_1")
     expect(readFileSync(path.join(stateDir, "state.json"), "utf8")).not.toContain("kept")
   })
 
-  test("uses the backends it is given", () => {
+  test("uses the backends it is given", async () => {
     const backends = memoryBackends()
-    hub = harness({ backends })
+    hub = await harness({ backends })
     expect(hub.backends).toBe(backends)
   })
 })

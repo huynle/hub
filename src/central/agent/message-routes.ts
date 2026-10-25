@@ -382,11 +382,11 @@ export function messageRoutes(deps: MessageDeps): AgentRoute[] {
       async handle({ request, user }) {
         const enabled = flag(await bodyOf(request), "enabled")
         if (enabled === undefined) throw new AgentError("invalid", "enabled must be true or false")
-        deps.store.updateAgentData(user.id, (data) => {
+        await deps.store.updateAgentData(user.id, (data) => {
           if (enabled) delete data.messagingPaused
           else data.messagingPaused = true
         })
-        deps.store.audit({ actor: user.id, action: enabled ? "messaging.resume" : "messaging.pause" })
+        await deps.store.audit({ actor: user.id, action: enabled ? "messaging.resume" : "messaging.pause" })
         return ok({ enabled })
       },
     },

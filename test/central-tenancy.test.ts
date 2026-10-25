@@ -49,7 +49,7 @@ function answer(client: Client, requests: any[]) {
 async function person(email: string, sessionID: string, processID: string): Promise<Person> {
   const { cookie } = await signIn(h.url, idp, email)
   const id = ((await (await h.api("/api/me", { cookie })).json()) as any).user.id
-  const machine = h.store.addMachine(`${email} laptop`, id)
+  const machine = await h.store.addMachine(`${email} laptop`, id)
   const client = await spoke(h, {
     machine,
     processID,
@@ -65,7 +65,7 @@ beforeEach(async () => {
   notified.length = 0
   pushed.length = 0
   idp = fakeProvider()
-  h = harness({
+  h = await harness({
     env: oidcEnv(idp),
     noDevice: true,
     pushSender: async (target) => void pushed.push(target.endpoint),
@@ -429,7 +429,7 @@ describe("bob cannot reach alice's grants, escalations, grant requests or agent 
     const env = { XDG_CONFIG_HOME: path.join(home, "xdg") }
     expect(await cli(["login", "--url", h.url, "--token", token], { env, home, stdout: () => {}, stderr: () => {} })).toBe(0)
     // A second spoke of bob's announcing session and act tokens, so his session has both.
-    const machine = h.store.addMachine("bob desktop", bob.id)
+    const machine = await h.store.addMachine("bob desktop", bob.id)
     const tokens: { shell?: string; act?: string } = {}
     const client = await spoke(h, {
       machine,
@@ -750,10 +750,10 @@ describe("catalog, SSE and push", () => {
 
   test("Push delivers only to the owner's devices", async () => {
     const store = Store.open(mkdtempSync(path.join(tmpdir(), "voice-tenancy-push-")))
-    const a = store.addDevice("a", "u_a").device
-    const b = store.addDevice("b", "u_b").device
-    store.addPushSubscription(a.id, { endpoint: "https://push.example.com/a", keys: { p256dh: "x", auth: "y" } })
-    store.addPushSubscription(b.id, { endpoint: "https://push.example.com/b", keys: { p256dh: "x", auth: "y" } })
+    const a = (await store.addDevice("a", "u_a")).device
+    const b = (await store.addDevice("b", "u_b")).device
+    await store.addPushSubscription(a.id, { endpoint: "https://push.example.com/a", keys: { p256dh: "x", auth: "y" } })
+    await store.addPushSubscription(b.id, { endpoint: "https://push.example.com/b", keys: { p256dh: "x", auth: "y" } })
     const sent: string[] = []
     const push = new Push({ store, subject: "mailto:admin@example.com", sender: async (target: PushTarget, _p: string, _o: PushSendOptions) => void sent.push(target.endpoint) })
     expect(await push.notify("handoff", "ses_1", "t", undefined, "u_a")).toBe(1)
