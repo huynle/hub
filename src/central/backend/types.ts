@@ -62,6 +62,8 @@ export interface StateStore {
   /** Gives a claim up; false when `owner` does not hold it. */
   release(namespace: string, key: string, owner: string): Promise<boolean>
   claimOf(namespace: string, key: string): Promise<Claim | undefined>
+  /** Makes buffered writes durable (the hub calls it on stop); stores that write through omit it. */
+  flush?(): Promise<void>
 }
 
 // ---- Bus --------------------------------------------------------------------------------------------------

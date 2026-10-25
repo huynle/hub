@@ -74,6 +74,32 @@ export interface TimelinePage {
   readonly older?: string
 }
 
+/** Timeline row kinds. "message": a hub message (src/spoke/timeline.ts has the others). */
+export const TIMELINE_KINDS = ["user", "assistant", "reasoning", "tool", "message"] as const
+export type TimelineKind = (typeof TIMELINE_KINDS)[number]
+
+/** A message row's direction from the session's point of view: delivered to it (in) or sent by it (out). */
+export const MESSAGE_DIRECTIONS = ["in", "out"] as const
+export type MessageDirection = (typeof MESSAGE_DIRECTIONS)[number]
+
+/**
+ * A hub message as a timeline row. Inbound rows come from the spoke's timeline (a message the hub delivered,
+ * `messageID` the deliver messageID); outbound rows come from the hub's message store. `text` is the body,
+ * without the envelope.
+ */
+export interface TimelineMessageItem {
+  readonly key: string
+  readonly messageID: string
+  readonly sessionID: string
+  readonly kind: "message"
+  readonly text: string
+  readonly at?: number
+  /** Ordering position, as for the other rows. */
+  readonly pos?: number
+  readonly direction: MessageDirection
+  readonly message: Pick<DeliverMeta, "kind" | "from" | "to" | "replyTo">
+}
+
 export interface SessionInfo {
   readonly id: string
   readonly title: string
@@ -140,6 +166,8 @@ export const FORWARDED_EVENTS: ReadonlySet<string> = new Set([
   "session.execution.interrupted",
   "session.text.delta",
   "session.text.ended",
+  // data: InboxDeliveredData. Newer spokes add `origin` (who put the prompt in the inbox); the type is unchanged,
+  // so older hubs keep accepting it.
   "session.inbox.delivered",
   "session.agent.selected",
   // Activity feed. The spoke sends these in compact form (see compactActivity): tool inputs are
@@ -173,6 +201,17 @@ export const FORWARDED_EVENTS: ReadonlySet<string> = new Set([
   // Hub-defined: a session's status and running jobs as the spoke found them (startup, stream reconnect).
   "session.seed",
 ])
+
+/** Who put a prompt into a session's inbox: the user (a typed or voice prompt) or the hub (a delivered message). */
+export const INBOX_ORIGINS = ["user", "hub"] as const
+export type InboxOrigin = (typeof INBOX_ORIGINS)[number]
+
+/** `session.inbox.delivered` data as forwarded. `origin` is optional: older spokes do not send it. */
+export interface InboxDeliveredData {
+  readonly sessionID: string
+  readonly inboxID: string
+  readonly origin?: InboxOrigin
+}
 
 /**
  * OpenCode events the spoke forwards only in another (compact) form: a subagent tool's progress, which names the
@@ -261,12 +300,18 @@ export const IMPLIED_OPENCODE_FEATURES = [
 /**
  * Features a spoke announces in its hello, so the hub can refuse an op an older spoke would ignore.
  * "sessionTokens": the spoke stores the session tokens the hub sends (sessionTokens op) for its sessions' shells.
+ * "deliver": the spoke admits hub messages into its sessions (deliver op).
  */
-export const SPOKE_FEATURES = [...IMPLIED_OPENCODE_FEATURES, "autoName", "sessionTokens"] as const
-export type SpokeFeature = (typeof SPOKE_FEATURES)[number]
+export const KNOWN_SPOKE_FEATURES = [...IMPLIED_OPENCODE_FEATURES, "autoName", "sessionTokens", "deliver"] as const
+export type SpokeFeature = (typeof KNOWN_SPOKE_FEATURES)[number]
+/** What this package's OpenCode spoke announces: "deliver" joins once the spoke handles the op (P2-T3). */
+export const SPOKE_FEATURES: readonly SpokeFeature[] = KNOWN_SPOKE_FEATURES.filter((f) => f !== "deliver")
 
-/** Features the hub announces in its welcome. "harness": it reads hello `harness`, `harnessVersion` and `evidence`. */
-export const HUB_FEATURES = ["harness"] as const
+/**
+ * Features the hub announces in its welcome. "harness": it reads hello `harness`, `harnessVersion` and `evidence`.
+ * "messaging": it routes messages between sessions (it sends deliver to spokes that announce that feature).
+ */
+export const HUB_FEATURES = ["harness", "messaging"] as const
 export type HubFeature = (typeof HUB_FEATURES)[number]
 
 /** A spoke's harness, version and evidence level; a hello without `harness` is an OpenCode native spoke. */
@@ -334,6 +379,49 @@ export const HUB_URL_MAX_CHARS = 2048
 /** Why a spoke did not store a session token: it does not report the session, or the token has expired. */
 export type SessionTokenSkipReason = "unknown" | "expired"
 
+// ---------- messaging (deliver) ----------
+
+/** What a hub message is: a tell, an ask, its reply or decline, the identity primer, or a Decision answer. */
+export const MESSAGE_KINDS = ["msg", "ask", "reply", "decline", "primer", "decision"] as const
+export type MessageKind = (typeof MESSAGE_KINDS)[number]
+
+/** How OpenCode admits a message into a busy session: after the running turn (queue) or into it (steer). */
+export const DELIVERY_MODES = ["queue", "steer"] as const
+export type DeliveryMode = (typeof DELIVERY_MODES)[number]
+
+/**
+ * How a spoke delivered a message: into the running turn (steer), as a new turn (turn), admitted without waking
+ * or behind the running turn (queued), or held by the spoke for later, e.g. while a form is open (retained).
+ */
+export const DELIVERED = ["steer", "turn", "queued", "retained"] as const
+export type Delivered = (typeof DELIVERED)[number]
+
+/** Longest deliver text (the hub-rendered envelope included). */
+export const DELIVER_TEXT_MAX = 16_000
+/** Longest id or address in a deliver request. */
+export const DELIVER_ID_MAX = 300
+
+/** Who sent a message to whom, as the hub resolved them; the spoke never sets these. */
+export interface DeliverMeta {
+  readonly kind: MessageKind
+  /** The authenticated sender's address, e.g. "@api-refactor". */
+  readonly from: string
+  /** The address the sender wrote, e.g. "@@reviewer". */
+  readonly to: string
+  /** The message a reply or decline answers (required for those kinds). */
+  readonly replyTo?: string
+  /** How to admit the message into a busy session; the spoke picks when absent. */
+  readonly delivery?: DeliveryMode
+}
+
+export type DeliverRequest = Extract<ServerRequest, { op: "deliver" }>
+
+export interface DeliverResult {
+  readonly delivered: Delivered
+  /** The harness's inbox entry for the message, when it reports one. */
+  readonly inboxID?: string
+}
+
 export type ServerRequest =
   /** `text` may be empty when `images` are attached. */
   | { readonly op: "turn"; readonly sessionID: string; readonly text: string; readonly voiceStyle: boolean; readonly images?: readonly PromptImage[] }
@@ -381,6 +469,11 @@ export type ServerRequest =
    * Send through batchSessionTokens so every frame stays under MAX_FRAME.
    */
   | { readonly op: "sessionTokens"; readonly tokens: readonly SessionToken[]; readonly hubURL?: string }
+  /**
+   * Admit a hub message into a session (feature "deliver"). `text` is the envelope the hub rendered; `messageID`
+   * is the idempotency key (spokes apply a message once). `wake: false` admits it without starting a turn.
+   */
+  | { readonly op: "deliver"; readonly sessionID: string; readonly messageID: string; readonly text: string; readonly wake: boolean; readonly meta: DeliverMeta }
 
 /** The feature a spoke must announce for the hub to send `op`, or undefined for a core op every spoke serves. */
 export function featureForOp(op: ServerRequest["op"]): SpokeFeature | undefined {
@@ -485,6 +578,7 @@ export interface ResultFor {
   create: { readonly sessionID: string; readonly openedIn?: "herdr" }
   /** `applied`: sessions whose token the spoke stored; `skipped`: the others, with the reason. */
   sessionTokens: { readonly applied: readonly string[]; readonly skipped: ReadonlyArray<{ readonly sessionID: string; readonly reason: SessionTokenSkipReason }> }
+  deliver: DeliverResult
 }
 
 // ---------- both directions ----------
@@ -618,6 +712,36 @@ function isHerdrInfo(v: unknown): boolean {
   )
 }
 
+/** Control (C0, C1), format (bidi, zero-width, BOM) and line/paragraph separator characters. */
+const UNSAFE_CHARS = /[\p{Cc}\p{Cf}\u2028\u2029]/u
+
+/** A non-empty address of at most DELIVER_ID_MAX characters without characters that could fake a header. */
+const address = (v: unknown): v is string => nonEmpty(v) && v.length <= DELIVER_ID_MAX && !UNSAFE_CHARS.test(v)
+const deliverID = (v: unknown): v is string => typeof v === "string" && v.length <= DELIVER_ID_MAX && ID.test(v)
+
+/** Why `v` is not an acceptable deliver request, or undefined when it is. */
+export function deliverProblem(v: unknown): string | undefined {
+  if (!isObj(v)) return "deliver must be an object"
+  if (!nonEmpty(v.sessionID) || v.sessionID.length > DELIVER_ID_MAX) return `sessionID must be 1–${DELIVER_ID_MAX} characters`
+  if (!deliverID(v.messageID)) return `messageID must be 1–${DELIVER_ID_MAX} id characters`
+  if (!nonEmpty(v.text) || v.text.length > DELIVER_TEXT_MAX) return `text must be 1–${DELIVER_TEXT_MAX} characters`
+  if (typeof v.wake !== "boolean") return "wake must be true or false"
+  const meta = v.meta
+  if (!isObj(meta)) return "meta must be an object"
+  if (!(MESSAGE_KINDS as readonly unknown[]).includes(meta.kind)) return `meta.kind must be one of ${MESSAGE_KINDS.join(", ")}`
+  if (!address(meta.from)) return `meta.from must be an address of 1–${DELIVER_ID_MAX} printable characters`
+  if (!address(meta.to)) return `meta.to must be an address of 1–${DELIVER_ID_MAX} printable characters`
+  if (meta.replyTo !== undefined && !deliverID(meta.replyTo)) return `meta.replyTo must be 1–${DELIVER_ID_MAX} id characters`
+  if ((meta.kind === "reply" || meta.kind === "decline") && meta.replyTo === undefined) return `meta.replyTo is required for a ${meta.kind}`
+  if (meta.delivery !== undefined && !(DELIVERY_MODES as readonly unknown[]).includes(meta.delivery)) return `meta.delivery must be one of ${DELIVERY_MODES.join(", ")}`
+  return undefined
+}
+
+/** Whether `v` is a well-formed deliver result (what the hub accepts back from a spoke). */
+export function isDeliverResult(v: unknown): v is DeliverResult {
+  return isObj(v) && (DELIVERED as readonly unknown[]).includes(v.delivered) && (v.inboxID === undefined || (nonEmpty(v.inboxID) && v.inboxID.length <= DELIVER_ID_MAX))
+}
+
 function isSpokeRequest(v: unknown): v is SpokeRequest {
   if (!isObj(v)) return false
   if (v.op === "pairCode") return true
@@ -743,6 +867,8 @@ function isServerRequest(v: unknown): v is ServerRequest {
       )
     case "sessionTokens":
       return Array.isArray(v.tokens) && v.tokens.length <= SESSION_TOKENS_MAX && v.tokens.every(isSessionToken) && (v.hubURL === undefined || isHubURL(v.hubURL))
+    case "deliver":
+      return deliverProblem(v) === undefined
     default:
       return false
   }

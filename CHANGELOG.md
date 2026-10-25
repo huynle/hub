@@ -103,6 +103,18 @@ the protocol up:
   `HUB_IT_OPENCODE=1 bun test test/spoke-env-inject.it.test.ts` also runs `hub whoami` in a real OpenCode shell
   against an in-process hub and checks it prints the session.
 
+### Agent messaging
+
+- **Protocol: `deliver` op and messaging features** (still version 1). The hub admits a message into a session
+  with `deliver {sessionID, messageID, text, wake, meta: {kind, from, to, replyTo?, delivery?}}`, answered with
+  `{delivered: "steer" | "turn" | "queued" | "retained", inboxID?}`. `kind` is `msg`, `ask`, `reply`,
+  `decline`, `primer` or `decision` (`reply` and `decline` need `replyTo`); `delivery` is `queue` or `steer`;
+  `text` is at most 16000 characters, ids and addresses at most 300, and addresses may not contain control,
+  bidi or zero-width characters (`deliverProblem`, `isDeliverResult`). Spokes announce `deliver` in
+  `SPOKE_FEATURES` (old OpenCode spokes do not imply it, so the hub must check before sending); the welcome's
+  `HUB_FEATURES` gains `messaging`. `session.inbox.delivered` may carry `origin: "user" | "hub"` (same event
+  type, so older hubs keep accepting it), and timeline rows gain the `message` kind (`TimelineMessageItem`).
+
 ### Other changes
 
 - **Auto-name**: let OpenCode name a session with its Title agent, from the console. **Auto-name** in every
