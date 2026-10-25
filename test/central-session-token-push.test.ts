@@ -3,25 +3,26 @@
 // connection, batched, retried after "unknown" skips or failures, and refreshed by a periodic sweep.
 // Registry, minter, transport, clock and timers are fakes.
 import { beforeEach, describe, expect, test } from "bun:test"
-import { SESSION_TOKEN_MAX_CHARS, type ResultFor, type SessionTokensRequest } from "../src/protocol"
+import { SESSION_TOKEN_MAX_CHARS, type ActTokensRequest, type ResultFor, type SessionTokensRequest } from "../src/protocol"
 import { SESSION_TOKEN_SWEEP_MS, SessionTokenPush, type PushRegistry, type TokenMinter } from "../src/central/session-token-push"
 
 const LIFETIME = 24 * 60 * 60 * 1000
 const HUB = "http://hub.test"
 
 let clock: number
-let conns: Map<string, { machine: string; sessions: string[]; features: boolean }>
+let conns: Map<string, { machine: string; sessions: string[]; features: boolean; act?: boolean }>
 let stamps: Map<string, string>
 let refused: Set<string>
 let minted: number
-let sent: Array<{ connID: string; req: SessionTokensRequest }>
-let answer: (connID: string, req: SessionTokensRequest) => Promise<ResultFor["sessionTokens"]>
+let sent: Array<{ connID: string; req: SessionTokensRequest | ActTokensRequest }>
+let answer: (connID: string, req: SessionTokensRequest | ActTokensRequest) => Promise<ResultFor["sessionTokens"]>
 let timers: Array<{ fn: () => void; ms: number; cleared: boolean }>
 let logged: string[]
 let push: SessionTokenPush
 
 const registry: PushRegistry = {
-  supports: (connID, feature) => feature === "sessionTokens" && conns.get(connID)?.features === true,
+  supports: (connID, feature) =>
+    (feature === "sessionTokens" && conns.get(connID)?.features === true) || (feature === "actTokens" && conns.get(connID)?.act === true),
   connMachine: (connID) => conns.get(connID)?.machine,
   reportedSessions: (connID) => conns.get(connID)?.sessions ?? [],
 }
@@ -33,8 +34,13 @@ const minter: TokenMinter = {
     if (!stamp || refused.has(sessionID)) return undefined
     return { token: `tok_${sessionID}_${++minted}`, exp: clock + LIFETIME, stamp }
   },
+  mintAct: (machine, sessionID) => {
+    const stamp = stamps.get(machine)
+    if (!stamp || refused.has(sessionID)) return undefined
+    return { token: `act_${sessionID}_${++minted}`, exp: clock + LIFETIME, stamp }
+  },
 }
-const applyAll = async (_connID: string, req: SessionTokensRequest) => ({ applied: req.tokens.map((t) => t.sessionID), skipped: [] })
+const applyAll = async (_connID: string, req: SessionTokensRequest | ActTokensRequest) => ({ applied: req.tokens.map((t) => t.sessionID), skipped: [] })
 
 const make = (extra: Partial<ConstructorParameters<typeof SessionTokenPush>[0]> = {}) =>
   new SessionTokenPush({
@@ -276,5 +282,68 @@ describe("refresh sweep", () => {
     expect(timers[0]!.cleared).toBe(true)
     await push.sweep()
     expect(timers).toHaveLength(1)
+  })
+})
+
+describe("act tokens", () => {
+  const ofOp = (op: string) => sent.filter((s) => s.req.op === op)
+  const tokensOf = (op: string) => ofOp(op).flatMap((s) => s.req.tokens.map((t) => t.token))
+
+  test("a spoke announcing actTokens gets act tokens in their own op, without a hub URL", async () => {
+    conns.get("c1")!.act = true
+    await push.sessions("c1")
+    expect(ofOp("sessionTokens")).toHaveLength(1)
+    expect(ofOp("actTokens")).toHaveLength(1)
+    const act = ofOp("actTokens")[0]!.req
+    expect("hubURL" in act).toBe(false)
+    expect(act.tokens.map((t) => t.sessionID)).toEqual(["ses_1", "ses_child"])
+    expect(act.tokens.every((t) => t.token.startsWith("act_") && t.exp === clock + LIFETIME)).toBe(true)
+    // Act tokens never travel in a sessionTokens frame, and shell tokens never in an actTokens frame.
+    expect(tokensOf("sessionTokens").every((t) => t.startsWith("tok_"))).toBe(true)
+  })
+
+  test("a spoke without actTokens never gets an act token, and none is minted", async () => {
+    await push.sessions("c1")
+    await push.sweep()
+    expect(ofOp("actTokens")).toEqual([])
+    expect(JSON.stringify(sent)).not.toContain("act_")
+  })
+
+  test("only actTokens (no sessionTokens) still gets act tokens; neither feature gets nothing", async () => {
+    conns.get("c1")!.features = false
+    conns.get("c1")!.act = true
+    await push.sessions("c1")
+    expect(ofOp("sessionTokens")).toEqual([])
+    expect(ofOp("actTokens")).toHaveLength(1)
+    conns.get("c1")!.act = false
+    clock += LIFETIME
+    await push.sessions("c1")
+    expect(sent).toHaveLength(1)
+  })
+
+  test("a minter without mintAct sends no act tokens", async () => {
+    conns.get("c1")!.act = true
+    const { mintAct: _mintAct, ...shellOnly } = minter
+    push = make({ tokens: shellOnly })
+    await push.sessions("c1")
+    expect(ofOp("actTokens")).toEqual([])
+    expect(ofOp("sessionTokens")).toHaveLength(1)
+  })
+
+  test("act tokens are deduped, retried and refreshed on their own", async () => {
+    conns.get("c1")!.act = true
+    answer = async (_connID, req) =>
+      req.op === "actTokens" ? { applied: ["ses_1"], skipped: [{ sessionID: "ses_child", reason: "unknown" }] } : applyAll(_connID, req)
+    await push.sessions("c1")
+    answer = applyAll
+    await push.sessions("c1")
+    // Only the skipped act token is resent; no shell token is.
+    expect(ofOp("sessionTokens")).toHaveLength(1)
+    expect(ofOp("actTokens").map((s) => s.req.tokens.map((t) => t.sessionID))).toEqual([["ses_1", "ses_child"], ["ses_child"]])
+    // A new stamp resends both kinds.
+    stamps.set("mch_a", "s2")
+    await push.sessions("c1")
+    expect(ofOp("sessionTokens")).toHaveLength(2)
+    expect(ofOp("actTokens")).toHaveLength(3)
   })
 })
