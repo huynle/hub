@@ -116,7 +116,7 @@ describe("verify over HTTP", () => {
     const { token, child, machineID } = await minted()
     const res = await bearer("/api/agent/whoami", token)
     expect(res.status).toBe(200)
-    expect(((await res.json()) as any).actor).toEqual({ kind: "session", userID: "local", machineID, sessionID: "ses_1" })
+    expect(((await res.json()) as any).actor).toEqual({ kind: "session", userID: "local", machineID, sessionID: "ses_1", via: "shell" })
     expect(((await (await bearer("/api/agent/whoami", child)).json()) as any).actor.sessionID).toBe("ses_child")
   })
 

@@ -151,7 +151,7 @@ describe("the CLI as the session (HUB_URL + HUB_SESSION_TOKEN)", () => {
   test("whoami is the session actor", async () => {
     const r = await cli(["whoami", "--json"], env, home)
     expect(r.code).toBe(0)
-    expect(json(r).actor).toEqual({ kind: "session", userID: "local", machineID: machineA.id, sessionID: ALPHA })
+    expect(json(r).actor).toEqual({ kind: "session", userID: "local", machineID: machineA.id, sessionID: ALPHA, via: "shell" })
     const text = await cli(["whoami"], env, home)
     expect(text.stdout).toContain(`session ${ALPHA} on machine ${machineA.id}`)
   })

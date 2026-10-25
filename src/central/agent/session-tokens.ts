@@ -3,8 +3,13 @@
 // to the session's shells.
 //
 // Format: `hst1.<b64url(payload JSON)>.<b64url(HMAC-SHA256(secret of kid, "hst1." + payload part))>`, where the
-// payload is {typ: "session", uid, mid, sid, exp (ms since the epoch), kid, ue (user epoch), me (machine
-// epoch), aud (the hub's public URL)}. One algorithm, one prefix; anything else is not a session token.
+// payload is {typ, uid, mid, sid, exp (ms since the epoch), kid, ue (user epoch), me (machine epoch), aud (the
+// hub's public URL)}. One algorithm, one prefix; anything else is not a session token.
+//
+// typ "session" is the shell token (HUB_SESSION_TOKEN; any code in the session's shells can read it): its actor
+// is via "shell" and can never act. typ "act" (phase 3, decision #1) is the act token, pushed only to spokes
+// announcing "actTokens" (actTokens op), which never put it in any environment; its actor is via "act", the only
+// session actor act verbs may admit (canActAsSession). The signature covers typ, so one cannot be turned into the other.
 //
 // A token is accepted while all of this holds: signature (constant-time) under a known kid, audience, expiry,
 // the user's and machine's current token epochs, the machine exists, is not revoked and still belongs to uid,
@@ -46,8 +51,11 @@ export interface MintedSessionToken {
   readonly stamp: string
 }
 
+/** Token types: "session" for shells, "act" for act verbs (the hub tool). */
+export type SessionTokenType = "session" | "act"
+
 interface Claims {
-  readonly typ: "session"
+  readonly typ: SessionTokenType
   readonly uid: string
   readonly mid: string
   readonly sid: string
@@ -83,7 +91,7 @@ function parseClaims(bytes: Buffer): Claims | undefined {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined
   const c = raw as Record<string, unknown>
   if (Object.keys(c).sort().join() !== CLAIM_KEYS) return undefined
-  if (c.typ !== "session" || !text(c.uid) || !text(c.mid) || !text(c.sid) || !text(c.kid) || !text(c.aud)) return undefined
+  if ((c.typ !== "session" && c.typ !== "act") || !text(c.uid) || !text(c.mid) || !text(c.sid) || !text(c.kid) || !text(c.aud)) return undefined
   if (!count(c.exp) || !count(c.ue) || !count(c.me)) return undefined
   return c as unknown as Claims
 }
@@ -132,12 +140,21 @@ export class SessionTokens {
    * disabled, or the session belongs to another tenant or to nobody).
    */
   mint(machineID: string, sessionID: string): MintedSessionToken | undefined {
+    return this.#mint("session", machineID, sessionID)
+  }
+
+  /** An act token (typ "act") for the session, under the same rules as mint. Only for the actTokens op. */
+  mintAct(machineID: string, sessionID: string): MintedSessionToken | undefined {
+    return this.#mint("act", machineID, sessionID)
+  }
+
+  #mint(typ: SessionTokenType, machineID: string, sessionID: string): MintedSessionToken | undefined {
     const uid = this.#owner(machineID)
     if (!uid || this.#sessions.sessionTenant(sessionID) !== uid) return undefined
     const { kid, secret } = this.#keys.active()
     const exp = this.#now() + this.lifetimeMs
     const claims: Claims = {
-      typ: "session",
+      typ,
       uid,
       mid: machineID,
       sid: sessionID,
@@ -174,7 +191,7 @@ export class SessionTokens {
     if (!machine || machine.revoked || machine.ownerID !== claims.uid) return undefined
     if (!this.#store.user(claims.uid)) return undefined
     if (this.#sessions.sessionTenant(claims.sid) !== claims.uid || !this.#sessions.machineReports(claims.mid, claims.sid)) return undefined
-    const actor: SessionActor = { kind: "session", userID: claims.uid, machineID: claims.mid, sessionID: claims.sid }
+    const actor: SessionActor = { kind: "session", userID: claims.uid, machineID: claims.mid, sessionID: claims.sid, via: claims.typ === "act" ? "act" : "shell" }
     return actor
   }
 

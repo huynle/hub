@@ -26,6 +26,11 @@ export interface SessionActor {
   readonly userID: string
   readonly machineID: string
   readonly sessionID: string
+  /**
+   * Which of the session's tokens: "shell" (typ session, in its shells' environment) or "act" (typ act, held by
+   * the spoke for the hub tool only). The hub's verifier always sets it; absent counts as "shell" (canActAsSession).
+   */
+  readonly via?: "shell" | "act"
 }
 
 /** A user-created app/agent token (P1-T7). */

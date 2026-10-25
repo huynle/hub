@@ -117,9 +117,9 @@ describe("stamp", () => {
 describe("verify", () => {
   test("round trip: the session actor of the machine's owner", () => {
     const { token } = tokens.mint(machineID, "ses_1")!
-    expect(tokens.verify(token)).toEqual({ kind: "session", userID: "local", machineID, sessionID: "ses_1" })
+    expect(tokens.verify(token)).toEqual({ kind: "session", userID: "local", machineID, sessionID: "ses_1", via: "shell" })
     expect(tokens.verifier.kind).toBe("session")
-    expect(tokens.verifier.verify(token)).toEqual({ kind: "session", userID: "local", machineID, sessionID: "ses_1" })
+    expect(tokens.verifier.verify(token)).toEqual({ kind: "session", userID: "local", machineID, sessionID: "ses_1", via: "shell" })
   })
 
   test("expired at exp, valid just before", () => {
@@ -244,5 +244,54 @@ describe("verify", () => {
     const { token } = tokens.mint(machineID, "ses_1")!
     expect(JSON.stringify(tokens)).not.toContain(token)
     expect(Bun.inspect(tokens)).not.toContain(keys.active().secret.toString("base64"))
+  })
+})
+
+describe("act tokens (typ act)", () => {
+  test("mintAct: the same format and checks, typ act; verified as a session actor via act", () => {
+    const minted = tokens.mintAct(machineID, "ses_1")!
+    expect(minted.token).toMatch(/^hst1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/)
+    const { claims } = parts(minted.token)
+    expect(claims).toEqual({ typ: "act", uid: "local", mid: machineID, sid: "ses_1", exp: minted.exp, kid: keys.active().kid, ue: 0, me: 0, aud: PUBLIC })
+    expect(tokens.verify(minted.token)).toEqual({ kind: "session", userID: "local", machineID, sessionID: "ses_1", via: "act" })
+    expect(minted.stamp).toBe(tokens.mint(machineID, "ses_1")!.stamp)
+  })
+
+  test("a shell session token verifies via shell, never via act", () => {
+    const { token } = tokens.mint(machineID, "ses_1")!
+    expect(tokens.verify(token)).toEqual({ kind: "session", userID: "local", machineID, sessionID: "ses_1", via: "shell" })
+    // Rewriting typ breaks the signature.
+    const p = parts(token)
+    const act = b64(JSON.stringify({ ...p.claims, typ: "act" }))
+    expect(tokens.verify(`hst1.${act}.${p.sig}`)).toBeUndefined()
+  })
+
+  test("act and shell tokens of a session differ", () => {
+    expect(tokens.mintAct(machineID, "ses_1")!.token).not.toBe(tokens.mint(machineID, "ses_1")!.token)
+  })
+
+  test("the same minting rules: nothing for another tenant's session or a revoked machine", () => {
+    report(machineID, "ses_bob", "bob")
+    expect(tokens.mintAct(machineID, "ses_bob")).toBeUndefined()
+    expect(tokens.mintAct("mch_unknown", "ses_1")).toBeUndefined()
+  })
+
+  test("the same verifier checks: expiry, epochs, liveness", () => {
+    const { token, exp } = tokens.mintAct(machineID, "ses_1")!
+    clock = exp
+    expect(tokens.verify(token)).toBe("expired")
+    clock = exp - 1
+    store.bumpMachineEpoch(machineID)
+    expect(tokens.verify(token)).toBeUndefined()
+    const fresh = tokens.mintAct(machineID, "ses_1")!.token
+    reported.get(machineID)!.delete("ses_1")
+    expect(tokens.verify(fresh)).toBeUndefined()
+  })
+
+  test("other typ values are refused", () => {
+    const { claims } = parts(tokens.mintAct(machineID, "ses_1")!.token)
+    expect(tokens.verify(forge(claims))).toMatchObject({ via: "act" })
+    expect(tokens.verify(forge({ ...claims, typ: "Act" }))).toBeUndefined()
+    expect(tokens.verify(forge({ ...claims, typ: "admin" }))).toBeUndefined()
   })
 })
