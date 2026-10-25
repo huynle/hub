@@ -10,7 +10,9 @@
 // Cluster mode (design §9, `cluster` option): each connection is recorded in the ConnDirectory (connID → pod); an op
 // for a connection another pod holds goes there over pod RPC (./cluster/rpc.ts) with the same per-op timeout, and the
 // owning pod re-checks the tenant before sending it. closeMachine / closeLaunch reach every pod. Session-token and
-// act-token pushes are sent only by the pod holding the connection. Without `cluster` everything is local.
+// act-token pushes are sent only by the pod holding the connection. Close notices are at most once, so every
+// RECHECK_MS each pod also re-reads its sockets' machines and owners (Store.recheck) and closes the sockets of a
+// revoked machine or a disabled owner itself. Without `cluster` everything is local.
 import type { Server, ServerWebSocket, WebSocketHandler } from "bun"
 import {
   encode,
@@ -115,6 +117,8 @@ export interface SpokeHubOptions {
   readonly staleMs?: number
   /** Per node op request timeouts (defaults: NODE_TIMEOUTS_MS; cancel uses requestTimeoutMs). */
   readonly nodeTimeoutsMs?: Partial<Record<NodeOp, number>>
+  /** Cluster mode: how often the sockets' machines and owners are re-checked (default RECHECK_MS). */
+  readonly recheckMs?: number
   /** Verifies launch-bound (hlt1) tokens; without it only machine tokens are accepted. */
   readonly launchTokens?: LaunchVerifier
   /** Cluster mode: the shared connection directory and this pod's RPC (absent: every connection is local). */
@@ -174,6 +178,8 @@ const LAUNCH_TOKEN = /^hlt1\./
 const CLUSTER_STOP_MS = 1_000
 /** How many closed launches are remembered (launch IDs are never reused). */
 const CLOSED_LAUNCHES = 1000
+/** Cluster mode: how often a pod re-checks that its sockets' machines are not revoked and their owners not disabled. */
+export const RECHECK_MS = 30_000
 
 export class SpokeHub {
   private readonly sockets = new Map<string, Socket>()
@@ -184,6 +190,7 @@ export class SpokeHub {
    */
   private readonly closedLaunches = new Map<string, string>()
   private readonly heartbeat: ReturnType<typeof setInterval>
+  private readonly recheckTimer?: ReturnType<typeof setInterval>
   private seq = 0
   /** Cluster mode: the directory heartbeat, RPC responder and close notices are set up. */
   private readonly started: Promise<void>
@@ -200,6 +207,10 @@ export class SpokeHub {
       }
     }, options.heartbeatMs ?? 20_000)
     this.heartbeat.unref?.()
+    if (options.cluster) {
+      this.recheckTimer = setInterval(() => void this.recheck(), options.recheckMs ?? RECHECK_MS)
+      this.recheckTimer.unref?.()
+    }
 
     this.websocket = {
       open: (ws) => this.open(ws),
@@ -309,6 +320,7 @@ export class SpokeHub {
 
   async stop(): Promise<void> {
     clearInterval(this.heartbeat)
+    clearInterval(this.recheckTimer)
     for (const ws of this.sockets.values()) this.bye(ws, "server shutting down", 1001)
     const { cluster } = this.options
     if (!cluster) return
@@ -327,6 +339,30 @@ export class SpokeHub {
 
   private closeMachineHere(machineID: string, reason: string): void {
     for (const ws of this.sockets.values()) if (ws.data.machineID === machineID) this.bye(ws, reason, CLOSE_REVOKED)
+  }
+
+  /**
+   * Cluster mode: re-reads the machines of this pod's ready sockets and their owners from the database and closes the
+   * sockets of a revoked (or removed) machine or a disabled owner, in case the close notice from another pod was lost.
+   */
+  async recheck(): Promise<void> {
+    const machineIDs = [...new Set([...this.sockets.values()].filter((ws) => ws.data.ready).map((ws) => ws.data.machineID))]
+    if (!machineIDs.length) return
+    const { store } = this.options
+    try {
+      await store.recheck({ machines: machineIDs, users: machineIDs.map((id) => this.ownerOf(id)) })
+      // Ownership may have moved: the current owners too.
+      await store.recheck({ users: machineIDs.map((id) => this.ownerOf(id)) })
+    } catch (cause) {
+      console.error(`[hub] machine re-check failed: ${cause instanceof Error ? cause.message : cause}`)
+      return
+    }
+    for (const machineID of machineIDs) {
+      const machine = store.machines().find((m) => m.id === machineID)
+      const owner = machine && store.user(machine.ownerID)
+      if (!machine || machine.revoked) this.closeMachineHere(machineID, "machine revoked")
+      else if (!owner || owner.disabled) this.closeMachineHere(machineID, "account disabled")
+    }
   }
 
   private publishClose(notice: Omit<CloseNotice, "from">): void {
