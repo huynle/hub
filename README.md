@@ -126,6 +126,7 @@ The hub serves the web app, pairs devices, enrolls machines, and does push and (
 | **Standalone binary** | Any server or laptop, no runtime needed | `hub-<os>-<arch>` from the [releases](https://github.com/huynle/hub/releases) |
 | **Docker** | Servers | `ghcr.io/huynle/hub` (linux/amd64, linux/arm64) |
 | **bunx / from source** | Bun users, development | `bunx --package @huynle/hub hub-server` · `bun bin/hub.ts` |
+| **Kubernetes (cluster mode)** | Several pods on Postgres + Valkey, rolling updates | [docs/cluster.md](docs/cluster.md), manifests in [`deploy/k8s/`](deploy/k8s/) |
 
 Every way reads the same configuration (env vars over `hub.json`, see [Configuration](#configuration)) and
 answers `--help` and `--version`. While no device is paired, the hub logs a pairing code for the first one.
@@ -918,6 +919,8 @@ holds the startup (`bin/hub.ts` serves `web/` from disk; the compiled binaries e
 | `HUB_PUBLIC_URL` | `http://<host>:<port>` (`http://127.0.0.1:<port>` when the host is `0.0.0.0` / `::`) | origin used in links, cookies and CSRF checks |
 | `HUB_STATE_DIR` | `~/.local/state/hub` | `state.json` (0600): users, machines and devices (token hashes only) with their owners, VAPID keys, push subscriptions, speech settings (server default and per user; provider API keys set from the phone), the audit log (last 500 entries); `token-keys.json` (0600): the HMAC keys that sign session tokens (created on first use, older keys kept so their tokens still verify); `agent/` (0700, files 0600, created on first use): agent data such as messages and name claims, one JSON file per user and collection, written shortly after each change and on shutdown |
 | `HUB_TOKEN_KEYS` | | overrides `token-keys.json` with the same JSON, `{"active": "<kid>", "keys": [{"kid": "<kid>", "secret": "<base64 of ≥ 32 random bytes>", "created": <ms>}]}`, e.g. a secret shared by several hub instances; the file is then never written |
+| `HUB_DATABASE_URL` / `HUB_VALKEY_URL` | | cluster mode: several hub pods sharing Postgres and Valkey (both or neither; requires `HUB_AUTH=oidc` and `HUB_TOKEN_KEYS`); see [docs/cluster.md](docs/cluster.md) |
+| `HUB_POD_ID` | the hostname | cluster mode: this pod's unique id |
 | `HUB_TURN_TIMEOUT_MS` | `600000` | the hub waits this + 15 s so the spoke's own timeout result arrives first |
 | `HUB_VAPID_SUBJECT` | the https public URL, else `mailto:hub@localhost` | contact sent to push services |
 | `OPENROUTER_API_KEY` | | default key for the `openrouter` speech provider (never sent to other providers) |
@@ -1543,6 +1546,7 @@ in the file).
 | `speech.stt` | `{provider, model, baseURL?, language?, apiKey?}` |
 | `speech.tts` | `{provider, model, voice, baseURL?, speed?, apiKey?}` |
 | `auth` | `{mode, issuer?, clientId, clientSecret, allowed, admins}`; see [Multi-user](#multi-user-sign-in-with-google) |
+| `cluster` | `{database, valkey}` URLs for cluster mode (env `HUB_DATABASE_URL` / `HUB_VALKEY_URL` win); see [docs/cluster.md](docs/cluster.md) |
 | `agents.never` | permission patterns (`action[:glob]`) no agent may ever approve, for every user, checked before any grant; see [Agent actions and grants](#agent-actions-and-grants) |
 | `agents.launches` | per-user launch caps `{maxQueued?, maxActive?, perHour?}` (defaults 50, 4, 60); see [docs/launches.md](docs/launches.md#placement-and-caps) |
 | `agents.webhooks.allowPrivate` | `true` lets webhooks target `http://`, loopback and private hosts (self-hosted receivers); see [docs/launches.md](docs/launches.md#where-webhooks-may-go) |
