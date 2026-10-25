@@ -68,7 +68,7 @@ const everything = (result: unknown) => JSON.stringify(result)
 describe("hub tool definition", () => {
   test("one tool named hub with a verb parameter and a JSON Schema input", () => {
     expect(HUB_TOOL).toBe("hub")
-    expect([...HUB_TOOL_VERBS].sort()).toEqual(["ask", "decline", "inbox", "msg", "reply", "status", "who", "whoami"])
+    expect([...HUB_TOOL_VERBS].sort()).toEqual(["answer", "approve", "ask", "decline", "deny", "inbox", "msg", "prompt", "reply", "status", "stop", "who", "whoami"])
     expect(HUB_TOOL_INPUT).toMatchObject({ type: "object", required: ["verb"], additionalProperties: false })
     expect((HUB_TOOL_INPUT as any).properties.verb.enum).toEqual([...HUB_TOOL_VERBS])
   })
@@ -268,10 +268,9 @@ describe("act tokens (identity per verb)", () => {
     actIdentity: (sessionID) => (act && sessionID === "ses_me" ? { token: ACT, url } : undefined),
   })
 
-  test("every current verb uses the shell token; act verbs are declared apart", () => {
-    for (const verb of HUB_TOOL_VERBS) expect(verbCredential(verb)).toBe("shell")
-    expect(HUB_TOOL_ACT_VERBS.filter((v) => (HUB_TOOL_VERBS as readonly string[]).includes(v))).toEqual([])
-    for (const verb of HUB_TOOL_ACT_VERBS) expect(verbCredential(verb)).toBe("act")
+  test("act verbs use the act token, every other verb the shell token", () => {
+    for (const verb of HUB_TOOL_VERBS) expect(verbCredential(verb)).toBe((HUB_TOOL_ACT_VERBS as readonly string[]).includes(verb) ? "act" : "shell")
+    for (const verb of ["msg", "ask", "reply", "decline", "inbox", "who", "status", "whoami"]) expect(verbCredential(verb)).toBe("shell")
   })
 
   test("toolIdentity act: the act identity only, never the shell token as a fallback", () => {
