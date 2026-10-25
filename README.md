@@ -548,7 +548,8 @@ session there as `@search`, the hub primes and prompts it, and once the session 
 launch ends `idle` and the worktree is removed (the branch stays; nothing uncommitted is ever removed). Apps launch
 with an app token (scope `sessions:launch`) under a grant with verb `launch`, retry safely with a `key`, tag
 launches with labels and follow them with signed webhooks. Everything, from the spec's fields and limits to
-placement, caps, the node's git rules and webhook signatures: [docs/launches.md](docs/launches.md).
+placement, caps, the node's git rules, webhook signatures and sandboxed launches in OpenShell (`hub node openshell
+check`): [docs/launches.md](docs/launches.md).
 
 ## hub CLI
 
