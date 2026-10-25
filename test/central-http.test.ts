@@ -13,7 +13,7 @@ describe("health and auth", () => {
   test("healthz needs no auth", async () => {
     h = harness()
     const res = await h.api("/healthz", { cookie: null })
-    expect(await res.json()).toEqual({ ok: true, version: "9.9.9", spokes: 0 })
+    expect(await res.json()).toEqual({ ok: true, version: "9.9.9", spokes: 0, nodes: 0 })
   })
 
   test("/api/* requires the device cookie even from 127.0.0.1", async () => {
