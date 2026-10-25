@@ -1,6 +1,17 @@
-// The pure grant policy (design §5, §7, §11.4; decision wvqeuis0).
+// The pure grant policy (design §5, §7, §11.4; decision wvqeuis0). No state, no I/O: grants.ts stores grants and
+// checks tenancy, acting.ts runs the check order; this module answers "does this rule cover this request?".
+// - Patterns `action[:glob]` (`bash` is OpenCode's `shell`; the action alone means every resource), matched with
+//   OpenCode's Wildcard semantics (`*` any run, `?` one character, a trailing ` *` optional).
+// - A request is allowed only if every resource is; never (hub `agents.never`, then the grant's) beats allow, and
+//   for an `always` reply also covers the save patterns, which must lie inside the allow rules.
+// - Shell allow rules: `$(`, backticks and `<`/`>` in a resource must be written literally, never matched by a wildcard.
+// - Escalation tiers are the hub's: tap for shell, external_directory, MCP/unknown tools and near-never requests.
+// - Grant schema: verbs, permissions, expires (1 minute–30 days), maxActionsPerHour, allowAlways; children and
+//   launch are phase 4. Project scopes are canonical paths matched on path boundaries.
 
 import type { Tier } from "./decisions"
+import { AgentError } from "./errors"
+import { isReservedName, isReservedRole, parseAddress } from "./names"
 
 /** One permission rule: an OpenCode action (or action glob) and a resource glob (`*` when the action stands alone). */
 export interface Pattern {
@@ -239,4 +250,130 @@ export function inProjects(dir: string, projects: readonly string[]): boolean {
     const root = canonicalProject(project)
     return root !== undefined && (canonical === root || canonical.startsWith(`${root}/`))
   })
+}
+
+/** A Pattern as text: the action alone when it covers every resource, else `action:glob`. */
+export const formatPattern = (pattern: Pattern): string => (pattern.resource === "*" ? pattern.action : `${pattern.action}:${pattern.resource}`)
+
+const UNIT_MS = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 } as const
+
+/** A duration in ms: a number of seconds (as elsewhere in the agent API) or `<n>s|m|h|d`; undefined when malformed. */
+export function parseDuration(value: unknown): number | undefined {
+  if (typeof value === "number") return Number.isFinite(value) && value >= 0 ? Math.round(value * 1000) : undefined
+  if (typeof value !== "string") return undefined
+  const match = /^(\d{1,9})([smhd])$/.exec(value)
+  return match ? Number(match[1]) * UNIT_MS[match[2] as keyof typeof UNIT_MS] : undefined
+}
+
+// ---------- grants ----------
+
+/** What a grant may let its holder do (phase 3; `launch` comes in phase 4). */
+export const GRANT_VERBS = ["approve", "deny", "answer", "prompt", "stop", "roles"] as const
+export type GrantVerb = (typeof GRANT_VERBS)[number]
+
+export const GRANT_DEFAULT_EXPIRES_MS = 8 * 3_600_000
+export const GRANT_EXPIRES_MIN_MS = 60_000
+export const GRANT_EXPIRES_MAX_MS = 30 * 86_400_000
+export const GRANT_DEFAULT_MAX_ACTIONS_PER_HOUR = 60
+export const GRANT_MAX_ACTIONS_PER_HOUR = 1000
+export const GRANT_PROJECTS_MAX = 20
+export const GRANT_PATTERNS_MAX = 100
+
+/** A validated grant as the user wrote it (holder, scope and tenancy are checked against the user's world by grants.ts). */
+export interface GrantSpec {
+  /** `@@role` (a reserved role), `@name`, `ses_…` or `app:<token id>`. */
+  readonly holder: string
+  readonly scope: { readonly projects: readonly string[] }
+  readonly allow: readonly GrantVerb[]
+  /** Canonical pattern texts (formatPattern). */
+  readonly permissions: { readonly allow: readonly string[]; readonly never: readonly string[] }
+  /** The holder may reply `always` (still only when every save pattern passes the policy). */
+  readonly allowAlways: boolean
+  readonly expiresInMs: number
+  readonly maxActionsPerHour: number
+}
+
+const GRANT_FIELDS = ["holder", "scope", "allow", "permissions", "expires", "maxActionsPerHour", "allowAlways"]
+const APP_HOLDER = /^app:[0-9a-f]{16}$/
+const PHASE_4 = ["children", "launch"]
+
+const invalid = (message: string) => new AgentError("invalid", message)
+const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value)
+
+function onlyFields(value: Record<string, unknown>, allowed: readonly string[], what: string): void {
+  for (const key of Object.keys(value)) {
+    if (PHASE_4.includes(key)) throw invalid(`${what}.${key} is not available yet (phase 4)`)
+    if (!allowed.includes(key)) throw invalid(`Unknown ${what} field ${key}`)
+  }
+}
+
+function validHolder(value: unknown): string {
+  if (typeof value === "string" && APP_HOLDER.test(value)) return value
+  const address = typeof value === "string" ? parseAddress(value) : undefined
+  if (!address || (address.kind === "name" && isReservedName(address.name))) throw invalid("holder is @@role, @name, ses_… or app:<token id>")
+  if (address.kind === "role" && !isReservedRole(address.role)) throw invalid("A role holder must be a reserved role (orchestrator…, concierge…)")
+  return value as string
+}
+
+function validProjects(value: unknown): string[] {
+  if (!isObject(value)) throw invalid("scope is an object {projects: [...]}")
+  onlyFields(value, ["projects"], "scope")
+  const raw = value.projects
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > GRANT_PROJECTS_MAX) throw invalid(`scope.projects lists 1–${GRANT_PROJECTS_MAX} project directories`)
+  const projects: string[] = []
+  for (const item of raw) {
+    const canonical = canonicalProject(item as string)
+    if (canonical === undefined) throw invalid(`scope.projects: ${String(item)} is not an absolute project directory`)
+    if (!projects.includes(canonical)) projects.push(canonical)
+  }
+  return projects
+}
+
+function validVerbs(value: unknown): GrantVerb[] {
+  if (!Array.isArray(value) || value.length === 0) throw invalid(`allow lists the verbs: ${GRANT_VERBS.join(", ")}`)
+  const verbs: GrantVerb[] = []
+  for (const verb of value) {
+    if (verb === "launch") throw invalid("allow: launch is not available yet (phase 4)")
+    if (!GRANT_VERBS.includes(verb)) throw invalid(`allow: unknown verb ${String(verb)}`)
+    if (!verbs.includes(verb)) verbs.push(verb)
+  }
+  return verbs
+}
+
+function validPatterns(value: unknown, what: string): string[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value) || value.length > GRANT_PATTERNS_MAX) throw invalid(`${what} lists at most ${GRANT_PATTERNS_MAX} patterns`)
+  const out: string[] = []
+  for (const item of value) {
+    const pattern = parsePattern(item)
+    if (!pattern) throw invalid(`${what}: ${String(item)} is not an action[:glob] pattern`)
+    const text = formatPattern(pattern)
+    if (!out.includes(text)) out.push(text)
+  }
+  return out
+}
+
+/** Validates a grant the user creates or edits; throws AgentError invalid. Holder and scope tenancy are the caller's. */
+export function validateGrant(input: unknown): GrantSpec {
+  if (!isObject(input)) throw invalid("A grant is an object")
+  onlyFields(input, GRANT_FIELDS, "grant")
+  const holder = validHolder(input.holder)
+  const projects = validProjects(input.scope)
+  const allow = validVerbs(input.allow)
+  let permissions: GrantSpec["permissions"] = { allow: [], never: [] }
+  if (input.permissions !== undefined) {
+    if (!isObject(input.permissions)) throw invalid("permissions is an object {allow?, never?}")
+    onlyFields(input.permissions, ["allow", "never"], "permissions")
+    permissions = { allow: validPatterns(input.permissions.allow, "permissions.allow"), never: validPatterns(input.permissions.never, "permissions.never") }
+  }
+  const expiresInMs = input.expires === undefined ? GRANT_DEFAULT_EXPIRES_MS : parseDuration(input.expires)
+  if (expiresInMs === undefined || expiresInMs < GRANT_EXPIRES_MIN_MS || expiresInMs > GRANT_EXPIRES_MAX_MS) {
+    throw invalid("expires is 1 minute to 30 days (seconds, or 30m, 8h, 2d)")
+  }
+  const cap = input.maxActionsPerHour ?? GRANT_DEFAULT_MAX_ACTIONS_PER_HOUR
+  if (!Number.isInteger(cap) || (cap as number) < 1 || (cap as number) > GRANT_MAX_ACTIONS_PER_HOUR) {
+    throw invalid(`maxActionsPerHour is a whole number 1–${GRANT_MAX_ACTIONS_PER_HOUR}`)
+  }
+  if (input.allowAlways !== undefined && typeof input.allowAlways !== "boolean") throw invalid("allowAlways is true or false")
+  return { holder, scope: { projects }, allow, permissions, allowAlways: input.allowAlways === true, expiresInMs, maxActionsPerHour: cap as number }
 }

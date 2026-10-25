@@ -2,7 +2,24 @@
 // Wildcard semantics, bash→shell, every-resource matching, never beats allow (incl. save patterns), shell
 // metacharacters, risk tiers, grant schema and duration validation, project path boundaries.
 import { describe, expect, test } from "bun:test"
-import { allowsResource, canonicalProject, evaluatePermission, inProjects, riskTier, forbidsResource, globCovers, globsOverlap, parsePattern, wildcard } from "../src/central/agent/policy"
+import { AgentError } from "../src/central/agent/errors"
+import {
+  GRANT_DEFAULT_EXPIRES_MS,
+  GRANT_DEFAULT_MAX_ACTIONS_PER_HOUR,
+  allowsResource,
+  canonicalProject,
+  evaluatePermission,
+  forbidsResource,
+  formatPattern,
+  globCovers,
+  globsOverlap,
+  inProjects,
+  parseDuration,
+  parsePattern,
+  riskTier,
+  validateGrant,
+  wildcard,
+} from "../src/central/agent/policy"
 
 describe("wildcard (OpenCode Wildcard.match)", () => {
   test.each([
@@ -319,5 +336,144 @@ describe("inProjects (boundary match)", () => {
     expect(inProjects("/srv/b/x", ["/srv/a", "/srv/b"])).toBe(true)
     expect(inProjects("/srv/c", ["/srv/a", "/srv/b"])).toBe(false)
     expect(inProjects("/srv/a", [])).toBe(false)
+  })
+})
+
+describe("formatPattern", () => {
+  test("action alone for every resource, else action:glob", () => {
+    expect(formatPattern(p("bash"))).toBe("shell")
+    expect(formatPattern(p("bash:git push*"))).toBe("shell:git push*")
+    expect(formatPattern(p("read:*"))).toBe("read")
+  })
+})
+
+describe("parseDuration", () => {
+  test.each([
+    [90, 90_000], // numbers are seconds, as elsewhere in the agent API
+    ["45s", 45_000],
+    ["30m", 1_800_000],
+    ["8h", 28_800_000],
+    ["2d", 172_800_000],
+  ])("%p → %p ms", (input, ms) => {
+    expect(parseDuration(input)).toBe(ms)
+  })
+
+  test.each(["", "8", "8 h", "1.5h", "-1h", "h", "8w", -5, Number.NaN, Number.POSITIVE_INFINITY, null, {}])("rejects %p", (bad) => {
+    expect(parseDuration(bad)).toBeUndefined()
+  })
+})
+
+describe("validateGrant", () => {
+  const base = {
+    holder: "@@orchestrator",
+    scope: { projects: ["/Users/huy/projects/hub/"] },
+    allow: ["approve", "deny", "answer", "prompt", "stop", "roles"],
+    permissions: { allow: ["read", "edit", "bash:bun test*"], never: ["bash:git push*", "external_directory"] },
+    expires: "8h",
+    maxActionsPerHour: 120,
+  }
+
+  const invalid = (input: unknown, message: RegExp) => {
+    let error: unknown
+    try {
+      validateGrant(input)
+    } catch (e) {
+      error = e
+    }
+    expect(error).toBeInstanceOf(AgentError)
+    expect((error as AgentError).code).toBe("invalid")
+    expect((error as AgentError).message).toMatch(message)
+  }
+
+  test("the design's example, canonicalised", () => {
+    expect(validateGrant(base)).toEqual({
+      holder: "@@orchestrator",
+      scope: { projects: ["/Users/huy/projects/hub"] },
+      allow: ["approve", "deny", "answer", "prompt", "stop", "roles"],
+      permissions: { allow: ["read", "edit", "shell:bun test*"], never: ["shell:git push*", "external_directory"] },
+      allowAlways: false,
+      expiresInMs: 28_800_000,
+      maxActionsPerHour: 120,
+    })
+  })
+
+  test("defaults: no permissions, 8h, the hourly cap, no always", () => {
+    const grant = validateGrant({ holder: "@@concierge", scope: { projects: ["/srv/app"] }, allow: ["prompt", "prompt"] })
+    expect(grant).toEqual({
+      holder: "@@concierge",
+      scope: { projects: ["/srv/app"] },
+      allow: ["prompt"],
+      permissions: { allow: [], never: [] },
+      allowAlways: false,
+      expiresInMs: GRANT_DEFAULT_EXPIRES_MS,
+      maxActionsPerHour: GRANT_DEFAULT_MAX_ACTIONS_PER_HOUR,
+    })
+  })
+
+  test("allowAlways true is kept", () => {
+    expect(validateGrant({ ...base, allowAlways: true }).allowAlways).toBe(true)
+  })
+
+  test.each(["@@orchestrator", "@@orchestrator-2", "@@concierge.hub", "@api-refactor", "ses_abc123", "app:0123456789abcdef"])("holder %s is accepted", (holder) => {
+    expect(validateGrant({ ...base, holder }).holder).toBe(holder)
+  })
+
+  test("holders: reserved roles only, never @me, well formed", () => {
+    invalid({ ...base, holder: "@@reviewer" }, /reserved role/)
+    invalid({ ...base, holder: "@me" }, /holder/)
+    invalid({ ...base, holder: "orchestrator" }, /holder/)
+    invalid({ ...base, holder: "app:xyz" }, /holder/)
+    invalid({ ...base, holder: undefined }, /holder/)
+  })
+
+  test("children and launch are phase 4", () => {
+    invalid({ ...base, scope: { ...base.scope, children: true } }, /children/)
+    invalid({ ...base, scope: { ...base.scope, launch: {} } }, /launch/)
+    invalid({ ...base, allow: ["approve", "launch"] }, /launch/)
+  })
+
+  test("scope needs canonical projects", () => {
+    invalid({ ...base, scope: {} }, /project/)
+    invalid({ ...base, scope: { projects: [] } }, /project/)
+    invalid({ ...base, scope: { projects: ["relative"] } }, /project/)
+    invalid({ ...base, scope: { projects: ["/"] } }, /project/)
+    invalid({ ...base, scope: { projects: Array.from({ length: 21 }, (_, i) => `/p/${i}`) } }, /project/)
+    invalid({ ...base, scope: "all" }, /scope/)
+    invalid({ ...base, scope: { projects: ["/a"], sessions: ["@x"] } }, /sessions/)
+  })
+
+  test("verbs", () => {
+    invalid({ ...base, allow: [] }, /verb/)
+    invalid({ ...base, allow: ["approve", "delete"] }, /delete/)
+    invalid({ ...base, allow: "approve" }, /verb/)
+  })
+
+  test("permission patterns", () => {
+    invalid({ ...base, permissions: { allow: ["read:"] } }, /pattern/)
+    invalid({ ...base, permissions: { never: [7] } }, /pattern/)
+    invalid({ ...base, permissions: { allow: Array.from({ length: 101 }, (_, i) => `read:${i}`) } }, /pattern/)
+    invalid({ ...base, permissions: { always: ["read"] } }, /always/)
+    invalid({ ...base, permissions: [] }, /permissions/)
+  })
+
+  test("expires is 1 minute to 30 days", () => {
+    expect(validateGrant({ ...base, expires: 60 }).expiresInMs).toBe(60_000)
+    expect(validateGrant({ ...base, expires: "30d" }).expiresInMs).toBe(30 * 86_400_000)
+    invalid({ ...base, expires: 59 }, /expires/)
+    invalid({ ...base, expires: "31d" }, /expires/)
+    invalid({ ...base, expires: "soon" }, /expires/)
+  })
+
+  test("maxActionsPerHour is a whole number 1–1000", () => {
+    expect(validateGrant({ ...base, maxActionsPerHour: 1 }).maxActionsPerHour).toBe(1)
+    expect(validateGrant({ ...base, maxActionsPerHour: 1000 }).maxActionsPerHour).toBe(1000)
+    for (const bad of [0, 1001, 1.5, "10", -1]) invalid({ ...base, maxActionsPerHour: bad }, /maxActionsPerHour/)
+  })
+
+  test("allowAlways is a boolean; unknown fields are rejected", () => {
+    invalid({ ...base, allowAlways: "yes" }, /allowAlways/)
+    invalid({ ...base, admin: true }, /admin/)
+    invalid(null, /object/)
+    invalid([], /object/)
   })
 })
