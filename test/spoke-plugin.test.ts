@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test"
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { defaults, writeConfig } from "../src/config"
@@ -684,5 +684,49 @@ describe("session env injection hooks", () => {
     const cleanup = await plugin.setup(fake.ctx as any)
     expect(typeof cleanup).toBe("function")
     ;(cleanup as () => void)()
+  })
+})
+
+describe("launch-bound plugin (inside a launch's sandbox)", () => {
+  function launchConfig(content: unknown) {
+    const dir = mkdtempSync(path.join(tmpdir(), "hub-plugin-launch-"))
+    const file = path.join(dir, "config.json")
+    writeFileSync(file, JSON.stringify(content))
+    const previous = process.env.HUB_LAUNCH_CONFIG
+    process.env.HUB_LAUNCH_CONFIG = file
+    cleanups.push(() => {
+      if (previous === undefined) delete process.env.HUB_LAUNCH_CONFIG
+      else process.env.HUB_LAUNCH_CONFIG = previous
+      rmSync(dir, { recursive: true, force: true })
+    })
+    return file
+  }
+
+  test("connects with the launch token and launchID, ignoring the machine config", async () => {
+    const server = fakeCentral()
+    cleanups.push(() => server.stop())
+    const machine = tempConfig({ server: "http://127.0.0.1:1", mode: "off", token: "machine-tok" })
+    const before = readFileSync(machine, "utf8")
+    launchConfig({ hubURL: server.url, token: "hlt1.launch", launchID: "lch_plugin" })
+    const fake = fakeContext()
+    cleanups.push((await plugin.setup(fake.ctx as any)) as () => void)
+    await until(() => server.frames.some((f) => f.t === "hello"))
+    expect(server.auth).toEqual(["Bearer hlt1.launch"])
+    expect((server.frames.find((f) => f.t === "hello") as unknown as Record<string, unknown>).launchID).toBe("lch_plugin")
+    expect(await fake.call("enroll")).toMatchObject({ type: "invalid" })
+    expect(await fake.call("setMode", { mode: "off" })).toMatchObject({ type: "invalid" })
+    expect(readFileSync(machine, "utf8")).toBe(before)
+  })
+
+  test("an invalid launch config leaves no spoke (never the machine config)", async () => {
+    const server = fakeCentral()
+    cleanups.push(() => server.stop())
+    tempConfig({ server: server.url, mode: "always", token: "machine-tok" })
+    launchConfig({ hubURL: "nope", token: "hlt1.launch", launchID: "lch_plugin" })
+    const fake = fakeContext()
+    cleanups.push((await plugin.setup(fake.ctx as any)) as () => void)
+    expect(await fake.call("status")).toMatchObject({ type: "unavailable" })
+    await Bun.sleep(100)
+    expect(server.auth).toEqual([])
   })
 })
