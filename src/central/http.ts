@@ -39,6 +39,8 @@ import { createActions } from "./actions"
 import { audioFormat, SpeechError } from "./speech/provider"
 import { SpeechService } from "./speech/service"
 import { NodeRegistry } from "./nodes"
+import { randomBytes } from "node:crypto"
+import { LaunchEngine } from "./agent/launch-engine"
 import { RequestTimeoutError, RequestTooLargeError, SpokeError, SpokeHub, type Notifier, type SpokeHubOptions, type SpokeSocketData } from "./spoke-ws"
 import { ACTIVITY_INTERVAL_MAX, ACTIVITY_INTERVAL_MIN, LOCAL_USER, PUSH_PREF_KEYS, quietHoursInput, Store, VIEW_PREF_KEYS, type DeviceRecord, type LegacyPushPrefs, type PushPrefs, type UserRecord, type ViewPrefs } from "./store"
 
@@ -103,6 +105,8 @@ export interface Central {
   readonly decisions: Decisions
   /** Kill switches (per user and hub-wide) and hub.json agents.never, for the acting verbs. */
   readonly acting: ActingSwitch
+  /** Launches (design §6): accept, list, stop; placement onto nodes and each launch's run to its end. */
+  readonly launches: LaunchEngine
   /** The JSON API's route table (method, path, access), for audits and tests. */
   readonly routes: readonly RouteInfo[]
   stop(): Promise<void>
@@ -565,6 +569,26 @@ export function startCentral(options: CentralOptions): Central {
   /** Permission, form, prompt and stop execution, shared by the console routes and the agent act verbs. */
   const actions = createActions({ registry, spokes, humanTurn })
   delivery.start()
+  // Launches (design §6): placement onto the user's nodes, prepare on the node, the session through the machine's
+  // service spoke, then its end; restart recovery runs on start.
+  const launches = new LaunchEngine({
+    state: backends.state,
+    counters: backends.counters,
+    locks: backends.locks,
+    owner: `hub-${process.pid}-${randomBytes(4).toString("hex")}`,
+    ...(config.launchCaps ? { caps: config.launchCaps } : {}),
+    nodes,
+    nodeOps: spokes,
+    registry,
+    spokes,
+    directory,
+    delivery,
+    decisions,
+    actions,
+    users: () => store.users().map((u) => u.id),
+    now,
+  })
+  void launches.start().catch((cause) => console.error(`[hub] launches did not start: ${(cause as Error).message}`))
 
   // One credential resolver for every /api request: device cookie, device token, session and app tokens.
   // Every stored agent message also goes to the user's console streams (live transcript rows).
@@ -1537,8 +1561,10 @@ export function startCentral(options: CentralOptions): Central {
     delivery,
     decisions,
     acting,
+    launches,
     routes: [...routes.map(({ method, path, access }) => ({ method, path, access })), ...agent.routes.map(({ method, path }) => ({ method, path, access: "agent" as const }))],
     async stop() {
+      launches.shutdown()
       tokenPush.stop()
       delivery.stop()
       decisions.stop()
