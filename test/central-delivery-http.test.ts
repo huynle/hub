@@ -60,7 +60,7 @@ describe("delivery in the hub", () => {
     expect(h.store.agentData(USER).sessions?.find((s) => s.sessionID === "ses_1")?.primed).toBeUndefined()
   })
 
-  test("POST /api/agent/name primes an unprimed session once with its new name; derived names never prime", async () => {
+  test("POST /api/agent/name primes with the new name (again on each explicit rename); derived names never prime", async () => {
     const { requests } = await start()
     // ses_1 and ses_2 have derived names already: nothing was primed.
     expect(requests.filter((r) => r.op === "deliver")).toEqual([])
@@ -68,9 +68,10 @@ describe("delivery in the hub", () => {
     expect(res.status).toBe(200)
     await waitFor(() => requests.some((r) => r.op === "deliver"))
     expect(requests.filter((r) => r.op === "deliver")).toEqual([expect.objectContaining({ sessionID: "ses_1", wake: false, meta: expect.objectContaining({ kind: "primer", to: "@backend" }) })])
+    // An explicit rename primes again with the new name.
     expect((await h.api("/api/agent/name", { method: "POST", json: { name: "backend-2", session: "ses_1" } })).status).toBe(200)
-    await Bun.sleep(50)
-    expect(requests.filter((r) => r.op === "deliver")).toHaveLength(1)
+    await waitFor(() => requests.filter((r) => r.op === "deliver").length === 2)
+    expect(requests.filter((r) => r.op === "deliver")[1]).toMatchObject({ sessionID: "ses_1", wake: false, meta: { kind: "primer", to: "@backend-2" } })
   })
 
   test("a spoke without deliver: unsupported", async () => {

@@ -191,18 +191,19 @@ export class Delivery {
     this.messages = new Messages({ state: deps.state, now, newID: this.newID })
     this.hops = new HopTracker({ state: deps.state, now })
     this.limiter = new MessageLimiter({ counters: deps.counters, now, ...(deps.limits ? { limits: deps.limits } : {}) })
-    deps.directory.onNamed?.((userID, sessionID) => void this.prime(userID, sessionID))
+    // An explicit (re)name primes again, so the session learns its new address.
+    deps.directory.onNamed?.((userID, sessionID) => void this.prime(userID, sessionID, { again: true }))
   }
 
   /**
-   * Primes the session once (see the header): no-op when it is primed, unknown, or no deliver-capable spoke of
+   * Primes the session once (see the header; `again`: an explicit rename primes once more): no-op when it is primed, unknown, or no deliver-capable spoke of
    * the user reports it. Never throws.
    */
-  prime(userID: string, sessionID: string): Promise<void> {
+  prime(userID: string, sessionID: string, options: { again?: boolean } = {}): Promise<void> {
     const key = `${userID}\u0000${sessionID}`
     const running = this.priming.get(key)
     if (running) return running
-    const run = this.primeNow(userID, sessionID)
+    const run = this.primeNow(userID, sessionID, options.again === true)
       .catch((cause) => console.error(`[hub] primer failed: ${cause instanceof Error ? cause.message : String(cause)}`))
       .finally(() => this.priming.delete(key))
     this.priming.set(key, run)
@@ -290,9 +291,9 @@ export class Delivery {
 
   // ---- internals ----------------------------------------------------------------------------------------
 
-  private async primeNow(userID: string, sessionID: string): Promise<void> {
+  private async primeNow(userID: string, sessionID: string, again: boolean): Promise<void> {
     const { directory } = this.deps
-    if (!directory.primed || !directory.markPrimed || directory.primed(userID, sessionID)) return
+    if (!directory.primed || !directory.markPrimed || (!again && directory.primed(userID, sessionID))) return
     if (!this.targets(userID, sessionID).length) return
     const entry = directory.resolve(userID, sessionID).sessions[0]
     if (!entry) return

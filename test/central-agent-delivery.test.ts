@@ -295,10 +295,13 @@ describe("identity primer", () => {
     expect(kinds(s)).toEqual(["primer"])
     expect(s.sent[0]!.req).toMatchObject({ wake: false, meta: { kind: "primer", to: "@renamed" } })
     expect(s.sent[0]!.req.text).toContain("You are @renamed")
+    // A later explicit rename primes again, so the session learns its new name; messages don't.
+    s.entries.set("ses_b", { ...s.entries.get("ses_b")!, name: "again" })
     s.primer.name(U, "ses_b", "again")
     await settle()
-    await s.delivery.send(U, asUser, "@renamed", "msg", "hi")
-    expect(kinds(s)).toEqual(["primer", "msg"])
+    await s.delivery.send(U, asUser, "@again", "msg", "hi")
+    expect(kinds(s)).toEqual(["primer", "primer", "msg"])
+    expect(s.sent[1]!.req.text).toContain("You are @again")
   })
 
   test("an explicit name of an offline session sends nothing; its first message later primes it", async () => {
