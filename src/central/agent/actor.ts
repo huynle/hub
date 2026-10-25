@@ -26,6 +26,11 @@ export interface SessionActor {
   readonly userID: string
   readonly machineID: string
   readonly sessionID: string
+  /**
+   * Which of the session's tokens: "shell" (typ session, in its shells' environment) or "act" (typ act, held by
+   * the spoke for the hub tool only). The hub's verifier always sets it; absent counts as "shell" (canActAsSession).
+   */
+  readonly via?: "shell" | "act"
 }
 
 /** A user-created app/agent token (P1-T7). */
@@ -163,6 +168,16 @@ export interface AgentAllow {
   readonly scope?: string
   /** Any app token may call it (introspection such as whoami). */
   readonly app?: boolean
+  /**
+   * An act verb: sessions may call it only through their act token (canActAsSession), never their shell token,
+   * whatever `session` says. App tokens still need `scope`.
+   */
+  readonly act?: boolean
+}
+
+/** Whether a session actor came with the session's act token; shell tokens (and anything else) never act. */
+export function canActAsSession(actor: AgentActor): boolean {
+  return actor.kind === "session" && actor.via === "act"
 }
 
 /** Route classes on /api/agent: users everywhere (incl. token management), sessions where allowed, apps by scope. */
@@ -171,7 +186,7 @@ export function agentAllows(allow: AgentAllow, actor: AgentActor): boolean {
     case "user":
       return true
     case "session":
-      return allow.session === true
+      return allow.act === true ? canActAsSession(actor) : allow.session === true
     case "app":
       return allow.app === true || (allow.scope !== undefined && actor.scopes.includes(allow.scope))
   }

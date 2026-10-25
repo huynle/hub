@@ -28,7 +28,7 @@ function answer(client: Client) {
     const frame = JSON.parse(String(message.data))
     if (frame.t !== "req") return
     requests.push(frame.req)
-    const result = frame.req.op === "sessionTokens" ? { applied: frame.req.tokens.map((t: any) => t.sessionID), skipped: [] } : {}
+    const result = frame.req.op === "sessionTokens" || frame.req.op === "actTokens" ? { applied: frame.req.tokens.map((t: any) => t.sessionID), skipped: [] } : {}
     client.send({ t: "res", id: frame.id, ok: true, result })
   })
   return requests
@@ -116,7 +116,7 @@ describe("verify over HTTP", () => {
     const { token, child, machineID } = await minted()
     const res = await bearer("/api/agent/whoami", token)
     expect(res.status).toBe(200)
-    expect(((await res.json()) as any).actor).toEqual({ kind: "session", userID: "local", machineID, sessionID: "ses_1" })
+    expect(((await res.json()) as any).actor).toEqual({ kind: "session", userID: "local", machineID, sessionID: "ses_1", via: "shell" })
     expect(((await (await bearer("/api/agent/whoami", child)).json()) as any).actor.sessionID).toBe("ses_child")
   })
 
@@ -194,5 +194,48 @@ describe("verify over HTTP", () => {
     const before = h.store.userEpoch(bob.id)
     expect((await h.api(`/api/admin/users/${bob.id}`, { method: "PUT", json: { role: "admin" } })).status).toBe(200)
     expect(h.store.userEpoch(bob.id)).toBe(before)
+  })
+})
+
+describe("act tokens over HTTP", () => {
+  const actOf = (requests: any[]) => new Map<string, string>(requests.filter((r) => r.op === "actTokens").flatMap((r) => r.tokens.map((t: any) => [t.sessionID, t.token])))
+
+  test("a spoke announcing actTokens gets an act token per session in its own op; it resolves via act", async () => {
+    start()
+    const { requests } = await tokenSpoke(["ses_1", "ses_child"], { features: ["sessionTokens", "actTokens"] })
+    await waitFor(() => actOf(requests).size === 2 && tokensOf(requests).size === 2)
+    const act = actOf(requests).get("ses_1")!
+    const shell = tokensOf(requests).get("ses_1")!
+    expect(act).toMatch(/^hst1\./)
+    expect(act).not.toBe(shell)
+    expect(requests.find((r) => r.op === "actTokens").hubURL).toBeUndefined()
+    // No act token ever travels in a sessionTokens frame.
+    expect(requests.filter((r) => r.op === "sessionTokens").flatMap((r) => r.tokens.map((t: any) => t.token))).not.toContain(act)
+    const whoami = async (token: string) => ((await (await bearer("/api/agent/whoami", token)).json()) as any).actor
+    expect(await whoami(act)).toMatchObject({ kind: "session", sessionID: "ses_1", via: "act" })
+    expect(await whoami(shell)).toMatchObject({ kind: "session", sessionID: "ses_1", via: "shell" })
+  })
+
+  test("a spoke announcing only sessionTokens never gets an act token", async () => {
+    start()
+    const { requests } = await tokenSpoke(["ses_1"])
+    await waitFor(() => tokensOf(requests).size === 1)
+    await Bun.sleep(50)
+    expect(requests.some((r) => r.op === "actTokens")).toBe(false)
+  })
+
+  test("an act token is refused on console routes and dies with the session", async () => {
+    start()
+    const { client, requests } = await tokenSpoke(["ses_1"], { features: ["sessionTokens", "actTokens"] })
+    await waitFor(() => actOf(requests).size === 1)
+    const act = actOf(requests).get("ses_1")!
+    expect((await bearer("/api/sessions", act)).status).toBe(403)
+    client.send({ t: "sessions", sessions: [] })
+    // Wait until the hub has seen the empty snapshot (the shell token goes at the same time).
+    const deadline = Date.now() + 2000
+    while ((await bearer("/api/agent/whoami", act)).status !== 401) {
+      if (Date.now() > deadline) throw new Error("act token still accepted")
+      await Bun.sleep(5)
+    }
   })
 })

@@ -23,6 +23,7 @@ import {
   type ResultFor,
   type ServerRequest,
   type SessionTokensRequest,
+  type ActTokensRequest,
   type SessionModelPrefs,
   type SpokeRequest,
   type TerminalInfo,
@@ -272,6 +273,11 @@ export class Spoke {
   private readonly tracker = new SessionTracker()
   /** Session tokens from the hub (sessionTokens op), for the sessions' shells (P1-T6). Never logged. */
   private readonly tokens = new SessionTokenStore()
+  /**
+   * Act tokens from the hub (actTokens op): the credential for act verbs, kept apart from `tokens` so no shell
+   * ever gets one. Only actIdentity reads them (the OpenCode hub tool). Never logged, never in any environment.
+   */
+  private readonly actTokens = new SessionTokenStore()
   /** The background workers each session started (the voice agent's task board). */
   private readonly tasks = new TaskBoard()
   private readonly turns = new TurnTracker()
@@ -378,6 +384,7 @@ export class Spoke {
     this.connection = undefined
     this.connectionKey = ""
     this.tokens.clear()
+    this.actTokens.clear()
   }
 
   isVoiceTurn(sessionID: string): boolean {
@@ -576,6 +583,16 @@ export class Spoke {
     return url ? { token, url } : { token }
   }
 
+  /**
+   * The session's act token (actTokens op) with the hub URL, for the OpenCode hub tool's act verbs only. Never
+   * hand it to a shell, an environment, a log or a tool's output. Undefined without an act token or a hub URL.
+   */
+  actIdentity(sessionID: string): { token: string; url: string } | undefined {
+    const token = this.actTokens.get(sessionID)?.token
+    const url = this.config.server || this.tokens.hubURL
+    return token && url ? { token, url } : undefined
+  }
+
   /** The URL the hub told this spoke its sessions' shells reach it at (HUB_URL), if it sent one. */
   get hubURL(): string | undefined {
     return this.tokens.hubURL
@@ -756,6 +773,7 @@ export class Spoke {
       this.connectionKey = key
       // Tokens belong to the hub and machine they came from; the next connection's hub sends its own.
       this.tokens.clear()
+      this.actTokens.clear()
       if (active) this.connect(config)
     }
     if (previous.sessions.join() !== config.sessions.join()) this.scheduleSnapshot()
@@ -919,7 +937,8 @@ export class Spoke {
     // Session browser ops are not gated by exposure: they are how a session gets exposed.
     if (req.op === "expose") return this.expose(req.sessionID, req.on)
     if (req.op === "create") return this.create(req.directory, req.title, req.herdrWorkspace)
-    if (req.op === "sessionTokens") return this.storeSessionTokens(req)
+    if (req.op === "sessionTokens") return this.storeTokens(this.tokens, req)
+    if (req.op === "actTokens") return this.storeTokens(this.actTokens, req)
     // Inspection and control need a session this process knows; Voice (conversation) is gated separately.
     if (!isReported(this.config, this.tracker, req.sessionID) && !(await this.adopt(req.sessionID))) throw new Error(UNKNOWN_SESSION)
     switch (req.op) {
@@ -1050,16 +1069,16 @@ export class Spoke {
    * Stores the hub's session tokens for sessions this process reports (the tracker knows them). Never adopts or
    * exposes a session: a token for any other session is skipped as "unknown", an expired one as "expired".
    */
-  private storeSessionTokens(req: SessionTokensRequest): ResultFor["sessionTokens"] {
+  private storeTokens(store: SessionTokenStore, req: SessionTokensRequest | ActTokensRequest): ResultFor["sessionTokens"] {
     const applied: string[] = []
     const skipped: Array<ResultFor["sessionTokens"]["skipped"][number]> = []
     for (const { sessionID, token, exp } of req.tokens) {
       if (this.config.mode === "off" || !this.tracker.has(sessionID)) skipped.push({ sessionID, reason: "unknown" })
-      else if (this.tokens.set(sessionID, token, exp)) applied.push(sessionID)
+      else if (store.set(sessionID, token, exp)) applied.push(sessionID)
       else skipped.push({ sessionID, reason: "expired" })
     }
-    if (req.hubURL !== undefined && applied.length > 0) this.tokens.hubURL = req.hubURL
-    this.tokens.prune()
+    if (req.op === "sessionTokens" && req.hubURL !== undefined && applied.length > 0) this.tokens.hubURL = req.hubURL
+    store.prune()
     return { applied, skipped }
   }
 
@@ -1401,7 +1420,10 @@ export class Spoke {
       this.turns.observe(event)
       this.observeModel(event)
       this.origins.observe(event)
-      if (event.type === "session.deleted" && typeof sessionID === "string") this.tokens.delete(sessionID)
+      if (event.type === "session.deleted" && typeof sessionID === "string") {
+        this.tokens.delete(sessionID)
+        this.actTokens.delete(sessionID)
+      }
       if (event.type === "form.replied" || event.type === "form.cancelled") {
         const formID = (event.data as Record<string, unknown> | undefined)?.id
         if (typeof formID === "string") {

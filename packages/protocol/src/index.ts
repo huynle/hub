@@ -303,8 +303,10 @@ export const IMPLIED_OPENCODE_FEATURES = [
  * "deliver": the spoke admits hub messages into its sessions (deliver op).
  * "hubPrompt": it admits deliver kind "prompt" (an agent's prompt under a grant) with a provenance header it renders.
  * "permissionMessage": it passes a permission reply's `message` (a deny reason) on to the harness.
+ * "actTokens": it keeps the act tokens the hub sends (actTokens op) apart from session tokens, never in any
+ * environment, for its own act verbs only (the OpenCode hub tool).
  */
-export const KNOWN_SPOKE_FEATURES = [...IMPLIED_OPENCODE_FEATURES, "autoName", "sessionTokens", "deliver", "hubPrompt", "permissionMessage"] as const
+export const KNOWN_SPOKE_FEATURES = [...IMPLIED_OPENCODE_FEATURES, "autoName", "sessionTokens", "deliver", "hubPrompt", "permissionMessage", "actTokens"] as const
 export type SpokeFeature = (typeof KNOWN_SPOKE_FEATURES)[number]
 /** What this package's OpenCode spoke announces (without "deliver" and "hubPrompt" when its OpenCode has no synthetic messages). */
 export const SPOKE_FEATURES: readonly SpokeFeature[] = KNOWN_SPOKE_FEATURES
@@ -481,6 +483,12 @@ export type ServerRequest =
    */
   | { readonly op: "sessionTokens"; readonly tokens: readonly SessionToken[]; readonly hubURL?: string }
   /**
+   * Act tokens (typ "act") for sessions the spoke reported (feature "actTokens"): the credential for act verbs. A
+   * separate op so a spoke that only knows sessionTokens never takes one for a shell token. The spoke keeps them
+   * apart from session tokens and never puts them in any environment. Send through batchActTokens.
+   */
+  | { readonly op: "actTokens"; readonly tokens: readonly SessionToken[] }
+  /**
    * Admit a hub message into a session (feature "deliver"). `text` is the envelope the hub rendered; `messageID`
    * is the idempotency key (spokes apply a message once). `wake: false` admits it without starting a turn.
    * Kind "prompt" (feature "hubPrompt"): `text` is the prompt's body; the spoke renders the provenance header from
@@ -603,6 +611,8 @@ export interface ResultFor {
   create: { readonly sessionID: string; readonly openedIn?: "herdr" }
   /** `applied`: sessions whose token the spoke stored; `skipped`: the others, with the reason. */
   sessionTokens: { readonly applied: readonly string[]; readonly skipped: ReadonlyArray<{ readonly sessionID: string; readonly reason: SessionTokenSkipReason }> }
+  /** As sessionTokens. */
+  actTokens: { readonly applied: readonly string[]; readonly skipped: ReadonlyArray<{ readonly sessionID: string; readonly reason: SessionTokenSkipReason }> }
   deliver: DeliverResult
 }
 
@@ -668,6 +678,7 @@ export function isHubURL(v: unknown): v is string {
 export const SESSION_TOKENS_ENVELOPE_CHARS = 1024
 
 export type SessionTokensRequest = Extract<ServerRequest, { op: "sessionTokens" }>
+export type ActTokensRequest = Extract<ServerRequest, { op: "actTokens" }>
 
 /**
  * Splits tokens into sessionTokens requests, in order, of at most SESSION_TOKENS_MAX tokens whose JSON is at most
@@ -675,10 +686,18 @@ export type SessionTokensRequest = Extract<ServerRequest, { op: "sessionTokens" 
  * Throws a RangeError when one token alone does not fit `maxChars`.
  */
 export function batchSessionTokens(tokens: readonly SessionToken[], options: { readonly hubURL?: string; readonly maxChars?: number } = {}): SessionTokensRequest[] {
-  const maxChars = options.maxChars ?? MAX_FRAME - SESSION_TOKENS_ENVELOPE_CHARS
-  const request = (batch: readonly SessionToken[]): SessionTokensRequest => ({ op: "sessionTokens", tokens: batch, ...(options.hubURL !== undefined ? { hubURL: options.hubURL } : {}) })
+  return batchTokens(tokens, (batch) => ({ op: "sessionTokens", tokens: batch, ...(options.hubURL !== undefined ? { hubURL: options.hubURL } : {}) }), options.maxChars)
+}
+
+/** Splits act tokens into actTokens requests, as batchSessionTokens does (no hub URL). */
+export function batchActTokens(tokens: readonly SessionToken[], options: { readonly maxChars?: number } = {}): ActTokensRequest[] {
+  return batchTokens(tokens, (batch) => ({ op: "actTokens", tokens: batch }), options.maxChars)
+}
+
+function batchTokens<R>(tokens: readonly SessionToken[], request: (batch: readonly SessionToken[]) => R, max?: number): R[] {
+  const maxChars = max ?? MAX_FRAME - SESSION_TOKENS_ENVELOPE_CHARS
   const empty = JSON.stringify(request([])).length
-  const out: SessionTokensRequest[] = []
+  const out: R[] = []
   let batch: SessionToken[] = []
   let size = empty
   for (const { sessionID, token, exp } of tokens) {
@@ -903,6 +922,8 @@ function isServerRequest(v: unknown): v is ServerRequest {
       )
     case "sessionTokens":
       return Array.isArray(v.tokens) && v.tokens.length <= SESSION_TOKENS_MAX && v.tokens.every(isSessionToken) && (v.hubURL === undefined || isHubURL(v.hubURL))
+    case "actTokens":
+      return Array.isArray(v.tokens) && v.tokens.length <= SESSION_TOKENS_MAX && v.tokens.every(isSessionToken) && !("hubURL" in v)
     case "deliver":
       return deliverProblem(v) === undefined
     default:

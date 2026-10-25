@@ -1,6 +1,6 @@
 // The OpenCode `hub` tool (src/spoke/hub-tool.ts): verbs over the SDK as the calling session, against a fake hub.
 import { afterEach, describe, expect, test } from "bun:test"
-import { ASK_WAIT_MAX_S, askWaitSeconds, HUB_TOOL, HUB_TOOL_DESCRIPTION, HUB_TOOL_INPUT, HUB_TOOL_VERBS, runHubTool, type HubToolSpoke } from "../src/spoke/hub-tool"
+import { ASK_WAIT_MAX_S, askWaitSeconds, HUB_TOOL, HUB_TOOL_ACT_VERBS, HUB_TOOL_DESCRIPTION, HUB_TOOL_INPUT, HUB_TOOL_VERBS, runHubTool, toolIdentity, verbCredential, type HubToolSpoke } from "../src/spoke/hub-tool"
 import { stopServer } from "./spoke-fake"
 
 const TOKEN = "hst.secret-token-value"
@@ -258,5 +258,44 @@ describe("hub tool verbs", () => {
     expect(status.content).toContain("box")
     expect(status.content).toContain("Review PR")
     expect(status.content).toContain("wants to run rm")
+  })
+})
+
+describe("act tokens (identity per verb)", () => {
+  const ACT = "hst.act-secret-value"
+  const both = (url: string, act: boolean | "throws" = true): HubToolSpoke => ({
+    ...spokeFor(url),
+    actIdentity: (sessionID) => (act && sessionID === "ses_me" ? { token: ACT, url } : undefined),
+  })
+
+  test("every current verb uses the shell token; act verbs are declared apart", () => {
+    for (const verb of HUB_TOOL_VERBS) expect(verbCredential(verb)).toBe("shell")
+    expect(HUB_TOOL_ACT_VERBS.filter((v) => (HUB_TOOL_VERBS as readonly string[]).includes(v))).toEqual([])
+    for (const verb of HUB_TOOL_ACT_VERBS) expect(verbCredential(verb)).toBe("act")
+  })
+
+  test("toolIdentity act: the act identity only, never the shell token as a fallback", () => {
+    const url = "http://hub.test"
+    expect(toolIdentity(both(url), "ses_me", "act")).toEqual({ token: ACT, url })
+    expect(toolIdentity(both(url, false), "ses_me", "act")).toBeUndefined()
+    expect(toolIdentity(spokeFor(url), "ses_me", "act")).toBeUndefined()
+    expect(toolIdentity(both(url), "ses_other", "act")).toBeUndefined()
+  })
+
+  test("toolIdentity shell: the shell identity only, never the act token", () => {
+    const url = "http://hub.test"
+    expect(toolIdentity(both(url), "ses_me", "shell")).toEqual({ token: TOKEN, url })
+    const noShell: HubToolSpoke = { ...both(url), shellIdentity: () => undefined }
+    expect(toolIdentity(noShell, "ses_me", "shell")).toBeUndefined()
+  })
+
+  test("existing verbs send the shell token even when an act token exists; neither token reaches the output", async () => {
+    const hub = fakeHub({
+      "GET /api/agent/whoami": () => Response.json({ actor: { kind: "session", userID: "u_1", machineID: "m_1", sessionID: `ses_me ${TOKEN} ${ACT}` }, user: { id: "u_1", name: "Huy" } }),
+    })
+    const result = await runHubTool(() => both(hub.url), { verb: "whoami" }, ctx())
+    expect(hub.seen.map((s) => s.auth)).toEqual([`Bearer ${TOKEN}`])
+    expect(JSON.stringify(result)).not.toContain(ACT)
+    expect(JSON.stringify(result)).not.toContain(TOKEN)
   })
 })

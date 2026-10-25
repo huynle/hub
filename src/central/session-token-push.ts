@@ -7,8 +7,20 @@
 // reconnect is a new connection, so it gets every token again (the spoke drops its tokens when its connection
 // changes). Tokens the spoke skipped, and tokens of a failed send, are retried on the next frame or sweep. A
 // periodic sweep refreshes tokens nearing expiry and forgets connections that are gone.
+//
+// Act tokens (typ "act", decision #1 of phase 3) follow the same rules in a lane of their own: the actTokens op,
+// sent only to connections announcing "actTokens" (never inside a sessionTokens frame, which older spokes hand to
+// shells), without a hub URL, deduped and retried separately from the shell tokens.
 // Tokens are never logged.
-import { batchSessionTokens, type ResultFor, type SessionToken, type SessionTokensRequest, type SpokeFeature } from "../protocol"
+import {
+  batchActTokens,
+  batchSessionTokens,
+  type ActTokensRequest,
+  type ResultFor,
+  type SessionToken,
+  type SessionTokensRequest,
+  type SpokeFeature,
+} from "../protocol"
 import type { Timers } from "./registry"
 
 /** How often the sweep looks for tokens to refresh (well under a third of their lifetime). */
@@ -29,13 +41,15 @@ export interface TokenMinter {
   readonly lifetimeMs: number
   stamp(machineID: string): string | undefined
   mint(machineID: string, sessionID: string): { token: string; exp: number; stamp: string } | undefined
+  /** An act token (typ "act"); without it no act tokens are sent. */
+  mintAct?(machineID: string, sessionID: string): { token: string; exp: number; stamp: string } | undefined
 }
 
 export interface SessionTokenPushOptions {
   readonly registry: PushRegistry
   readonly tokens: TokenMinter
   /** Sends a sessionTokens request to a connection (SpokeHub.request). */
-  send(connID: string, req: SessionTokensRequest): Promise<ResultFor["sessionTokens"]>
+  send(connID: string, req: SessionTokensRequest | ActTokensRequest): Promise<ResultFor["sessionTokens"]>
   /** The URL sessions' shells reach the hub at. */
   readonly hubURL: string
   readonly now?: () => number
@@ -52,6 +66,15 @@ interface Sent {
   readonly stamp: string
 }
 
+/** One kind of token: the feature a connection must announce, how to mint one and how to batch them. */
+interface Lane {
+  readonly feature: SpokeFeature
+  mint(machineID: string, sessionID: string): { token: string; exp: number; stamp: string } | undefined
+  batch(tokens: readonly SessionToken[]): Array<SessionTokensRequest | ActTokensRequest>
+  /** connID → sessionID → the token last sent (or being sent). */
+  readonly sent: Map<string, Map<string, Sent>>
+}
+
 const realTimers: Timers = {
   set: (fn, ms) => {
     const handle = setTimeout(fn, ms)
@@ -64,8 +87,7 @@ const realTimers: Timers = {
 const reason = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause))
 
 export class SessionTokenPush {
-  /** connID → sessionID → the token last sent (or being sent). */
-  readonly #sent = new Map<string, Map<string, Sent>>()
+  readonly #lanes: readonly Lane[]
   readonly #inflight = new Set<Promise<unknown>>()
   readonly #now: () => number
   readonly #timers: Timers
@@ -75,6 +97,17 @@ export class SessionTokenPush {
   constructor(private readonly options: SessionTokenPushOptions) {
     this.#now = options.now ?? Date.now
     this.#timers = options.timers ?? realTimers
+    const { tokens, hubURL, maxChars } = options
+    const max = maxChars !== undefined ? { maxChars } : {}
+    const session: Lane = {
+      feature: "sessionTokens",
+      mint: (machineID, sessionID) => tokens.mint(machineID, sessionID),
+      batch: (batch) => batchSessionTokens(batch, { hubURL, ...max }),
+      sent: new Map(),
+    }
+    const mintAct = tokens.mintAct?.bind(tokens)
+    const act: Lane | undefined = mintAct && { feature: "actTokens", mint: mintAct, batch: (batch) => batchActTokens(batch, max), sent: new Map() }
+    this.#lanes = act ? [session, act] : [session]
   }
 
   /** Handles a sessions frame of a connection: sends what is new or due. Resolves when the sends settle. */
@@ -112,7 +145,8 @@ export class SessionTokenPush {
   }
 
   async #sweepAll(): Promise<void> {
-    await Promise.all([...this.#sent.keys()].map((connID) => this.#track(this.#sync(connID))))
+    const conns = new Set(this.#lanes.flatMap((lane) => [...lane.sent.keys()]))
+    await Promise.all([...conns].map((connID) => this.#track(this.#sync(connID))))
   }
 
   /** Tracks work for idle(); failures (e.g. an unreadable key file) are logged, never thrown. */
@@ -123,19 +157,23 @@ export class SessionTokenPush {
   }
 
   async #sync(connID: string): Promise<void> {
+    await Promise.all(this.#lanes.map((lane) => this.#syncLane(lane, connID)))
+  }
+
+  async #syncLane(lane: Lane, connID: string): Promise<void> {
     const { registry, tokens } = this.options
     const machineID = registry.connMachine(connID)
-    if (machineID === undefined || !registry.supports(connID, "sessionTokens")) {
-      this.#sent.delete(connID)
+    if (machineID === undefined || !registry.supports(connID, lane.feature)) {
+      lane.sent.delete(connID)
       return
     }
     const stamp = tokens.stamp(machineID)
     if (stamp === undefined) {
-      this.#sent.delete(connID)
+      lane.sent.delete(connID)
       return
     }
-    let sent = this.#sent.get(connID)
-    if (!sent) this.#sent.set(connID, (sent = new Map()))
+    let sent = lane.sent.get(connID)
+    if (!sent) lane.sent.set(connID, (sent = new Map()))
     const reported = new Set(registry.reportedSessions(connID))
     for (const sessionID of sent.keys()) if (!reported.has(sessionID)) sent.delete(sessionID)
 
@@ -146,11 +184,11 @@ export class SessionTokenPush {
     for (const sessionID of reported) {
       const last = sent.get(sessionID)
       if (last && last.stamp === stamp && last.exp - now >= refreshAt) continue
-      const minted = tokens.mint(machineID, sessionID)
+      const minted = lane.mint(machineID, sessionID)
       if (!minted) continue
       const entry = { sessionID, token: minted.token, exp: minted.exp }
-      if (!this.#fits(entry)) {
-        this.options.log?.(`[hub] session token for ${sessionID} does not fit in a frame; not sent`)
+      if (!this.#fits(lane, entry)) {
+        this.options.log?.(`[hub] ${lane.feature === "actTokens" ? "act" : "session"} token for ${sessionID} does not fit in a frame; not sent`)
         continue
       }
       const record = { exp: minted.exp, stamp: minted.stamp }
@@ -163,7 +201,7 @@ export class SessionTokenPush {
     const forget = (sessionID: string) => {
       if (records.has(sessionID) && sent.get(sessionID) === records.get(sessionID)) sent.delete(sessionID)
     }
-    const requests = this.#batch(due)
+    const requests = lane.batch(due)
     await Promise.all(
       requests.map(async (req) => {
         try {
@@ -171,21 +209,16 @@ export class SessionTokenPush {
           for (const { sessionID } of result.skipped) forget(sessionID)
         } catch (cause) {
           for (const { sessionID } of req.tokens) forget(sessionID)
-          this.options.log?.(`[hub] sending session tokens failed: ${reason(cause)}`)
+          this.options.log?.(`[hub] sending ${lane.feature === "actTokens" ? "act" : "session"} tokens failed: ${reason(cause)}`)
         }
       }),
     )
   }
 
-  #batch(tokens: readonly SessionToken[]): SessionTokensRequest[] {
-    const { hubURL, maxChars } = this.options
-    return batchSessionTokens(tokens, { hubURL, ...(maxChars !== undefined ? { maxChars } : {}) })
-  }
-
   /** Whether a token fits in a request on its own. */
-  #fits(entry: SessionToken): boolean {
+  #fits(lane: Lane, entry: SessionToken): boolean {
     try {
-      this.#batch([entry])
+      lane.batch([entry])
       return true
     } catch {
       return false

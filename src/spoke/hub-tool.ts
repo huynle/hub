@@ -1,7 +1,10 @@
 // The OpenCode `hub` tool: one tool with a verb parameter (msg, ask, reply, decline, inbox, who, status, whoami)
 // that talks to the hub's /api/agent as the calling session, through the shared SDK (packages/sdk) with the
 // session's own token (Spoke.shellIdentity). The token is only ever sent to the hub: it never appears in the tool's
-// output or metadata (and is redacted should a hub echo it back). Messages from other sessions are shown in the
+// output or metadata (and is redacted should a hub echo it back).
+// Act verbs (HUB_TOOL_ACT_VERBS; none yet) use the session's act token instead (Spoke.actIdentity, decision #1 of
+// phase 3): the only credential the hub lets a session act with, which the spoke never puts in any environment.
+// toolIdentity picks the token per verb and never falls back from one kind to the other. Messages from other sessions are shown in the
 // hub's envelope (packages/sdk/src/envelope.ts), sanitised, and marked as not coming from the user.
 import {
   HubClient,
@@ -21,6 +24,14 @@ export const HUB_TOOL = "hub"
 
 export const HUB_TOOL_VERBS = ["msg", "ask", "reply", "decline", "inbox", "who", "status", "whoami"] as const
 export type HubToolVerb = (typeof HUB_TOOL_VERBS)[number]
+
+/** Verbs that act (approve, deny, answer, prompt, stop …) and so need the session's act token. None yet. */
+export const HUB_TOOL_ACT_VERBS: readonly string[] = []
+
+/** Which of the session's tokens a verb uses: "act" for act verbs, "shell" for every other verb. */
+export function verbCredential(verb: string): "shell" | "act" {
+  return HUB_TOOL_ACT_VERBS.includes(verb) ? "act" : "shell"
+}
 
 /** Verbs that need a hub announcing "messaging". */
 const MESSAGING_VERBS: ReadonlySet<string> = new Set(["msg", "ask", "reply", "decline", "inbox"])
@@ -66,7 +77,17 @@ export const HUB_TOOL_INPUT = {
 /** The part of the Spoke the tool uses. */
 export interface HubToolSpoke {
   shellIdentity(sessionID: string): { token: string; url?: string } | undefined
+  /** The session's act token (Spoke.actIdentity); older spokes have none. */
+  actIdentity?(sessionID: string): { token: string; url: string } | undefined
   hubSupports(feature: string): boolean
+}
+
+/**
+ * The session's identity for a kind of verb: its act identity for "act" (never the shell token), its shell
+ * identity for "shell" (never the act token). Undefined when the session has no token of that kind.
+ */
+export function toolIdentity(spoke: HubToolSpoke, sessionID: string, kind: "shell" | "act"): { token: string; url?: string } | undefined {
+  return kind === "act" ? spoke.actIdentity?.(sessionID) : spoke.shellIdentity(sessionID)
 }
 
 export interface HubToolContext {
@@ -105,14 +126,17 @@ export async function runHubTool(spoke: () => HubToolSpoke | undefined, value: u
   if (!(HUB_TOOL_VERBS as readonly string[]).includes(verb)) return failure(`hub: unknown verb "${verb}" (use one of ${HUB_TOOL_VERBS.join(", ")})`, "invalid")
   const current = spoke()
   if (!current) return failure("The hub is not running in this OpenCode process; nothing was sent.", "unavailable")
-  const identity = current.shellIdentity(context.sessionID)
+  const kind = verbCredential(verb)
+  const identity = toolIdentity(current, context.sessionID, kind)
   if (!identity) return failure("This session has no hub token yet (the hub sends one once the session is shared and connected). Try again shortly.", "no_token")
   if (!identity.url) return failure("The hub's URL is not known yet; try again shortly.", "no_url")
   if (MESSAGING_VERBS.has(verb) && !current.hubSupports("messaging")) {
     return failure(`The hub this machine is connected to does not support messaging; hub ${verb} needs a newer hub.`, "unsupported")
   }
   const client = new HubClient({ url: identity.url, token: identity.token })
-  const redact = (result: HubToolResult): HubToolResult => scrub(result, identity.token)
+  // Both of the session's tokens are scrubbed, whichever one the verb sent.
+  const secrets = [identity.token, toolIdentity(current, context.sessionID, kind === "act" ? "shell" : "act")?.token]
+  const redact = (result: HubToolResult): HubToolResult => secrets.reduce((out, token) => (token ? scrub(out, token) : out), result)
   try {
     return redact(await dispatch(client, verb as HubToolVerb, input, context))
   } catch (cause) {
