@@ -336,6 +336,8 @@ async function main(dir: string, argv: string[]): Promise<number> {
     case "sandbox create": {
       const n = one(p, "--name")
       if (!n) throw new Exit(2, "error: the fake needs --name\n")
+      // As the gateway (MAX_ROUTABLE_NAME_LEN): sandbox names are DNS labels of at most 19 characters.
+      if (n.length > 19) throw grpcError("InvalidArgument", `name exceeds maximum length (${n.length} > 19)`)
       if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(n)) throw grpcError("InvalidArgument", "invalid sandbox name")
       if (state.sandboxes[key(workspace, n)]) throw grpcError("AlreadyExists", "sandbox already exists")
       const policyFile = one(p, "--policy")
