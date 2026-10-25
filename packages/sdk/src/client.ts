@@ -6,6 +6,12 @@ import type {
   AppTokenView,
   Asked,
   CreatedAppToken,
+  Decision,
+  DecisionAnswered,
+  DecisionOption,
+  DecisionState,
+  DecisionTier,
+  DecisionUrgency,
   DirectoryEntry,
   Inbox,
   LogRow,
@@ -101,6 +107,24 @@ export interface AskOptions extends MsgOptions {
   readonly expires?: number
   /** Seconds to wait for the answer; the hub serves at most WAIT_POLL_MAX_S per request, so longer waits loop. */
   readonly wait?: number
+  // Asks to @me open a Decision (design §12.1) with these:
+  readonly options?: readonly DecisionOption[]
+  readonly recommendation?: { readonly option: string; readonly why?: string }
+  readonly urgency?: DecisionUrgency
+  readonly tier?: DecisionTier
+  /** Seconds until the deadline. */
+  readonly deadline?: number
+  /** A safe option taken at the deadline. */
+  readonly onTimeout?: string
+  /** Addresses of the sessions it concerns. */
+  readonly about?: readonly string[]
+}
+
+/** The Decision fields of AskOptions, when given. */
+const decisionFields = (options: AskOptions) => {
+  const out: Record<string, unknown> = {}
+  for (const key of ["options", "recommendation", "urgency", "tier", "deadline", "onTimeout", "about"] as const) if (options[key] !== undefined) out[key] = options[key]
+  return out
 }
 
 const signalOf = (options: CallOptions) => (options.signal ? { signal: options.signal } : {})
@@ -255,6 +279,7 @@ export class HubClient {
       ...(options.all ? { all: true } : {}),
       ...(options.expires !== undefined ? { expiresIn: options.expires } : {}),
       ...(options.wait !== undefined ? { wait: first } : {}),
+      ...decisionFields(options),
     }
     const asked = await this.call<Asked | SentAll>("POST", `${AGENT}/ask`, { body, ...signalOf(options) })
     if ("sent" in asked) return asked
@@ -262,7 +287,7 @@ export class HubClient {
     while (current.message.state === "open" && left > 0 && !options.signal?.aborted) {
       const wait = Math.min(left, WAIT_POLL_MAX_S)
       left -= wait
-      current = { ...(asked.delivery ? { delivery: asked.delivery } : {}), ...(await this.message(current.message.id, { wait, ...signalOf(options) })) }
+      current = { ...(asked.delivery ? { delivery: asked.delivery } : {}), ...(asked.decision ? { decision: asked.decision } : {}), ...(await this.message(current.message.id, { wait, ...signalOf(options) })) }
     }
     return current
   }
@@ -294,6 +319,23 @@ export class HubClient {
 
   unmute(session: string, options: CallOptions = {}): Promise<{ muted: string[] }> {
     return this.call("POST", `${AGENT}/unmute`, { body: { session }, ...signalOf(options) })
+  }
+
+  // Decisions (asks to @me).
+
+  /** Decisions the caller asked (the user: all of theirs), newest first. */
+  decisions(options: CallOptions & { readonly state?: DecisionState } = {}): Promise<{ decisions: Decision[] }> {
+    return this.call("GET", `${AGENT}/decisions`, { query: { state: options.state }, ...signalOf(options) })
+  }
+
+  decision(id: string, options: CallOptions = {}): Promise<{ decision: Decision }> {
+    return this.call("GET", `${AGENT}/decisions/${segment(id)}`, signalOf(options))
+  }
+
+  /** Answers a Decision as the user (a device token; tap Decisions need the console): first answer wins, later ones are gone. */
+  answerDecision(id: string, answer: CallOptions & { readonly option?: string; readonly text?: string }): Promise<DecisionAnswered> {
+    const { signal: _signal, ...body } = answer
+    return this.call("POST", `/api/decisions/${segment(id)}/answer`, { body, ...signalOf(answer) })
   }
 
   // App tokens (user credentials only).

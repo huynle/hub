@@ -90,6 +90,8 @@ export type NotifyKind =
   | "say"
   | "handoff"
   | "activity"
+  | "decision"
+  | "message"
 
 export interface NotifyKindInfo {
   readonly key: NotifyKind
@@ -113,6 +115,8 @@ export const NOTIFY_GROUPS: readonly NotifyGroup[] = [
     kinds: [
       { key: "question", label: "Question", description: "A session or subagent asks you something." },
       { key: "permission", label: "Needs permission", description: "A tool call waits for your OK (answer from the notification)." },
+      { key: "decision", label: "Decision", description: "A session asks you to decide (hub ask @me), with options and a recommendation." },
+      { key: "message", label: "Message", description: "Agent messaging needs you: a message to you, an unanswered ask, or sessions looping." },
     ],
   },
   {

@@ -17,10 +17,12 @@ import { isNotificationKind, Push, type PushSender } from "./push"
 import { pushEndpointProblem, resolveHost as systemResolveHost, type ResolveHost } from "./push-target"
 import { fileBackends, type Backends } from "./backend"
 import { createResolver, type BearerVerifier, type CredentialMode } from "./agent/actor"
+import { Decisions, type Decision } from "./agent/decisions"
 import { Delivery } from "./agent/delivery"
+import { AgentError } from "./agent/errors"
+import { decisionStateQuery, MessageFeed } from "./agent/message-routes"
 import { hubDirectory } from "./agent/directory-routes"
 import { agentApi, agentRoutes, agentVerifiers, isAgentPath, wellKnown, type AgentRoute } from "./agent/routes"
-import { MessageFeed } from "./agent/message-routes"
 import { SessionTokens } from "./agent/session-tokens"
 import { SessionTokenPush } from "./session-token-push"
 import { TokenKeys } from "./token-keys"
@@ -84,6 +86,8 @@ export interface Central {
   readonly backends: Backends
   /** Agent messages: store and delivery to sessions (the message routes use it). */
   readonly delivery: Delivery
+  /** Decisions (ask @me): answered by the user on /api/decisions. */
+  readonly decisions: Decisions
   /** The JSON API's route table (method, path, access), for audits and tests. */
   readonly routes: readonly RouteInfo[]
   stop(): Promise<void>
@@ -487,6 +491,14 @@ export function startCentral(options: CentralOptions): Central {
     }
   }
 
+  /** A push to the user about one session (titled by it; "" opens the console), whatever device shows it. */
+  const pushUser = (kind: "decision" | "message", userID: string, sessionID: string, key: string) => {
+    const title = (sessionID && registry.status(sessionID)?.find((s) => s.id === sessionID)?.title) || "Hub"
+    notifier.notify(kind, sessionID, title, undefined, userID, { key }).catch((cause) => {
+      console.error("[hub] push notification failed:", cause instanceof Error ? cause.message : cause)
+    })
+  }
+
   const directory = hubDirectory({ registry, store, now })
   // Agent messages (design §3): delivered through spokes that announce "deliver"; pending ones flush on every
   // sessions frame; human turns (console turn/utterance, prompts typed in the harness) reset hop chains.
@@ -506,10 +518,20 @@ export function startCentral(options: CentralOptions): Central {
         return {}
       }
     },
-    // No push kind of its own yet: "question" reaches the user even while a device shows the session.
-    alert: (_userID, alert) =>
-      registry.alertUser("question", alert.sessionID, { subject: alert.kind === "hopCap" ? "Message loop" : "Unanswered ask", text: alert.text, key: alert.messageID }),
+    // Push kind "message": a msg to @me, an ask left unanswered, a message loop (sent even while watched).
+    alert: (userID, alert) => pushUser("message", userID, alert.sessionID, `${alert.kind}:${alert.messageID}`),
   })
+  /** Message events (watch, waiters), shared by the agent routes and the console's Decision answers. */
+  const feed = new MessageFeed()
+  // Decisions (design §12.1): asks to @me; deadlines run over every user's Decisions (survive restarts).
+  const decisions = new Decisions({
+    state: backends.state,
+    delivery,
+    now,
+    users: () => store.users().map((u) => u.id),
+    notify: (userID, decision, reason) => pushUser("decision", userID, decision.sessionID ?? "", `${decision.id}:${reason}`),
+  })
+  decisions.start()
   /** The user prompted the session: its message hop chain starts over (never fails the prompt). */
   const humanTurn = async (sessionID: string): Promise<void> => {
     const tenant = registry.sessionTenant(sessionID)
@@ -522,9 +544,8 @@ export function startCentral(options: CentralOptions): Central {
 
   // One credential resolver for every /api request: device cookie, device token, session and app tokens.
   // Every stored agent message also goes to the user's console streams (live transcript rows).
-  const feed = new MessageFeed()
   feed.subscribe((userID, message) => broadcast({ type: "message", message }, { tenant: userID }))
-  const agentDeps = { store, sessionTokens, directory, registry, spokes, delivery, feed, heartbeatMs, now }
+  const agentDeps = { store, sessionTokens, directory, registry, spokes, delivery, decisions, feed, heartbeatMs, now }
   const resolveActor = createResolver({
     cookieName: COOKIE,
     findDevice: (token) => store.findDevice(token),
@@ -936,6 +957,30 @@ export function startCentral(options: CentralOptions): Central {
       return new Response(null, { status: 204 })
     }),
     route("GET", "/api/admin/audit", "admin", () => Response.json(store.auditLog())),
+    // Decisions (asks to @me): the user's own; answered only here (tap: the console cookie, not a device token).
+    route("GET", "/api/decisions", "user", async ({ url, user }) => {
+      try {
+        return Response.json({ decisions: await decisions.list(user.id, { ...optionalState(url) }) }, { headers: NO_STORE })
+      } catch (cause) {
+        return decisionFailure(cause)
+      }
+    }),
+    route("GET", "/api/decisions/:id", "user", async ({ params, user }) => {
+      const decision = await decisions.get(user.id, params.id!)
+      return decision ? Response.json({ decision }, { headers: NO_STORE }) : error(404, "No such decision", "not_found")
+    }),
+    route("POST", "/api/decisions/:id/answer", "user", async ({ request, params, user, device }) => {
+      const input = await body(request)
+      const via = (await resolveActor.mode(request)) === "bearer" ? "device-token" : "cookie"
+      try {
+        const answered = await decisions.answer(user.id, params.id!, decisionAnswer(input), { kind: "user", userID: user.id, deviceID: device.id, via })
+        if (answered.reply) feed.publish(user.id, answered.reply)
+        store.audit({ actor: user.id, action: "decision.answer", target: params.id!, detail: answered.decision.answer?.option ?? "text" })
+        return Response.json(answered, { headers: NO_STORE })
+      } catch (cause) {
+        return decisionFailure(cause)
+      }
+    }),
     route("GET", "/api/settings/speech/default", "admin", () => Response.json(speechSettings.view(), { headers: NO_STORE })),
     route("PUT", "/api/settings/speech/default", "admin", async ({ request, user }) => {
       const view = speechSettings.update(await request.json())
@@ -1460,10 +1505,12 @@ export function startCentral(options: CentralOptions): Central {
     speechSettings,
     backends,
     delivery,
+    decisions,
     routes: [...routes.map(({ method, path, access }) => ({ method, path, access })), ...agent.routes.map(({ method, path }) => ({ method, path, access: "agent" as const }))],
     async stop() {
       tokenPush.stop()
       delivery.stop()
+      decisions.stop()
       spokes.stop()
       for (const listener of [...listeners]) listeners.delete(listener)
       // Bun 1.3.5 quirk: once the server has closed a WebSocket itself, stop(true)'s promise never
@@ -1472,6 +1519,27 @@ export function startCentral(options: CentralOptions): Central {
       await backends.state.flush?.().catch((cause) => console.error(`[hub] agent state not saved: ${(cause as Error).message}`))
     },
   }
+}
+
+/** The state filter of GET /api/decisions (throws invalid). */
+const optionalState = (url: URL): { state?: Decision["state"] } => {
+  const state = decisionStateQuery(url.searchParams.get("state"))
+  return state ? { state } : {}
+}
+
+/** {option?, text?} of a Decision answer (types only; Decisions validates). */
+function decisionAnswer(input: Record<string, unknown>): { option?: string; text?: string } {
+  for (const key of ["option", "text"] as const) {
+    if (input[key] !== undefined && typeof input[key] !== "string") throw new AgentError("invalid", `${key} must be a string`)
+  }
+  return { ...(typeof input.option === "string" ? { option: input.option } : {}), ...(typeof input.text === "string" ? { text: input.text } : {}) }
+}
+
+/** Console envelope for a Decision failure: gone → 409 (the web app's toast), the rest by code. */
+function decisionFailure(cause: unknown): Response {
+  if (!(cause instanceof AgentError)) throw cause
+  const status: Partial<Record<string, number>> = { gone: 409, not_found: 404, forbidden: 403, invalid: 400, rate_limited: 429, paused: 423 }
+  return Response.json({ error: cause.message, code: cause.code, ...(cause.options.hint ? { hint: cause.options.hint } : {}) }, { status: status[cause.code] ?? 500 })
 }
 
 /** Deep-link scheme of the native apps: `hubapp://link?hub=<public URL>&code=<link code>`. */

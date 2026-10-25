@@ -274,11 +274,24 @@ cookie and a hub bearer token (400).
 | `POST /api/agent/roles/claim {role, exclusive?, project?, session?}` · `…/roles/release` | ✓ | own session | – | claims (with a new `generation`) or releases a role |
 | `POST /api/agent/msg {to, text, wake?, urgent?, all?}` | ✓ | ✓ | `messages:send` | tells a session (`all`: every holder of a role); never yourself |
 | `POST /api/agent/ask {to, text, expiresIn?, wait?}` | ✓ | ✓ | `messages:send` | an ask, open until answered, declined or expired; `wait` (≤ 60 s) returns the `answer` |
-| `POST /api/agent/reply {replyTo, text}` · `…/decline {replyTo, why}` | ✓ | ✓ | `messages:send` | answers a message you received (to its real sender) |
+| `POST /api/agent/ask {to: "@me", text, options?, recommendation?, urgency?, tier?, deadline?, onTimeout?, about?, wait?}` | – | ✓ | `messages:send` | opens a **Decision** for the user (below): `{message, decision, answer?}` |
+| `GET /api/agent/decisions?state=` · `…/decisions/:id` | ✓ (all) | own | `messages:read` (own) | the Decisions the caller asked |
+| `POST /api/agent/reply {replyTo, text}` · `…/decline {replyTo, why}` | ✓ | ✓ | `messages:send` | answers a message you received (to its real sender); not a Decision's ask |
 | `GET /api/agent/inbox` · `GET /api/agent/messages/:id?wait=` | ✓ | ✓ | `messages:read` | open asks, your waiting asks, recent messages, mutes · one message and its answer |
 | `POST /api/agent/mute {session}` · `…/unmute` | ✓ | ✓ | `messages:send` | refuses (or allows again) messages from a session |
 | `GET` · `PUT /api/agent/messaging {enabled}` | ✓ | – | – | the per-user messaging switch (off: `423 paused`) |
 | `POST /api/agent/app-tokens {label?, scopes?}` · `GET` · `DELETE …/:id` | ✓ | – | – | creates (token shown once), lists, revokes app tokens |
+
+**Decisions and `@me`.** `@me` addresses the user: `msg @me` is stored in the user's inbox (push kind `message`);
+`ask @me` opens a Decision `{id: "dec_…", from, about, question, options: [{id, label, safe?}], recommendation:
+{option, why?}, urgency: low|normal|high, tier: confirm|tap, deadline, onTimeout, state, answer?}` (push kind
+`decision`, generic body, opens `about[0]`, default the asking session). Only the user answers, on the console:
+`GET /api/decisions?state=`, `GET /api/decisions/:id`, `POST /api/decisions/:id/answer {option, text?}` (`text` alone
+for a Decision without options; same-origin cookie or a device token; `tap` Decisions only with the console
+cookie, else `403 forbidden`). The first answer wins, a later one gets `409 {code: "gone"}`; the answer reaches the
+asker as the user's reply to its ask (`Decision dec_…: Hold [hold]`). At the deadline, `onTimeout` (only an option
+marked `safe`) answers it (`answeredBy: "timeout"`); without one the Decision stays open and is pushed again once.
+`deadline` is in seconds and must fall before the ask expires (default: a day past the deadline, at most 7 days).
 
 Reads come from the hub's catalog; only `show` (summary) and `log` (timeline) ask the session's spoke, so they
 depend on what its harness supports. A session token reads all of its user's sessions but names and claims roles
@@ -316,6 +329,9 @@ hub msg <addr> "text" [--all] [--no-wake] [--urgent]     tell: fire and forget
 hub ask <addr> "text" [--wait [secs]] [--expires 2h] [--all] [--no-wake] [--urgent]
 hub reply <msgID> "text" [--no-wake]      to the message's real sender, never via the role
 hub decline <msgID> --why "reason"
+hub ask @me "question" [--option id=label[:safe]]... [--recommend id [--why "…"]] [--urgency low|normal|high]
+        [--deadline 2h [--on-timeout <safe id>]] [--tier confirm|tap] [--about <addr>]...   a Decision for the user
+hub decisions list [--state open|answered|expired]   the Decisions you asked
 hub inbox                                 asks to answer, your open asks, recent messages, mutes
 hub mute <addr> · hub unmute <addr>       refuse (or accept again) messages from a session
 hub mcp                                   an MCP server on stdio (see below)
@@ -323,7 +339,7 @@ hub login [--url URL] [--token APP_TOKEN] · hub logout
 hub help · hub --version
 ```
 
-Addresses are `ses_…` (or an unambiguous prefix), `@name`, `@@role` and `@name.project`. Output is short text
+Addresses are `ses_…` (or an unambiguous prefix), `@name`, `@@role`, `@name.project` and `@me` (the user). Output is short text
 (one session per line: name and ID, state, harness, current activity, blockers); `--json` prints the hub's answer
 unchanged (for errors, the `{error: {code, message, hint?, …}}` envelope on stdout as well). Errors print the
 message, any candidates or retry time, a missing feature, and the hint on stderr.

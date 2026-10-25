@@ -28,6 +28,8 @@ export const NOTIFICATION_LABELS: Readonly<Record<NotificationKind, string>> = O
   longTool: "Long tool finished",
   say: "Spoken reply",
   activity: "Activity",
+  decision: "Decision",
+  message: "Message",
 })
 
 /** True for a known notification kind (API input). */
@@ -191,6 +193,11 @@ export function pushPayload(kind: NotificationKind, sessionID: string, sessionTi
       return { kind, sessionID, title, body: "Sent from the terminal. Tap to talk." }
     case "question":
       return { kind, sessionID, title, body: "Tap to see it." }
+    // An agent wrote the question or message: never in the payload (the console shows it after sign-in).
+    case "decision":
+      return { kind, sessionID, title, body: "A decision waits for you. Tap to answer." }
+    case "message":
+      return { kind, sessionID, title, body: "Tap to see it." }
     case "permission":
       // Never the request's summary (it may be a command line); the service worker fetches it from the hub.
       return { kind, sessionID, title, body: "Tap to review and answer.", ...(extra.requestID ? { requestID: extra.requestID } : {}) }
@@ -212,6 +219,8 @@ export function sendOptionsFor(kind: NotificationKind | "test"): { TTL: number; 
     case "question":
     case "permission":
     case "failed":
+    case "decision":
+    case "message":
       return { TTL: URGENT_TTL_SECONDS, urgency: "high" }
     case "done":
     case "stopped":

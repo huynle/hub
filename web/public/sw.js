@@ -7,13 +7,15 @@ self.addEventListener("install", () => self.skipWaiting())
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()))
 
 /** Kinds that wait for the user: stay on screen until handled. */
-const STICKY = new Set(["question", "permission", "blocked"])
+const STICKY = new Set(["question", "permission", "blocked", "decision"])
 /** Progress kinds replace the previous one of the session quietly (same tag, no new alert). */
 const QUIET = new Set(["finished", "turn", "retry", "subagentDone", "jobDone", "longTool", "activity"])
 const VIBRATE = {
   question: [200, 100, 200],
   permission: [200, 100, 200],
   blocked: [200, 100, 200],
+  decision: [200, 100, 200],
+  message: [150, 80, 150],
   failed: [300],
   subagentFailed: [300],
   jobFailed: [300],

@@ -1144,7 +1144,7 @@ async function notifications(browser: Browser): Promise<void> {
     const groups = await page.locator("#notifications [data-notify-group] h4").allTextContents()
     assert(groups.join("|") === "Needs you|Session|Subagents|Scripts and tools|Voice|Activity digest", `groups: ${groups.join("|")}`)
     const summary = page.locator("#notifications [data-notify-summary]")
-    assert((await summary.textContent())?.trim() === "You'll get: Question, Needs permission, All done, Failed, Hand-off.", `summary: ${await summary.textContent()}`)
+    assert((await summary.textContent())?.trim() === "You'll get: Question, Needs permission, Decision, Message, All done, Failed, Hand-off.", `summary: ${await summary.textContent()}`)
     assert((await page.locator('#notifications input[data-pref="turn"]').isChecked()) === false, "every-turn notifications are off by default")
     await page.locator("#notifications .switch").filter({ hasText: "Each subagent that fails" }).waitFor()
     await page.locator('#notifications input[data-pref="subagentFailed"]').check()

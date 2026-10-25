@@ -24,6 +24,9 @@
 //   deliver-capable spokes: an offline session is primed when its pending message is flushed. The directory
 //   persists the primed flag on the session record; a primer no spoke takes is tried again with the next
 //   message and never holds the message back.
+// - @me (design §12.1): the user's address, never a session (even one named "me"). A msg or ask to @me is stored
+//   for the user (their stored-only inbox; nothing goes to a spoke); a msg alerts the user ("user"), an ask is a
+//   Decision's carrier (./decisions pushes it). The user cannot message @me; `@me.project` is malformed.
 // - Loop protection (./message-limits): pair/user rate limits before storing, hop per message, human turns
 //   (console, voice, typed in the harness) reset a session's chain (humanTurn).
 import type { DeliverRequest, DeliverResult, DeliveryMode, MessageKind as WireKind } from "../../protocol"
@@ -66,8 +69,9 @@ export type DeliverSend = (connID: string, req: DeliverRequest) => Promise<Deliv
  * ask stayed unanswered by an idle recipient after every re-wake.
  */
 export interface DeliveryAlert {
-  readonly kind: "hopCap" | "unanswered"
-  /** The recipient session. */
+  /** user: a session or app sent the user (@me) a message. */
+  readonly kind: "hopCap" | "unanswered" | "user"
+  /** The recipient session (user: the sending session, "" for an app). */
   readonly sessionID: string
   readonly messageID: string
   readonly text: string
@@ -117,6 +121,12 @@ const defaultTimers: Timers = {
   },
   clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 }
+
+/** The user's own address (design §12.1). */
+export const USER_ADDRESS = "@me"
+
+/** True for `@me` (and the malformed `@me.project`, which send refuses). */
+const isUserAddress = (addr: string): boolean => addr === USER_ADDRESS || addr.startsWith(`${USER_ADDRESS}.`)
 
 /** How long an offline recipient's message waits for its session to come back. */
 export const PENDING_MS = 24 * 60 * 60_000
@@ -217,6 +227,7 @@ export class Delivery {
    * ambiguous, unsupported {feature: "deliver"}, rate_limited or forbidden (muted) before anything is stored.
    */
   async send(userID: string, actor: AgentActor, addr: string, kind: "msg" | "ask", text: string, options: SendOptions = {}): Promise<Sent> {
+    if (isUserAddress(addr)) return this.sendToUser(userID, actor, addr, kind, text, options)
     const from = this.party(userID, actor)
     const resolved = this.others(actor, this.deps.directory.resolve(userID, addr))
     return this.sendTo(userID, from, addr, resolved, this.pick(resolved), kind, text, options)
@@ -224,6 +235,7 @@ export class Delivery {
 
   /** Like send, to every session the address names (each role holder gets its own message). */
   async sendAll(userID: string, actor: AgentActor, addr: string, kind: "msg" | "ask", text: string, options: SendOptions = {}): Promise<Sent[]> {
+    if (isUserAddress(addr)) return [await this.sendToUser(userID, actor, addr, kind, text, options)]
     const from = this.party(userID, actor)
     const resolved = this.others(actor, this.deps.directory.resolve(userID, addr))
     const sent: Sent[] = []
@@ -307,6 +319,30 @@ export class Delivery {
       meta: { kind: "primer", from: "hub", to: entry.name ? `@${entry.name}` : sessionID, delivery: "steer" },
     }
     if (await this.request(userID, sessionID, req)) directory.markPrimed(userID, sessionID)
+  }
+
+  /** A msg or ask to the user (@me): stored only; a msg alerts the user. */
+  private async sendToUser(userID: string, actor: AgentActor, addr: string, kind: "msg" | "ask", text: string, options: SendOptions): Promise<Sent> {
+    if (addr !== USER_ADDRESS) throw new AgentError("invalid", "@me takes no project scope")
+    if (actor.kind === "user") throw new AgentError("invalid", "You are @me: the user cannot message themselves")
+    const from = this.party(userID, actor)
+    const recipient: Party = { kind: "user" }
+    await this.limiter.admit(userID, from, recipient)
+    const hop = await this.hops.next(userID, from)
+    const message = await this.messages.send(userID, {
+      from,
+      to: USER_ADDRESS,
+      recipient,
+      kind,
+      text,
+      hop,
+      ...(options.expiresInMs === undefined ? {} : { expiresInMs: options.expiresInMs }),
+    })
+    this.users.add(userID)
+    if (kind === "msg") {
+      this.deps.alert?.(userID, { kind: "user", sessionID: from.kind === "session" ? from.sessionID : "", messageID: message.id, text: `${partyLabel(from)} sent you a message` })
+    }
+    return { message }
   }
 
   private async sendTo(userID: string, from: Party, addr: string, resolved: Resolved, entry: DirectoryEntry, kind: "msg" | "ask", text: string, options: SendOptions): Promise<Sent> {

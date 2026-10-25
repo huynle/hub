@@ -76,8 +76,11 @@ export class HubTransportError extends Error {
 export const isHubError = (error: unknown, ...codes: ErrorCode[]): error is HubError =>
   error instanceof HubError && (codes.length === 0 || codes.includes(error.code))
 
-/** The envelope inside a parsed body, if it is one. */
+/** The envelope inside a parsed body, if it is one (also the console routes' {error: message, code, hint?}). */
 export function envelopeOf(body: unknown): Envelope | undefined {
-  const error = (body as { error?: unknown } | null)?.error as Envelope | undefined
-  return typeof error === "object" && error !== null && typeof error.code === "string" && typeof error.message === "string" ? error : undefined
+  const raw = body as { error?: unknown; code?: unknown; hint?: unknown } | null
+  const error = raw?.error as Envelope | undefined
+  if (typeof error === "object" && error !== null && typeof error.code === "string" && typeof error.message === "string") return error
+  if (typeof raw?.error === "string" && typeof raw.code === "string") return { code: raw.code, message: raw.error, ...(typeof raw.hint === "string" ? { hint: raw.hint } : {}) }
+  return undefined
 }

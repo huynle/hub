@@ -194,6 +194,50 @@ export interface SentAll {
 /** POST /api/agent/ask (after any wait) and GET /api/agent/messages/:id: the message and, once closed, its answer. */
 export interface Asked extends Sent {
   readonly answer?: AgentMessage
+  /** An ask to @me: the Decision it opened. */
+  readonly decision?: Decision
+}
+
+/** One choice a Decision offers; onTimeout may pick only a safe one. */
+export interface DecisionOption {
+  readonly id: string
+  readonly label: string
+  readonly safe?: boolean
+}
+
+export type DecisionUrgency = "low" | "normal" | "high"
+/** confirm: any of the user's devices; tap: only the signed-in console. */
+export type DecisionTier = "confirm" | "tap"
+export type DecisionState = "open" | "answered" | "expired"
+
+/** What an ask to @me opens (design §12.1); only the user answers it. */
+export interface Decision {
+  readonly id: string
+  /** The ask (to @me) carrying it. */
+  readonly messageID: string
+  readonly from: Party
+  /** Session IDs it concerns. */
+  readonly about: readonly string[]
+  readonly sessionID?: string
+  readonly question: string
+  readonly options: readonly DecisionOption[]
+  readonly recommendation?: { readonly option: string; readonly why?: string }
+  readonly urgency: DecisionUrgency
+  readonly tier: DecisionTier
+  readonly deadline?: number
+  readonly onTimeout?: string
+  readonly state: DecisionState
+  readonly at: number
+  readonly expiresAt: number
+  readonly escalatedAt?: number
+  readonly answer?: { readonly option?: string; readonly text?: string; readonly answeredBy: "user" | "timeout"; readonly at: number; readonly deviceID?: string }
+}
+
+/** POST /api/decisions/:id/answer. */
+export interface DecisionAnswered {
+  readonly decision: Decision
+  /** The user's reply to the asker. */
+  readonly reply?: AgentMessage
 }
 
 /** POST /api/agent/reply and /decline: the answer and the message it answered. */
