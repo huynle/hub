@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { defaults, readConfig, writeConfig, type VoiceConfig } from "../src/config"
@@ -1362,6 +1362,79 @@ describe("open sessions (0.4)", () => {
     expect(calls.create).toHaveLength(1)
     const unknown = await server.request({ op: "create", directory: "/home/user/app", herdrWorkspace: "w99" })
     expect((unknown.result as any).warning).toMatch(/w99|workspace/i)
+  })
+})
+
+describe("launch create (feature \"launch\")", () => {
+  function roots() {
+    const base = realpathSync(mkdtempSync(path.join(tmpdir(), "hub-launch-")))
+    cleanups.push(() => rmSync(base, { recursive: true, force: true }))
+    const root = path.join(base, "projects")
+    mkdirSync(path.join(root, "repo", ".worktrees", "feat"), { recursive: true })
+    mkdirSync(path.join(base, "outside"))
+    return { base, root, worktree: path.join(root, "repo", ".worktrees", "feat") }
+  }
+  const service = (workspaceRoots: readonly string[]) =>
+    setup({ mode: "always", token: "tok" }, { kind: "service", listRecent: async () => [], options: { workspaceRoots: () => workspaceRoots } })
+
+  test("the spoke announces \"launch\"", async () => {
+    expect(SPOKE_FEATURES).toContain("launch")
+    const { spoke, server } = service([])
+    await until(() => spoke.status().connection === "connected")
+    expect((server.frames[0] as { features?: string[] }).features).toContain("launch")
+  })
+
+  test("creates a session in a new directory under the node workspace roots, with the agent and model applied", async () => {
+    const { root, worktree } = roots()
+    const { spoke, server, calls, agents, models } = service([root])
+    await until(() => spoke.status().connection === "connected")
+    const res = await server.request({ op: "create", directory: worktree, title: "Launch", launchID: "lch_1", agent: "plan", model: { providerID: "anthropic", modelID: "claude-opus", variant: "thinking" } })
+    expect(res).toMatchObject({ ok: true, result: { sessionID: "ses_new1" } })
+    expect(calls.create).toEqual([{ directory: worktree, title: "Launch" }])
+    expect(agents.get("ses_new1")).toBe("plan")
+    expect(models.get("ses_new1")).toEqual({ providerID: "anthropic", id: "claude-opus", variant: "thinking" })
+    // Agent first: switching the agent may reset the model.
+    expect(calls.switch).toEqual([{ sessionID: "ses_new1", agent: "plan" }])
+    await until(() => lastSessions(server)?.sessions.some((s) => s.id === "ses_new1") === true)
+    expect(lastSessions(server)!.sessions.find((s) => s.id === "ses_new1")).toMatchObject({ directory: worktree, projectName: "feat" })
+    // Only launch ID: no agent or model switch.
+    expect(await server.request({ op: "create", directory: worktree, launchID: "lch_2" })).toMatchObject({ ok: true, result: { sessionID: "ses_new2" } })
+    expect(calls.switch).toHaveLength(1)
+    expect(calls.model).toHaveLength(1)
+  })
+
+  test("refuses directories outside the roots, missing ones, or any without roots, before creating", async () => {
+    const { base, root, worktree } = roots()
+    const none = service([])
+    await until(() => none.spoke.status().connection === "connected")
+    expect(await none.server.request({ op: "create", directory: worktree, launchID: "lch_1" })).toMatchObject({ ok: false, error: expect.stringMatching(/workspace roots/i) })
+    const { spoke, server, calls } = service([root])
+    await until(() => spoke.status().connection === "connected")
+    expect(await server.request({ op: "create", directory: path.join(base, "outside"), launchID: "lch_1" })).toMatchObject({ ok: false, error: expect.stringMatching(/not under/i) })
+    expect(await server.request({ op: "create", directory: path.join(root, "gone"), agent: "build" })).toMatchObject({ ok: false, error: expect.stringMatching(/does not exist/i) })
+    expect(calls.create).toHaveLength(0)
+    expect(none.calls.create).toHaveLength(0)
+  })
+
+  test("refuses an agent or model the harness lacks, before creating", async () => {
+    const { root, worktree } = roots()
+    const { spoke, server, calls } = service([root])
+    await until(() => spoke.status().connection === "connected")
+    expect(await server.request({ op: "create", directory: worktree, agent: "nope" })).toMatchObject({ ok: false, error: expect.stringMatching(/unknown agent/i) })
+    expect(await server.request({ op: "create", directory: worktree, model: { providerID: "anthropic", modelID: "gpt-9" } })).toMatchObject({ ok: false, error: expect.stringMatching(/unknown model/i) })
+    expect(await server.request({ op: "create", directory: worktree, model: { providerID: "anthropic", modelID: "claude-opus", variant: "turbo" } })).toMatchObject({ ok: false, error: expect.stringMatching(/unknown model/i) })
+    expect(calls.create).toHaveLength(0)
+  })
+
+  test("only the service process serves launch creates; a plain create keeps its reported-workspace rule", async () => {
+    const { root, worktree } = roots()
+    const standalone = setup({ mode: "always", token: "tok" }, { options: { workspaceRoots: () => [root] } })
+    await until(() => standalone.spoke.status().connection === "connected")
+    expect(await standalone.server.request({ op: "create", directory: worktree, launchID: "lch_1" })).toMatchObject({ ok: false, error: expect.stringMatching(/background service/i) })
+    const { spoke, server, calls } = service([root])
+    await until(() => spoke.status().connection === "connected")
+    expect(await server.request({ op: "create", directory: worktree })).toMatchObject({ ok: false, error: "unknown workspace" })
+    expect(calls.create).toHaveLength(0)
   })
 })
 

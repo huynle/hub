@@ -17,6 +17,7 @@ import { HUB_TOOL, HUB_TOOL_DESCRIPTION, HUB_TOOL_INPUT, runHubTool } from "./sp
 import { cliEntry, installLaunchers } from "./spoke/launchers"
 import { listServiceSessions } from "./spoke/listing"
 import { ensureLocalHub } from "./spoke/localhub"
+import { nodeConfigPath, readWorkspaceRoots } from "./spoke/node-roots"
 import { PromptReferences } from "./spoke/prompt-refs"
 import { replyPermission, type PermissionLocation } from "./spoke/locations"
 import { foregroundEndpoint, formOutcome } from "./spoke/own-server"
@@ -232,8 +233,9 @@ export default Plugin.define({
           pluginVersion: pluginVersion(),
           // Loopback servers only, and only when autoStartLocalHub is on (see src/spoke/localhub.ts).
           localHub: (server) => ensureLocalHub(server),
-          // One Herdr reader per machine: the background service's spoke (see src/spoke/herdr.ts).
-          ...(kind === "service" ? { herdr: herdrRunner() } : {}),
+          // One Herdr reader per machine: the background service's spoke (see src/spoke/herdr.ts). Launch creates
+          // (service only) need the node workspace roots, read from node.json each time (src/spoke/node-roots.ts).
+          ...(kind === "service" ? { herdr: herdrRunner(), workspaceRoots: () => readWorkspaceRoots(nodeConfigPath()) } : {}),
         }),
       undefined,
       permissionLocation(ctx),
