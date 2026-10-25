@@ -272,6 +272,33 @@ describe("SpokeConnection", () => {
     expect(fake.frames.filter((f) => f.t === "hello")).toHaveLength(1)
   })
 
+  test("bye with retryAfterMs (a draining hub) reconnects after a jittered delay up to it, not the long backoff", async () => {
+    const fake = fakeServer()
+    const conn = connect(fake.url, { backoff: { minMs: 60_000, maxMs: 60_000, random: () => 0.5 } })
+    await until(() => conn.state === "connected")
+    const sent = Date.now()
+    fake.send({ t: "bye", reason: "draining", retryAfterMs: 400 })
+    fake.sockets[0]!.close(1001, "draining")
+    await until(() => conn.state === "error")
+    await Bun.sleep(100)
+    expect(fake.frames.filter((f) => f.t === "hello")).toHaveLength(1)
+    await until(() => conn.state === "connected" && fake.frames.filter((f) => f.t === "hello").length === 2, 2000)
+    // random 0.5 of 400 ms: about 200 ms after the bye (never the 30–60 s backoff).
+    expect(Date.now() - sent).toBeGreaterThanOrEqual(150)
+    expect(Date.now() - sent).toBeLessThan(1500)
+  })
+
+  test("a bye without retryAfterMs keeps the usual backoff", async () => {
+    const fake = fakeServer()
+    const conn = connect(fake.url, { backoff: { minMs: 60_000, maxMs: 60_000 } })
+    await until(() => conn.state === "connected")
+    fake.send({ t: "bye", reason: "server shutting down" })
+    fake.sockets[0]!.close(1001, "server shutting down")
+    await until(() => conn.state === "error")
+    await Bun.sleep(300)
+    expect(fake.frames.filter((f) => f.t === "hello")).toHaveLength(1)
+  })
+
   test("stop() closes the socket and does not reconnect", async () => {
     const fake = fakeServer()
     const conn = connect(fake.url)
