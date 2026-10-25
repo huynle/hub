@@ -50,7 +50,7 @@ import { evaluatePermission, formatPattern, type GrantVerb, parsePattern, type P
 /** What the engine reads from the Registry. */
 export type ActingRegistry = Pick<
   Registry,
-  "sessionTenant" | "session" | "rootOf" | "permissionRequest" | "permissionTargets" | "formTargets" | "owner" | "supports"
+  "sessionTenant" | "session" | "rootOf" | "permissionRequest" | "permissionTargets" | "formTargets" | "owner" | "supports" | "harnessOf"
 >
 
 /** Why a request needs the user, as the policy saw it. */
@@ -388,7 +388,10 @@ export class Acting {
     const connID = registry.owner(sessionID)
     if (!connID) throw offline()
     for (const feature of ["deliver", "hubPrompt"] as const) {
-      if (!registry.supports(connID, feature)) throw new AgentError("unsupported", `The session's spoke does not support ${feature}`, { extra: { feature } })
+      if (!registry.supports(connID, feature)) {
+        const harness = registry.harnessOf(connID) ?? "unknown"
+        throw new AgentError("unsupported", unsupportedMessage({ feature, harness }), { extra: { feature, harness } })
+      }
     }
     const messageID = (this.deps.newMessageID ?? newMessageID)()
     const from = this.address(caller)

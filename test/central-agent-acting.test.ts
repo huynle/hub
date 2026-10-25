@@ -101,6 +101,7 @@ function setup(options: {
       formTargets: (rootID, id) => (forms.has(id) && sessions.get(forms.get(id)!)!.root === rootID ? [{ connID: "c1", sessionID: forms.get(id)! }] : []),
       owner: (id) => (sessions.has(id) && !options.noOwner ? "c1" : undefined),
       supports: (_connID, feature) => features.has(feature),
+      harnessOf: () => "opencode",
     },
     directory: {
       resolveOne: (userID, addr) => {
@@ -461,7 +462,7 @@ describe("prompt", () => {
   test("a spoke without hubPrompt is unsupported; no owner is offline; a dropped spoke is offline", async () => {
     const old = setup({ features: ["deliver"] })
     const error = await failure(old.acting.prompt(caller(orchestrator), "ses_target", { text: "x" }))
-    expect([error.code, error.options.extra]).toEqual(["unsupported", { feature: "hubPrompt" }])
+    expect([error.code, error.options.extra]).toEqual(["unsupported", { feature: "hubPrompt", harness: "opencode" }])
     expect(old.calls).toEqual([])
     expect(old.audits[0]).toMatchObject({ outcome: "unsupported" })
     const none = setup({ noOwner: true })

@@ -102,7 +102,7 @@ export interface Actions {
 }
 
 /** How callers word an Unsupported outcome (as the read routes do). */
-export const unsupportedMessage = ({ feature, harness }: Pick<Unsupported, "feature" | "harness">): string => `The ${harness} spoke does not support ${feature}`
+export const unsupportedMessage = ({ feature, harness }: { readonly feature: string; readonly harness: string }): string => `The ${harness} spoke does not support ${feature}`
 
 const DONE: Done = { outcome: "done" }
 const GONE: Gone = { outcome: "gone" }
