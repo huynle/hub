@@ -1,10 +1,11 @@
 // FileStateStore specifics (the shared contract is in central-backend-state.test.ts): data survives a restart,
 // files live under <stateDir>/agent/ with owner-only modes, and names never escape that folder.
 import { afterEach, describe, expect, test } from "bun:test"
-import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs"
+import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { FileStateStore } from "../src/central/backend/file-state"
+import type { Timers } from "../src/central/backend/types"
 
 let dirs: string[] = []
 afterEach(() => {
@@ -23,6 +24,25 @@ const files = (dir: string): string[] =>
   existsSync(dir) ? (readdirSync(dir, { recursive: true }) as string[]).filter((f) => statSync(path.join(dir, f)).isFile()).sort() : []
 
 const mode = (file: string) => statSync(file).mode & 0o777
+
+/** Timers fired by hand. */
+function manualTimers() {
+  const pending = new Map<number, { fn: () => void; ms: number }>()
+  let next = 0
+  const timers: Timers = {
+    set: (fn, ms) => {
+      pending.set(++next, { fn, ms })
+      return next
+    },
+    clear: (handle) => void pending.delete(handle as number),
+  }
+  const fire = () => {
+    const due = [...pending.values()]
+    pending.clear()
+    for (const { fn } of due) fn()
+  }
+  return { timers, pending, fire }
+}
 
 describe("FileStateStore persistence", () => {
   test("entries and versions survive a restart after flush", async () => {
@@ -124,5 +144,57 @@ describe("FileStateStore persistence", () => {
     const second = new FileStateStore({ stateDir: dir })
     await expect(second.get("alice", "c", "k")).rejects.toThrow(file!.split("/").pop()!)
     expect(await Bun.file(path.join(dir, "agent", file!)).text()).toBe("{not json")
+  })
+})
+
+describe("FileStateStore debounced writes", () => {
+  test("changes are written once after the debounce delay, not on every write", async () => {
+    const dir = stateDir()
+    const clock = manualTimers()
+    const state = new FileStateStore({ stateDir: dir, timers: clock.timers, debounceMs: 50 })
+    await state.put("alice", "c", "a", 1)
+    await state.put("alice", "c", "b", 2)
+    await state.claim("ns", "k", "o")
+    expect(files(dir)).toEqual([])
+    expect([...clock.pending.values()].map((t) => t.ms)).toEqual([50])
+    clock.fire()
+    expect(files(path.join(dir, "agent")).length).toBe(2)
+    expect((await new FileStateStore({ stateDir: dir }).list("alice", "c")).length).toBe(2)
+    await state.get("alice", "c", "a")
+    expect(clock.pending.size).toBe(0)
+  })
+
+  test("flush writes at once and cancels the pending write", async () => {
+    const dir = stateDir()
+    const clock = manualTimers()
+    const state = new FileStateStore({ stateDir: dir, timers: clock.timers })
+    await state.put("alice", "c", "a", 1)
+    expect(clock.pending.size).toBe(1)
+    await state.flush()
+    expect(clock.pending.size).toBe(0)
+    expect((await new FileStateStore({ stateDir: dir }).get("alice", "c", "a"))!.value).toBe(1)
+  })
+
+  test("a failed debounced write is reported, kept, and written by the next flush", async () => {
+    const dir = stateDir()
+    const clock = manualTimers()
+    const warnings: string[] = []
+    const state = new FileStateStore({ stateDir: dir, timers: clock.timers, warn: (message) => warnings.push(message) })
+    await state.put("alice", "c", "a", 1)
+    writeFileSync(path.join(dir, "agent"), "in the way")
+    clock.fire()
+    expect(warnings.length).toBe(1)
+    expect(warnings[0]).toContain("agent")
+    rmSync(path.join(dir, "agent"))
+    await state.flush()
+    expect((await new FileStateStore({ stateDir: dir }).get("alice", "c", "a"))!.value).toBe(1)
+  })
+
+  test("flush rejects when a file cannot be written", async () => {
+    const dir = stateDir()
+    const state = new FileStateStore({ stateDir: dir, timers: manualTimers().timers })
+    await state.put("alice", "c", "a", 1)
+    writeFileSync(path.join(dir, "agent"), "in the way")
+    await expect(state.flush()).rejects.toThrow()
   })
 })

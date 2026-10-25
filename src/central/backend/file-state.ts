@@ -1,6 +1,7 @@
 // StateStore in files under <stateDir>/agent/ (the single-process hub's durable agent data; a cluster uses
 // Postgres). One JSON file per user and collection (users/<user>/<collection>.json) and one per claim namespace
-// (claims/<namespace>.json), loaded on first use and then served from memory; writes go to disk on flush().
+// (claims/<namespace>.json), loaded on first use and then served from memory. Changed files are written once
+// `debounceMs` after the first change, or at once by flush() (the hub flushes on stop).
 // Files are written atomically (temp file + rename) with mode 0600, folders 0700. Ids and names become path
 // segments only when they are short lowercase [a-z0-9_-] (case-insensitive file systems), otherwise their
 // SHA-256; each file repeats the ids it belongs to, so a file is never read for the wrong one. Hubs from before
@@ -8,15 +9,24 @@
 import { createHash } from "node:crypto"
 import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
-import type { Claim, ClaimResult, Clock, Data, Entry, StateStore, Versioned, WriteOptions, WriteResult } from "./types"
+import { realTimers } from "./memory-bus"
+import type { Claim, ClaimResult, Clock, Data, Entry, StateStore, Timers, Versioned, WriteOptions, WriteResult } from "./types"
 
 /** The folder under the state directory. */
 export const AGENT_STATE_DIR = "agent"
+/** Default delay between a change and its write. */
+export const FILE_STATE_DEBOUNCE_MS = 250
 
 export interface FileStateStoreOptions {
   /** The hub's state directory; data goes to <stateDir>/agent/. */
   readonly stateDir: string
   readonly now?: Clock
+  /** Timers for the debounced writes (default real, unref'd timers). */
+  readonly timers?: Timers
+  /** Delay between a change and its write (default FILE_STATE_DEBOUNCE_MS). */
+  readonly debounceMs?: number
+  /** Reports a failed debounced write (default console.warn); the change is kept for the next write. */
+  readonly warn?: (message: string) => void
 }
 
 interface Stored {
@@ -44,6 +54,11 @@ const segment = (name: string): string => (SAFE_SEGMENT.test(name) ? name : `~${
 export class FileStateStore implements StateStore {
   private readonly now: Clock
   private readonly root: string
+  private readonly timers: Timers
+  private readonly debounceMs: number
+  private readonly warn: (message: string) => void
+  /** The pending debounced write. */
+  private timer: unknown
   /** file → loaded document. */
   private readonly docs = new Map<string, Doc<unknown>>()
   private readonly dirty = new Set<Doc<unknown>>()
@@ -53,6 +68,9 @@ export class FileStateStore implements StateStore {
   constructor(options: FileStateStoreOptions) {
     this.now = options.now ?? Date.now
     this.root = path.join(options.stateDir, AGENT_STATE_DIR)
+    this.timers = options.timers ?? realTimers
+    this.debounceMs = options.debounceMs ?? FILE_STATE_DEBOUNCE_MS
+    this.warn = options.warn ?? console.warn
   }
 
   async get<T = Data>(userID: string, collection: string, key: string): Promise<Versioned<T> | undefined> {
@@ -107,8 +125,14 @@ export class FileStateStore implements StateStore {
     return held && { namespace, key, ...held }
   }
 
-  /** Writes every changed file now. */
+  /** Writes every changed file now (rejects when one cannot be written; it stays changed). */
   async flush(): Promise<void> {
+    this.writeChanged()
+  }
+
+  private writeChanged(): void {
+    if (this.timer !== undefined) this.timers.clear(this.timer)
+    this.timer = undefined
     for (const doc of [...this.dirty]) {
       this.write(doc)
       this.dirty.delete(doc)
@@ -147,6 +171,15 @@ export class FileStateStore implements StateStore {
 
   private changed(doc: Doc<unknown>): void {
     this.dirty.add(doc)
+    if (this.timer !== undefined) return
+    this.timer = this.timers.set(() => {
+      this.timer = undefined
+      try {
+        this.writeChanged()
+      } catch (cause) {
+        this.warn(`[hub] cannot write agent state under ${this.root}: ${(cause as Error).message}; retrying on the next change`)
+      }
+    }, this.debounceMs)
   }
 
   private write(doc: Doc<unknown>): void {

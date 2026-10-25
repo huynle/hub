@@ -3,7 +3,8 @@
 // here; callers must not rely on that (a networked bus resolves on send).
 import { BusNoResponderError, BusRemoteError, BusTimeoutError, type Bus, type BusHandler, type BusResponder, type Data, type RequestOptions, type Timers, type Unsubscribe } from "./types"
 
-const realTimers: Timers = {
+/** setTimeout-based timers that never keep the process alive. */
+export const realTimers: Timers = {
   set: (fn, ms) => {
     const handle = setTimeout(fn, ms)
     ;(handle as { unref?: () => void }).unref?.()
