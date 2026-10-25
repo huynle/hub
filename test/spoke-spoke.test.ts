@@ -15,9 +15,9 @@ afterEach(() => {
   for (const c of cleanups.splice(0).reverse()) c()
 })
 
-function fakeHost(opts: { forms?: boolean } = {}) {
+function fakeHost(opts: { forms?: boolean; synthetic?: boolean } = {}) {
   const events = new EventQueue<Ev>()
-  const calls = { generate: [] as string[], form: [] as unknown[], prompt: [] as unknown[], permission: [] as unknown[], get: [] as string[], interrupt: [] as string[], switch: [] as unknown[], create: [] as unknown[], model: [] as unknown[], update: [] as unknown[] }
+  const calls = { generate: [] as string[], form: [] as unknown[], prompt: [] as unknown[], permission: [] as unknown[], get: [] as string[], interrupt: [] as string[], switch: [] as unknown[], create: [] as unknown[], model: [] as unknown[], update: [] as unknown[], synthetic: [] as any[] }
   /** Titles set through updateSession. */
   const titles = new Map<string, string>()
   /** Current model per session (absent: the default model). */
@@ -49,6 +49,15 @@ function fakeHost(opts: { forms?: boolean } = {}) {
       calls.prompt.push(input)
       return { id: `msg_${++inbox}` }
     },
+    ...(opts.synthetic === false
+      ? {}
+      : {
+          synthetic: async (input: any) => {
+            calls.synthetic.push(input)
+            if (input.text === "boom") throw new Error("OpenCode refused")
+            return { id: input.id, sessionID: input.sessionID, type: "synthetic", time: { created: Date.now() } }
+          },
+        }),
     context: async (sessionID) => (messages.get(sessionID) ?? []) as any,
     listModels: async () => catalog as any,
     getSession: async (sessionID) => {
@@ -119,13 +128,13 @@ function fakeHost(opts: { forms?: boolean } = {}) {
 
 function setup(
   config: Partial<VoiceConfig>,
-  opts: { server?: FakeCentral; kind?: "service" | "standalone"; listRecent?: SpokeHost["listRecent"]; herdr?: HerdrRunner; options?: Partial<SpokeOptions>; forms?: boolean } = {},
+  opts: { server?: FakeCentral; kind?: "service" | "standalone"; listRecent?: SpokeHost["listRecent"]; herdr?: HerdrRunner; options?: Partial<SpokeOptions>; forms?: boolean; synthetic?: boolean } = {},
 ) {
   const dir = mkdtempSync(path.join(tmpdir(), "voice-spoke-"))
   const file = path.join(dir, "config.json")
   const server = opts.server ?? fakeCentral()
   writeConfig(file, { ...defaults("box"), server: server.url, ...config })
-  const { host, calls, messages, agents, known, models, catalog, parents, generation, titles } = fakeHost({ forms: opts.forms })
+  const { host, calls, messages, agents, known, models, catalog, parents, generation, titles } = fakeHost({ forms: opts.forms, synthetic: opts.synthetic })
   if (opts.listRecent) (host as { listRecent?: SpokeHost["listRecent"] }).listRecent = opts.listRecent
   const spoke = new Spoke(host, {
     configFile: file,
@@ -1542,5 +1551,163 @@ describe("session tokens", () => {
     expect(lines.join("\n")).not.toContain("SECRET")
     expect(Bun.inspect(spoke)).not.toContain("SECRET")
     expect(spoke.sessionToken("ses_a")).toBe("SECRET-A")
+  })
+})
+
+describe("deliver", () => {
+  const deliver = (extra: Record<string, unknown> = {}, meta: Record<string, unknown> = {}) => ({
+    op: "deliver",
+    sessionID: "ses_a",
+    messageID: "msg_7fA9bC0dE1fG2hI3jK4lM5",
+    text: "[hub] from @api to @@reviewer\n---\nhello\n---",
+    wake: true,
+    ...extra,
+    meta: { kind: "msg", from: "@api", to: "@@reviewer", ...meta },
+  })
+
+  test("the hello announces deliver", async () => {
+    expect(SPOKE_FEATURES).toContain("deliver")
+    const { spoke, server } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    expect((server.frames[0] as { features?: string[] }).features).toContain("deliver")
+  })
+
+  test("an idle session gets the envelope as a synthetic message with hub metadata and a turn, without voice side effects", async () => {
+    const { spoke, server, host, calls } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    await until(() => lastSessions(server)?.sessions.length === 1)
+    const res = await server.request(deliver({}, { replyTo: "msg_0", kind: "reply" }))
+    expect(res).toMatchObject({ ok: true, result: { delivered: "turn", inboxID: "msg_7fA9bC0dE1fG2hI3jK4lM5" } })
+    expect(calls.synthetic).toEqual([
+      {
+        sessionID: "ses_a",
+        id: "msg_7fA9bC0dE1fG2hI3jK4lM5",
+        text: "[hub] from @api to @@reviewer\n---\nhello\n---",
+        metadata: { source: "hub", messageID: "msg_7fA9bC0dE1fG2hI3jK4lM5", kind: "reply", from: "@api", to: "@@reviewer", replyTo: "msg_0" },
+        delivery: "queue",
+        resume: true,
+      },
+    ])
+    expect(calls.prompt).toHaveLength(0)
+    expect(calls.model).toHaveLength(0)
+    expect(calls.switch).toHaveLength(0)
+    expect(spoke.status("ses_a").conversation).toBeFalsy()
+  })
+
+  test("a busy session queues a plain message behind the turn and steers an ask into it", async () => {
+    const { spoke, server, host, calls } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    host.push({ type: "session.execution.started", data: { sessionID: "ses_a" } })
+    await until(() => forwarded(server).some((e) => e.type === "session.execution.started"))
+    const msg = await server.request(deliver())
+    const ask = await server.request(deliver({ messageID: "msg_ask1" }, { kind: "ask" }))
+    const urgent = await server.request(deliver({ messageID: "msg_urgent1" }, { delivery: "steer" }))
+    expect(msg).toMatchObject({ ok: true, result: { delivered: "queued" } })
+    expect(ask).toMatchObject({ ok: true, result: { delivered: "steer" } })
+    expect(urgent).toMatchObject({ ok: true, result: { delivered: "steer" } })
+    expect(calls.synthetic.map((c) => `${c.id}:${c.delivery}:${c.resume}`)).toEqual(["msg_7fA9bC0dE1fG2hI3jK4lM5:queue:true", "msg_ask1:steer:true", "msg_urgent1:steer:true"])
+    host.push({ type: "session.execution.succeeded", data: { sessionID: "ses_a" } })
+    await until(() => forwarded(server).some((e) => e.type === "session.execution.succeeded"))
+    expect(await server.request(deliver({ messageID: "msg_after" }))).toMatchObject({ result: { delivered: "turn" } })
+  })
+
+  test("wake:false is admitted without waking and reported queued", async () => {
+    const { spoke, server, host, calls } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    await until(() => lastSessions(server)?.sessions.length === 1)
+    expect(await server.request(deliver({ wake: false }))).toMatchObject({ ok: true, result: { delivered: "queued" } })
+    expect(calls.synthetic[0]).toMatchObject({ resume: false, delivery: "queue" })
+  })
+
+  test("a subagent session is never woken", async () => {
+    const { spoke, server, host, calls } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    host.push(created("ses_kid", { parentID: "ses_a" }))
+    await until(() => lastSessions(server)?.sessions.length === 2)
+    expect(await server.request(deliver({ sessionID: "ses_kid" }))).toMatchObject({ ok: true, result: { delivered: "queued" } })
+    expect(calls.synthetic[0]).toMatchObject({ sessionID: "ses_kid", resume: false })
+  })
+
+  test("a session with an open form retains the message (OpenCode holds it until the form is answered)", async () => {
+    const { spoke, server, host, calls } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    host.push({ type: "form.created", data: { form: { id: "frm_1", sessionID: "ses_a", title: "Q", fields: [] } } })
+    await until(() => forwarded(server).some((e) => e.type === "form.created"))
+    expect(await server.request(deliver({}, { kind: "ask" }))).toMatchObject({ ok: true, result: { delivered: "retained" } })
+    expect(calls.synthetic[0]).toMatchObject({ resume: true, delivery: "steer" })
+  })
+
+  test("a duplicate messageID is admitted once", async () => {
+    const { spoke, server, host, calls } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    await until(() => lastSessions(server)?.sessions.length === 1)
+    const [a, b] = await Promise.all([server.request(deliver()), server.request(deliver())])
+    const c = await server.request(deliver())
+    expect(calls.synthetic).toHaveLength(1)
+    for (const res of [a, b, c]) expect(res).toMatchObject({ ok: true, result: { delivered: "turn", inboxID: "msg_7fA9bC0dE1fG2hI3jK4lM5" } })
+  })
+
+  test("a failed admission is reported and the retry is sent", async () => {
+    const { spoke, server, host, calls } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    await until(() => lastSessions(server)?.sessions.length === 1)
+    const failed = await server.request(deliver({ text: "boom" }))
+    expect(failed).toMatchObject({ ok: false, error: expect.stringMatching(/OpenCode refused/) })
+    expect(await server.request(deliver())).toMatchObject({ ok: true, result: { delivered: "turn" } })
+    expect(calls.synthetic).toHaveLength(2)
+  })
+
+  test("sessions this process does not know are refused", async () => {
+    const { spoke, server, calls } = setup({ mode: "session", sessions: ["ses_a"], token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    const res = await server.request(deliver({ sessionID: "ses_stranger" }))
+    expect(res.error).toMatch(/unknown session/i)
+    expect(calls.synthetic).toHaveLength(0)
+  })
+
+  test("an OpenCode without synthetic messages does not announce deliver and refuses it", async () => {
+    const { spoke, server, host } = setup({ mode: "always", token: "tok" }, { synthetic: false })
+    await until(() => spoke.status().connection === "connected")
+    expect((server.frames[0] as { features?: string[] }).features).not.toContain("deliver")
+    host.push(created("ses_a"))
+    await until(() => lastSessions(server)?.sessions.length === 1)
+    const res = await server.request(deliver())
+    expect(res.ok).toBe(false)
+  })
+
+  test("inbox deliveries carry their origin (user prompt, hub message) to a hub that supports messaging", async () => {
+    const { spoke, server, host } = setup({ mode: "always", token: "tok" }, { server: fakeCentral({ hubFeatures: ["harness", "messaging"] }) })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    await until(() => lastSessions(server)?.sessions.length === 1)
+    host.push({ type: "session.inbox.enqueued", data: { sessionID: "ses_a", inboxID: "msg_typed", item: { type: "user", payload: { text: "hi" }, delivery: "steer" } } })
+    host.push({ type: "session.inbox.delivered", data: { sessionID: "ses_a", inboxID: "msg_typed" } })
+    await server.request(deliver())
+    host.push({ type: "session.inbox.delivered", data: { sessionID: "ses_a", inboxID: "msg_7fA9bC0dE1fG2hI3jK4lM5" } })
+    host.push({ type: "session.inbox.delivered", data: { sessionID: "ses_a", inboxID: "msg_unknown" } })
+    await until(() => forwarded(server).filter((e) => e.type === "session.inbox.delivered").length === 3)
+    expect(forwarded(server).filter((e) => e.type === "session.inbox.delivered").map((e) => e.data)).toEqual([
+      { sessionID: "ses_a", inboxID: "msg_typed", origin: "user" },
+      { sessionID: "ses_a", inboxID: "msg_7fA9bC0dE1fG2hI3jK4lM5", origin: "hub" },
+      { sessionID: "ses_a", inboxID: "msg_unknown" },
+    ])
+    expect(forwarded(server).some((e) => e.type === "session.inbox.enqueued")).toBe(false)
+  })
+
+  test("a hub without messaging gets inbox deliveries unchanged", async () => {
+    const { spoke, server, host } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    host.push({ type: "session.inbox.enqueued", data: { sessionID: "ses_a", inboxID: "msg_typed", item: { type: "user", payload: { text: "hi" }, delivery: "steer" } } })
+    host.push({ type: "session.inbox.delivered", data: { sessionID: "ses_a", inboxID: "msg_typed" } })
+    await until(() => forwarded(server).some((e) => e.type === "session.inbox.delivered"))
+    expect(forwarded(server).find((e) => e.type === "session.inbox.delivered")?.data).toEqual({ sessionID: "ses_a", inboxID: "msg_typed" })
   })
 })
