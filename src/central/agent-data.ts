@@ -68,6 +68,8 @@ export interface AgentData {
   appTokens?: AppToken[]
   /** Last holder generation handed out per roleKey(role, project). */
   generations?: Record<string, number>
+  /** The user's agent kill switch (agent/acting-switch.ts): every agent action answers paused. */
+  actingPaused?: true
   [field: string]: unknown
 }
 
