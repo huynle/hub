@@ -28,6 +28,8 @@ export interface FakeHarnessOptions {
   /** The stub model's OpenAI-compatible base URL (…/v1). */
   readonly modelBaseURL: string
   readonly fault?: Fault
+  /** Serve neither permission nor deliver (a spoke whose harness has no such hooks). */
+  readonly minimal?: boolean
   /** Where the harness logs (stderr in the driver); never given a token, except by the "tokens" fault. */
   readonly log?: (line: string) => void
 }
@@ -50,8 +52,8 @@ const nextID = (prefix: string) => `${prefix}_${Date.now().toString(36)}${(++cou
 const SUMMARY_MAX = 160
 
 /** Features the reference spoke announces (from a spoke that is never started). */
-export function referenceFeatures(): readonly string[] {
-  return new FakeHarness({ hubURL: "http://127.0.0.1:1", token: "unused", directory: "/", modelBaseURL: "http://127.0.0.1:1/v1" }).spoke.features
+export function referenceFeatures(minimal = false): readonly string[] {
+  return new FakeHarness({ hubURL: "http://127.0.0.1:1", token: "unused", directory: "/", modelBaseURL: "http://127.0.0.1:1/v1", minimal }).spoke.features
 }
 
 export class FakeHarness {
@@ -73,13 +75,13 @@ export class FakeHarness {
       pluginVersion: "0.0.1",
       directory: options.directory,
       handlers: {
-        permission: (req) => this.#permission(req),
+        ...(options.minimal ? {} : { permission: (req: Extract<ServerRequest, { op: "permission" }>) => this.#permission(req) }),
         interrupt: (req) => (this.#interrupt(req.sessionID), {}),
         stop: (req) => (this.#interrupt(req.sessionID), { stopped: [req.sessionID] }),
         form: () => ({ gone: true }),
         rename: (req) => this.#rename(req.sessionID, req.title),
       },
-      deliver: (req) => this.#deliver(req),
+      ...(options.minimal ? {} : { deliver: (req: DeliverRequest) => this.#deliver(req) }),
       backoff: fault === "reconnect" ? { minMs: 60_000, maxMs: 60_000 } : { minMs: 500, maxMs: 5000 },
       socket: faultySocket(fault, () => [...this.#sessions.keys()][0]),
     })
