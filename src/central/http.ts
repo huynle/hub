@@ -53,7 +53,7 @@ import { LaunchEngine } from "./agent/launch-engine"
 import { LaunchTokens } from "./agent/launch-tokens"
 import { LaunchFeed, launchInfo } from "./agent/launch-routes"
 import type { WatchRegistry } from "./agent/watch"
-import { RequestTimeoutError, RequestTooLargeError, SpokeError, SpokeHub, type Notifier, type SpokeHubOptions, type SpokeSocketData } from "./spoke-ws"
+import { DRAIN_RETRY_AFTER_MS, DRAIN_TIMEOUT_MS, RequestTimeoutError, RequestTooLargeError, SpokeError, SpokeHub, type DrainOptions, type Notifier, type SpokeHubOptions, type SpokeSocketData } from "./spoke-ws"
 import { ACTIVITY_INTERVAL_MAX, ACTIVITY_INTERVAL_MIN, LOCAL_USER, PUSH_PREF_KEYS, quietHoursInput, Store, VIEW_PREF_KEYS, type DeviceRecord, type LegacyPushPrefs, type PushPrefs, type UserRecord, type ViewPrefs } from "./store"
 
 export interface Speech {
@@ -104,6 +104,9 @@ export interface CentralOptions {
     readonly leaderTtlMs?: number
     /** How often the decision deadline and message re-wake loops run (see DECISION_TICK_MS, REWAKE_TICK_MS). */
     readonly loopTickMs?: number
+    /** drain(): how long it waits for requests in flight, and the bye's retryAfterMs (see DRAIN_TIMEOUT_MS, DRAIN_RETRY_AFTER_MS). */
+    readonly drainTimeoutMs?: number
+    readonly drainRetryAfterMs?: number
   }
 }
 
@@ -136,6 +139,13 @@ export interface Central {
   readonly webhooks: Webhooks
   /** The JSON API's route table (method, path, access), for audits and tests. */
   readonly routes: readonly RouteInfo[]
+  /**
+   * Draining before a shutdown (design §10; SIGTERM): /readyz fails, new /spoke/ws upgrades are refused, spokes and
+   * nodes get bye{reason:"draining", retryAfterMs} (once their requests in flight are answered), the leader leases
+   * are released, cluster view slices withdrawn, SSE streams end with a `retry:` hint, and it resolves when requests
+   * in flight are done (at most timeoutMs; the rest fail as offline). Call stop() after it. Repeated calls share one.
+   */
+  drain(options?: DrainOptions): Promise<void>
   stop(): Promise<void>
 }
 
@@ -151,6 +161,8 @@ interface Listener {
   /** Sends a message; `id` is its event id (EventSource's lastEventId). */
   send(message: Message, id?: string): void
   close(): void
+  /** Draining: tells the browser to reconnect after retryMs (`retry:`), then ends the stream. */
+  end(retryMs: number): void
 }
 
 /** Messages a lite stream leaves out (unless they are of the listener's session tree). */
@@ -193,6 +205,9 @@ const NO_STORE = { "cache-control": "no-store" }
 export const COOKIE = "voice_device"
 const COOKIE_MAX_AGE = 400 * 24 * 60 * 60
 const SSE_HEARTBEAT_MS = 20_000
+/** Draining: the `retry:` an ending SSE stream sends (the browser reconnects, through the load balancer, after it). */
+const SSE_RETRY_MS = 2_000
+const SSE_RETRY = `retry: ${SSE_RETRY_MS}\n\n`
 /** Cluster mode: how much longer than the turn timeout a turn's cluster-wide lease lasts (it is released at its end). */
 const TURN_LEASE_SLACK_MS = 120_000
 /** Cluster mode: how long a stop sent to the launches leader may take (it waits for the node's collect and cleanup). */
@@ -402,6 +417,8 @@ export function startCentral(options: CentralOptions): Central {
   let publicURL = config.publicURL
   let auth!: Auth
   let spokes!: SpokeHub
+  /** Set by drain() (design §10): /readyz fails and new SSE streams are sent away. */
+  let draining: Promise<void> | undefined
   /** At most one machine per hub process is approved without confirmation (see localAutoApprove). */
   let autoApproved = false
 
@@ -908,6 +925,7 @@ export function startCentral(options: CentralOptions): Central {
     const { pathname } = url
     const method = request.method
     try {
+      if (method === "GET" && pathname === "/readyz") return readyz()
       if (pathname === "/spoke/ws") return spokes.upgrade(request, server)
       if (method === "GET" && pathname === "/healthz") {
         return Response.json({ ok: true, version: options.version ?? "0.0.0", spokes: registry.connections(), nodes: nodes.count() })
@@ -1699,6 +1717,8 @@ export function startCentral(options: CentralOptions): Central {
    * over: the catalog, then a `resync` marker so the page refetches what it shows. Heartbeats are `ping` events.
    */
   function events(signal: AbortSignal, userID: string, deviceID: string, options: { lastID?: string; lite: boolean; session?: string }): Response {
+    // Draining: come back (to another pod) shortly.
+    if (draining) return new Response(SSE_RETRY, { headers: { "content-type": "text/event-stream", "cache-control": "no-cache" } })
     const encoder = new TextEncoder()
     let cleanup = () => {}
     const stream = new ReadableStream<Uint8Array>({
@@ -1721,6 +1741,10 @@ export function startCentral(options: CentralOptions): Central {
             try {
               controller.close()
             } catch {}
+          },
+          end: (retryMs) => {
+            write(`retry: ${retryMs}\n\n`)
+            listener.close()
           },
         }
         if (live) return clusterStream(listener, write)
@@ -1800,6 +1824,25 @@ export function startCentral(options: CentralOptions): Central {
     })
   }
 
+  /** /readyz: 503 while draining, else 200. */
+  async function readyz(): Promise<Response> {
+    if (draining) return Response.json({ ok: false, draining: true }, { status: 503, headers: NO_STORE })
+    return Response.json({ ok: true }, { headers: NO_STORE })
+  }
+
+  async function runDrain(drainOptions: DrainOptions): Promise<void> {
+    const timeoutMs = drainOptions.timeoutMs ?? options.timing?.drainTimeoutMs ?? DRAIN_TIMEOUT_MS
+    const retryAfterMs = drainOptions.retryAfterMs ?? options.timing?.drainRetryAfterMs ?? DRAIN_RETRY_AFTER_MS
+    // Refuse new WebSockets and requests; bye each connection once its requests in flight are answered.
+    const connections = spokes.drain({ timeoutMs, retryAfterMs })
+    // Step down at once (releasing the leases), so another pod takes the timed jobs over.
+    await Promise.allSettled(leaders.map((loop) => loop.stop()))
+    // Withdraw this pod's slices: the other pods stop showing its connections (the new pod republishes them).
+    await view?.stop().catch((cause) => console.error(`[hub] cluster view not withdrawn: ${(cause as Error).message}`))
+    for (const listener of [...listeners]) listener.end(SSE_RETRY_MS)
+    await connections
+  }
+
   /** Compressed copies of hashed assets, made once per file and encoding (they never change). */
   const compressed = new Map<string, Promise<Uint8Array>>()
   function compress(name: string, bytes: Uint8Array, encoding: "br" | "gzip"): Promise<Uint8Array> {
@@ -1863,6 +1906,10 @@ export function startCentral(options: CentralOptions): Central {
     launchTokens,
     webhooks,
     routes: [...routes.map(({ method, path, access }) => ({ method, path, access })), ...agent.routes.map(({ method, path }) => ({ method, path, access: "agent" as const }))],
+    drain(drainOptions: DrainOptions = {}) {
+      draining ??= runDrain(drainOptions)
+      return draining
+    },
     async stop() {
       // Step down first (releasing the leases), so another pod takes the timed jobs over at once.
       await Promise.allSettled([...leaders.map((loop) => loop.stop()), recommendations?.stop()])
