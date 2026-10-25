@@ -24,9 +24,12 @@ const tempDir = () => {
   return dir
 }
 
+const standard = (impl: { backend: string }) => impl.backend === "memory" || impl.backend === "file"
+
 describe("the standard implementations", () => {
   test("memory for every kind, and file for state", () => {
-    const names = Object.fromEntries(BACKEND_KINDS.map((kind) => [kind, implementations(kind).map((impl) => `${impl.backend}:${impl.name}`)]))
+    // Only the standard ones: with HUB_IT_CLUSTER=1, test/cluster-impls/* add postgres and valkey implementations.
+    const names = Object.fromEntries(BACKEND_KINDS.map((kind) => [kind, implementations(kind).filter(standard).map((impl) => `${impl.backend}:${impl.name}`)]))
     expect(names).toMatchObject({
       state: ["memory:MemoryStateStore", "file:FileStateStore"],
       bus: ["memory:MemoryBus"],
@@ -58,7 +61,7 @@ describe("the standard implementations", () => {
 
   test("memory and file support every capability", () => {
     for (const kind of BACKEND_KINDS)
-      for (const impl of implementations(kind)) expect(impl.supports("clock", "timeTravel", "timers", "options")).toBe(true)
+      for (const impl of implementations(kind).filter(standard)) expect(impl.supports("clock", "timeTravel", "timers", "options")).toBe(true)
   })
 
   test("the file state directory is removed when the instance is disposed (after flushing)", async () => {
