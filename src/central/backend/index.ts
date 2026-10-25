@@ -1,6 +1,7 @@
 // The hub's backends (design §9): interfaces in ./types, in-memory implementations for the single-process hub,
-// and a file StateStore under <stateDir>/agent. startCentral creates the file bundle (or takes one in its
-// options), exposes it to new code only, and flushes its state on stop.
+// and a file StateStore under <stateDir>/agent. startCentral creates the bundle its config selects (hubBackends:
+// file, or cluster when HUB_DATABASE_URL/HUB_VALKEY_URL are set) or takes one in its options, exposes it to
+// new code only, and flushes its state on stop.
 import { FileStateStore, type FileStateStoreOptions } from "./file-state"
 import { MemoryBus } from "./memory-bus"
 import { MemoryCatalog } from "./memory-catalog"
@@ -8,6 +9,7 @@ import { MemoryCounters, MemoryLocks } from "./memory-counters"
 import { MemoryEventLog } from "./memory-events"
 import { MemoryKv } from "./memory-kv"
 import { MemoryStateStore } from "./memory-state"
+import type { CentralConfig, ClusterConfig } from "../config"
 import type { Backends, Clock, Timers } from "./types"
 
 export * from "./types"
@@ -50,4 +52,30 @@ export function fileBackends(options: FileBackendsOptions): Backends {
     ...(warn ? { warn } : {}),
   })
   return { ...memoryBackends(memory), state }
+}
+
+export interface ClusterBackendsOptions extends MemoryBackendsOptions {
+  /** HUB_DATABASE_URL / HUB_VALKEY_URL and the pod id (see ../config). */
+  readonly cluster: ClusterConfig
+}
+
+/** Cluster mode is configured but this build cannot run it yet. The message names no URL. */
+export class ClusterUnavailableError extends Error {
+  constructor() {
+    super("Cluster mode (HUB_DATABASE_URL and HUB_VALKEY_URL) is not yet available in this build; unset both to run a single-process hub")
+    this.name = "ClusterUnavailableError"
+  }
+}
+
+/**
+ * State in Postgres, everything else in Valkey (design §9). Not yet available: throws ClusterUnavailableError
+ * until the Postgres and Valkey implementations land.
+ */
+export function clusterBackends(_options: ClusterBackendsOptions): Backends {
+  throw new ClusterUnavailableError()
+}
+
+/** The hub's bundle for its config: the cluster one when cluster mode is configured, else the file one. */
+export function hubBackends(config: Pick<CentralConfig, "stateDir" | "cluster">, options: MemoryBackendsOptions = {}): Backends {
+  return config.cluster ? clusterBackends({ ...options, cluster: config.cluster }) : fileBackends({ ...options, stateDir: config.stateDir })
 }
