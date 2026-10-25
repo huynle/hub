@@ -187,13 +187,13 @@ function world(options: { deps?: Partial<LaunchEngineDeps> } = {}) {
   const names = new Map<string, string>()
   const primeOrder: string[] = []
   const directory = {
-    sync: (_userID: string) => {},
-    setName(_userID: string, sessionID: string, name: string) {
+    sync: async (_userID: string) => {},
+    async setName(_userID: string, sessionID: string, name: string) {
       names.set(name, sessionID)
       primeOrder.push(`name:${name}`)
       return { sessionID, name }
     },
-    claimRole(_userID: string, sessionID: string, role: string) {
+    async claimRole(_userID: string, sessionID: string, role: string) {
       primeOrder.push(`role:${role}`)
       return { role, generation: 1, sessionID } as any
     },

@@ -19,8 +19,12 @@
 //
 // Tenancy: everything is per user; another user's sessions, names and roles do not exist here (not_found),
 // and ambiguity candidates only ever list the caller's own sessions.
-// Uniqueness is enforced inside one synchronous store update (single writer per user in this process); a
-// cluster backend would put names behind StateStore.claim instead.
+// Reads (resolve, who, primed) are synchronous: they evaluate the rules on a copy of the stored data and save
+// nothing. Writes (sync, names, roles, primer and deletion marks) are async: they run inside one store update and
+// resolve once it is saved (their errors reject). Uniqueness holds across pods: on a shared (cluster) store an update
+// that lost a race with another pod's write runs again on the fresh data before it resolves.
+// Cluster mode: the SessionSource reports every pod's sessions (the Registry's cluster view), so a sync on one pod
+// never takes another pod's sessions for offline.
 import { roleKey, type AgentData, type AgentName, type AgentRole, type AgentSession } from "../agent-data"
 import type { Store } from "../store"
 import { AgentError } from "./errors"
@@ -58,7 +62,7 @@ export interface SessionSource {
   archived(userID: string): ReadonlySet<string>
 }
 
-export type DirectoryStore = Pick<Store, "updateAgentData">
+export type DirectoryStore = Pick<Store, "updateAgentData" | "agentData" | "user">
 
 export interface DirectoryOptions {
   readonly store: DirectoryStore
@@ -131,13 +135,13 @@ export class Directory {
   }
 
   /** Applies what the spokes report and the clock to the user's records (saves only on change). */
-  sync(userID: string): void {
-    this.update(userID, () => undefined)
+  sync(userID: string): Promise<void> {
+    return this.update(userID, () => undefined)
   }
 
   /** Records that a session was deleted (its name is released NAME_RELEASE_MS later). */
-  markDeleted(userID: string, sessionID: string): void {
-    this.update(userID, (draft) => {
+  markDeleted(userID: string, sessionID: string): Promise<void> {
+    return this.update(userID, (draft) => {
       const record = draft.byID.get(sessionID)
       if (record && record.deletedAt === undefined) record.deletedAt = this.now()
     })
@@ -147,12 +151,12 @@ export class Directory {
 
   /** Whether the identity primer reached the session (false for an unknown one). */
   primed(userID: string, sessionID: string): boolean {
-    return this.update(userID, (draft) => draft.byID.get(sessionID)?.primed !== undefined)
+    return this.read(userID, (draft) => draft.byID.get(sessionID)?.primed !== undefined)
   }
 
   /** Records that the identity primer reached the session (an unknown session is ignored). */
-  markPrimed(userID: string, sessionID: string): void {
-    this.update(userID, (draft) => {
+  markPrimed(userID: string, sessionID: string): Promise<void> {
+    return this.update(userID, (draft) => {
       const record = draft.byID.get(sessionID)
       if (record && record.primed === undefined) record.primed = this.now()
     })
@@ -167,8 +171,8 @@ export class Directory {
   // ---------- names ----------
 
   /** Names a session (explicit: a taken name fails); the previous name stays an alias for ALIAS_MS. Tells onNamed listeners. */
-  setName(userID: string, sessionID: string, requested: string): { sessionID: string; name: string; alias?: string } {
-    const result = this.assignName(userID, sessionID, requested)
+  async setName(userID: string, sessionID: string, requested: string): Promise<{ sessionID: string; name: string; alias?: string }> {
+    const result = await this.assignName(userID, sessionID, requested)
     for (const listener of this.named) {
       try {
         listener(userID, sessionID, result.name)
@@ -179,7 +183,7 @@ export class Directory {
     return result
   }
 
-  private assignName(userID: string, sessionID: string, requested: string): { sessionID: string; name: string; alias?: string } {
+  private async assignName(userID: string, sessionID: string, requested: string): Promise<{ sessionID: string; name: string; alias?: string }> {
     const name = requested.replace(/^@/, "")
     if (!validName(name)) throw new AgentError("invalid", "A name is 2–40 characters: a-z, 0-9 and -")
     if (isReservedName(name)) throw new AgentError("invalid", "@me is reserved: it always means the user")
@@ -206,7 +210,7 @@ export class Directory {
    * can claim while an exclusive holder is live. Reserved roles (orchestrator…, concierge…) need `byUser`
    * (grants with `roles` come in phase 3). Exclusivity and generations are per (role, project scope).
    */
-  claimRole(userID: string, sessionID: string, requested: string, options: { exclusive?: boolean; project?: string; byUser?: boolean } = {}): RoleView {
+  async claimRole(userID: string, sessionID: string, requested: string, options: { exclusive?: boolean; project?: string; byUser?: boolean } = {}): Promise<RoleView> {
     const { role, project } = parseRole(requested, options.project)
     if (isReservedRole(role) && !options.byUser) throw new AgentError("forbidden", `@@${role} is reserved: only the user can assign it`)
     return this.update(userID, (draft) => {
@@ -233,7 +237,7 @@ export class Directory {
   }
 
   /** Gives a role up; not_found when the session does not hold it. */
-  releaseRole(userID: string, sessionID: string, requested: string, scope?: string): { role: string; project?: string } {
+  async releaseRole(userID: string, sessionID: string, requested: string, scope?: string): Promise<{ role: string; project?: string }> {
     const { role, project } = parseRole(requested, scope)
     return this.update(userID, (draft) => {
       const held = draft.roles.find((r) => r.sessionID === sessionID && r.role === role && r.project === project)
@@ -249,7 +253,7 @@ export class Directory {
   who(userID: string, filter: { project?: string; role?: string } = {}): DirectoryEntry[] {
     const project = filter.project?.toLowerCase()
     const role = filter.role !== undefined ? parseRole(filter.role, project) : undefined
-    return this.update(userID, (draft) =>
+    return this.read(userID, (draft) =>
       draft.sessions
         .filter((s) => s.archivedAt === undefined && s.deletedAt === undefined)
         .map((s) => this.entry(draft, s.sessionID))
@@ -268,7 +272,7 @@ export class Directory {
   resolve(userID: string, addr: string): Resolved {
     const address = parseAddress(addr)
     if (!address) throw new AgentError("invalid", `Not an address: use ses_…, @name or @@role`)
-    return this.update(userID, (draft) => ({ address, sessions: this.lookup(draft, address, addr) }))
+    return this.read(userID, (draft) => ({ address, sessions: this.lookup(draft, address, addr) }))
   }
 
   /** Exactly one session; several (a role with several holders) is ambiguous. */
@@ -330,34 +334,28 @@ export class Directory {
     }
   }
 
-  /** Runs `change` on the user's refreshed data in one store update; not_found for an unknown user. */
-  private update<T>(userID: string, change: (draft: Draft) => T): T {
+  /** Runs `look` on a refreshed copy of the user's data, saving nothing; not_found for an unknown user. */
+  private read<T>(userID: string, look: (draft: Draft) => T): T {
+    if (!this.store.user(userID)) throw new AgentError("not_found", "No such user")
+    const reported = new Map(this.source.reported(userID).map((s) => [s.sessionID, s]))
+    return look(this.refresh(userID, this.store.agentData(userID), reported, this.source.archived(userID)))
+  }
+
+  /**
+   * Runs `change` on the user's refreshed data in one store update and resolves once it is saved; not_found for an
+   * unknown user. On a shared store the change may run again (on fresh data, after another pod's write).
+   */
+  private async update<T>(userID: string, change: (draft: Draft) => T): Promise<T> {
     const reported = new Map(this.source.reported(userID).map((s) => [s.sessionID, s]))
     const archived = this.source.archived(userID)
     let done = false
-    let failed: { error: unknown } | undefined
     let result: T | undefined
-    // Synchronous: the change runs inside the call (the file store saves before returning; a loaded shared store
-    // writes afterwards). Its error is rethrown here; a failed shared write is logged (the cache is put back).
-    // TODO(P6-T10): make the directory async for cluster mode (before its first load a shared store runs the
-    // change later, and a retry after a version conflict happens after this returns).
-    this.store
-      .updateAgentData(userID, (data) => {
-        try {
-          const draft = this.refresh(userID, data, reported, archived)
-          result = change(draft)
-          this.write(draft)
-          done = true
-          failed = undefined
-        } catch (error) {
-          failed = { error }
-          throw error
-        }
-      })
-      .catch((cause: unknown) => {
-        if (failed?.error !== cause) console.error(`[hub] agent directory not saved: ${(cause as Error)?.message ?? cause}`)
-      })
-    if (failed) throw failed.error
+    await this.store.updateAgentData(userID, (data) => {
+      const draft = this.refresh(userID, data, reported, archived)
+      result = change(draft)
+      this.write(draft)
+      done = true
+    })
     if (!done) throw new AgentError("not_found", "No such user")
     this.online.set(userID, new Set(reported.keys()))
     return result as T
