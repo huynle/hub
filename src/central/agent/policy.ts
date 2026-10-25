@@ -205,3 +205,38 @@ export function riskTier(request: PermissionRequest, never: readonly Pattern[]):
   if (!CONFIRM_ACTIONS.has(action)) return "tap"
   return nearNever(action, request, never) ? "tap" : "confirm"
 }
+
+export const PROJECT_PATH_MAX = 1024
+const DRIVE = /^[A-Za-z]:\//
+
+/**
+ * A project directory as a grant scope compares it: absolute (POSIX or a Windows drive), `/` separators,
+ * `.`/`..`/repeated slashes resolved, no trailing slash; undefined for relative, `~`, root or malformed paths.
+ * Pure text: symlinks are not resolved (the directories live on the spokes' machines).
+ */
+export function canonicalProject(path: string): string | undefined {
+  if (typeof path !== "string" || path.length === 0 || path.length > PROJECT_PATH_MAX || path.includes("\0")) return undefined
+  const slashed = path.replaceAll("\\", "/")
+  const drive = DRIVE.test(slashed) ? slashed.slice(0, 2) : ""
+  const rest = drive ? slashed.slice(2) : slashed
+  if (!rest.startsWith("/")) return undefined
+  const segments: string[] = []
+  for (const segment of rest.split("/")) {
+    if (segment === "" || segment === ".") continue
+    if (segment === "..") {
+      if (segments.length === 0) return undefined
+      segments.pop()
+    } else segments.push(segment)
+  }
+  return segments.length === 0 ? undefined : `${drive}/${segments.join("/")}`
+}
+
+/** Whether a session directory is one of the projects or inside one (on a path boundary, after canonicalising). */
+export function inProjects(dir: string, projects: readonly string[]): boolean {
+  const canonical = canonicalProject(dir)
+  if (canonical === undefined) return false
+  return projects.some((project) => {
+    const root = canonicalProject(project)
+    return root !== undefined && (canonical === root || canonical.startsWith(`${root}/`))
+  })
+}

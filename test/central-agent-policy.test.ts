@@ -2,7 +2,7 @@
 // Wildcard semantics, bash→shell, every-resource matching, never beats allow (incl. save patterns), shell
 // metacharacters, risk tiers, grant schema and duration validation, project path boundaries.
 import { describe, expect, test } from "bun:test"
-import { allowsResource, evaluatePermission, riskTier, forbidsResource, globCovers, globsOverlap, parsePattern, wildcard } from "../src/central/agent/policy"
+import { allowsResource, canonicalProject, evaluatePermission, inProjects, riskTier, forbidsResource, globCovers, globsOverlap, parsePattern, wildcard } from "../src/central/agent/policy"
 
 describe("wildcard (OpenCode Wildcard.match)", () => {
   test.each([
@@ -280,5 +280,44 @@ describe("riskTier (set by the hub, never by the agent)", () => {
 
   test("near never ignores never rules of other actions", () => {
     expect(riskTier({ action: "read", resources: [".env"] }, never)).toBe("confirm")
+  })
+})
+
+describe("canonicalProject", () => {
+  test.each([
+    ["/Users/huy/projects/hub", "/Users/huy/projects/hub"],
+    ["/Users/huy/projects/hub/", "/Users/huy/projects/hub"],
+    ["/Users/huy//projects/./hub", "/Users/huy/projects/hub"],
+    ["/Users/huy/projects/x/../hub", "/Users/huy/projects/hub"],
+    ["C:\\Users\\huy\\hub\\", "C:/Users/huy/hub"],
+  ])("%j → %j", (input, expected) => {
+    expect(canonicalProject(input)).toBe(expected)
+  })
+
+  test.each(["", "relative/path", "~/projects", "/", "//", "/a/../..", "C:\\", "/a\0b", `/${"a".repeat(1100)}`, 7, null])("rejects %p", (bad) => {
+    expect(canonicalProject(bad as string)).toBeUndefined()
+  })
+})
+
+describe("inProjects (boundary match)", () => {
+  const projects = ["/Users/huy/projects/hub"]
+
+  test.each([
+    ["/Users/huy/projects/hub", true],
+    ["/Users/huy/projects/hub/", true],
+    ["/Users/huy/projects/hub/.worktrees/p3", true],
+    ["/Users/huy/projects/hub-evil", false], // a prefix is not a boundary
+    ["/Users/huy/projects/hubx/src", false],
+    ["/Users/huy/projects", false],
+    ["/Users/huy/projects/hub/../other", false],
+    ["relative", false],
+  ])("%j → %p", (dir, expected) => {
+    expect(inProjects(dir, projects)).toBe(expected)
+  })
+
+  test("any of several projects", () => {
+    expect(inProjects("/srv/b/x", ["/srv/a", "/srv/b"])).toBe(true)
+    expect(inProjects("/srv/c", ["/srv/a", "/srv/b"])).toBe(false)
+    expect(inProjects("/srv/a", [])).toBe(false)
   })
 })
