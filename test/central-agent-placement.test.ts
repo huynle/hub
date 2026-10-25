@@ -39,7 +39,7 @@ const node = (extra: Partial<Candidate> = {}): Candidate => ({
   workspaceRoots: ["/p"],
   draining: false,
   launchIDs: [],
-  launchService: true,
+  launchHarnesses: ["opencode"],
   reserved: 0,
   ...extra,
 })
@@ -74,21 +74,21 @@ describe("matchNode: hard constraints", () => {
 
   test("openshell: the profile (when named) and the harness must be listed; no service spoke is needed", () => {
     const shell = spec({ runtime: { kind: "openshell", profile: "net-off" }, workspace: { repo: "/p/x", mode: "clone", remote: "https://github.com/a/b" } })
-    const sandbox = node({ runtimes: [{ kind: "openshell", profiles: ["untrusted-code"], harnesses: ["opencode"] }], features: ["sandbox"], launchService: false })
+    const sandbox = node({ runtimes: [{ kind: "openshell", profiles: ["untrusted-code"], harnesses: ["opencode"] }], features: ["sandbox"], launchHarnesses: [] })
     expect(matchNode(U, shell, [sandbox])).toEqual({ ok: false, wait: "no_match", reason: "No node fits: mbp has no net-off profile" })
-    const ok = node({ runtimes: [{ kind: "openshell", profiles: ["net-off"], harnesses: ["opencode"] }], features: ["sandbox"], launchService: false })
+    const ok = node({ runtimes: [{ kind: "openshell", profiles: ["net-off"], harnesses: ["opencode"] }], features: ["sandbox"], launchHarnesses: [] })
     expect(matchNode(U, shell, [ok])).toMatchObject({ ok: true })
-    const unlisted = node({ runtimes: [{ kind: "openshell", profiles: ["net-off"] }], features: ["sandbox"], launchService: false })
+    const unlisted = node({ runtimes: [{ kind: "openshell", profiles: ["net-off"] }], features: ["sandbox"], launchHarnesses: [] })
     expect(matchNode(U, shell, [unlisted])).toEqual({ ok: false, wait: "no_match", reason: "No node fits: mbp has no opencode harness" })
-    const listed = node({ runtimes: [{ kind: "openshell", profiles: ["net-off"], harnesses: ["claude"] }], features: ["sandbox"], launchService: false })
+    const listed = node({ runtimes: [{ kind: "openshell", profiles: ["net-off"], harnesses: ["claude"] }], features: ["sandbox"], launchHarnesses: [] })
     expect(matchNode(U, shell, [listed])).toEqual({ ok: false, wait: "no_match", reason: "No node fits: mbp has no opencode harness" })
     const noProfile = spec({ runtime: { kind: "openshell" }, workspace: { repo: "/p/x", mode: "clone", remote: "https://github.com/a/b" } })
-    expect(matchNode(U, noProfile, [node({ runtimes: [{ kind: "openshell", harnesses: ["opencode"] }], features: ["sandbox"], launchService: false })])).toMatchObject({ ok: true })
+    expect(matchNode(U, noProfile, [node({ runtimes: [{ kind: "openshell", harnesses: ["opencode"] }], features: ["sandbox"], launchHarnesses: [] })])).toMatchObject({ ok: true })
   })
 
   test("openshell: the node must serve sandboxes (feature sandbox: start and stop)", () => {
     const shell = spec({ runtime: { kind: "openshell" }, workspace: { repo: "/p/x", mode: "clone", remote: "https://github.com/a/b" } })
-    const old = node({ runtimes: [{ kind: "openshell", harnesses: ["opencode"] }], launchService: false })
+    const old = node({ runtimes: [{ kind: "openshell", harnesses: ["opencode"] }], launchHarnesses: [] })
     expect(matchNode(U, shell, [old])).toEqual({ ok: false, wait: "no_match", reason: "No node fits: mbp does not serve sandboxes" })
   })
 
@@ -103,15 +103,29 @@ describe("matchNode: hard constraints", () => {
   })
 
   test("host launches need the machine's service spoke announcing launch", () => {
-    expect(matchNode(U, spec(), [node({ launchService: false })])).toEqual({
+    expect(matchNode(U, spec(), [node({ launchHarnesses: [] })])).toEqual({
       ok: false,
       wait: "no_match",
       reason: "No node fits: mbp has no connected service spoke with launch",
     })
   })
 
+  test("host launches need the service spoke of the launch's harness", () => {
+    const both = node({ runtimes: [{ kind: "host", harnesses: ["opencode", "claude-code"] }], launchHarnesses: ["claude-code"] })
+    expect(matchNode(U, spec(), [both])).toEqual({
+      ok: false,
+      wait: "no_match",
+      reason: "No node fits: mbp has no connected opencode service spoke with launch",
+    })
+    expect(matchNode(U, spec({ harness: "claude-code" }), [both])).toMatchObject({ ok: true })
+    expect(matchNode(U, spec({ harness: "claude-code" }), [node({ ...both, launchHarnesses: ["opencode"] })])).toMatchObject({
+      ok: false,
+      reason: "No node fits: mbp has no connected claude-code service spoke with launch",
+    })
+  })
+
   test("reasons name every node; the machine ID stands in for a missing name", () => {
-    const result = matchNode(U, spec(), [node({ draining: true }), node({ machineID: "m2", name: undefined, launchService: false })])
+    const result = matchNode(U, spec(), [node({ draining: true }), node({ machineID: "m2", name: undefined, launchHarnesses: [] })])
     expect(result).toEqual({ ok: false, wait: "no_match", reason: "No node fits: mbp is draining; m2 has no connected service spoke with launch" })
   })
 })
@@ -185,7 +199,7 @@ describe("matchNode: labels and machine, required or preferred", () => {
 // ---- admission and the placement pass ---------------------------------------------------------------------
 
 const live = (extra: Partial<PlacementNode> = {}): PlacementNode => {
-  const { launchService: _s, reserved: _r, ...plain } = node()
+  const { launchHarnesses: _s, reserved: _r, ...plain } = node()
   return { ...plain, ...extra }
 }
 
@@ -212,7 +226,7 @@ function setup(options: { caps?: HubLaunches; nodes?: PlacementNode[]; service?:
         return world.nodes
       },
     },
-    spokes: { launchService: (_user, machineID) => (options.service ?? (() => true))(machineID) },
+    spokes: { launchHarnesses: (_user, machineID) => ((options.service ?? (() => true))(machineID) ? ["opencode"] : []) },
   })
   const launch = async (extra: Record<string, unknown> = {}, user = U) => (await store.create(user, spec(extra))).launch
   return { placement, store, counters, locks, world, launch, advance: (ms: number) => (t += ms), now }
@@ -265,7 +279,7 @@ function setupDeps() {
     locks: new MemoryLocks({ now }),
     owner: "pod-a",
     nodes: { nodes: () => [] },
-    spokes: { launchService: () => false },
+    spokes: { launchHarnesses: () => [] },
   }
 }
 

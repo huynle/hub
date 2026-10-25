@@ -1,6 +1,6 @@
 // Launch-bound connections in the Registry (phase 5, decision lk6gn3u7 #5/#6): a spoke inside a sandbox connects
 // with a launch token and is bound to that launch. It reports sessions like any spoke, but it is never the
-// machine's service (serviceFor, and so the launch engine's launchService check), never an exposure target, and
+// machine's service (serviceFor, and so the launch engine's launchHarnesses check), never an exposure target, and
 // the registry can say which connection serves a launch.
 import { beforeEach, describe, expect, test } from "bun:test"
 import { Registry } from "../src/central/registry"

@@ -160,7 +160,8 @@ function world(options: { deps?: Partial<LaunchEngineDeps> } = {}) {
     },
   }
   const registry = {
-    serviceFor: (_machineID: string) => undefined,
+    serviceFor: (_machineID: string, _harness?: string) => undefined,
+    serviceHarnesses: (_machineID: string) => [],
     supports: (connID: string, feature: string) => isLaunchConn(connID) && feature === "launch",
     connTenant: (connID: string) => (isLaunchConn(connID) ? U : undefined),
     launchConn: (launchID: string) => launchConns.get(launchID),

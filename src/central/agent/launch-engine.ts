@@ -64,7 +64,7 @@ export type EngineNodes = {
 export interface EngineNodeOps {
   requestNode<R extends NodeRequest>(connID: string, req: R): Promise<NodeResultFor[R["op"]]>
 }
-export type EngineRegistry = Pick<Registry, "serviceFor" | "supports" | "connTenant" | "hasSession" | "idle" | "session" | "subscribe" | "onSessions" | "launchConn">
+export type EngineRegistry = Pick<Registry, "serviceFor" | "serviceHarnesses" | "supports" | "connTenant" | "hasSession" | "idle" | "session" | "subscribe" | "onSessions" | "launchConn">
 /** Mints the launch-bound token (hlt1) a sandboxed harness connects back with (LaunchTokens). */
 export interface EngineLaunchTokens {
   mint(machineID: string, launchID: string): Promise<{ readonly token: string; readonly exp: number } | undefined>
@@ -298,10 +298,11 @@ export class LaunchEngine {
       store: this.store,
       nodes: placementNodes(deps.nodes),
       spokes: {
-        launchService: (_userID, machineID) => {
-          const connID = registry.serviceFor(machineID)
-          return connID !== undefined && registry.supports(connID, "launch")
-        },
+        launchHarnesses: (_userID, machineID) =>
+          registry.serviceHarnesses(machineID).filter((harness) => {
+            const connID = registry.serviceFor(machineID, harness)
+            return connID !== undefined && registry.supports(connID, "launch")
+          }),
       },
       counters: deps.counters,
       locks: deps.locks,
@@ -664,8 +665,9 @@ export class LaunchEngine {
       const connected = started ? registry.launchConn(launch.id) : undefined
       return connected ?? this.startHarness(userID, launch, workspace)
     }
-    const connID = registry.serviceFor(launch.machineID!)
-    if (connID === undefined || !registry.supports(connID, "launch")) throw new Error("The machine has no connected service spoke with launch")
+    const { harness } = launch.spec
+    const connID = registry.serviceFor(launch.machineID!, harness)
+    if (connID === undefined || !registry.supports(connID, "launch")) throw new Error(`The machine has no connected ${harness} service spoke with launch`)
     return connID
   }
 
