@@ -7,7 +7,7 @@ import { partyAddress } from "./timeline-core"
 // ---------- grants ----------
 
 /** What a grant may let its holder do (src/central/agent/policy.ts GRANT_VERBS). */
-export const GRANT_VERBS = ["approve", "deny", "answer", "prompt", "stop", "roles"] as const
+export const GRANT_VERBS = ["approve", "deny", "answer", "prompt", "stop", "roles", "launch"] as const
 export type GrantVerb = (typeof GRANT_VERBS)[number]
 export type GrantState = "active" | "expired" | "revoked"
 
@@ -314,9 +314,9 @@ export function actingView(raw: { enabled?: unknown; hubEnabled?: unknown }): { 
   const on = raw.enabled !== false
   const hubOn = raw.hubEnabled !== false
   const note = !hubOn
-    ? "An admin turned agent actions off for the whole hub: no agent can approve, deny, answer, prompt or stop until it is on again."
+    ? "An admin turned agent actions off for the whole hub: no agent can approve, deny, answer, prompt, stop or launch until it is on again."
     : !on
-      ? "Agents cannot act for you (approve, deny, answer, prompt, stop). Reading and messaging still work."
+      ? "Agents cannot act for you (approve, deny, answer, prompt, stop, launch). Reading and messaging still work."
       : ""
   return { on, hubOn, note }
 }

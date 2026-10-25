@@ -61,7 +61,7 @@ async function grantArg(flags: Parsed["flags"], stdin: (() => Promise<string>) |
   const projects = listOf(flags, "project")
   if (!projects.length) throw new UsageError("needs --project <path> (repeatable)")
   const allow = listOf(flags, "allow") as GrantVerb[]
-  if (!allow.length) throw new UsageError("needs --allow <verbs> (approve, deny, answer, prompt, stop, roles)")
+  if (!allow.length) throw new UsageError("needs --allow <verbs> (approve, deny, answer, prompt, stop, roles, launch)")
   const permit = [...listOf(flags, "permit"), ...listOf(flags, "permission-allow")]
   const never = listOf(flags, "never")
   const expires = str(flags, "expires")

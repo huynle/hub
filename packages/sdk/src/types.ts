@@ -331,7 +331,7 @@ export type Prompted =
 
 // Grants (/api/agent/grants; src/central/agent/grants.ts): created, edited and revoked only by the user.
 
-export type GrantVerb = "approve" | "deny" | "answer" | "prompt" | "stop" | "roles"
+export type GrantVerb = "approve" | "deny" | "answer" | "prompt" | "stop" | "roles" | "launch"
 export type GrantState = "active" | "expired" | "revoked"
 
 /** What the user grants (create and update bodies). */

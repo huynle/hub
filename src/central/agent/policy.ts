@@ -6,8 +6,8 @@
 //   for an `always` reply also covers the save patterns, which must lie inside the allow rules.
 // - Shell allow rules: `$(`, backticks and `<`/`>` in a resource must be written literally, never matched by a wildcard.
 // - Escalation tiers are the hub's: tap for shell, external_directory, MCP/unknown tools and near-never requests.
-// - Grant schema: verbs, permissions, expires (1 minute–30 days), maxActionsPerHour, allowAlways; children and
-//   launch are phase 4. Project scopes are canonical paths matched on path boundaries.
+// - Grant schema: verbs (launch included, phase 4), permissions, expires (1 minute–30 days), maxActionsPerHour,
+//   allowAlways; children stays deferred. Project scopes are canonical paths matched on path boundaries.
 
 import type { Tier } from "./decisions"
 import { AgentError } from "./errors"
@@ -267,8 +267,8 @@ export function parseDuration(value: unknown): number | undefined {
 
 // ---------- grants ----------
 
-/** What a grant may let its holder do (phase 3; `launch` comes in phase 4). */
-export const GRANT_VERBS = ["approve", "deny", "answer", "prompt", "stop", "roles"] as const
+/** What a grant may let its holder do (`launch`, phase 4, starts sessions in the grant's projects). */
+export const GRANT_VERBS = ["approve", "deny", "answer", "prompt", "stop", "roles", "launch"] as const
 export type GrantVerb = (typeof GRANT_VERBS)[number]
 
 export const GRANT_DEFAULT_EXPIRES_MS = 8 * 3_600_000
@@ -295,14 +295,14 @@ export interface GrantSpec {
 
 const GRANT_FIELDS = ["holder", "scope", "allow", "permissions", "expires", "maxActionsPerHour", "allowAlways"]
 const APP_HOLDER = /^app:[0-9a-f]{16}$/
-const PHASE_4 = ["children", "launch"]
+const DEFERRED = ["children"]
 
 const invalid = (message: string) => new AgentError("invalid", message)
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value)
 
 function onlyFields(value: Record<string, unknown>, allowed: readonly string[], what: string): void {
   for (const key of Object.keys(value)) {
-    if (PHASE_4.includes(key)) throw invalid(`${what}.${key} is not available yet (phase 4)`)
+    if (DEFERRED.includes(key)) throw invalid(`${what}.${key} is not available yet (phase 4)`)
     if (!allowed.includes(key)) throw invalid(`Unknown ${what} field ${key}`)
   }
 }
@@ -333,7 +333,6 @@ function validVerbs(value: unknown): GrantVerb[] {
   if (!Array.isArray(value) || value.length === 0) throw invalid(`allow lists the verbs: ${GRANT_VERBS.join(", ")}`)
   const verbs: GrantVerb[] = []
   for (const verb of value) {
-    if (verb === "launch") throw invalid("allow: launch is not available yet (phase 4)")
     if (!GRANT_VERBS.includes(verb)) throw invalid(`allow: unknown verb ${String(verb)}`)
     if (!verbs.includes(verb)) verbs.push(verb)
   }

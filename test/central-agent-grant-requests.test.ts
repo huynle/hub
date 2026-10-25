@@ -133,7 +133,8 @@ describe("requesting", () => {
       { grant: GRANT, why: "  " },
       { grant: GRANT, why: "x", extra: 1 },
       { why: "x" },
-      { grant: { ...GRANT, allow: ["launch"] }, why: "x" },
+      { grant: { ...GRANT, allow: ["delete"] }, why: "x" },
+      { grant: { ...GRANT, scope: { ...GRANT.scope, children: true } }, why: "x" },
       { grant: { ...GRANT, scope: { projects: ["relative"] } }, why: "x" },
     ]) {
       await expect(ask(s, orchestrator, body)).rejects.toMatchObject({ code: "invalid" })

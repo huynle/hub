@@ -4,6 +4,7 @@
 import { describe, expect, test } from "bun:test"
 import {
   actingView,
+  GRANT_VERBS,
   agentNotes,
   answeredNote,
   applyAgentEntry,
@@ -100,6 +101,12 @@ describe("grant form", () => {
       maxActionsPerHour: "60",
       allowAlways: false,
     })
+  })
+
+  test("launch is an action (phase 4) and survives into the body, in GRANT_VERBS order", () => {
+    expect(GRANT_VERBS).toEqual(["approve", "deny", "answer", "prompt", "stop", "roles", "launch"])
+    const result = grantBody({ ...draftOf(), holder: "app:0123456789abcdef", projects: "/home/u/api", allow: ["launch", "approve"] })
+    expect(result).toMatchObject({ ok: true, body: { allow: ["approve", "launch"] } })
   })
 
   test("a valid draft becomes the hub's grant body (lines trimmed, blanks dropped)", () => {
@@ -234,6 +241,8 @@ describe("acting switches", () => {
   test("both on: no note; the user's off or the hub's off say what it means", () => {
     expect(actingView({ enabled: true, hubEnabled: true })).toEqual({ on: true, hubOn: true, note: "" })
     expect(actingView({ enabled: false, hubEnabled: true })).toMatchObject({ on: false, note: expect.stringContaining("cannot act for you") })
+    expect(actingView({ enabled: false, hubEnabled: true }).note).toContain("launch")
+    expect(actingView({ enabled: true, hubEnabled: false }).note).toContain("launch")
     expect(actingView({ enabled: true, hubEnabled: false })).toMatchObject({ hubOn: false, note: expect.stringContaining("admin") })
     // An older hub without hubEnabled: assume on.
     expect(actingView({ enabled: true })).toMatchObject({ hubOn: true })

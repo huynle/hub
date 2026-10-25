@@ -75,6 +75,7 @@ Grants (the user only: the console, or \`hub login\` with a device token; exit 5
   hub grant create --holder <ses_…|@name|@@orchestrator…|app:<id>> --project <path>... --allow approve,deny,…
          [--permit <pattern>]... [--never <pattern>]... [--expires 8h] [--max-per-hour N] [--allow-always]
          | --json '{…}' | --json -   what a session or app token may do, in which projects, until when
+                                      verbs: approve, deny, answer, prompt, stop, roles, launch (start sessions)
   hub grant request --project <path>... --allow approve,deny,… [--permission-allow <pattern>]... [--never <pattern>]...
          [--expires 8h] [--max-per-hour N] [--allow-always] [--holder <@@role you hold>] --why "…"
                                       (agents) ask the user for a grant: opens a tap Decision; the answer comes
