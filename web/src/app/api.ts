@@ -1,8 +1,10 @@
-// Same-origin JSON API calls with the device cookie. Errors carry the HTTP status and the hub's `code`/`field`.
+// Same-origin JSON API calls with the device cookie. Errors carry the HTTP status and the hub's `code`/`field`
+// (console routes: {error: string, code?, field?}) or `code`/`hint` (/api/agent routes: {error: {code, message, hint?}}).
 
 export class HttpError extends Error {
   code?: string
   field?: string
+  hint?: string
   constructor(
     readonly status: number,
     message: string,
@@ -53,11 +55,15 @@ export async function api(path: string, { method = "GET", json, body, headers = 
     throw cause
   }
   if (!res.ok) {
-    const data = (await res.json().catch(() => ({}))) as { error?: string; code?: string; field?: string }
+    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>
     if (res.status === 401) onUnauthorized?.()
-    const error = new HttpError(res.status, data.error || `HTTP ${res.status}`)
-    if (typeof data.field === "string") error.field = data.field
-    if (typeof data.code === "string") error.code = data.code
+    // The agent envelope nests code, message and hint in `error`.
+    const body = data.error && typeof data.error === "object" ? (data.error as Record<string, unknown>) : data
+    const message = typeof data.error === "string" ? data.error : typeof body.message === "string" ? body.message : ""
+    const error = new HttpError(res.status, message || `HTTP ${res.status}`)
+    if (typeof body.field === "string") error.field = body.field
+    if (typeof body.code === "string") error.code = body.code
+    if (typeof body.hint === "string") error.hint = body.hint
     throw error
   }
   return res

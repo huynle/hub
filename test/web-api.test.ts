@@ -34,4 +34,12 @@ describe("api", () => {
     expect(error).toBeInstanceOf(HttpError)
     expect(error).toMatchObject({ status: 409, message: "No OpenCode process", code: "offline" })
   })
+
+  test("the /api/agent envelope {error: {code, message, hint}} keeps its message, code and hint", async () => {
+    globalThis.fetch = (async () =>
+      Response.json({ error: { code: "invalid", message: "holder is @@role, @name, ses_… or app:<token id>", hint: "Use @@orchestrator" } }, { status: 400 })) as unknown as typeof fetch
+    const error = await api("/api/agent/grants", { method: "POST", json: {} }).catch((e) => e)
+    expect(error).toBeInstanceOf(HttpError)
+    expect(error).toMatchObject({ status: 400, message: "holder is @@role, @name, ses_… or app:<token id>", code: "invalid", hint: "Use @@orchestrator" })
+  })
 })
