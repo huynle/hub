@@ -5,7 +5,7 @@
 // asker as a reply. A real delivery engine over fake spokes, a fake clock and fake timers.
 import { describe, expect, test } from "bun:test"
 import type { AgentActor, UserActor } from "../src/central/agent/actor"
-import { DECISION_TICK_MS, Decisions, type Decision } from "../src/central/agent/decisions"
+import { DECISION_STATES, DECISION_TICK_MS, Decisions, type Decision } from "../src/central/agent/decisions"
 import { Delivery, type DeliveryRegistry } from "../src/central/agent/delivery"
 import type { DirectoryEntry, Resolved } from "../src/central/agent/directory"
 import { AgentError } from "../src/central/agent/errors"
@@ -382,5 +382,42 @@ describe("listing", () => {
     expect(ids(await s.decisions.list(U, { state: "open" }))).toEqual([b.id])
     expect(ids(await s.decisions.list(U, { from: { kind: "session", sessionID: "ses_a" } }))).toEqual([a.id])
     expect(await s.decisions.list("u2")).toEqual([])
+  })
+})
+
+describe("closed elsewhere (P3-T8)", () => {
+  test("close: an open Decision becomes closed with a reason, the asker hears it, later answers are gone", async () => {
+    const s = setup()
+    const { decision } = await s.decisions.ask(U, asSession("ses_a"), { question: "Approve?", options: OPTIONS })
+    s.changes.length = 0
+    s.clock.set(T0 + MIN)
+    const closed = await s.decisions.close(U, decision.id, "The request was answered elsewhere")
+    expect(closed).toMatchObject({ state: "closed", closed: { at: T0 + MIN, reason: "The request was answered elsewhere" } })
+    expect(closed!.answer).toBeUndefined()
+    expect(s.changes).toEqual([{ userID: U, id: decision.id, state: "closed" }])
+    const reply = (await s.delivery.messages.list(U, { kind: "user" })).find((m) => m.kind === "reply")!
+    expect(reply).toMatchObject({ replyTo: decision.messageID, recipient: { kind: "session", sessionID: "ses_a" } })
+    expect(reply.text).toBe(`Decision ${decision.id} closed: The request was answered elsewhere`)
+    await expect(s.decisions.answer(U, decision.id, { option: "go" }, cookieUser)).rejects.toMatchObject({ code: "gone" })
+    expect((await s.decisions.list(U, { state: "closed" })).map((d) => d.id)).toEqual([decision.id])
+  })
+
+  test("close leaves answered, expired and unknown Decisions alone (undefined, no change)", async () => {
+    const s = setup()
+    const a = (await s.decisions.ask(U, asSession("ses_a"), { question: "A?", options: OPTIONS })).decision
+    await s.decisions.answer(U, a.id, { option: "go" }, cookieUser)
+    const e = (await s.decisions.ask(U, asSession("ses_a"), { question: "E?", expiresInMs: HOUR })).decision
+    s.clock.set(T0 + HOUR)
+    s.changes.length = 0
+    expect(await s.decisions.close(U, a.id, "x")).toBeUndefined()
+    expect(await s.decisions.close(U, e.id, "x")).toBeUndefined()
+    expect(await s.decisions.close(U, "dec_nope", "x")).toBeUndefined()
+    expect(await s.decisions.close("u2", a.id, "x")).toBeUndefined()
+    expect(s.changes).toEqual([])
+    expect((await s.decisions.get(U, a.id))?.state).toBe("answered")
+  })
+
+  test("DECISION_STATES lists every state, closed included", () => {
+    expect([...DECISION_STATES]).toEqual(["open", "answered", "expired", "closed"])
   })
 })

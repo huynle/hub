@@ -13,7 +13,9 @@
 //   looks at every user's open Decisions, so deadlines survive restarts.
 // - Text is sanitised (question by the message store; labels, ids and reasons here). Notifications carry only
 //   the Decision (the push layer sends a generic body).
-// - Every open and change (answer, timeout, escalation, expiry) goes to `changed` (the console's 'decision' event).
+// - close(): a Decision whose subject went away (a permission answered elsewhere) is closed, not answered; the asker
+//   hears why.
+// - Every open and change (answer, timeout, escalation, expiry, close) goes to `changed` (the console's 'decision' event).
 import type { Clock, StateStore, Timers } from "../backend/types"
 import type { AgentActor, UserActor } from "./actor"
 import type { Delivery } from "./delivery"
@@ -25,10 +27,12 @@ import { updateVersioned } from "./versioned"
 export type Urgency = "low" | "normal" | "high"
 /** confirm: any of the user's signed-in devices; tap: only a signed-in console (cookie). */
 export type Tier = "confirm" | "tap"
-export type DecisionState = "open" | "answered" | "expired"
+/** closed: ended without an answer because what it asked about went away (answered elsewhere, ended). */
+export type DecisionState = "open" | "answered" | "expired" | "closed"
 
 export const URGENCIES: readonly Urgency[] = ["low", "normal", "high"]
 export const TIERS: readonly Tier[] = ["confirm", "tap"]
+export const DECISION_STATES: readonly DecisionState[] = ["open", "answered", "expired", "closed"]
 
 /** Options a Decision offers. */
 export const OPTIONS_MAX = 8
@@ -85,6 +89,8 @@ export interface Decision {
   /** When it passed its deadline without a safe onTimeout (notified again). */
   readonly escalatedAt?: number
   readonly answer?: DecisionAnswer
+  /** Why it closed without an answer (state closed). */
+  readonly closed?: { readonly at: number; readonly reason: string }
 }
 
 export interface AskInput {
@@ -274,12 +280,28 @@ export class Decisions {
     const choice = this.choice(current, input)
     const at = this.now()
     const answer: DecisionAnswer = { ...choice, answeredBy: "user", at, deviceID: by.deviceID }
-    const decision = await this.close(userID, id, answer)
+    const decision = await this.settle(userID, id, answer)
     if (!decision) throw gone()
     this.emit(userID, decision)
     const option = decision.options.find((o) => o.id === choice.option)
     const text = option ? `Decision ${id}: ${option.label} [${option.id}]${choice.text ? `\n${choice.text}` : ""}` : `Decision ${id}: ${choice.text}`
     return { decision, ...(await this.replyTo(userID, decision, text, by)) }
+  }
+
+  /**
+   * Closes an open Decision without an answer (what it asked about went away: answered elsewhere, ended) and tells
+   * the asker why. Undefined (no change) when it is not open, unknown or another user's.
+   */
+  async close(userID: string, id: string, reason: string): Promise<Decision | undefined> {
+    const why = sanitizeLabel(reason, WHY_MAX) || "Closed"
+    const closed = await updateVersioned<Decision>(this.deps.state, userID, DECISIONS, id, (current) =>
+      current && this.view(current).state === "open" ? { ...current, state: "closed", closed: { at: this.now(), reason: why } } : undefined,
+    )
+    if (!closed) return undefined
+    this.emit(userID, closed)
+    const hub: UserActor = { kind: "user", userID, deviceID: "hub", via: "cookie" }
+    await this.replyTo(userID, closed, `Decision ${id} closed: ${why}`, hub)
+    return closed
   }
 
   /** Starts the deadline loop (every DECISION_TICK_MS). */
@@ -344,8 +366,8 @@ export class Decisions {
     return { option: input.option, ...(text === undefined ? {} : { text }) }
   }
 
-  /** Closes the Decision with the answer if it is still open (version-checked); undefined when it is not. */
-  private close(userID: string, id: string, answer: DecisionAnswer): Promise<Decision | undefined> {
+  /** Answers the Decision if it is still open (version-checked); undefined when it is not. */
+  private settle(userID: string, id: string, answer: DecisionAnswer): Promise<Decision | undefined> {
     return updateVersioned<Decision>(this.deps.state, userID, DECISIONS, id, (current) =>
       current && this.view(current).state === "open" ? { ...current, state: "answered", answer } : undefined,
     )
@@ -374,7 +396,7 @@ export class Decisions {
       if (value.deadline === undefined || t < value.deadline) continue
       const option = value.onTimeout === undefined ? undefined : value.options.find((o) => o.id === value.onTimeout && o.safe)
       if (option) {
-        const decision = await this.close(userID, value.id, { option: option.id, answeredBy: "timeout", at: t })
+        const decision = await this.settle(userID, value.id, { option: option.id, answeredBy: "timeout", at: t })
         if (decision) {
           this.emit(userID, decision)
           const hub: UserActor = { kind: "user", userID, deviceID: "hub", via: "cookie" }
