@@ -13,6 +13,8 @@
 import type { Clock, StateStore } from "../backend/types"
 import type { AuditEntry } from "../store"
 import { type Party, sanitizeText } from "./envelope"
+import { AgentError } from "./errors"
+import { AGENT_PREFIX, type AgentRoute } from "./routes"
 import { updateVersioned } from "./versioned"
 
 /** Entries each user keeps (the oldest are dropped first). */
@@ -151,4 +153,32 @@ export class AgentAudit {
     const entries = older.slice(0, limit)
     return { entries, ...(older.length > limit ? { next: entries[entries.length - 1]!.seq } : {}) }
   }
+}
+
+const NO_STORE = { "cache-control": "no-store" }
+
+/** A whole number query parameter in [min, max], or undefined when absent (throws invalid). */
+function intQuery(url: URL, name: string, min: number, max: number): number | undefined {
+  const raw = url.searchParams.get(name)
+  if (raw === null) return undefined
+  const value = /^\d{1,15}$/.test(raw) ? Number(raw) : NaN
+  if (!(value >= min && value <= max)) throw new AgentError("invalid", `${name} must be a whole number from ${min} to ${max}`)
+  return value
+}
+
+/** GET /api/agent/audit?limit&before: the caller's own log (users only; sessions and apps never read it). */
+export function auditRoutes(audit: AgentAudit): AgentRoute[] {
+  return [
+    {
+      method: "GET",
+      path: `${AGENT_PREFIX}/audit`,
+      allow: {},
+      handle: async ({ url, user }) => {
+        const limit = intQuery(url, "limit", 1, AUDIT_PAGE_MAX)
+        const before = intQuery(url, "before", 1, Number.MAX_SAFE_INTEGER)
+        const page = await audit.list(user.id, { ...(limit !== undefined ? { limit } : {}), ...(before !== undefined ? { before } : {}) })
+        return Response.json(page, { headers: NO_STORE })
+      },
+    },
+  ]
 }

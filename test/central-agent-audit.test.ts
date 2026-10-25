@@ -2,7 +2,10 @@
 // outcome} in a per-user ring (2000) in the StateStore, newest first; each new entry goes to `recorded` (the
 // owner's SSE 'agent' event); admins get only a hub-wide summary (who, kind, when) in Store.audit, never text.
 import { describe, expect, test } from "bun:test"
-import { AGENT_AUDIT_LIMIT, AUDIT_REASON_MAX, AgentAudit, type AgentAuditEntry, type AuditInput } from "../src/central/agent/audit"
+import { agentAllows, type AgentActor } from "../src/central/agent/actor"
+import { AGENT_AUDIT_LIMIT, AUDIT_REASON_MAX, AgentAudit, auditRoutes, type AgentAuditEntry, type AuditInput } from "../src/central/agent/audit"
+import { agentFailure } from "../src/central/agent/errors"
+import type { AgentContext } from "../src/central/agent/routes"
 import { MemoryStateStore } from "../src/central/backend/memory-state"
 
 const T0 = 1_700_000_000_000
@@ -121,5 +124,52 @@ describe("AgentAudit.list", () => {
   test("an unknown user has an empty log", async () => {
     const { audit } = setup()
     expect(await audit.list("nobody")).toEqual({ entries: [] })
+  })
+})
+
+describe("GET /api/agent/audit (route)", () => {
+  const user: AgentActor = { kind: "user", userID: "u1", deviceID: "d1", via: "cookie" }
+  const call = async (audit: AgentAudit, query = "", userID = "u1") => {
+    const [route] = auditRoutes(audit)
+    const url = new URL(`http://hub.test/api/agent/audit${query}`)
+    const context = { request: new Request(url), url, params: {}, actor: { ...user, userID }, credential: "cookie", user: { id: userID, role: "user", created: 0, lastSeen: 0 } } as AgentContext
+    try {
+      return await route!.handle(context)
+    } catch (cause) {
+      return agentFailure(cause)
+    }
+  }
+
+  test("one GET route, users only (no session or app tokens)", () => {
+    const routes = auditRoutes(setup().audit)
+    expect(routes.map((r) => `${r.method} ${r.path}`)).toEqual(["GET /api/agent/audit"])
+    const route = routes[0]!
+    expect(agentAllows(route.allow, user)).toBe(true)
+    expect(agentAllows(route.allow, { kind: "session", userID: "u1", machineID: "m1", sessionID: "s1" })).toBe(false)
+    expect(agentAllows(route.allow, { kind: "app", userID: "u1", tokenID: "t1", scopes: ["sessions:read", "sessions:act"] })).toBe(false)
+  })
+
+  test("the caller's own entries, newest first, paged, never cached", async () => {
+    const { audit } = setup()
+    for (let i = 0; i < 3; i++) await audit.record("u1", approve)
+    await audit.record("u2", approve)
+    const res = await call(audit, "?limit=2")
+    expect(res.status).toBe(200)
+    expect(res.headers.get("cache-control")).toBe("no-store")
+    const body = (await res.json()) as any
+    expect(body.entries.map((e: AgentAuditEntry) => e.seq)).toEqual([3, 2])
+    expect(body.next).toBe(2)
+    const older = (await (await call(audit, "?limit=2&before=2")).json()) as any
+    expect(older).toEqual({ entries: [expect.objectContaining({ seq: 1 })] })
+    expect(((await (await call(audit, "", "u2")).json()) as any).entries.length).toBe(1)
+  })
+
+  test("a bad limit or before is invalid (400)", async () => {
+    const { audit } = setup()
+    for (const query of ["?limit=0", "?limit=abc", "?limit=501", "?before=-1", "?before=x"]) {
+      const res = await call(audit, query)
+      expect({ query, status: res.status }).toEqual({ query, status: 400 })
+      expect(((await res.json()) as any).error.code).toBe("invalid")
+    }
   })
 })
