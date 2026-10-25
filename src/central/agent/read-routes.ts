@@ -20,7 +20,7 @@ import { AgentError } from "./errors"
 import { AGENT_PREFIX, type AgentRoute } from "./routes"
 import { partyFromActor, partyKey } from "./envelope"
 import { launchedBy } from "./launch-routes"
-import { type LaunchSource, watchStream, type MessageSource } from "./watch"
+import { type LaunchSource, watchStream, type MessageSource, type WatchRegistry } from "./watch"
 
 /** Labels per session ID. */
 export type SessionLabels = ReadonlyMap<string, Readonly<Record<string, string>>>
@@ -51,6 +51,8 @@ export interface ReadDeps {
   readonly labels?: (userID: string) => Promise<SessionLabels>
   /** Launch changes for the watch stream's launch events. */
   readonly launches?: LaunchSource
+  /** What the watch stream of a user reads (cluster mode: status from every pod); the registry when absent. */
+  readonly watchRegistry?: (userID: string) => WatchRegistry
   /** Watch stream heartbeat (default WATCH_HEARTBEAT_MS). */
   readonly heartbeatMs?: number
   readonly now?: () => number
@@ -367,7 +369,7 @@ export function readRoutes(deps: ReadDeps): AgentRoute[] {
         // Launch events: the user sees all; an app or session those it started.
         const launches = deps.launches ? { feed: deps.launches, ...(actor.kind === "user" ? {} : { by: launchedBy(actor) }) } : undefined
         return watchStream({
-          registry: deps.registry,
+          registry: deps.watchRegistry?.(user.id) ?? deps.registry,
           userID: user.id,
           signal: request.signal,
           blocked,

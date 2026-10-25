@@ -37,7 +37,7 @@ import { SessionTokens } from "./agent/session-tokens"
 import { SessionTokenPush } from "./session-token-push"
 import { TokenKeys } from "./token-keys"
 import { EventLog } from "./events-log"
-import { BusyError, Registry } from "./registry"
+import { BusyError, Registry, type RegistryMessage } from "./registry"
 import { createActions } from "./actions"
 import { audioFormat, SpeechError } from "./speech/provider"
 import { SpeechService } from "./speech/service"
@@ -47,10 +47,12 @@ import { PodRpc } from "./cluster/rpc"
 import { ClusterView } from "./cluster/view"
 import { LeaderLoop, NoLeaderError } from "./cluster/leader"
 import { ClusterRecommendations } from "./cluster/recommend"
+import { LiveFanout, type LiveEvent } from "./cluster/live"
 import { randomBytes, randomUUID } from "node:crypto"
 import { LaunchEngine } from "./agent/launch-engine"
 import { LaunchTokens } from "./agent/launch-tokens"
 import { LaunchFeed, launchInfo } from "./agent/launch-routes"
+import type { WatchRegistry } from "./agent/watch"
 import { RequestTimeoutError, RequestTooLargeError, SpokeError, SpokeHub, type Notifier, type SpokeHubOptions, type SpokeSocketData } from "./spoke-ws"
 import { ACTIVITY_INTERVAL_MAX, ACTIVITY_INTERVAL_MIN, LOCAL_USER, PUSH_PREF_KEYS, quietHoursInput, Store, VIEW_PREF_KEYS, type DeviceRecord, type LegacyPushPrefs, type PushPrefs, type UserRecord, type ViewPrefs } from "./store"
 
@@ -314,15 +316,45 @@ export function startCentral(options: CentralOptions): Central {
     const root = registry.status(listener.session)?.[0]?.id ?? listener.session
     return message.sessionID === listener.session || message.rootID === root || message.sessionID === root
   }
-  /** Logs a message for one user and sends it to their streams (except `exceptDevice`'s). */
-  const toUser = (userID: string, message: Message, exceptDevice?: string) => {
-    // A catalog is logged as a marker: a replay sends one fresh catalog for any number of them.
-    const id = eventLog.append(userID, message.type === "catalog" ? { type: "catalog" } : message, exceptDevice)
+  /**
+   * Cluster mode (design §9): a user's events go to every pod over the Bus (user.<id>.live), logged in the shared
+   * EventLog first (except streamed text), so consoles on any pod get them and resume by Last-Event-ID on any pod.
+   */
+  const live = config.cluster ? new LiveFanout({ bus: backends.bus, events: backends.events, podID: config.cluster.podID }) : undefined
+  /** Sends a message to this process's streams of a user (except `exceptDevice`'s); a catalog is built per user. */
+  const deliver = (userID: string, message: Message, id?: string, exceptDevice?: string) => {
     for (const listener of [...listeners]) {
       if (listener.userID !== userID || listener.deviceID === exceptDevice) continue
       if (message.type === "catalog") listener.send({ type: "catalog", machines: machines(userID) }, id)
       else if (wants(listener, message)) listener.send(message, id)
     }
+  }
+  /** Logs a message for one user and sends it to their streams (except `exceptDevice`'s). */
+  const toUser = (userID: string, message: Message, exceptDevice?: string) => {
+    if (live) {
+      // A catalog is this pod's own view (its registry covers the cluster): never logged, never sent to other pods.
+      if (message.type === "catalog") deliver(userID, message)
+      // Failures are logged by the fan-out.
+      else live.send(userID, message, exceptDevice).catch(() => {})
+      return
+    }
+    // A catalog is logged as a marker: a replay sends one fresh catalog for any number of them.
+    const id = eventLog.append(userID, message.type === "catalog" ? { type: "catalog" } : message, exceptDevice)
+    deliver(userID, message, id, exceptDevice)
+  }
+  /** Closes the streams of users who were disabled or removed. */
+  const closeDisabled = () => {
+    for (const listener of [...listeners]) {
+      const user = store.user(listener.userID)
+      if (!user || user.disabled) listener.close()
+    }
+  }
+  /** Users that may receive an `audience` message (cluster mode: whether or not they stream on this pod). */
+  const audienceUsers = (audience: { tenant?: string; admins?: true }): string[] => {
+    if (audience.admins) return store.users().filter((u) => u.role === "admin" && !u.disabled).map((u) => u.id)
+    if (audience.tenant === undefined) return []
+    const user = store.user(audience.tenant)
+    return user && !user.disabled ? [user.id] : []
   }
   /**
    * Sends to SSE subscribers: catalog to everyone (each gets their own machines), `admins` messages to
@@ -330,9 +362,12 @@ export function startCentral(options: CentralOptions): Central {
    * disabled are closed.
    */
   const broadcast = (message: Message, audience: { tenant?: string; admins?: true } = {}) => {
-    for (const listener of [...listeners]) {
-      const user = store.user(listener.userID)
-      if (!user || user.disabled) listener.close()
+    closeDisabled()
+    if (live) {
+      // Stored machines changed: every pod sends its streams a fresh catalog (catalogHere).
+      if (message.type === "catalog") live.publishCatalog().catch((cause) => console.error(`[hub] catalog announcement failed: ${(cause as Error).message}`))
+      else for (const userID of audienceUsers(audience)) toUser(userID, message)
+      return
     }
     const users = new Set([...eventLog.users(), ...[...listeners].map((l) => l.userID)])
     for (const userID of users) {
@@ -344,6 +379,13 @@ export function startCentral(options: CentralOptions): Central {
       } else if (audience.tenant !== undefined && audience.tenant === userID) toUser(userID, message)
     }
   }
+  /** Cluster mode: a fresh catalog to this pod's streams (the registry's cluster-wide view changed). */
+  const catalogHere = () => {
+    closeDisabled()
+    for (const userID of new Set([...listeners].map((l) => l.userID))) toUser(userID, { type: "catalog" })
+  }
+  live?.onCatalog(catalogHere)
+  live?.start().catch((cause) => console.error(`[hub] live fan-out did not start: ${(cause as Error).message}`))
   const speechSettings = new SpeechService({
     store,
     defaults: {
@@ -457,7 +499,9 @@ export function startCentral(options: CentralOptions): Central {
       }))
   }
 
-  registry.subscribe((message, tenant) => broadcast({ ...message }, tenant !== undefined ? { tenant } : {}))
+  // Cluster mode: a catalog change stays on this pod (each pod's registry emits its own for remote slices); the rest
+  // goes to the tenant's streams on every pod.
+  registry.subscribe((message, tenant) => (live && message.type === "catalog" ? catalogHere() : broadcast({ ...message }, tenant !== undefined ? { tenant } : {})))
   registry.subscribeAlerts((alert) => {
     // Push goes to the session owner's devices only; an alert without an owner goes nowhere.
     if (!alert.owner) return
@@ -637,6 +681,8 @@ export function startCentral(options: CentralOptions): Central {
   })
   /** Message events (watch, waiters), shared by the agent routes and the console's Decision answers. */
   const feed = new MessageFeed()
+  // Cluster mode: messages stored on any pod reach this pod's listeners (ask waiters, agent watches).
+  if (config.cluster) feed.attach({ bus: backends.bus, podID: config.cluster.podID }).catch((cause) => console.error(`[hub] message feed did not attach: ${(cause as Error).message}`))
   // Decisions (design §12.1): asks to @me; deadlines run over every user's Decisions (survive restarts).
   const decisions = new Decisions({
     state: backends.state,
@@ -674,7 +720,10 @@ export function startCentral(options: CentralOptions): Central {
   // service spoke, then its end; restart recovery runs on start. Every change goes to launchFeed: the owner's
   // console streams get it as a 'launch' event.
   const launchFeed = new LaunchFeed()
-  launchFeed.subscribe((userID, launch) => broadcast({ type: "launch", launch: launchInfo(launch) }, { tenant: userID }))
+  // Cluster mode: launch changes made on any pod reach this pod's agent watches. The console broadcast, closing a
+  // launch's connections and webhooks run only on the publishing pod (origin): they reach every pod themselves.
+  if (config.cluster) launchFeed.attach({ bus: backends.bus, podID: config.cluster.podID }).catch((cause) => console.error(`[hub] launch feed did not attach: ${(cause as Error).message}`))
+  launchFeed.subscribe((userID, launch) => broadcast({ type: "launch", launch: launchInfo(launch) }, { tenant: userID }), { origin: true })
   const launches = new LaunchEngine({
     state: backends.state,
     counters: backends.counters,
@@ -719,7 +768,7 @@ export function startCentral(options: CentralOptions): Central {
   // then on) when the launch ends. Not on queued: that would refuse the sandbox's spoke before it ever connects.
   launchFeed.subscribe((_userID, launch) => {
     if (launch.state === "ended") spokes.closeLaunch(launch.id)
-  })
+  }, { origin: true })
   const launchLeader = leader("launches", {
     onElected: () => launches.start().catch((cause) => console.error(`[hub] launches did not start: ${(cause as Error).message}`)),
     onDeposed: () => launches.shutdown(),
@@ -757,7 +806,7 @@ export function startCentral(options: CentralOptions): Central {
       // Queued here, sent by the webhooks leader (kicked when that is another pod).
       .then((queued) => (queued && !webhookLeader.isLeader() ? webhookLeader.kick() : undefined))
       .catch((cause) => console.error(`[hub] webhook queue failed: ${(cause as Error).message}`))
-  })
+  }, { origin: true })
   const webhookLeader = leader("webhooks", {
     onElected: () => webhooks.start(),
     onDeposed: () => webhooks.stop(),
@@ -767,7 +816,7 @@ export function startCentral(options: CentralOptions): Central {
 
   // One credential resolver for every /api request: device cookie, device token, session and app tokens.
   // Every stored agent message also goes to the user's console streams (live transcript rows).
-  feed.subscribe((userID, message) => broadcast({ type: "message", message }, { tenant: userID }))
+  feed.subscribe((userID, message) => broadcast({ type: "message", message }, { tenant: userID }), { origin: true })
   const audit = new AgentAudit({ state: backends.state, now, admin: store, recorded: (userID, entry) => broadcast({ type: "agent", entry }, { tenant: userID }) })
   const grants = new Grants({ state: backends.state, counters: backends.counters, directory, store, admin: store, now })
   const acting = new ActingSwitch({ store, never: config.agentsNever, audit })
@@ -816,7 +865,26 @@ export function startCentral(options: CentralOptions): Central {
     void escalations.closed(tenant, requestID).catch((cause) => console.error(`[hub] escalation close failed: ${(cause as Error).message}`))
   })
   const escalate: Escalate = (escalation) => escalations.escalate(escalation)
-  const agentDeps = { store, sessionTokens, directory, registry, spokes, delivery, decisions, feed, heartbeatMs, now, audit, grants, grantRequests, acting, actions, escalate, launches, launchFeed, webhooks, maxPromptChars: MAX_PROMPT_CHARS }
+  /** Cluster mode: what GET /api/agent/watch reads; status of sessions on any pod comes from the user's live events. */
+  const watchRegistry = live
+    ? (userID: string): WatchRegistry => ({
+        catalog: () => registry.catalog(),
+        sessionTenant: (sessionID) => registry.sessionTenant(sessionID),
+        subscribe: (listener) => {
+          const offCatalog = registry.subscribe((message) => {
+            if (message.type === "catalog") listener(message)
+          })
+          const subscription = live.subscribe(userID, (event) => {
+            if (event.message.type === "status") listener(event.message as unknown as RegistryMessage, userID)
+          })
+          return () => {
+            offCatalog()
+            subscription.close()
+          }
+        },
+      })
+    : undefined
+  const agentDeps = { store, sessionTokens, directory, registry, spokes, delivery, decisions, feed, heartbeatMs, now, audit, grants, grantRequests, acting, actions, escalate, launches, launchFeed, webhooks, maxPromptChars: MAX_PROMPT_CHARS, ...(watchRegistry ? { watchRegistry } : {}) }
   const resolveActor = createResolver({
     cookieName: COOKIE,
     findDevice: (token) => deviceOfToken(token),
@@ -1655,6 +1723,7 @@ export function startCentral(options: CentralOptions): Central {
             } catch {}
           },
         }
+        if (live) return clusterStream(listener, write)
         eventLog.open(userID)
         const missed = options.lastID ? eventLog.since(userID, options.lastID) : undefined
         if (missed) {
@@ -1682,6 +1751,50 @@ export function startCentral(options: CentralOptions): Central {
         cleanup()
       },
     })
+    /**
+     * Cluster mode: the user's live events from every pod; the replay comes from the shared EventLog. Events that
+     * arrive while it is read wait (in order) and then go out, except those the replay already sent.
+     */
+    async function clusterStream(listener: Listener, write: (chunk: string) => void): Promise<void> {
+      let pending: LiveEvent[] | undefined = []
+      const replayed = new Set<string>()
+      const forward = (event: LiveEvent) => {
+        if (event.exceptDevice === deviceID || (event.id !== undefined && replayed.has(event.id))) return
+        if (wants(listener, event.message)) listener.send(event.message, event.id)
+      }
+      const subscription = live!.subscribe(userID, (event) => (pending ? pending.push(event) : forward(event)))
+      listeners.add(listener)
+      const heartbeat = setInterval(() => write("event: ping\ndata: 0\n\n"), heartbeatMs)
+      cleanup = () => {
+        clearInterval(heartbeat)
+        listeners.delete(listener)
+        subscription.close()
+      }
+      signal.addEventListener("abort", () => cleanup(), { once: true })
+      try {
+        await subscription.ready
+        const missed = options.lastID ? await backends.events.since(userID, options.lastID) : undefined
+        if (missed && "events" in missed) {
+          for (const { id, message, exceptDevice } of missed.events) {
+            replayed.add(id)
+            if (exceptDevice !== deviceID && wants(listener, message)) listener.send(message, id)
+          }
+          // Catalogs are not logged in a cluster: a resumed stream always gets the current one.
+          listener.send({ type: "catalog", machines: machines(userID) })
+        } else {
+          const latest = await backends.events.latest(userID)
+          listener.send({ type: "catalog", machines: machines(userID) }, latest)
+          if (options.lastID) listener.send({ type: "resync" }, latest)
+        }
+      } catch (cause) {
+        console.error(`[hub] live stream did not start: ${(cause as Error).message}`)
+        listener.close()
+        return
+      }
+      const waiting = pending
+      pending = undefined
+      for (const event of waiting) forward(event)
+    }
     return new Response(stream, {
       headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" },
     })
@@ -1761,6 +1874,7 @@ export function startCentral(options: CentralOptions): Central {
       await spokes.stop()
       await view?.stop().catch((cause) => console.error(`[hub] cluster view not stopped: ${(cause as Error).message}`))
       for (const listener of [...listeners]) listeners.delete(listener)
+      await Promise.all([live?.stop(), feed.detach(), launchFeed.detach()]).catch((cause) => console.error(`[hub] live fan-out not stopped: ${(cause as Error).message}`))
       // Bun 1.3.5 quirk: once the server has closed a WebSocket itself, stop(true)'s promise never
       // resolves even though the listener is closed. Don't wait on it forever.
       await Promise.race([server.stop(true), Bun.sleep(250)])
