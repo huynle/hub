@@ -1,15 +1,9 @@
 // /who and /msg in the TUI: what the user typed after the slash name, and what the TUI shows back. The server side
 // (src/spoke/hub-rpc.ts) talks to the hub as the TUI's current session; labels arrive sanitised from there.
+import type { WhoRow } from "./spoke/hub-rpc"
 
-/** One session in /who, as the server's hubWho RPC returns it. */
-export interface WhoRow {
-  readonly sessionID: string
-  readonly name?: string
-  readonly project?: string
-  readonly state?: string
-  readonly online: boolean
-  readonly roles: readonly string[]
-}
+/** One session in /who, as the server's hubWho RPC returns it (type only: the TUI never loads the SDK). */
+export type { WhoRow }
 
 export const MSG_USAGE = "Usage: /msg @name text (or @@role, @name.project, ses_…, @me)"
 
