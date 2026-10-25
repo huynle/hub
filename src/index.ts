@@ -12,6 +12,7 @@ import { checkServer, parseServerInput } from "./setup"
 import { defineVoiceAgent, orchestratorParts, STOP_TOOL, STOP_TOOL_DESCRIPTION } from "./spoke/conversation"
 import { envInjector, hubBinDir, ShellCorrelator, stripInheritedHubEnv } from "./spoke/env-inject"
 import { herdrRunner } from "./spoke/herdr"
+import { launchSource } from "./spoke/launch-source"
 import { HubRpcError, hubMsg, hubWho } from "./spoke/hub-rpc"
 import { HUB_TOOL, HUB_TOOL_DESCRIPTION, HUB_TOOL_INPUT, runHubTool } from "./spoke/hub-tool"
 import { cliEntry, installLaunchers } from "./spoke/launchers"
@@ -222,21 +223,28 @@ export default Plugin.define({
     // An OpenCode started from a session's shell must not act as that session (nor hand its token to its shells).
     stripInheritedHubEnv(process.env)
     const kind = detectKind(process.argv)
+    // Inside a launch's sandbox the spoke is launch-bound: the node's read-only launch config and node.json, no
+    // machine config, enrolment, local hub or Herdr (src/spoke/launch-source.ts). A broken one leaves no spoke.
+    const source = launchSource()
     const membership: Membership<Spoke> = joinProcess(
-      (processID) =>
-        new Spoke(hostFrom(ctx, () => membership.locals<PermissionLocation>(), kind), {
+      (processID) => {
+        if (source.kind === "invalid") throw new Error(`${source.error}; the hub spoke is off in this process`)
+        const host = hostFrom(ctx, () => membership.locals<PermissionLocation>(), kind)
+        const common = { machineName: hostname(), kind, processID, pid: process.pid, pluginVersion: pluginVersion() }
+        if (source.kind === "launch") {
+          const nodeConfig = source.nodeConfig
+          return new Spoke(host, { ...common, configFile: source.file, launch: source.launch, workspaceRoots: () => readWorkspaceRoots(nodeConfig) })
+        }
+        return new Spoke(host, {
+          ...common,
           configFile: prepareConfigPath(),
-          machineName: hostname(),
-          kind,
-          processID,
-          pid: process.pid,
-          pluginVersion: pluginVersion(),
           // Loopback servers only, and only when autoStartLocalHub is on (see src/spoke/localhub.ts).
           localHub: (server) => ensureLocalHub(server),
           // One Herdr reader per machine: the background service's spoke (see src/spoke/herdr.ts). Launch creates
           // (service only) need the node workspace roots, read from node.json each time (src/spoke/node-roots.ts).
           ...(kind === "service" ? { herdr: herdrRunner(), workspaceRoots: () => readWorkspaceRoots(nodeConfigPath()) } : {}),
-        }),
+        })
+      },
       undefined,
       permissionLocation(ctx),
     )

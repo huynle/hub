@@ -1,10 +1,11 @@
 // Per-machine spoke configuration, shared by every OpenCode process on the machine and edited
 // from the /hub dialog. Holds the machine token, so it is written with mode 0600.
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
 import { hubEnv, type Env } from "./env"
 import { APP_DIR, configBase, legacyPaths, migrateFirst } from "./migrate"
+import { isHubURL } from "./protocol"
 
 export type Mode = "off" | "always" | "session"
 
@@ -167,4 +168,51 @@ export function isExposed(config: VoiceConfig, sessionID: string): boolean {
 export function setSession(config: VoiceConfig, sessionID: string, on: boolean): VoiceConfig {
   const sessions = on ? [...new Set([...config.sessions, sessionID])] : config.sessions.filter((id) => id !== sessionID)
   return { ...config, sessions }
+}
+
+// ---------- launch-bound mode ----------
+// A spoke inside a launch's sandbox (OpenShell, design §6.4) connects with a credential bound to that launch. The node
+// writes {hubURL, token, launchID} next to node.json before the harness starts; the spoke only reads it: no enrolment,
+// no local hub, no config writes.
+
+export interface LaunchConfig {
+  readonly hubURL: string
+  /** The launch-bound credential (hlt1…); never logged. */
+  readonly token: string
+  readonly launchID: string
+}
+
+/** Where the node puts the launch config inside a sandbox. */
+export const LAUNCH_CONFIG_DEFAULT = "/sandbox/.hub/config.json"
+const LAUNCH_ID = /^[A-Za-z0-9_.:@/+~-]{1,300}$/
+const LAUNCH_TOKEN = /^[\x21-\x7e]{1,4096}$/
+
+/** A launch config, or undefined unless every field is present and valid. */
+export function parseLaunchConfig(raw: unknown): LaunchConfig | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined
+  const r = raw as Record<string, unknown>
+  if (!isHubURL(r.hubURL)) return undefined
+  if (typeof r.token !== "string" || !LAUNCH_TOKEN.test(r.token)) return undefined
+  if (typeof r.launchID !== "string" || !LAUNCH_ID.test(r.launchID)) return undefined
+  return { hubURL: r.hubURL.replace(/\/+$/, ""), token: r.token, launchID: r.launchID }
+}
+
+/** $HUB_LAUNCH_CONFIG, else LAUNCH_CONFIG_DEFAULT when it exists; undefined: not launch-bound. */
+export function launchConfigPath(env: Env = process.env, exists: (file: string) => boolean = existsSync): string | undefined {
+  const explicit = env.HUB_LAUNCH_CONFIG
+  if (explicit) return explicit
+  return exists(LAUNCH_CONFIG_DEFAULT) ? LAUNCH_CONFIG_DEFAULT : undefined
+}
+
+/** Reads a launch config; throws (without the token) when it is missing, unparsable or invalid. */
+export function readLaunchConfig(file: string): LaunchConfig {
+  let raw: unknown
+  try {
+    raw = JSON.parse(readFileSync(file, "utf8"))
+  } catch (cause) {
+    throw new Error(`Cannot read the launch config ${file}: ${cause instanceof SyntaxError ? "not JSON" : (cause as NodeJS.ErrnoException).code ?? "unreadable"}`)
+  }
+  const config = parseLaunchConfig(raw)
+  if (!config) throw new Error(`Invalid launch config ${file}: expected {hubURL, token, launchID}`)
+  return config
 }
