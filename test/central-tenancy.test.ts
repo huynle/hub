@@ -175,6 +175,10 @@ describe("route table", () => {
       "GET /api/decisions",
       "GET /api/decisions/:id",
       "POST /api/decisions/:id/answer",
+      "POST /api/agent/launches",
+      "GET /api/agent/launches",
+      "GET /api/agent/launches/:id",
+      "DELETE /api/agent/launches/:id",
     ]) {
       expect(keys).toContain(required)
     }
@@ -584,6 +588,77 @@ describe("bob cannot reach alice's grants, escalations, grant requests or agent 
     expect(open).toEqual([world.escalationID, world.requestDecisionID].sort())
     expect(alice.requests.filter((r) => ACT_OPS.includes(r.op))).toEqual([])
     creds.spoke.close()
+  })
+})
+
+describe("bob cannot reach alice's launches", () => {
+  const launch = (key: string) => ({ key, workspace: { repo: "/home/user/work", branch: "feat/x" }, prompt: "secret plan", labels: { app: "brain" } })
+
+  async function aliceLaunch(): Promise<string> {
+    const created = await as(alice, "/api/agent/launches", { method: "POST", json: launch("k1") })
+    expect(created.status).toBe(201)
+    return (await json(created)).launch.id
+  }
+
+  test("GET and DELETE of alice's launch are not_found for bob and the admin, like an unknown id; lists are empty; it keeps running", async () => {
+    const id = await aliceLaunch()
+    for (const who of [bob, admin]) {
+      for (const target of [id, "lch_unknown"]) {
+        for (const method of ["GET", "DELETE"]) {
+          const res = await as(who, `/api/agent/launches/${target}`, { method })
+          expect({ method, target, status: res.status }).toEqual({ method, target, status: 404 })
+          expect((await json(res)).error.code).toBe("not_found")
+        }
+      }
+      expect((await json(await as(who, "/api/agent/launches"))).launches).toEqual([])
+      expect((await json(await as(who, "/api/agent/launches?label=app=brain"))).launches).toEqual([])
+    }
+    expect((await json(await as(alice, `/api/agent/launches/${id}`))).launch.state).not.toBe("ended")
+  })
+
+  test("bob reusing alice's idempotency key gets his own launch, never hers", async () => {
+    const id = await aliceLaunch()
+    const res = await as(bob, "/api/agent/launches", { method: "POST", json: launch("k1") })
+    expect(res.status).toBe(201)
+    expect((await json(res)).launch.id).not.toBe(id)
+    expect((await json(await as(alice, "/api/agent/launches"))).launches.map((l: any) => l.id)).toEqual([id])
+  })
+
+  test("bob's launch app token under his own grant cannot see or stop alice's launch", async () => {
+    const id = await aliceLaunch()
+    const token = await json(await as(bob, "/api/agent/app-tokens", { method: "POST", json: { scopes: ["sessions:launch", "sessions:read"] } }))
+    const granted = await as(bob, "/api/agent/grants", { method: "POST", json: { holder: `app:${token.id}`, scope: { projects: ["/home/user/work"] }, allow: ["launch"] } })
+    expect(granted.status).toBe(201)
+    const asApp = (pathname: string, init: RequestInit = {}) => h.api(pathname, { ...init, cookie: null, origin: null, headers: { authorization: `Bearer ${token.token}` } })
+    expect((await asApp(`/api/agent/launches/${id}`)).status).toBe(404)
+    expect((await asApp(`/api/agent/launches/${id}`, { method: "DELETE" })).status).toBe(404)
+    expect((await json(await asApp("/api/agent/launches"))).launches).toEqual([])
+    expect((await json(await as(alice, "/api/agent/audit"))).entries.map((e: any) => e.verb)).toEqual(["launch"])
+  })
+
+  test("SSE and watch: alice's launch events never reach bob or the admin", async () => {
+    const bobEvents = sse(await as(bob, "/api/events"))
+    const adminEvents = sse(await as(admin, "/api/events"))
+    const aliceEvents = sse(await as(alice, "/api/events"))
+    const bobWatch = sse(await as(bob, "/api/agent/watch"))
+    for (const stream of [bobEvents, adminEvents, aliceEvents]) await stream.next((m) => m.type === "catalog")
+    await bobWatch.next((m) => m.type === "ready")
+    const id = await aliceLaunch()
+    expect(await aliceEvents.next((m) => m.type === "launch")).toMatchObject({ launch: { id, state: "queued" } })
+    // bob's own launch is the marker: his streams get it, never alice's
+    const mine = (await json(await as(bob, "/api/agent/launches", { method: "POST", json: { ...launch("b1"), prompt: "bob plan" } }))).launch.id
+    for (const stream of [bobEvents, bobWatch]) {
+      const seen: any[] = []
+      await stream.next((m) => {
+        seen.push(m)
+        return m.type === "launch"
+      })
+      expect(seen.filter((m) => m.type === "launch").map((m) => m.id ?? m.launch.id)).toEqual([mine])
+      expect(JSON.stringify(seen)).not.toContain(id)
+      expect(JSON.stringify(seen)).not.toContain("secret plan")
+    }
+    await expect(adminEvents.next((m) => m.type === "launch", 150)).rejects.toThrow(/timed out/)
+    for (const stream of [bobEvents, adminEvents, aliceEvents, bobWatch]) await stream.cancel()
   })
 })
 

@@ -563,8 +563,8 @@ function bounded(text: string, max: number): string {
 
 const gone = () => new AgentError("gone", "Already answered, expired or ended")
 
-/** An error's audit decision and outcome. */
-function auditOf(cause: unknown): [AuditDecision, AuditOutcome] {
+/** An error's audit decision and outcome (shared with the launch routes). */
+export function auditOf(cause: unknown): [AuditDecision, AuditOutcome] {
   if (!(cause instanceof AgentError)) return ["allow", "failed"]
   switch (cause.code) {
     case "paused":

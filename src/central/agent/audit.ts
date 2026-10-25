@@ -30,9 +30,10 @@ export type AuditDecision = "allow" | "needs_user" | "forbidden" | "paused" | "r
 /** What happened: done, failed, raced (gone), the spoke could not (offline, unsupported), escalated or refused. */
 export type AuditOutcome = "ok" | "failed" | "gone" | "offline" | "unsupported" | "escalated" | "refused"
 
-/** What the action was on: the session, and the permission request or form. */
+/** What the action was on: the session, and the permission request or form, or the launch. */
 export interface AuditTarget {
   readonly sessionID?: string
+  readonly launchID?: string
   readonly requestID?: string
   readonly formID?: string
 }
@@ -97,8 +98,8 @@ function cleanReason(reason: string | undefined): string | undefined {
 }
 
 function cleanTarget(target: AuditTarget): AuditTarget {
-  const out: { sessionID?: string; requestID?: string; formID?: string } = {}
-  for (const key of ["sessionID", "requestID", "formID"] as const) {
+  const out: { -readonly [K in keyof AuditTarget]: AuditTarget[K] } = {}
+  for (const key of ["sessionID", "launchID", "requestID", "formID"] as const) {
     const id = cleanID(target[key])
     if (id) out[key] = id
   }

@@ -8,6 +8,7 @@
 //   GET /api/agent/sessions/:addr/log?n=20 the newest timeline rows (spoke feature "timeline")
 //   GET /api/agent/watch?blocked=1&session=<addr>  SSE of compact events (watch.ts)
 // show and log call spokes; a spoke without the feature answers unsupported {feature, harness}.
+// A session a launch started carries that launch's labels (the latest launch's, when several did); others have none.
 import path from "node:path"
 import { featureForOp, type ServerRequest, type SpokeFeature } from "../../protocol"
 import type { CatalogMachine, CatalogSession, LiveStatus, NowActivity, RegistryMessage, SessionView } from "../registry"
@@ -18,7 +19,11 @@ import type { AgentActor } from "./actor"
 import { AgentError } from "./errors"
 import { AGENT_PREFIX, type AgentRoute } from "./routes"
 import { partyFromActor, partyKey } from "./envelope"
-import { watchStream, type MessageSource } from "./watch"
+import { launchedBy } from "./launch-routes"
+import { type LaunchSource, watchStream, type MessageSource } from "./watch"
+
+/** Labels per session ID. */
+export type SessionLabels = ReadonlyMap<string, Readonly<Record<string, string>>>
 
 /** What the read routes need from the Registry. */
 export interface ReadRegistry {
@@ -42,6 +47,10 @@ export interface ReadDeps {
   readonly spokes?: SpokeRequester
   /** Agent messages for the watch stream's message events. */
   readonly feed?: MessageSource
+  /** The labels of the user's launched sessions (none without it). */
+  readonly labels?: (userID: string) => Promise<SessionLabels>
+  /** Launch changes for the watch stream's launch events. */
+  readonly launches?: LaunchSource
   /** Watch stream heartbeat (default WATCH_HEARTBEAT_MS). */
   readonly heartbeatMs?: number
   readonly now?: () => number
@@ -97,7 +106,9 @@ function rows(registry: ReadRegistry, userID: string): Row[] {
   return [...out.values()]
 }
 
-function view({ session: s, harness }: Row, entry: DirectoryEntry | undefined): AgentSessionView {
+const NO_LABELS: SessionLabels = new Map()
+
+function view({ session: s, harness }: Row, entry: DirectoryEntry | undefined, labels: SessionLabels): AgentSessionView {
   const own = s.status.find((e) => e.id === s.id) as LiveStatus | undefined
   return {
     id: s.id,
@@ -111,7 +122,7 @@ function view({ session: s, harness }: Row, entry: DirectoryEntry | undefined): 
     ...(s.now ? { now: nowText(s.now) } : {}),
     blockers: s.blockers.map((b) => ({ kind: b.kind, id: b.id, summary: b.summary, ...(b.sessionID !== s.id ? { sessionID: b.sessionID } : {}) })),
     children: s.status.filter((e) => e.parentID === s.id).length,
-    labels: {},
+    labels: { ...labels.get(s.id) },
   }
 }
 
@@ -157,7 +168,7 @@ function you(actor: AgentActor, entries: Map<string, DirectoryEntry>) {
 }
 
 /** The status snapshot of one user (design §4): machines → projects → sessions, and what needs attention. */
-export function snapshot(deps: ReadDeps, userID: string, actor: AgentActor) {
+export function snapshot(deps: ReadDeps, userID: string, actor: AgentActor, labels: SessionLabels = NO_LABELS) {
   const list = rows(deps.registry, userID)
   const entries = directoryOf(deps.directory, userID)
   const online = new Map(deps.registry.catalog().map((m) => [m.id, m]))
@@ -172,7 +183,7 @@ export function snapshot(deps: ReadDeps, userID: string, actor: AgentActor) {
         const project = projectOf(row.session)
         const group = projects.get(project.root) ?? { ...project, sessions: [] }
         projects.set(project.root, group)
-        group.sessions.push(view(row, entries.get(row.session.id)))
+        group.sessions.push(view(row, entries.get(row.session.id), labels))
       }
       return {
         id: m.id,
@@ -217,6 +228,7 @@ async function ask(deps: ReadDeps, connID: string, req: ServerRequest): Promise<
 /** GET /sessions/:addr: the session's catalog view with full blockers, and its summary from the spoke. */
 async function show(deps: ReadDeps, userID: string, addr: string) {
   const { entry, live, row } = located(deps, userID, addr)
+  const labels = { ...(await labelsOf(deps, userID)).get(entry.sessionID) }
   const name = entry.name ? { name: `@${entry.name}` } : {}
   const roles = entry.roles.map(roleLabel)
   if (!live) {
@@ -232,6 +244,7 @@ async function show(deps: ReadDeps, userID: string, addr: string) {
       ...(entry.machineID ? { machineID: entry.machineID } : {}),
       ...(entry.lastSeen !== undefined ? { lastSeen: entry.lastSeen } : {}),
       blockers: [],
+      labels,
     }
   }
   const harness = row?.harness ?? "unknown"
@@ -252,7 +265,7 @@ async function show(deps: ReadDeps, userID: string, addr: string) {
     ...(live.now ? { now: nowText(live.now), activity: live.now } : {}),
     blockers: live.blockers.map(({ sessionTitle: _, ...b }) => b),
     children: live.status.filter((e) => e.parentID === live.id).length,
-    labels: {},
+    labels,
   }
   try {
     const connID = spokeFor(deps, live.id, "summary", harness)
@@ -275,6 +288,8 @@ async function log(deps: ReadDeps, userID: string, addr: string, raw: string | n
   const page = (await ask(deps, connID, { op: "timeline", sessionID: entry.sessionID, limit: n, order: "desc" })) as { items?: unknown[]; older?: string }
   return { sessionID: entry.sessionID, rows: page.items ?? [], ...(page.older ? { older: page.older } : {}) }
 }
+
+const labelsOf = (deps: ReadDeps, userID: string): Promise<SessionLabels> => deps.labels?.(userID) ?? Promise.resolve(NO_LABELS)
 
 const STATES = new Set(["idle", "working", "blocked", "error"])
 
@@ -309,17 +324,18 @@ export function readRoutes(deps: ReadDeps): AgentRoute[] {
       method: "GET",
       path: `${AGENT_PREFIX}/status`,
       allow: READ,
-      handle: ({ user, actor }) => ok(snapshot(deps, user.id, actor)),
+      handle: async ({ user, actor }) => ok(snapshot(deps, user.id, actor, await labelsOf(deps, user.id))),
     },
     {
       method: "GET",
       path: `${AGENT_PREFIX}/sessions`,
       allow: READ,
-      handle: ({ user, url }) => {
+      handle: async ({ user, url }) => {
         const keep = sessionFilter(deps, user.id, url.searchParams)
         const entries = directoryOf(deps.directory, user.id)
+        const labels = await labelsOf(deps, user.id)
         const sessions = rows(deps.registry, user.id)
-          .map((row) => ({ row, view: view(row, entries.get(row.session.id)) }))
+          .map((row) => ({ row, view: view(row, entries.get(row.session.id), labels) }))
           .filter(({ row, view }) => keep(row, view))
           .map(({ row, view }) => ({ ...view, machineID: row.machineID, project: projectOf(row.session).name }))
         return ok({ sessions })
@@ -348,6 +364,8 @@ export function readRoutes(deps: ReadDeps): AgentRoute[] {
         const messages = deps.feed && messageReader ? { feed: deps.feed, ...(actor.kind === "user" ? {} : { party: partyKey(partyFromActor(actor)) }) } : undefined
         const sessions = addr ? new Set(deps.directory.resolve(user.id, addr).sessions.map((s) => s.sessionID)) : undefined
         const blocked = ["1", "true"].includes(url.searchParams.get("blocked") ?? "")
+        // Launch events: the user sees all; an app or session those it started.
+        const launches = deps.launches ? { feed: deps.launches, ...(actor.kind === "user" ? {} : { by: launchedBy(actor) }) } : undefined
         return watchStream({
           registry: deps.registry,
           userID: user.id,
@@ -355,6 +373,7 @@ export function readRoutes(deps: ReadDeps): AgentRoute[] {
           blocked,
           ...(sessions ? { sessions } : {}),
           ...(messages ? { messages } : {}),
+          ...(launches ? { launches } : {}),
           ...(deps.heartbeatMs !== undefined ? { heartbeatMs: deps.heartbeatMs } : {}),
           ...(deps.now ? { now: deps.now } : {}),
         })

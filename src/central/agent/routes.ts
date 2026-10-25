@@ -9,7 +9,7 @@
 import type { DeviceRecord, Store, UserRecord } from "../store"
 import type { Directory } from "./directory"
 import { directoryRoutes } from "./directory-routes"
-import { readRoutes, type ReadRegistry, type SpokeRequester } from "./read-routes"
+import { type ReadDeps, readRoutes, type ReadRegistry, type SpokeRequester } from "./read-routes"
 import { agentAllows, type AgentActor, type AgentAllow, type BearerVerifier, type Credential, type Resolver } from "./actor"
 import { appTokenRoutes, appTokenVerifier } from "./app-tokens"
 import type { Decisions } from "./decisions"
@@ -25,6 +25,7 @@ import { type ActingSwitch, actingSwitchRoutes } from "./acting-switch"
 import { Acting, type ActingRegistry, type Escalate } from "./acting"
 import { actingRoutes } from "./acting-routes"
 import type { Actions } from "../actions"
+import { type LaunchFeed, launchRoutes, type RouteLaunches } from "./launch-routes"
 
 export const AGENT_PREFIX = "/api/agent"
 
@@ -78,6 +79,13 @@ export interface AgentDeps {
    * POST /api/agent/sessions/:addr/{approve,deny,answer,prompt,stop} (P3-T7).
    */
   readonly actions?: Actions
+  /**
+   * Launches (P4-T8): with grants, acting and audit, the launch routes /api/agent/launches (P4-T9); the read
+   * routes show the labels of launched sessions.
+   */
+  readonly launches?: RouteLaunches
+  /** Launch changes: the watch stream's launch events. */
+  readonly launchFeed?: Pick<LaunchFeed, "subscribe">
   /** needs_user escalations of the act verbs (P3-T8 opens a Decision); without it needs_user is only answered. */
   readonly escalate?: Escalate
   /** The console's prompt limit, for the user's prompts on the act route. */
@@ -110,7 +118,7 @@ export function agentRoutes(deps: AgentDeps): AgentRoute[] {
   return [
     ...(deps.directory ? directoryRoutes(deps.directory) : []),
     ...(deps.directory && deps.delivery ? messageRoutes({ delivery: deps.delivery, directory: deps.directory, store: deps.store, feed, ...(deps.decisions ? { decisions: deps.decisions } : {}) }) : []),
-    ...(deps.directory && deps.registry ? readRoutes({ store: deps.store, directory: deps.directory, registry: deps.registry, ...(deps.delivery ? { feed } : {}), ...(deps.spokes ? { spokes: deps.spokes } : {}), ...(deps.heartbeatMs !== undefined ? { heartbeatMs: deps.heartbeatMs } : {}), ...(deps.now ? { now: deps.now } : {}) }) : []),
+    ...(deps.directory && deps.registry ? readRoutes({ store: deps.store, directory: deps.directory, registry: deps.registry, ...(deps.delivery ? { feed } : {}), ...(deps.spokes ? { spokes: deps.spokes } : {}), ...launchReads(deps), ...(deps.heartbeatMs !== undefined ? { heartbeatMs: deps.heartbeatMs } : {}), ...(deps.now ? { now: deps.now } : {}) }) : []),
     {
       method: "GET",
       path: `${AGENT_PREFIX}/whoami`,
@@ -122,7 +130,28 @@ export function agentRoutes(deps: AgentDeps): AgentRoute[] {
     ...(deps.grants ? grantRoutes(deps.grants, deps.now, deps.grantRequests) : []),
     ...(deps.acting ? actingSwitchRoutes(deps.acting) : []),
     ...actVerbRoutes(deps),
+    ...(deps.launches && deps.grants && deps.acting && deps.audit
+      ? launchRoutes({ launches: deps.launches, grants: deps.grants, acting: deps.acting, audit: deps.audit, ...(deps.directory ? { directory: deps.directory } : {}) })
+      : []),
   ]
+}
+
+/** What the read routes show of launches: launched sessions' labels (the latest launch wins) and launch events. */
+function launchReads(deps: AgentDeps): Pick<ReadDeps, "labels" | "launches"> {
+  const { launches, launchFeed } = deps
+  return {
+    ...(launches
+      ? {
+          labels: async (userID: string) => {
+            const out = new Map<string, Readonly<Record<string, string>>>()
+            // Oldest first: a later launch of the same session overrides.
+            for (const launch of await launches.list(userID)) if (launch.sessionID !== undefined) out.set(launch.sessionID, launch.spec.labels)
+            return out
+          },
+        }
+      : {}),
+    ...(launchFeed ? { launches: launchFeed } : {}),
+  }
 }
 
 /** The act verbs, when every part they need is given. */
