@@ -3,6 +3,7 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { spawnSync } from "node:child_process"
 import { randomBytes } from "node:crypto"
+import { rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { tmuxBackend, tmuxRunner } from "../src/tmux.ts"
 
@@ -19,8 +20,13 @@ async function until(check: () => Promise<boolean>, ms = 5000): Promise<boolean>
   return false
 }
 
+// Kill the private server and remove its socket file (tmux leaves it behind).
 afterAll(() => {
-  if (hasTmux) spawnSync("tmux", ["-L", socket, "kill-server"])
+  if (!hasTmux) return
+  const where = spawnSync("tmux", ["-L", socket, "display-message", "-p", "#{socket_path}"], { encoding: "utf8" }).stdout?.trim()
+  spawnSync("tmux", ["-L", socket, "kill-server"])
+  // tmux's own default when the server is already gone: $TMUX_TMPDIR or /tmp, then tmux-<uid>/<socket>.
+  rmSync(where || `${process.env.TMUX_TMPDIR || "/tmp"}/tmux-${process.getuid?.() ?? 0}/${socket}`, { force: true })
 })
 
 describe.skipIf(!hasTmux)("tmux backend, live (private socket)", () => {
