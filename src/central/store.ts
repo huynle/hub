@@ -850,6 +850,8 @@ export class Store {
 
   /** Appends an audit entry. Never pass tokens, codes, keys or session content. */
   audit(entry: Omit<AuditEntry, "at">): Promise<void> {
+    // Shared: first the entries other pods wrote (the cache may not have them yet), so this one sorts after them.
+    if (this.shared) return this.shared.syncAudit().then(() => this.mutate((tx) => this.appendAudit(tx, entry)))
     return this.mutate((tx) => this.appendAudit(tx, entry))
   }
 
