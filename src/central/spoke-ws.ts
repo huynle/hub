@@ -2,6 +2,11 @@
 // validation, heartbeats, server→spoke request/response correlation, and spoke→server requests.
 // `hub node` daemons share the endpoint and the machine token but say hello with role "node" (design §6.3):
 // they go to the NodeRegistry, never to the spoke Registry, and get node ops (requestNode) instead of spoke ops.
+// A harness inside a sandbox (phase 5) authenticates with its launch's hlt1 token instead (./agent/launch-tokens.ts):
+// accepted only while the launch is provisioning or running, only with a spoke hello naming that launch, one
+// connection per launch (a reconnect replaces the old one), closed when the launch ends (closeLaunch) or the token
+// expires; such a connection is bound to the launch in the Registry and gets no pairing or login codes.
+// Source addresses (loopback included: a sandbox reaches a loopback hub through its host) are never trusted.
 import type { Server, ServerWebSocket, WebSocketHandler } from "bun"
 import {
   encode,
@@ -25,6 +30,7 @@ import {
   type ServerRequest,
   type SpokeRequest,
 } from "../protocol"
+import type { LaunchBinding, LaunchVerifyResult } from "./agent/launch-tokens"
 import type { Auth } from "./auth"
 import type { NodeRegistry } from "./nodes"
 import type { NotificationKind, PushExtra } from "./push"
@@ -76,6 +82,10 @@ export interface SpokeSocketData {
   role?: HelloRole
   lastSeen: number
   helloTimer?: ReturnType<typeof setTimeout>
+  /** The launch whose launch-bound token authenticated this connection (absent for machine tokens). */
+  readonly launch?: LaunchBinding
+  /** Closes a launch-bound connection when its token expires. */
+  expiryTimer?: ReturnType<typeof setTimeout>
 }
 
 type Socket = ServerWebSocket<SpokeSocketData>
@@ -99,6 +109,13 @@ export interface SpokeHubOptions {
   readonly staleMs?: number
   /** Per node op request timeouts (defaults: NODE_TIMEOUTS_MS; cancel uses requestTimeoutMs). */
   readonly nodeTimeoutsMs?: Partial<Record<NodeOp, number>>
+  /** Verifies launch-bound (hlt1) tokens; without it only machine tokens are accepted. */
+  readonly launchTokens?: LaunchVerifier
+}
+
+/** Checks launch-bound tokens (implemented by LaunchTokens). */
+export interface LaunchVerifier {
+  verify(token: string): Promise<LaunchVerifyResult>
 }
 
 interface Pending {
@@ -125,6 +142,11 @@ const CLOSE_PROTOCOL = 4000
 const CLOSE_REVOKED = 4001
 const CLOSE_STALE = 4002
 const CLOSE_REPLACED = 4003
+const CLOSE_LAUNCH_ENDED = 4004
+const CLOSE_LAUNCH_EXPIRED = 4005
+/** Longest delay setTimeout takes; later expiries re-arm. */
+const MAX_TIMER_MS = 2 ** 31 - 1
+const LAUNCH_TOKEN = /^hlt1\./
 
 export class SpokeHub {
   private readonly sockets = new Map<string, Socket>()
@@ -153,19 +175,37 @@ export class SpokeHub {
     }
   }
 
-  /** Authenticates and upgrades /spoke/ws. Returns a Response on failure, undefined when upgraded. */
-  upgrade(request: Request, server: Server<SpokeSocketData>): Response | undefined {
+  /**
+   * Authenticates and upgrades /spoke/ws with a machine token or a launch-bound (hlt1) token. Resolves with a
+   * Response on failure, undefined when upgraded.
+   */
+  async upgrade(request: Request, server: Server<SpokeSocketData>): Promise<Response | undefined> {
     const match = /^Bearer\s+(\S+)$/i.exec(request.headers.get("authorization") ?? "")
-    const machine = match?.[1] ? this.options.store.findMachine(match[1]) : undefined
+    const token = match?.[1]
+    if (token && LAUNCH_TOKEN.test(token)) return this.upgradeLaunch(request, server, token)
+    const machine = token ? this.options.store.findMachine(token) : undefined
     const owner = machine && this.options.store.user(machine.ownerID)
     if (!machine || !owner || owner.disabled) return Response.json({ error: "Invalid or revoked machine token" }, { status: 401 })
-    const data: SpokeSocketData = {
-      connID: newID("conn"),
-      machineID: machine.id,
-      machineName: machine.name,
-      ready: false,
-      lastSeen: Date.now(),
+    return this.accept(request, server, { connID: newID("conn"), machineID: machine.id, machineName: machine.name, ready: false, lastSeen: Date.now() })
+  }
+
+  private async upgradeLaunch(request: Request, server: Server<SpokeSocketData>, token: string): Promise<Response | undefined> {
+    const refused = () => Response.json({ error: "Invalid or expired launch token" }, { status: 401 })
+    const verifier = this.options.launchTokens
+    if (!verifier) return refused()
+    let binding: LaunchVerifyResult
+    try {
+      binding = await verifier.verify(token)
+    } catch {
+      return refused()
     }
+    if (!binding || binding === "expired") return refused()
+    const machine = this.options.store.machines().find((m) => m.id === binding.machineID)
+    if (!machine) return refused()
+    return this.accept(request, server, { connID: newID("conn"), machineID: machine.id, machineName: machine.name, ready: false, lastSeen: Date.now(), launch: binding })
+  }
+
+  private accept(request: Request, server: Server<SpokeSocketData>, data: SpokeSocketData): Response | undefined {
     if (server.upgrade(request, { data })) return undefined
     return Response.json({ error: "Expected a WebSocket upgrade" }, { status: 426 })
   }
@@ -214,6 +254,11 @@ export class SpokeHub {
     })
   }
 
+  /** Disconnects the connections bound to a launch (when it ends). */
+  closeLaunch(launchID: string, reason = "launch ended"): void {
+    for (const ws of this.sockets.values()) if (ws.data.launch?.launchID === launchID) this.bye(ws, reason, CLOSE_LAUNCH_ENDED)
+  }
+
   /** Disconnects every socket of a machine (after revocation). */
   closeMachine(machineID: string, reason: string): void {
     for (const ws of this.sockets.values()) if (ws.data.machineID === machineID) this.bye(ws, reason, CLOSE_REVOKED)
@@ -226,9 +271,18 @@ export class SpokeHub {
 
   private open(ws: Socket): void {
     this.sockets.set(ws.data.connID, ws)
+    if (ws.data.launch) this.armExpiry(ws, ws.data.launch.exp)
     ws.data.helloTimer = setTimeout(() => {
       if (!ws.data.ready) this.bye(ws, "hello timeout")
     }, this.options.helloTimeoutMs ?? 10_000)
+  }
+
+  /** Closes a launch-bound connection at its token's expiry. */
+  private armExpiry(ws: Socket, exp: number): void {
+    const left = exp - Date.now()
+    if (left <= 0) return this.bye(ws, "launch token expired", CLOSE_LAUNCH_EXPIRED)
+    ws.data.expiryTimer = setTimeout(() => this.armExpiry(ws, exp), Math.min(left, MAX_TIMER_MS))
+    ws.data.expiryTimer.unref?.()
   }
 
   private seen(ws: Socket): void {
@@ -240,7 +294,11 @@ export class SpokeHub {
 
   private message(ws: Socket, raw: string | Buffer): void {
     this.seen(ws)
-    if (ws.data.ready ? ws.data.role === NODE_ROLE : helloRole(raw) === NODE_ROLE) return this.nodeMessage(ws, raw)
+    if (ws.data.ready ? ws.data.role === NODE_ROLE : helloRole(raw) === NODE_ROLE) {
+      // A launch token is for that launch's spoke only.
+      if (ws.data.launch) return this.bye(ws, "protocol error")
+      return this.nodeMessage(ws, raw)
+    }
     const message = parseSpokeMessage(raw)
     if (!message) return this.bye(ws, "protocol error")
     const { registry } = this.options
@@ -251,10 +309,21 @@ export class SpokeHub {
       if (message.v !== PROTOCOL_VERSION) {
         return this.bye(ws, `unsupported protocol version ${message.v}; server speaks version ${PROTOCOL_VERSION}`)
       }
+      const { launch } = ws.data
+      if (launch) {
+        if (message.launchID !== launch.launchID) return this.bye(ws, "the hello does not name the launch of this token")
+        // One connection per launch: a reconnect (the old socket may be half-open) replaces the old one.
+        const old = registry.launchConn(launch.launchID)
+        if (old !== undefined) {
+          registry.disconnect(old)
+          const oldWs = this.sockets.get(old)
+          if (oldWs) this.bye(oldWs, "replaced by a new connection of this launch", CLOSE_REPLACED)
+        }
+      }
       clearTimeout(ws.data.helloTimer)
       ws.data.ready = true
       ws.data.role = "spoke"
-      registry.connect(connID, { id: ws.data.machineID, name: ws.data.machineName }, message)
+      registry.connect(connID, { id: ws.data.machineID, name: ws.data.machineName }, message, launch ? { launchID: launch.launchID } : {})
       this.options.store.touchMachine(ws.data.machineID)
       // Older spokes ignore `features`; newer ones send a request a feature adds only when it is listed here.
       this.send(ws, { t: "welcome", v: PROTOCOL_VERSION, machineID: ws.data.machineID, publicURL: this.options.publicURL, features: [...HUB_FEATURES] })
@@ -360,6 +429,8 @@ export class SpokeHub {
     const { auth, publicURL } = this.options
     const owner = this.ownerOf(ws.data.machineID)
     if (!owner) throw new Error("This machine is no longer enrolled")
+    // A sandboxed harness never gets credentials for the owner's devices or console.
+    if (ws.data.launch && (req.op === "pairCode" || req.op === "openLink")) throw new Error("Not available to a launch-bound session")
     switch (req.op) {
       case "pairCode": {
         const { code, expiresAt } = auth.issuePairCode(owner)
@@ -392,6 +463,7 @@ export class SpokeHub {
 
   private closed(ws: Socket): void {
     clearTimeout(ws.data.helloTimer)
+    clearTimeout(ws.data.expiryTimer)
     const { connID } = ws.data
     this.sockets.delete(connID)
     for (const [id, pending] of this.pending) {
