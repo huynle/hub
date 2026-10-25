@@ -157,6 +157,12 @@ export class PostgresStateStore implements StateStore {
   }
 
   /** Closes the connection pool (a later call opens a new one). */
+  /** Readiness: SELECT 1 (after the schema check; rejects when the database does not answer, never naming the url). */
+  async ping(): Promise<void> {
+    const sql = await this.#client()
+    await sql`SELECT 1`
+  }
+
   async close(): Promise<void> {
     const sql = this.#sql
     this.#sql = undefined

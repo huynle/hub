@@ -148,6 +148,30 @@ describe("NodeConnection", () => {
     await until(() => sockets.length === 3)
   })
 
+  test("a draining hub's bye with retryAfterMs reconnects after a jittered delay up to it, not the backoff", async () => {
+    const { conn, sockets } = setup({ backoff: { minMs: 60_000, maxMs: 60_000, random: () => 0.5 } })
+    conn.start()
+    sockets[0]!.open()
+    sockets[0]!.receive(welcome())
+    sockets[0]!.receive({ t: "bye", reason: "draining", retryAfterMs: 200 })
+    sockets[0]!.drop(1001, "draining")
+    expect(conn.state).toBe("error")
+    await sleep(40)
+    expect(sockets.length).toBe(1)
+    // random 0.5 of 200 ms: about 100 ms.
+    await until(() => sockets.length === 2)
+  })
+
+  test("a draining bye before the welcome is no old hub: reconnect soon, not after the long wait", async () => {
+    const { conn, sockets } = setup({ backoff: { minMs: 60_000, maxMs: 60_000, random: () => 1 } })
+    conn.start()
+    sockets[0]!.open()
+    sockets[0]!.receive({ t: "bye", reason: "draining", retryAfterMs: 50 })
+    sockets[0]!.drop(1001, "draining")
+    expect(conn.state).toBe("error")
+    await until(() => sockets.length === 2)
+  })
+
   test("a revoked machine stops for good", async () => {
     const { conn, sockets } = setup()
     conn.start()

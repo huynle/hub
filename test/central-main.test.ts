@@ -1,7 +1,7 @@
 // Hub command line: --version and --help answer without starting anything; unknown flags are refused.
 import { describe, expect, test } from "bun:test"
 import { centralConfig } from "../src/central/config"
-import { authStartupLines, hubHelp, parseHubArgs } from "../src/central/main"
+import { authStartupLines, hubHelp, parseHubArgs, shutdownHub } from "../src/central/main"
 
 describe("parseHubArgs", () => {
   test("no arguments runs the hub", () => {
@@ -81,5 +81,41 @@ describe("multi-user (oidc) startup", () => {
     const { warnings } = authStartupLines(config)
     expect(warnings.join("\n")).toMatch(/https/)
     expect(warnings.join("\n")).toMatch(/HUB_OIDC_INSECURE_ISSUER/)
+  })
+})
+
+describe("shutdownHub", () => {
+  const fake = () => {
+    const calls: string[] = []
+    return {
+      calls,
+      central: {
+        drain: async () => void calls.push("drain"),
+        stop: async () => void calls.push("stop"),
+      },
+    }
+  }
+
+  test("SIGTERM (a pod being replaced) drains, then stops", async () => {
+    const { calls, central } = fake()
+    const lines: string[] = []
+    await shutdownHub(central, "SIGTERM", (line) => lines.push(line))
+    expect(calls).toEqual(["drain", "stop"])
+    expect(lines.join("\n")).toContain("draining")
+  })
+
+  test("SIGINT (Ctrl-C) stops at once", async () => {
+    const { calls, central } = fake()
+    await shutdownHub(central, "SIGINT", () => {})
+    expect(calls).toEqual(["stop"])
+  })
+
+  test("a failed drain still stops", async () => {
+    const calls: string[] = []
+    const central = { drain: async () => Promise.reject(new Error("bus down")), stop: async () => void calls.push("stop") }
+    const lines: string[] = []
+    await shutdownHub(central, "SIGTERM", (line) => lines.push(line))
+    expect(calls).toEqual(["stop"])
+    expect(lines.join("\n")).toContain("bus down")
   })
 })

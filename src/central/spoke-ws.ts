@@ -13,6 +13,9 @@
 // act-token pushes are sent only by the pod holding the connection. Close notices are at most once, so every
 // RECHECK_MS each pod also re-reads its sockets' machines and owners (Store.recheck) and closes the sockets of a
 // revoked machine or a disabled owner itself. Without `cluster` everything is local.
+// Draining (design §10, drain()): new upgrades are refused with 503, new requests to this pod's connections fail as
+// offline, and each connection gets bye{reason:"draining", retryAfterMs} once its requests in flight are answered
+// (at the deadline at the latest), so it reconnects (to another pod) after a short jittered delay.
 import type { Server, ServerWebSocket, WebSocketHandler } from "bun"
 import {
   encode,
@@ -94,6 +97,8 @@ export interface SpokeSocketData {
   readonly launch?: LaunchBinding
   /** Closes a launch-bound connection when its token expires. */
   expiryTimer?: ReturnType<typeof setTimeout>
+  /** Draining: the bye was sent. */
+  drained?: boolean
 }
 
 type Socket = ServerWebSocket<SpokeSocketData>
@@ -178,6 +183,22 @@ const LAUNCH_TOKEN = /^hlt1\./
 const CLUSTER_STOP_MS = 1_000
 /** How many closed launches are remembered (launch IDs are never reused). */
 const CLOSED_LAUNCHES = 1000
+/** How soon drained spokes and nodes are told to reconnect (they wait a random 0–this; design §10: 0–5 s). */
+export const DRAIN_RETRY_AFTER_MS = 5_000
+/** How long draining waits for requests in flight (k8s terminationGracePeriodSeconds is 60). */
+export const DRAIN_TIMEOUT_MS = 50_000
+/** Close code of a drained connection (a hub code: Bun 1.3.5 reports a server's 1001 to clients as 1000). */
+const CLOSE_DRAINING = 4006
+/** How often draining looks whether the requests in flight are done. */
+const DRAIN_POLL_MS = 20
+
+export interface DrainOptions {
+  /** Sent in the bye: the peers reconnect after a random 0–retryAfterMs (default DRAIN_RETRY_AFTER_MS). */
+  readonly retryAfterMs?: number
+  /** How long to wait for requests in flight (default DRAIN_TIMEOUT_MS); the rest fail as offline. */
+  readonly timeoutMs?: number
+}
+
 /** Cluster mode: how often a pod re-checks that its sockets' machines are not revoked and their owners not disabled. */
 export const RECHECK_MS = 30_000
 
@@ -192,6 +213,11 @@ export class SpokeHub {
   private readonly heartbeat: ReturnType<typeof setInterval>
   private readonly recheckTimer?: ReturnType<typeof setInterval>
   private seq = 0
+  /** Set by drain(): the bye's retryAfterMs. */
+  private draining?: { readonly retryAfterMs: number }
+  private drained?: Promise<void>
+  /** Calls this pod made to connections on other pods, not answered yet (draining waits for them). */
+  private remoteCalls = 0
   /** Cluster mode: the directory heartbeat, RPC responder and close notices are set up. */
   private readonly started: Promise<void>
   readonly websocket: WebSocketHandler<SpokeSocketData>
@@ -226,6 +252,10 @@ export class SpokeHub {
    * Response on failure, undefined when upgraded.
    */
   async upgrade(request: Request, server: Server<SpokeSocketData>): Promise<Response | undefined> {
+    if (this.draining) {
+      const retryAfter = String(Math.max(1, Math.ceil(this.draining.retryAfterMs / 1000)))
+      return Response.json({ error: "This hub server is shutting down; reconnect", code: "draining" }, { status: 503, headers: { "retry-after": retryAfter } })
+    }
     const match = /^Bearer\s+(\S+)$/i.exec(request.headers.get("authorization") ?? "")
     const token = match?.[1]
     if (token && LAUNCH_TOKEN.test(token)) return this.upgradeLaunch(request, server, token)
@@ -269,7 +299,7 @@ export class SpokeHub {
   request<R extends ServerRequest>(connID: string, req: R, options: RequestOptions = {}): Promise<ResultFor[R["op"]]> {
     const ws = this.sockets.get(connID)
     if (!ws && this.options.cluster) return this.remote({ kind: "spoke", connID, req, tenant: options.tenant ?? "" }) as Promise<ResultFor[R["op"]]>
-    if (!ws?.data.ready || ws.data.role !== "spoke") return Promise.reject(new SpokeError("OpenCode process disconnected"))
+    if (!ws?.data.ready || ws.data.role !== "spoke" || this.draining) return Promise.reject(new SpokeError("OpenCode process disconnected"))
     const id = `r${++this.seq}`
     const frame = encode({ t: "req", id, req })
     if (frame.length > MAX_FRAME) return Promise.reject(new RequestTooLargeError(req.op))
@@ -278,6 +308,7 @@ export class SpokeHub {
       const timer = setTimeout(() => {
         this.pending.delete(id)
         reject(new RequestTimeoutError(req.op))
+        this.released(connID)
       }, timeoutMs)
       this.pending.set(id, { connID, op: req.op, resolve: resolve as (v: unknown) => void, reject, timer })
       ws.send(frame)
@@ -291,7 +322,7 @@ export class SpokeHub {
   requestNode<R extends NodeRequest>(connID: string, req: R, options: RequestOptions = {}): Promise<NodeResultFor[R["op"]]> {
     const ws = this.sockets.get(connID)
     if (!ws && this.options.cluster) return this.remote({ kind: "node", connID, req, tenant: options.tenant ?? "" }) as Promise<NodeResultFor[R["op"]]>
-    if (!ws?.data.ready || ws.data.role !== NODE_ROLE) return Promise.reject(new NodeError("The node disconnected"))
+    if (!ws?.data.ready || ws.data.role !== NODE_ROLE || this.draining) return Promise.reject(new NodeError("The node disconnected"))
     const id = `r${++this.seq}`
     const frame = encode({ t: "req", id, req } satisfies NodeServerMessage)
     if (frame.length > MAX_FRAME) return Promise.reject(new NodeError(`The ${req.op} request is too large to send to the node`))
@@ -300,6 +331,7 @@ export class SpokeHub {
       const timer = setTimeout(() => {
         this.pending.delete(id)
         reject(new RequestTimeoutError(req.op, "The node"))
+        this.released(connID)
       }, timeoutMs)
       this.pending.set(id, { connID, op: req.op, node: true, resolve: resolve as (v: unknown) => void, reject, timer })
       ws.send(frame)
@@ -318,10 +350,54 @@ export class SpokeHub {
     this.publishClose({ kind: "machine", id: machineID, reason })
   }
 
+  /**
+   * Draining (design §10): refuses new upgrades and requests, says bye{reason:"draining", retryAfterMs} to each
+   * connection once its requests in flight are answered, and resolves when they all are (or at the deadline, when the
+   * rest fail as offline and every connection gets its bye). Repeated calls share the first one.
+   */
+  drain(options: DrainOptions = {}): Promise<void> {
+    this.drained ??= this.runDrain(options.retryAfterMs ?? DRAIN_RETRY_AFTER_MS, options.timeoutMs ?? DRAIN_TIMEOUT_MS)
+    return this.drained
+  }
+
+  /** Whether drain() was called. */
+  isDraining(): boolean {
+    return this.draining !== undefined
+  }
+
+  private async runDrain(retryAfterMs: number, timeoutMs: number): Promise<void> {
+    this.draining = { retryAfterMs }
+    for (const ws of [...this.sockets.values()]) this.released(ws.data.connID)
+    const deadline = Date.now() + timeoutMs
+    while ((this.pending.size > 0 || this.remoteCalls > 0) && Date.now() < deadline) await Bun.sleep(Math.min(DRAIN_POLL_MS, Math.max(1, deadline - Date.now())))
+    for (const [id, pending] of this.pending) {
+      this.pending.delete(id)
+      clearTimeout(pending.timer)
+      pending.reject(pending.node ? new NodeError("The node disconnected") : new SpokeError("OpenCode process disconnected"))
+    }
+    for (const ws of [...this.sockets.values()]) this.byeDraining(ws)
+  }
+
+  /** Draining: a connection with no request in flight any more gets its bye. */
+  private released(connID: string): void {
+    if (!this.draining) return
+    const ws = this.sockets.get(connID)
+    if (!ws) return
+    for (const pending of this.pending.values()) if (pending.connID === connID) return
+    this.byeDraining(ws)
+  }
+
+  private byeDraining(ws: Socket): void {
+    if (!this.draining || ws.data.drained) return
+    ws.data.drained = true
+    this.send(ws, { t: "bye", reason: "draining", retryAfterMs: this.draining.retryAfterMs })
+    ws.close(CLOSE_DRAINING, "draining")
+  }
+
   async stop(): Promise<void> {
     clearInterval(this.heartbeat)
     clearInterval(this.recheckTimer)
-    for (const ws of this.sockets.values()) this.bye(ws, "server shutting down", 1001)
+    for (const ws of this.sockets.values()) if (!ws.data.drained) this.bye(ws, "server shutting down", 1001)
     const { cluster } = this.options
     if (!cluster) return
     // Best effort and bounded: the entries expire anyway, and an unreachable Valkey must not hold up shutdown.
@@ -411,9 +487,14 @@ export class SpokeHub {
     const tenant = call.tenant || this.ownerOf(entry.machineID)
     if (!tenant) throw offlineError(call.kind)
     const timeoutMs = call.kind === "node" ? this.nodeTimeoutMs(call.req) : this.spokeTimeoutMs(call.req)
-    return rpc.call(entry.pod, { ...call, tenant } as RpcCall, timeoutMs, {
-      onGone: () => void directory.forget(call.connID, entry.pod).catch(() => undefined),
-    })
+    this.remoteCalls++
+    try {
+      return await rpc.call(entry.pod, { ...call, tenant } as RpcCall, timeoutMs, {
+        onGone: () => void directory.forget(call.connID, entry.pod).catch(() => undefined),
+      })
+    } finally {
+      this.remoteCalls--
+    }
   }
 
   /** An op from another pod for a connection here: re-check the tenant, then send it like a local one. */
@@ -432,6 +513,8 @@ export class SpokeHub {
 
   private open(ws: Socket): void {
     this.sockets.set(ws.data.connID, ws)
+    // Upgraded just before drain(): send it on its way too.
+    if (this.draining) return this.byeDraining(ws)
     if (ws.data.launch) {
       const closed = this.closedLaunches.get(ws.data.launch.launchID)
       if (closed !== undefined) return this.bye(ws, closed, CLOSE_LAUNCH_ENDED)
@@ -569,6 +652,8 @@ export class SpokeHub {
     if (!pending || pending.connID !== connID) return
     this.pending.delete(message.id)
     clearTimeout(pending.timer)
+    // Draining: once the result is handed on, this connection may get its bye.
+    queueMicrotask(() => this.released(connID))
     if (pending.node) {
       if (!message.ok) return pending.reject(new NodeError(message.error || `The node's ${pending.op} request failed`))
       const problem = nodeResultProblem(pending.op as NodeOp, message.result)

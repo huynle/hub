@@ -150,6 +150,8 @@ describe("hub → node ops", () => {
     const welcome = { t: "welcome", v: PROTOCOL_VERSION, machineID: "m_1", publicURL: "https://hub.example", features: [...HUB_FEATURES] }
     expect(fromHub(welcome)).toEqual(welcome)
     expect(fromHub({ t: "bye", reason: "revoked" })).toBeDefined()
+    expect(fromHub({ t: "bye", reason: "draining", retryAfterMs: 5000 })).toEqual({ t: "bye", reason: "draining", retryAfterMs: 5000 } as any)
+    expect(fromHub({ t: "bye", reason: "draining", retryAfterMs: -5 })).toBeUndefined()
     expect(fromHub({ t: "res", id: "x", ok: false, error: "nope" })).toBeDefined()
   })
 })

@@ -16,6 +16,7 @@
 //     a session or app (messages:read) only those it sent or received; ?session= matches either session.
 //   {type: "launch", id, state, reason, outcome?, sessionID?, name?, labels}   a launch changed (the user sees all of
 //     theirs, an app or session those it started); ?session= matches its session.
+// When the hub drains (shutting down), the stream ends with `retry: 2000` (reconnect, to another pod, after it).
 // A `ping` event every heartbeat (default 20 s). Only status messages of the caller's tenant are read; catalog
 // changes are diffed against the caller's own sessions.
 import type { LiveStatus, RegistryMessage } from "../registry"
@@ -25,6 +26,10 @@ import type { Launch } from "./launch-store"
 import type { ReadRegistry } from "./read-routes"
 
 export const WATCH_HEARTBEAT_MS = 20_000
+/** Draining: the `retry:` (ms) an ending watch stream sends. */
+export const WATCH_RETRY_MS = 2_000
+const RETRY = `retry: ${WATCH_RETRY_MS}\n\n`
+const SSE_HEADERS = { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" }
 
 export interface WatchRegistry extends Pick<ReadRegistry, "catalog" | "sessionTenant"> {
   subscribe(listener: (message: RegistryMessage, tenant?: string) => void): () => void
@@ -68,6 +73,8 @@ export interface WatchOptions {
   readonly launches?: { readonly feed: LaunchSource; readonly by?: string }
   readonly heartbeatMs?: number
   readonly now?: () => number
+  /** Aborted when the hub drains: the stream ends with a `retry:` hint. */
+  readonly draining?: AbortSignal
 }
 
 /** The compact watch event of a message (never its text). */
@@ -95,6 +102,7 @@ interface Known {
 type WatchEvent = { type: string; sessionID?: string; rootID?: string; senderID?: string } & Record<string, unknown>
 
 export function watchStream(options: WatchOptions): Response {
+  if (options.draining?.aborted) return new Response(RETRY, { headers: SSE_HEADERS })
   const { registry, userID } = options
   const now = options.now ?? Date.now
   const encoder = new TextEncoder()
@@ -193,10 +201,21 @@ export function watchStream(options: WatchOptions): Response {
       }
       options.signal.addEventListener("abort", () => cleanup(), { once: true })
       send({ type: "ready" })
+      options.draining?.addEventListener(
+        "abort",
+        () => {
+          write(RETRY)
+          cleanup()
+          try {
+            controller.close()
+          } catch {}
+        },
+        { once: true },
+      )
     },
     cancel() {
       cleanup()
     },
   })
-  return new Response(stream, { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" } })
+  return new Response(stream, { headers: SSE_HEADERS })
 }

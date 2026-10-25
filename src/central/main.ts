@@ -135,11 +135,28 @@ export function runHub(options: RunHubOptions): void {
   const shutdown = async (signal: string) => {
     if (stopping) return
     stopping = true
-    console.log(`[hub] ${signal}: shutting down`)
     clearInterval(timer)
-    await central.stop()
+    await shutdownHub(central, signal)
     process.exit(0)
   }
   process.on("SIGTERM", () => void shutdown("SIGTERM"))
   process.on("SIGINT", () => void shutdown("SIGINT"))
+}
+
+/**
+ * Shuts the hub down on a signal. SIGTERM (Kubernetes replacing the pod, systemd, docker stop) drains first (design
+ * §10: /readyz fails, spokes and nodes are sent to another pod, requests in flight finish; quick without any), then
+ * stops; SIGINT (Ctrl-C) stops at once. A failed drain still stops.
+ */
+export async function shutdownHub(central: { drain(): Promise<void>; stop(): Promise<void> }, signal: string, log: (line: string) => void = console.log): Promise<void> {
+  if (signal === "SIGTERM") {
+    log(`[hub] ${signal}: draining`)
+    try {
+      await central.drain()
+    } catch (cause) {
+      log(`[hub] drain failed: ${cause instanceof Error ? cause.message : cause}`)
+    }
+  }
+  log(`[hub] ${signal}: shutting down`)
+  await central.stop()
 }

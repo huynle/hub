@@ -11,13 +11,13 @@
 // Modules: launch.ts (launch vocabulary and workspace checks), node.ts (the `hub node` hello, frames and ops on the
 // same socket), webhook.ts (webhook signature format), wire.ts (shared frame primitives). All are re-exported here.
 
-import { featureList, HUB_URL_MAX_CHARS, ID, isByeFrame as isBye, isHubURL, isObj, isResFrame as isRes, isWelcomeFrame, MAX_FRAME, nonEmpty, num, parseFrame as parse, str, token, UNSAFE_CHARS } from "./wire.ts"
+import { featureList, HUB_URL_MAX_CHARS, ID, isByeFrame as isBye, isHubURL, isObj, isResFrame as isRes, isWelcomeFrame, MAX_FRAME, MAX_RETRY_AFTER_MS, nonEmpty, num, parseFrame as parse, str, token, UNSAFE_CHARS } from "./wire.ts"
 import type { NodeMessage, NodeServerMessage } from "./node.ts"
 
 export * from "./launch.ts"
 export * from "./node.ts"
 export * from "./webhook.ts"
-export { HUB_URL_MAX_CHARS, isHubURL, MAX_FRAME }
+export { HUB_URL_MAX_CHARS, isHubURL, MAX_FRAME, MAX_RETRY_AFTER_MS }
 
 export const PROTOCOL_VERSION = 1
 
@@ -675,6 +675,12 @@ export interface Res {
 export interface Bye {
   readonly t: "bye"
   readonly reason: string
+  /**
+   * How soon to reconnect, in ms (0–MAX_RETRY_AFTER_MS): sent with reason "draining" by a hub pod that is shutting
+   * down, so the peer reconnects (to another pod) after a jittered delay up to this instead of its long backoff.
+   * Optional and additive: older peers ignore it.
+   */
+  readonly retryAfterMs?: number
 }
 
 export type SpokeMessage = Hello | Sessions | Terminals | Event | Req<SpokeRequest> | Res | Bye

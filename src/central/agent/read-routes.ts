@@ -55,6 +55,8 @@ export interface ReadDeps {
   readonly watchRegistry?: (userID: string) => WatchRegistry
   /** Watch stream heartbeat (default WATCH_HEARTBEAT_MS). */
   readonly heartbeatMs?: number
+  /** Aborted when the hub drains: watch streams end with a `retry:` hint. */
+  readonly draining?: AbortSignal
   readonly now?: () => number
 }
 
@@ -378,6 +380,7 @@ export function readRoutes(deps: ReadDeps): AgentRoute[] {
           ...(launches ? { launches } : {}),
           ...(deps.heartbeatMs !== undefined ? { heartbeatMs: deps.heartbeatMs } : {}),
           ...(deps.now ? { now: deps.now } : {}),
+          ...(deps.draining ? { draining: deps.draining } : {}),
         })
       },
     },

@@ -2,7 +2,8 @@
 // share one machine record), a hello with role "node", then the hub's prepare/collect/cleanup/cancel requests
 // answered in order of arrival. Reconnects with jittered exponential backoff; a hub that does not serve nodes (its
 // welcome lacks "nodes", or it rejects the node hello before any welcome, as a hub older than nodes does) is
-// retried only after a long wait, so an old hub is not hammered. A revoked machine stops for good.
+// retried only after a long wait, so an old hub is not hammered. A revoked machine stops for good. A bye carrying
+// retryAfterMs (a hub pod draining, design §10) is followed by one short jittered reconnect (0–retryAfterMs) instead.
 //
 // The WebSocket is the runtime's global one with an Authorization header: Bun's accepts `{ headers }`, and so does
 // Node's (undici, Node 22+), so this runs on both (bundled for node, or from source on bun).
@@ -60,6 +61,11 @@ export function backoffDelay(attempt: number, backoff: Backoff): number {
   return Math.round(base * (0.5 + 0.5 * (backoff.random ?? Math.random)()))
 }
 
+/** The reconnect delay a bye's retryAfterMs asks for: uniformly jittered over 0–retryAfterMs, so peers spread out. */
+export function retryAfterDelay(retryAfterMs: number, random: () => number = Math.random): number {
+  return Math.round(retryAfterMs * random())
+}
+
 export function wsURL(server: string): string {
   return `${server.replace(/\/+$/, "").replace(/^http/, "ws")}/spoke/ws`
 }
@@ -98,6 +104,8 @@ export class NodeConnection {
   private stopped = true
   private attempt = 0
   private retry?: ReturnType<typeof setTimeout>
+  /** The last bye's retryAfterMs (a draining hub): the next reconnect waits about this instead of the backoff. */
+  private retryAfterMs?: number
   private readonly backoff: Backoff
 
   constructor(private readonly options: NodeConnectionOptions) {
@@ -166,7 +174,9 @@ export class NodeConnection {
           return this.welcome(frame)
         case "bye":
           if (frame.reason === "revoked") return this.revoked()
-          if (!this.welcomed) rejected = true
+          // A draining hub is no hub refusing nodes: come back soon (to another pod).
+          if (frame.retryAfterMs !== undefined) this.retryAfterMs = frame.retryAfterMs
+          else if (!this.welcomed) rejected = true
           this.lastError = frame.reason
           return
         case "req":
@@ -186,7 +196,7 @@ export class NodeConnection {
       this.welcomed = false
       if (this.stopped || this.state === "revoked") return
       // Opened, then closed by the hub before any welcome: the hub refused the node hello.
-      if (!wasWelcomed && opened && (rejected || ev.code === 4000)) return this.unsupported(`The hub does not accept nodes${this.lastError ? ` (${this.lastError})` : ""}`)
+      if (!wasWelcomed && opened && (rejected || ev.code === 4000) && this.retryAfterMs === undefined) return this.unsupported(`The hub does not accept nodes${this.lastError ? ` (${this.lastError})` : ""}`)
       this.fail(wasWelcomed ? `Connection closed${ev.reason ? `: ${ev.reason}` : ""}` : (this.lastError ?? "Could not connect"))
     }
   }
@@ -237,7 +247,9 @@ export class NodeConnection {
   private fail(error: string): void {
     this.lastError = error
     this.setState("error")
-    this.schedule(backoffDelay(this.attempt++, this.backoff))
+    const retryAfterMs = this.retryAfterMs
+    this.retryAfterMs = undefined
+    this.schedule(retryAfterMs !== undefined ? retryAfterDelay(retryAfterMs, this.backoff.random) : backoffDelay(this.attempt++, this.backoff))
   }
 
   private schedule(ms: number): void {

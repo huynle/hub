@@ -64,6 +64,8 @@ export interface StateStore {
   claimOf(namespace: string, key: string): Promise<Claim | undefined>
   /** Makes buffered writes durable (the hub calls it on stop); stores that write through omit it. */
   flush?(): Promise<void>
+  /** Readiness (/readyz): rejects when the database does not answer. In-process stores omit it. */
+  ping?(): Promise<void>
 }
 
 // ---- Bus --------------------------------------------------------------------------------------------------
@@ -186,6 +188,8 @@ export interface Kv {
   getdel(key: string): Promise<string | undefined>
   /** Removes the key; true when it existed. */
   del(key: string): Promise<boolean>
+  /** Readiness (/readyz): rejects when the server does not answer. In-process stores omit it. */
+  ping?(): Promise<void>
 }
 
 // ---- Catalog ----------------------------------------------------------------------------------------------

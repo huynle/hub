@@ -1,5 +1,6 @@
 // The spoke's single outbound WebSocket to the central server: hello/welcome handshake, request/
-// response correlation in both directions, and reconnect with jittered exponential backoff.
+// response correlation in both directions, and reconnect with jittered exponential backoff. A bye carrying
+// retryAfterMs (a hub pod draining, design §10) is followed by one short jittered reconnect (0–retryAfterMs) instead.
 import {
   encode,
   MAX_FRAME,
@@ -52,6 +53,11 @@ export function backoffDelay(attempt: number, backoff: Backoff): number {
   return Math.round(base * (0.5 + 0.5 * random))
 }
 
+/** The reconnect delay a bye's retryAfterMs asks for: uniformly jittered over 0–retryAfterMs, so peers spread out. */
+export function retryAfterDelay(retryAfterMs: number, random: () => number = Math.random): number {
+  return Math.round(retryAfterMs * random())
+}
+
 export function wsURL(server: string): string {
   return `${server.replace(/\/+$/, "").replace(/^http/, "ws")}/spoke/ws`
 }
@@ -80,6 +86,8 @@ export class SpokeConnection {
   private stopped = true
   private attempt = 0
   private retry?: ReturnType<typeof setTimeout>
+  /** The last bye's retryAfterMs (a draining hub): the next reconnect waits about this instead of the backoff. */
+  private retryAfterMs?: number
   private nextID = 0
   private readonly pending = new Map<string, Pending>()
   private readonly backoff: Backoff
@@ -213,6 +221,8 @@ export class SpokeConnection {
           this.setState("revoked")
           this.drop(1000, "revoked")
           this.failPending("revoked")
+        } else if (frame.retryAfterMs !== undefined) {
+          this.retryAfterMs = frame.retryAfterMs
         }
         return
       case "res": {
@@ -245,7 +255,10 @@ export class SpokeConnection {
     this.setState("error")
     if (this.stopped) return
     clearTimeout(this.retry)
-    this.retry = setTimeout(() => this.open(), backoffDelay(this.attempt++, this.backoff))
+    const retryAfterMs = this.retryAfterMs
+    this.retryAfterMs = undefined
+    const delay = retryAfterMs !== undefined ? retryAfterDelay(retryAfterMs, this.backoff.random) : backoffDelay(this.attempt++, this.backoff)
+    this.retry = setTimeout(() => this.open(), delay)
   }
 
   private drop(code: number, reason: string): void {

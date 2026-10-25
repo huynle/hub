@@ -18,7 +18,12 @@ export const featureList = (v: unknown): v is string[] => Array.isArray(v) && v.
 export const UNSAFE_CHARS = /[\p{Cc}\p{Cf}\u2028\u2029]/u
 
 export const isResFrame = (v: Record<string, unknown>): boolean => nonEmpty(v.id) && typeof v.ok === "boolean" && (v.error === undefined || str(v.error))
-export const isByeFrame = (v: Record<string, unknown>): boolean => str(v.reason)
+/** Longest reconnect delay a bye's retryAfterMs may ask for (5 minutes). */
+export const MAX_RETRY_AFTER_MS = 300_000
+/** A bye: a reason, and optionally (e.g. a draining hub) how soon to reconnect, in whole milliseconds. */
+export const isByeFrame = (v: Record<string, unknown>): boolean =>
+  str(v.reason) &&
+  (v.retryAfterMs === undefined || (Number.isInteger(v.retryAfterMs) && (v.retryAfterMs as number) >= 0 && (v.retryAfterMs as number) <= MAX_RETRY_AFTER_MS))
 export const isWelcomeFrame = (v: Record<string, unknown>): boolean =>
   num(v.v) && nonEmpty(v.machineID) && str(v.publicURL) && (v.features === undefined || featureList(v.features))
 
