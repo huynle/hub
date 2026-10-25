@@ -43,6 +43,8 @@ export interface PushExtra {
   readonly subject?: string
   /** Identity of what ended (subagent session, job, tool call): the cooldown is per session, kind and key. Not sent. */
   readonly key?: string
+  /** decision: the Decision, so a tap opens its card. */
+  readonly decisionID?: string
 }
 
 export interface PushPayload {
@@ -51,6 +53,7 @@ export interface PushPayload {
   readonly title: string
   readonly body: string
   readonly requestID?: string
+  readonly decisionID?: string
   /** A test notification shaped like `kind`. */
   readonly test?: true
 }
@@ -195,7 +198,7 @@ export function pushPayload(kind: NotificationKind, sessionID: string, sessionTi
       return { kind, sessionID, title, body: "Tap to see it." }
     // An agent wrote the question or message: never in the payload (the console shows it after sign-in).
     case "decision":
-      return { kind, sessionID, title, body: "A decision waits for you. Tap to answer." }
+      return { kind, sessionID, title, body: "A decision waits for you. Tap to answer.", ...(extra.decisionID ? { decisionID: extra.decisionID } : {}) }
     case "message":
       return { kind, sessionID, title, body: "Tap to see it." }
     case "permission":

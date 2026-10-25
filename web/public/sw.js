@@ -24,6 +24,8 @@ const VIBRATE = {
 }
 
 const sessionURL = (sessionID) => (sessionID ? `/s/${encodeURIComponent(sessionID)}` : "/")
+/** A Decision's card: in its session (or Home), marked by ?decision=. */
+const decisionURL = (sessionID, decisionID) => `${sessionURL(sessionID)}?decision=${encodeURIComponent(decisionID)}`
 
 async function postJSON(path, body) {
   return fetch(path, {
@@ -57,6 +59,7 @@ self.addEventListener("push", (event) => {
   const sessionID = typeof data.sessionID === "string" ? data.sessionID : ""
   const kind = typeof data.kind === "string" ? data.kind : "update"
   const requestID = typeof data.requestID === "string" ? data.requestID : ""
+  const decisionID = kind === "decision" && typeof data.decisionID === "string" && /^dec_[A-Za-z0-9]{1,64}$/.test(data.decisionID) ? data.decisionID : ""
   event.waitUntil(
     (async () => {
       let body = data.body || ""
@@ -83,7 +86,7 @@ self.addEventListener("push", (event) => {
         badge: "/icon-192.png",
         timestamp: Date.now(),
         actions,
-        data: { url: sessionURL(sessionID), sessionID, kind, requestID },
+        data: { url: decisionID ? decisionURL(sessionID, decisionID) : sessionURL(sessionID), sessionID, kind, requestID },
       })
     })(),
   )

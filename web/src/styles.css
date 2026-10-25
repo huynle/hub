@@ -365,6 +365,22 @@ pre.code { white-space: pre; font-size: 0.75rem; }
 .blocker { margin: 12px 0; border-color: #5a4a2a; }
 .blocker-head { margin: 0 0 4px; color: var(--warn); }
 .blocker-text { margin: 0 0 10px; font-size: 0.7812rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Decision cards (hub ask @me): Home and the sessions they concern. */
+.decisions { margin: 12px 0; }
+.decisions .section-title { font-size: 0.875rem; margin: 0 0 6px; color: var(--warn); }
+.decision { margin: 12px 0; border-color: #5a4a2a; }
+.decision.urgency-high { border-color: var(--err); }
+.decision.targeted { box-shadow: 0 0 0 2px var(--accent); }
+.decision-question { font-size: 0.875rem; }
+.decision-deadline { margin: 0 0 8px; color: var(--warn); }
+.decision-deadline.overdue { color: var(--err); }
+.decision .badge-pill.urgency.high { color: var(--err); border-color: var(--err); }
+.decision .badge-pill.recommended { color: var(--accent); border-color: var(--accent); }
+.decision .badge-pill.safe { color: var(--ok); border-color: var(--ok); }
+.decision .choice.recommended > span:first-of-type { font-weight: 600; }
+.decision-why { margin: 6px 0; }
+.decision-note, .decision textarea { width: 100%; margin: 6px 0; }
+.decision-tier { margin: 4px 0 8px; }
 .form-card fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
 .form-card fieldset:disabled { opacity: 0.6; }
 .form-field { margin: 0 0 12px; display: flex; flex-direction: column; gap: 4px; }

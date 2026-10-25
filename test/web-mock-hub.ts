@@ -62,6 +62,10 @@
 // whose status tree lists its finished subagents (no `since`); `live` then plays that turn as SSE events (reasoning,
 // text with ordinal, tool activity, two subagents spawned with their child session, finishing later) and adds its
 // messages to the history.
+// Decisions (P2-T10b, hub ask @me): GET /api/decisions?state=, GET /api/decisions/:id, POST /api/decisions/:id/answer
+// {option?, text?} (409 gone unless open; emits SSE {type:"decision"}). Control: POST /mock/decision {id?, silent?,
+// …fields} opens or patches one (defaults: from @mock about ses_mock, options Proceed / Hold (safe), Hold
+// recommended) and emits it as an SSE 'decision' unless `silent` (e.g. answered elsewhere, for the 409 path).
 // MOCK_WEB_DIST serves another built console instead of web/dist (to measure an older build).
 import { existsSync, readFileSync, statSync } from "node:fs"
 import path from "node:path"
@@ -834,6 +838,40 @@ const ORDER_CONTEXT = orderSession as unknown as OrderMessage[]
 /** Messages of the live turn: msg_046 (reasoning, text, shell), msg_047 (two subagents), msg_048 (text). */
 const ORDER_LIVE = [45, 48] as const
 let order = { messages: ORDER_LIVE[0] as number, run: 0 }
+
+// ---------- decisions (hub ask @me) ----------
+let mockDecisions: Array<Record<string, any>> = []
+let decisionSeq = 0
+function mockDecision(body: Record<string, any>): Record<string, any> {
+  const { silent: _silent, ...patch } = body
+  const existing = typeof patch.id === "string" ? mockDecisions.find((d) => d.id === patch.id) : undefined
+  if (existing) {
+    Object.assign(existing, patch)
+    return existing
+  }
+  const at = Date.now()
+  const decision = {
+    id: `dec_mock${++decisionSeq}`,
+    messageID: `msg_mockdec${decisionSeq}`,
+    from: { kind: "session", sessionID: SESSION, name: "mock" },
+    about: [SESSION],
+    sessionID: SESSION,
+    question: "Drop column legacy_id?",
+    options: [
+      { id: "go", label: "Proceed" },
+      { id: "hold", label: "Hold", safe: true },
+    ],
+    recommendation: { option: "hold", why: "3 services still read legacy_id" },
+    urgency: "normal",
+    tier: "confirm",
+    state: "open",
+    at,
+    expiresAt: at + 86_400_000,
+    ...patch,
+  }
+  mockDecisions.push(decision)
+  return decision
+}
 const orderRows = () => timelineItems(ORDER, ORDER_CONTEXT.slice(0, order.messages)) as unknown as Array<Record<string, unknown>>
 function orderTree(working: readonly string[] = []): Status[] {
   const spawned = orderRows().filter((r) => typeof r.childSessionID === "string")
@@ -1093,6 +1131,12 @@ const server = Bun.serve({
       }
       return Response.json({ rows: big.rows.length })
     }
+    if (p === "/mock/decision" && m === "POST") {
+      const body = await json()
+      const decision = mockDecision(body)
+      if (body.silent !== true) emit({ type: "decision", decision })
+      return Response.json({ decision })
+    }
     if (p === "/mock/emit" && m === "POST") {
       emit(await json())
       return Response.json({ ok: true, clients: clients.size })
@@ -1213,6 +1257,7 @@ const server = Bun.serve({
       audit = seedAudit()
       enrollments = seedEnrollments()
       userSpeech = new Map()
+      mockDecisions = []
       speech = seedSpeech()
       keys = { stt: "sk-or-v1-mock-stt-1234", tts: undefined }
       pushPrefs = { ...DEFAULT_PUSH_PREFS, say: false }
@@ -1287,6 +1332,26 @@ const server = Bun.serve({
       })
     }
     if (p === "/api/events") return sse(request, user)
+    if (p === "/api/decisions" && m === "GET") {
+      const state = url.searchParams.get("state")
+      return Response.json({ decisions: mockDecisions.filter((d) => !state || d.state === state).sort((a, b) => b.at - a.at) })
+    }
+    if ((match0 = /^\/api\/decisions\/([^/]+)(\/answer)?$/.exec(p))) {
+      const decision = mockDecisions.find((d) => d.id === decodeURIComponent(match0![1]!))
+      if (!match0[2] && m === "GET") return decision ? Response.json({ decision }) : Response.json({ error: "No such decision", code: "not_found" }, { status: 404 })
+      if (match0[2] && m === "POST") {
+        const body = await json()
+        last().body = body
+        if (!decision) return Response.json({ error: "No such decision", code: "not_found" }, { status: 404 })
+        if (decision.state !== "open") return Response.json({ error: "The decision is already answered or expired", code: "gone" }, { status: 409 })
+        if (decision.options.length ? !decision.options.some((o: any) => o.id === body.option) : typeof body.text !== "string" || !body.text.trim()) {
+          return Response.json({ error: "Pick one of the options", code: "invalid" }, { status: 400 })
+        }
+        Object.assign(decision, { state: "answered", answer: { ...(body.option ? { option: body.option } : {}), ...(body.text ? { text: body.text } : {}), answeredBy: "user", at: Date.now() } })
+        emit({ type: "decision", decision })
+        return Response.json({ decision })
+      }
+    }
     if (p === "/api/enrollments") return admin ? Response.json({ enrollments }) : forbidden()
     if ((match0 = /^\/api\/enrollments\/([^/]+)\/(approve|deny)$/.exec(p)) && m === "POST") {
       const code = decodeURIComponent(match0[1]!).toUpperCase()

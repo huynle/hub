@@ -5,7 +5,7 @@
 // with the session to open) and 'message' (a msg to @me).
 import { afterEach, describe, expect, test } from "bun:test"
 import type { BearerVerifier } from "../src/central/agent/actor"
-import { harness, session, spoke, waitFor, type Harness } from "./central-harness"
+import { harness, session, spoke, sse, waitFor, type Harness } from "./central-harness"
 
 const USER = "local"
 const TOKENS: Record<string, string> = { ses_1: "hst_fake_ses_1", ses_2: "hst_fake_ses_2" }
@@ -185,6 +185,20 @@ describe("answering on the console", () => {
     const { decision } = await json(await askMe())
     const { token } = h.store.addDevice("phone app")
     expect((await bearer(`/api/decisions/${decision.id}/answer`, token, { method: "POST", json: { option: "go" } })).status).toBe(200)
+  })
+})
+
+describe("console 'decision' events (/api/events)", () => {
+  test("opening and answering a Decision reach the user's stream as 'decision' events with the Decision", async () => {
+    await start()
+    const events = sse(await h.api("/api/events"))
+    const { decision } = await json(await askMe())
+    expect(await events.next((m) => m.type === "decision")).toEqual({ type: "decision", decision })
+    const answered = await json(await asUser(`/api/decisions/${decision.id}/answer`, { option: "hold" }))
+    const event = await events.next((m) => m.type === "decision")
+    expect(event).toEqual({ type: "decision", decision: answered.decision })
+    expect(event.decision).toMatchObject({ id: decision.id, state: "answered", answer: { option: "hold", answeredBy: "user" } })
+    await events.cancel()
   })
 })
 

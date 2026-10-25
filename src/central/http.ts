@@ -492,9 +492,9 @@ export function startCentral(options: CentralOptions): Central {
   }
 
   /** A push to the user about one session (titled by it; "" opens the console), whatever device shows it. */
-  const pushUser = (kind: "decision" | "message", userID: string, sessionID: string, key: string) => {
+  const pushUser = (kind: "decision" | "message", userID: string, sessionID: string, key: string, decisionID?: string) => {
     const title = (sessionID && registry.status(sessionID)?.find((s) => s.id === sessionID)?.title) || "Hub"
-    notifier.notify(kind, sessionID, title, undefined, userID, { key }).catch((cause) => {
+    notifier.notify(kind, sessionID, title, undefined, userID, { key, ...(decisionID ? { decisionID } : {}) }).catch((cause) => {
       console.error("[hub] push notification failed:", cause instanceof Error ? cause.message : cause)
     })
   }
@@ -529,7 +529,9 @@ export function startCentral(options: CentralOptions): Central {
     delivery,
     now,
     users: () => store.users().map((u) => u.id),
-    notify: (userID, decision, reason) => pushUser("decision", userID, decision.sessionID ?? "", `${decision.id}:${reason}`),
+    notify: (userID, decision, reason) => pushUser("decision", userID, decision.sessionID ?? "", `${decision.id}:${reason}`, decision.id),
+    // The console's live Decision cards: opened, answered (here, by timeout), escalated, expired.
+    changed: (userID, decision) => broadcast({ type: "decision", decision }, { tenant: userID }),
   })
   decisions.start()
   /** The user prompted the session: its message hop chain starts over (never fails the prompt). */

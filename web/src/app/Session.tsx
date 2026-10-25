@@ -18,7 +18,7 @@ import { api, errorText, getJSON, HttpError, NetworkError, sessionPath } from ".
 import { prepareImage } from "./attach"
 import { takeFirstTurn } from "./first-turn"
 import { Composer, VoiceBar } from "./Composer"
-import { hub, live, liveTick, lookup, markRead, me, onMessage, rows, speechReady } from "./hub"
+import { decisions, hub, live, liveTick, lookup, markRead, me, onMessage, rows, speechReady } from "./hub"
 import { isPhone, railOpen, setRailOpen, toggleSidebar } from "./layout"
 import { ModelPicker, createModels, modelLabel, type ModelKind } from "./ModelMenu"
 import { PanelHandle } from "./PanelHandle"
@@ -28,6 +28,8 @@ import { toast } from "./toast"
 import { allowVoiceNotifications, dictation, dictationFor, drafts, voice, voiceNotifyHint, voiceState } from "./voice"
 import { VoicePill } from "./VoicePill"
 import { BlockerCard } from "./BlockerCard"
+import { DecisionCards } from "./DecisionCard"
+import { decisionsFor } from "../core/decision-core"
 import { Transcript, type TickState } from "./Transcript"
 import { Icon, IconButton, Menu, STATE_LABEL, StatusIcon, ago, now } from "./ui"
 import { formatElapsed } from "../core/feedback-core"
@@ -642,6 +644,7 @@ export function SessionView(props: { id: string }) {
               </Show>
               <For each={notes()}>{(n) => <p class={`note ${n.kind}`} role={n.kind === "err" ? "alert" : undefined}>{n.text}</p>}</For>
               {/* Keyed by request ID: catalog updates rebuild the blocker objects, which must not reset half-filled answers. */}
+              <DecisionCards decisions={decisionsFor(decisions(), id)} />
               <For each={blockerIDs()}>{(key) => <Show when={blockerByID().get(key)}>{(b) => <BlockerCard sessionID={id} blocker={b()} rootID={id} />}</Show>}</For>
               <Show when={working()}>
                 <p class="working-line muted" role="status">

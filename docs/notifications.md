@@ -35,7 +35,7 @@ fires at most once per settled run: about 32 times for this session.
 |---|---|---|---|
 | `question` | Question | `form.created` anywhere in the tree (once per form) | on |
 | `permission` | Needs permission | `permission.asked` anywhere in the tree (once per request; Allow/Reject from the notification) | on |
-| `decision` | Decision | a session or app asked you (`hub ask @me`): a Decision opened, or passed its deadline without a safe `onTimeout` (once more); body generic ("A decision waits for you. Tap to answer."), opens the session it is about | on |
+| `decision` | Decision | a session or app asked you (`hub ask @me`): a Decision opened, or passed its deadline without a safe `onTimeout` (once more); body generic ("A decision waits for you. Tap to answer."), opens the session it is about at the Decision's card (`?decision=<id>`) | on |
 | `message` | Message | agent messaging needs you: a `msg` to `@me`, an ask an idle session left unanswered after every re-wake, or sessions messaging each other past the hop cap; body generic ("Tap to see it.") | on |
 | `done` | All done | the root's last turn succeeded and the whole tree stayed settled for 15 s (see below); once per run | on |
 | `failed` | Failed | `session.execution.failed` of the root; body: the error message | on |

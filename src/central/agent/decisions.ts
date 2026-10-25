@@ -13,6 +13,7 @@
 //   looks at every user's open Decisions, so deadlines survive restarts.
 // - Text is sanitised (question by the message store; labels, ids and reasons here). Notifications carry only
 //   the Decision (the push layer sends a generic body).
+// - Every open and change (answer, timeout, escalation, expiry) goes to `changed` (the console's 'decision' event).
 import type { Clock, StateStore, Timers } from "../backend/types"
 import type { AgentActor, UserActor } from "./actor"
 import type { Delivery } from "./delivery"
@@ -118,6 +119,8 @@ export interface DecisionsDeps {
   readonly users?: () => Iterable<string>
   /** A Decision the user should see (opened, or past its deadline without a safe onTimeout). */
   readonly notify?: (userID: string, decision: Decision, reason: NotifyReason) => void
+  /** A Decision opened or changed (answered, timed out, escalated, expired): the console's live event. Never throws through. */
+  readonly changed?: (userID: string, decision: Decision) => void
 }
 
 const DECISIONS = "decisions"
@@ -234,6 +237,7 @@ export class Decisions {
     await this.deps.state.put(userID, BY_MESSAGE, message.id, decision.id)
     await this.trim(userID)
     this.deps.notify?.(userID, decision, "opened")
+    this.emit(userID, decision)
     return { message, decision }
   }
 
@@ -272,6 +276,7 @@ export class Decisions {
     const answer: DecisionAnswer = { ...choice, answeredBy: "user", at, deviceID: by.deviceID }
     const decision = await this.close(userID, id, answer)
     if (!decision) throw gone()
+    this.emit(userID, decision)
     const option = decision.options.find((o) => o.id === choice.option)
     const text = option ? `Decision ${id}: ${option.label} [${option.id}]${choice.text ? `\n${choice.text}` : ""}` : `Decision ${id}: ${choice.text}`
     return { decision, ...(await this.replyTo(userID, decision, text, by)) }
@@ -302,6 +307,15 @@ export class Decisions {
   }
 
   // ---- internals ----------------------------------------------------------------------------------------
+
+  /** Tells the changed listener (its failure never fails the caller). */
+  private emit(userID: string, decision: Decision): void {
+    try {
+      this.deps.changed?.(userID, decision)
+    } catch (cause) {
+      console.error(`[hub] decision ${decision.id}: change listener failed: ${cause instanceof Error ? cause.message : String(cause)}`)
+    }
+  }
 
   private schedule(): void {
     this.timer = this.timers.set(() => {
@@ -353,7 +367,8 @@ export class Decisions {
     for (const { value } of await this.deps.state.list<Decision>(userID, DECISIONS)) {
       if (value.state !== "open") continue
       if (t >= value.expiresAt) {
-        await updateVersioned<Decision>(this.deps.state, userID, DECISIONS, value.id, (current) => (current?.state === "open" ? { ...current, state: "expired" } : undefined))
+        const expired = await updateVersioned<Decision>(this.deps.state, userID, DECISIONS, value.id, (current) => (current?.state === "open" ? { ...current, state: "expired" } : undefined))
+        if (expired) this.emit(userID, expired)
         continue
       }
       if (value.deadline === undefined || t < value.deadline) continue
@@ -361,6 +376,7 @@ export class Decisions {
       if (option) {
         const decision = await this.close(userID, value.id, { option: option.id, answeredBy: "timeout", at: t })
         if (decision) {
+          this.emit(userID, decision)
           const hub: UserActor = { kind: "user", userID, deviceID: "hub", via: "cookie" }
           await this.replyTo(userID, decision, `Decision ${decision.id}: no answer by the deadline; took the safe option ${option.label} [${option.id}]`, hub)
         }
@@ -370,7 +386,10 @@ export class Decisions {
       const escalated = await updateVersioned<Decision>(this.deps.state, userID, DECISIONS, value.id, (current) =>
         current?.state === "open" && current.escalatedAt === undefined ? { ...current, escalatedAt: t } : undefined,
       )
-      if (escalated) this.deps.notify?.(userID, escalated, "escalated")
+      if (escalated) {
+        this.deps.notify?.(userID, escalated, "escalated")
+        this.emit(userID, escalated)
+      }
     }
   }
 

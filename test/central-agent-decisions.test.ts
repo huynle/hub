@@ -98,6 +98,7 @@ function setup(options: { state?: StateStore; clock?: ReturnType<typeof fakeCloc
     newID: () => `msg_${String(++n).padStart(4, "0")}`,
   })
   const notified: Array<{ userID: string; id: string; reason: string; sessionID: string }> = []
+  const changes: Array<{ userID: string; id: string; state: string; answeredBy?: string; escalated?: true }> = []
   let d = 0
   const make = () =>
     new Decisions({
@@ -108,8 +109,16 @@ function setup(options: { state?: StateStore; clock?: ReturnType<typeof fakeCloc
       newID: () => `dec_${String(++d).padStart(4, "0")}`,
       users: () => [U],
       notify: (userID, decision, reason) => notified.push({ userID, id: decision.id, reason, sessionID: decision.sessionID ?? "" }),
+      changed: (userID, decision) =>
+        changes.push({
+          userID,
+          id: decision.id,
+          state: decision.state,
+          ...(decision.answer ? { answeredBy: decision.answer.answeredBy } : {}),
+          ...(decision.escalatedAt !== undefined ? { escalated: true as const } : {}),
+        }),
     })
-  return { clock, state, delivery, sent, notified, decisions: make(), make }
+  return { clock, state, delivery, sent, notified, changes, decisions: make(), make }
 }
 
 const OPTIONS = [
@@ -315,6 +324,49 @@ describe("deadlines", () => {
     s.clock.set(T0 + HOUR)
     await restarted.tick()
     expect((await restarted.get(U, decision.id))?.answer?.answeredBy).toBe("timeout")
+  })
+})
+
+describe("changes (the console's live 'decision' events)", () => {
+  test("changed fires on open, on the user's answer, on a timeout answer, on escalation and on expiry", async () => {
+    const s = setup()
+    const a = (await s.decisions.ask(U, asSession("ses_a"), { question: "A?", options: OPTIONS })).decision
+    const b = (await s.decisions.ask(U, asSession("ses_a"), { question: "B?", options: OPTIONS, deadlineMs: HOUR, onTimeout: "hold" })).decision
+    const c = (await s.decisions.ask(U, asSession("ses_a"), { question: "C?", options: OPTIONS, deadlineMs: HOUR })).decision
+    const e = (await s.decisions.ask(U, asSession("ses_a"), { question: "E?", expiresInMs: 2 * HOUR })).decision
+    expect(s.changes).toEqual([a, b, c, e].map((x) => ({ userID: U, id: x.id, state: "open" })))
+    s.changes.length = 0
+    await s.decisions.answer(U, a.id, { option: "go" }, cookieUser)
+    expect(s.changes).toEqual([{ userID: U, id: a.id, state: "answered", answeredBy: "user" }])
+    s.changes.length = 0
+    s.clock.set(T0 + HOUR)
+    await s.decisions.tick()
+    expect(s.changes).toEqual([
+      { userID: U, id: b.id, state: "answered", answeredBy: "timeout" },
+      { userID: U, id: c.id, state: "open", escalated: true },
+    ])
+    s.changes.length = 0
+    s.clock.set(T0 + 2 * HOUR)
+    await s.decisions.tick()
+    expect(s.changes).toEqual([{ userID: U, id: e.id, state: "expired" }])
+    s.changes.length = 0
+    await s.decisions.tick()
+    expect(s.changes).toEqual([])
+  })
+
+  test("a failing changed listener does not fail the ask or the answer", async () => {
+    const s = setup()
+    const decisions = new Decisions({
+      state: s.state,
+      delivery: s.delivery,
+      now: s.clock.now,
+      timers: s.clock.timers,
+      changed: () => {
+        throw new Error("listener broke")
+      },
+    })
+    const { decision } = await decisions.ask(U, asSession("ses_a"), { question: "Ok?", options: OPTIONS })
+    expect((await decisions.answer(U, decision.id, { option: "go" }, cookieUser)).decision.state).toBe("answered")
   })
 })
 
