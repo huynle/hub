@@ -73,12 +73,13 @@ export class LiveFanout {
     await this.catalogSubscription
   }
 
+  /** Drops this pod's subscriptions (once they are made: a Bus that never connected must not hold up a stop). */
   async stop(): Promise<void> {
     const catalog = this.catalogSubscription
     this.catalogSubscription = undefined
     const topics = [...this.topics.values()]
     this.topics.clear()
-    await Promise.all([catalog?.then((off) => off()), ...topics.map((topic) => topic.subscribed.then((off) => off?.()))].map((p) => p?.catch(this.onError)))
+    for (const pending of [catalog, ...topics.map((topic) => topic.subscribed)]) void pending?.then((off) => off?.()).catch(this.onError)
   }
 
   /** Logs (unless streamed text) and publishes a user's event; resolves once it is on the Bus. */

@@ -64,10 +64,11 @@ export class Feed<T> {
     await unsubscribe
   }
 
+  /** Stops sharing; the Bus subscription is dropped once it is made (a Bus that never connected must not hold up a stop). */
   async detach(): Promise<void> {
     const attached = this.attached
     this.attached = undefined
-    if (attached) await (await attached.unsubscribe)()
+    void attached?.unsubscribe.then((off) => off()).catch((cause: unknown) => this.report(cause))
   }
 
   private run(userID: string, item: T, local: boolean): void {
