@@ -470,7 +470,8 @@ export class Delivery {
     const entries = (await this.deps.state.list<Pending>(userID, PENDING)).sort((a, b) => a.value.at - b.value.at || (a.key < b.key ? -1 : 1))
     for (const { key, value, version } of entries) {
       const message = value.expiresAt > this.now() ? await this.messages.get(userID, value.messageID) : undefined
-      if (!message) {
+      // Gone, or an ask that closed (expired) while it waited: nothing to deliver.
+      if (!message || (message.kind === "ask" && message.state !== "open")) {
         await this.deps.state.delete(userID, PENDING, key, { ifVersion: version })
         continue
       }

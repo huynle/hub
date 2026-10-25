@@ -277,6 +277,15 @@ describe("pending queue", () => {
     expect(s.sent).toHaveLength(0)
   })
 
+  test("a pending ask that expired before its recipient came back is dropped", async () => {
+    const s = setup()
+    await s.delivery.send(U, asUser, "@beta", "ask", "quick?", { expiresInMs: 10 * MIN })
+    await s.clock.advance(11 * MIN)
+    s.connect("c1", ["ses_b"])
+    await s.delivery.onSessions("c1")
+    expect(s.sent).toHaveLength(0)
+  })
+
   test("a flush delivers only the connection's tenant's messages, for sessions it reports", async () => {
     const s = setup()
     await s.delivery.send(U, asUser, "@beta", "msg", "for b")
