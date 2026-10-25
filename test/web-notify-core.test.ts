@@ -64,7 +64,7 @@ describe("describeTestResult", () => {
 describe("toggles and quiet hours", () => {
   test("one toggle per hub kind, grouped, each with the hub's label and a one-line description", () => {
     expect(NOTIFY_GROUPS.map((g) => [g.title, g.kinds.map((k) => k.key)])).toEqual([
-      ["Needs you", ["question", "permission"]],
+      ["Needs you", ["question", "permission", "decision", "message"]],
       ["Session", ["done", "failed", "turn", "stopped", "retry"]],
       ["Subagents", ["subagentDone", "subagentFailed"]],
       ["Scripts and tools", ["jobDone", "jobFailed", "longTool"]],
@@ -79,7 +79,7 @@ describe("toggles and quiet hours", () => {
     }
   })
   test("summary of what this device gets, in group order", () => {
-    expect(notifySummary({ ...DEFAULT_PUSH_PREFS })).toBe("You'll get: Question, Needs permission, All done, Failed, Spoken reply, Hand-off.")
+    expect(notifySummary({ ...DEFAULT_PUSH_PREFS })).toBe("You'll get: Question, Needs permission, Decision, Message, All done, Failed, Spoken reply, Hand-off.")
     expect(notifySummary({ jobFailed: true, done: false })).toBe("You'll get: Script failed.")
     expect(notifySummary({})).toBe("You'll get no notifications on this device.")
   })
