@@ -11,13 +11,16 @@
 //   one seen last; the message records the holder generation. sendAll: every holder, a message each. A session
 //   never messages itself: it is left out of a role it holds, and an address naming only it is invalid.
 // - Pending: no deliver-capable connection reports the recipient (offline) or every one failed → kept for
-//   PENDING_MS in the StateStore and delivered oldest first on the user's next sessions frame (onSessions).
+//   PENDING_MS in the StateStore and delivered oldest first on the user's next sessions frame (onSessions). In a
+//   cluster (deps.locks) each (user, session) flush holds a lease (deliver:<user>:<session>) and re-reads the
+//   entry under it, so a spoke reconnecting to another pod meanwhile never gets a message twice.
 //   OpenCode holds admitted messages itself across forms, interrupts and restarts (P2-T0), so there is no
 //   "retained" retry loop on the hub.
 // - Re-wake: an open ask to an idle recipient (Registry.idle: native or hooks evidence) is woken again after
 //   each REWAKE_BACKOFF_MS delay with a short reminder (its own id), then the user is alerted once. Busy,
 //   offline or pending recipients push the wait back. State lives in the StateStore (survives restarts); the
-//   loop looks at users seen since start (a send or a sessions frame of theirs).
+//   loop looks at deps.users (the hub passes every stored user; it runs on the leader pod only, see
+//   ../cluster/leader.ts), else at the users seen since start (a send or a sessions frame of theirs).
 // - Primer (design §2.3, decision jswt9p22 #7): once per session, a short identity note (renderPrimer) is
 //   admitted without waking (wake:false, steer, meta.kind "primer") just before the first message the session
 //   gets, or when it is explicitly named (Directory.onNamed; derived names never prime). Only through
@@ -31,7 +34,8 @@
 //   (console, voice, typed in the harness) reset a session's chain (humanTurn).
 import type { DeliverRequest, DeliverResult, DeliveryMode, MessageKind as WireKind } from "../../protocol"
 import { isDeliverResult } from "../../protocol"
-import type { Clock, Counters, StateStore, Timers } from "../backend/types"
+import { randomBytes } from "node:crypto"
+import type { Clock, Counters, Locks, StateStore, Timers } from "../backend/types"
 import type { AgentActor } from "./actor"
 import type { DirectoryEntry, NamedListener, Resolved } from "./directory"
 import { type Party, type PartyInfo, partyFromActor, partyKey, partyLabel, renderEnvelope, renderPrimer } from "./envelope"
@@ -91,6 +95,12 @@ export interface DeliveryDeps {
   readonly alert?: (userID: string, alert: DeliveryAlert) => void
   /** Limiter caps (default PAIR_LIMIT, USER_LIMIT, WAKE_BUDGET). */
   readonly limits?: Partial<MessageLimits>
+  /** The users the re-wake loop looks at (every user of the hub; default: the users seen by this process since start). */
+  readonly users?: () => Iterable<string> | Promise<Iterable<string>>
+  /** Cluster mode: a pending flush holds a lease per (user, session), so two pods never deliver the same message. */
+  readonly locks?: Locks
+  /** This process, as lease owner (default: a random one). */
+  readonly owner?: string
 }
 
 export interface SendOptions {
@@ -135,6 +145,9 @@ export const PENDING_MS = 24 * 60 * 60_000
 export const REWAKE_BACKOFF_MS: readonly number[] = [5 * 60_000, 15 * 60_000, 45 * 60_000]
 /** How often the re-wake loop looks for due asks. */
 export const REWAKE_TICK_MS = 30_000
+
+/** How long a pending flush may hold a (user, session) lease (it is released as soon as the flush is done). */
+export const FLUSH_LEASE_MS = 120_000
 
 /** StateStore collection: messageID → Pending. */
 const PENDING = "message-pending"
@@ -192,12 +205,14 @@ export class Delivery {
   private readonly users = new Set<string>()
   private timer: unknown
   private running = false
+  private readonly owner: string
 
   constructor(deps: DeliveryDeps) {
     this.deps = deps
     const now = (this.now = deps.now ?? Date.now)
     this.timers = deps.timers ?? defaultTimers
     this.newID = deps.newID ?? newMessageID
+    this.owner = deps.owner ?? `delivery-${process.pid}-${randomBytes(4).toString("hex")}`
     this.messages = new Messages({ state: deps.state, now, newID: this.newID })
     this.hops = new HopTracker({ state: deps.state, now })
     this.limiter = new MessageLimiter({ counters: deps.counters, now, ...(deps.limits ? { limits: deps.limits } : {}) })
@@ -292,7 +307,14 @@ export class Delivery {
 
   /** One pass of the re-wake loop over every known user (the loop calls it; tests may too). */
   async tick(): Promise<void> {
-    for (const userID of [...this.users]) {
+    let users: string[]
+    try {
+      users = this.deps.users ? [...(await this.deps.users())] : [...this.users]
+    } catch (cause) {
+      console.error(`[hub] re-wake failed: ${cause instanceof Error ? cause.message : String(cause)}`)
+      return
+    }
+    for (const userID of users) {
       try {
         await this.rewake(userID)
       } catch (cause) {
@@ -562,16 +584,44 @@ export class Delivery {
 
   private async flushNow(userID: string): Promise<void> {
     const entries = (await this.deps.state.list<Pending>(userID, PENDING)).sort((a, b) => a.value.at - b.value.at || (a.key < b.key ? -1 : 1))
-    for (const { key, value, version } of entries) {
-      const message = value.expiresAt > this.now() ? await this.messages.get(userID, value.messageID) : undefined
-      // Gone, or an ask that closed (expired) while it waited: nothing to deliver.
-      if (!message || (message.kind === "ask" && message.state !== "open")) {
-        await this.deps.state.delete(userID, PENDING, key, { ifVersion: version })
-        continue
+    /** Cluster mode: the sessions whose lease this flush holds (true) or another process holds (false). */
+    const leases = new Map<string, boolean>()
+    try {
+      for (const { key, value, version } of entries) {
+        const message = value.expiresAt > this.now() ? await this.messages.get(userID, value.messageID) : undefined
+        // Gone, or an ask that closed (expired) while it waited: nothing to deliver.
+        if (!message || (message.kind === "ask" && message.state !== "open")) {
+          await this.deps.state.delete(userID, PENDING, key, { ifVersion: version })
+          continue
+        }
+        if (!this.targets(userID, value.sessionID).length) continue
+        if (!(await this.lease(userID, value.sessionID, leases))) continue
+        // Another process may have delivered it before this one took the lease.
+        if (this.deps.locks && !(await this.deps.state.get(userID, PENDING, key))) continue
+        if (await this.attempt(userID, message, value.sessionID, value.wake, value.urgent)) await this.deps.state.delete(userID, PENDING, key)
       }
-      if (!this.targets(userID, value.sessionID).length) continue
-      if (await this.attempt(userID, message, value.sessionID, value.wake, value.urgent)) await this.deps.state.delete(userID, PENDING, key)
+    } finally {
+      const { locks } = this.deps
+      for (const [sessionID, held] of leases) {
+        if (held) await locks!.release(flushKey(userID, sessionID), this.owner).catch(() => false)
+      }
     }
+  }
+
+  /** Takes the (user, session) flush lease once per flush (always true without locks); false: another process flushes it. */
+  private async lease(userID: string, sessionID: string, leases: Map<string, boolean>): Promise<boolean> {
+    const { locks } = this.deps
+    if (!locks) return true
+    const known = leases.get(sessionID)
+    if (known !== undefined) return known
+    let held = false
+    try {
+      held = (await locks.acquire(flushKey(userID, sessionID), this.owner, FLUSH_LEASE_MS)) !== undefined
+    } catch (cause) {
+      console.error(`[hub] message flush lease failed: ${cause instanceof Error ? cause.message : String(cause)}`)
+    }
+    leases.set(sessionID, held)
+    return held
   }
 
   private deliverRequest(message: Message, sessionID: string, wake: boolean, urgent: boolean): DeliverRequest {
@@ -601,6 +651,9 @@ export class Delivery {
     }
   }
 }
+
+/** The Locks key of a (user, session) pending flush. */
+const flushKey = (userID: string, sessionID: string) => `deliver:${userID}:${sessionID}`
 
 /** The session's holder generation of the role (and project scope) an address names; undefined: not held. */
 function roleGeneration(entry: DirectoryEntry, address: { readonly role: string; readonly project?: string }): number | undefined {

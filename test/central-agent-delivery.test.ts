@@ -7,13 +7,13 @@ import type { AgentActor } from "../src/central/agent/actor"
 import { mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { Delivery, REWAKE_BACKOFF_MS, REWAKE_TICK_MS, type DeliveryAlert, type DeliveryRegistry } from "../src/central/agent/delivery"
+import { Delivery, REWAKE_BACKOFF_MS, REWAKE_TICK_MS, type DeliveryAlert, type DeliveryDeps, type DeliveryRegistry } from "../src/central/agent/delivery"
 import type { DirectoryEntry, NamedListener, Resolved } from "../src/central/agent/directory"
 import { renderPrimer } from "../src/central/agent/envelope"
 import { AgentError } from "../src/central/agent/errors"
 import { HOP_CAP, type MessageLimits } from "../src/central/agent/message-limits"
 import { parseAddress } from "../src/central/agent/names"
-import { MemoryCounters } from "../src/central/backend/memory-counters"
+import { MemoryCounters, MemoryLocks } from "../src/central/backend/memory-counters"
 import { FileStateStore } from "../src/central/backend/file-state"
 import { MemoryStateStore } from "../src/central/backend/memory-state"
 import type { StateStore, Timers } from "../src/central/backend/types"
@@ -157,7 +157,7 @@ function setup(options: { state?: StateStore; clock?: ReturnType<typeof fakeCloc
   const state = options.state ?? new MemoryStateStore({ now: clock.now })
   const alerts: Array<{ userID: string; alert: DeliveryAlert }> = []
   let n = 0
-  const make = (store: StateStore = state) =>
+  const make = (store: StateStore = state, extra: Partial<DeliveryDeps> = {}) =>
     new Delivery({
       state: store,
       counters: new MemoryCounters({ now: clock.now }),
@@ -169,6 +169,7 @@ function setup(options: { state?: StateStore; clock?: ReturnType<typeof fakeCloc
       newID: () => `msg_${String(++n).padStart(4, "0")}`,
       alert: (userID, alert) => alerts.push({ userID, alert }),
       ...(options.limits ? { limits: options.limits } : {}),
+      ...extra,
     })
   w.addSession("ses_a", { name: "alpha" })
   w.addSession("ses_b", { name: "beta" })
@@ -791,6 +792,45 @@ describe("restart", () => {
     expect(s.sent.slice(before).map((x) => x.req.sessionID)).toEqual(["ses_a"])
     expect(s.sent.at(-1)!.req.text).toContain(ask.message.id)
     restarted.stop()
+  })
+})
+
+describe("cluster (pods sharing the state)", () => {
+  test("the re-wake loop looks at the users it is given: an ask sent on another pod is re-woken here", async () => {
+    const s = setup()
+    s.connect("c1", ["ses_a", "ses_b"])
+    s.idle.add("ses_b")
+    const ask = await s.delivery.send(U, asSession("ses_a"), "@beta", "ask", "q?")
+    // The leader pod never saw U (no send, no sessions frame of theirs there).
+    const leader = s.make(s.state, { users: () => [U] })
+    leader.start()
+    await s.clock.advance(REWAKE_BACKOFF_MS[0]!)
+    const reminders = s.sent.filter((x) => x.req.messageID !== ask.message.id)
+    expect(reminders).toHaveLength(1)
+    expect(reminders[0]!.req.text).toContain(ask.message.id)
+    leader.stop()
+  })
+
+  test("two pods flushing the same pending message at once deliver it once (per-session lease)", async () => {
+    const s = setup()
+    const locks = new MemoryLocks({ now: s.clock.now })
+    const a = s.make(s.state, { locks, owner: "pod-a" })
+    const b = s.make(s.state, { locks, owner: "pod-b" })
+    const sent = await a.send(U, asUser, "@beta", "msg", "one")
+    expect(sent.delivery).toBe("pending")
+    let answer!: () => void
+    const answered = new Promise<void>((resolve) => (answer = resolve))
+    s.connect("c1", ["ses_b"], { answer: async () => (await answered, { delivered: "turn" }) })
+    const flushes = [a.onSessions("c1"), b.onSessions("c1")]
+    await settle()
+    answer()
+    await Promise.all(flushes)
+    expect(s.sent.filter((x) => x.req.messageID === sent.message.id)).toHaveLength(1)
+    // Delivered and gone: later flushes on either pod send nothing more.
+    await a.onSessions("c1")
+    await b.onSessions("c1")
+    expect(s.sent.filter((x) => x.req.messageID === sent.message.id)).toHaveLength(1)
+    expect((await b.messages.get(U, sent.message.id))?.delivery).toBe("turn")
   })
 })
 
