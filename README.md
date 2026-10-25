@@ -251,6 +251,12 @@ An address several sessions match answers `ambiguous` with the candidates; anoth
 roles do not exist (`not_found`). A name is released 7 days after its session is archived or deleted; a role
 holder offline for 30 minutes loses the role. Some role names (such as `orchestrator…`) are reserved to the user.
 
+In an OpenCode prompt, an address is a reference, not routing: the prompt still goes to the session you typed it
+in, word for word, and the plugin attaches a short `hub-references.txt` note naming the session(s) it means (state,
+machine, project, your open asks to it) so the agent can contact them with the `hub` tool. OpenCode's own `@file`
+and `@agent` mentions win; unknown names add nothing; if the hub does not answer within 1.5 s the prompt goes on
+without the note.
+
 **Routes.** Errors are `{error: {code, message, hint?, …}}` with the codes the [CLI](#hub-cli) maps to exit
 codes. Console routes refuse session and app tokens (403); `/api/agent` refuses a request carrying both the
 cookie and a hub bearer token (400).
@@ -312,6 +318,7 @@ hub reply <msgID> "text" [--no-wake]      to the message's real sender, never vi
 hub decline <msgID> --why "reason"
 hub inbox                                 asks to answer, your open asks, recent messages, mutes
 hub mute <addr> · hub unmute <addr>       refuse (or accept again) messages from a session
+hub mcp                                   an MCP server on stdio (see below)
 hub login [--url URL] [--token APP_TOKEN] · hub logout
 hub help · hub --version
 ```
@@ -357,6 +364,34 @@ is set and the credential is not that session. The CLI removes `BUN_BE_BUN` from
 | 7 | `unsupported`, `offline` |
 | 8 | `gone`; an `ask --wait` that expired |
 | 9 | `unauthorized`, `token_expired` (a session token: start a new shell), or not logged in |
+
+### hub mcp (MCP server)
+
+`hub mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server on stdio for MCP clients outside
+OpenCode (Claude Desktop, Cursor, other agents). It speaks JSON-RPC 2.0, one message per line (MCP's stdio
+transport; protocol revisions `2025-06-18`, `2025-03-26` and `2024-11-05`), and answers `initialize`, `ping`,
+`tools/list` and `tools/call`; notifications (`notifications/initialized`, `notifications/cancelled`, which aborts
+the call) get no answer, other methods answer `-32601`. Its tools are the CLI's verbs: `whoami`, `status`,
+`sessions`, `show`, `log`, `who`, `msg`, `ask`, `reply`, `decline` and `inbox`, with the same arguments
+(`to`, `text`, `addr`, `id`, `why`, `n`, `wake`, `urgent`, `all`, `project`, `role`, …). `ask` takes `wait` of at
+most 60 s (one long poll; a longer wait is cut to 60) and `expires` in seconds or as `2h`. Answers are the CLI's
+short text; messages and answers from other sessions come in the hub's envelope and are marked as not from the
+user. Hub errors are tool results with `isError: true` and the hub's `code: message` (plus candidates and hint),
+never protocol errors. Only protocol frames go to stdout; the server ends when stdin closes (after answering the
+calls in flight) or on SIGINT/SIGTERM.
+
+```json
+{ "mcpServers": { "hub": { "command": "/home/you/.local/state/hub/bin/hubctl", "args": ["mcp"] } } }
+```
+
+(the launcher in the hub bin dir, `$HUB_STATE_DIR/bin`; just `hubctl` when that dir is on the client's PATH).
+
+**Identity.** The server acts as the CLI's credential, read for each call: `HUB_URL` + `HUB_SESSION_TOKEN` when
+set, else the `hub login` file. MCP clients start servers without a hub session's shell environment, so in practice
+it acts as the **app token** you logged in with (needs `sessions:read`, `messages:send` and `messages:read`), not
+as an OpenCode session: messages are sent from the app, and replies to them land in its inbox (the `inbox` tool),
+not in a session. Naming and roles stay out (app tokens cannot use them). Inside OpenCode, agents use the plugin's
+`hub` tool instead, which acts as the calling session.
 
 ## Spoke (OpenCode plugin)
 
@@ -1329,7 +1364,9 @@ second user. The opt-in `HUB_IT_OPENCODE=1 bun test test/spoke-env-inject.it.tes
 `HUB_SESSION_TOKEN`, and that `hub whoami` there prints the session. `HUB_IT_OPENCODE=1 bun test
 test/spoke-deliver.it.test.ts` does the same for hub messages: the model sees the delivered envelope, a repeated
 message id is applied once, `wake: false` waits for the next turn, and inbox deliveries carry their origin. `HUB_IT_OPENCODE=1 bun test test/spoke-hub-tool.it.test.ts` has the stub model call the `hub` tool and checks
-that the hub sees the session's token while the model and the transcript never do.
+that the hub sees the session's token while the model and the transcript never do. `HUB_IT_OPENCODE=1 bun test
+test/spoke-prompt-refs.it.test.ts` checks that a prompt naming a session reaches the model unchanged with the
+reference note attached, and that hub-sourced prompts get none.
 
 Point a project's `.opencode/opencode.jsonc` at your checkout to try changes:
 `{ "plugins": [{ "package": "/path/to/hub" }] }`. If the plugin is also installed globally,
