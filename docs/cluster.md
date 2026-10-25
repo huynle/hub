@@ -238,7 +238,6 @@ Pub/sub channels are under `hub:bus:` (`hub:bus:t:<topic>` for topics such as `s
 - **Activity digest notifications** are collected per pod; text deltas are not resumable after a reconnect.
 - **Long-polls** (`wait`) are not counted as requests in flight while draining: a long-poll on a draining pod may
   end with a connection error, and the client retries.
-- **Audit order**: entries written by two pods in the same millisecond may be listed in either order.
 - Writes by the launch supervisor are not yet checked against its lease's fence; a deposed leader's last write
   can land after a new leader started.
 - Run the same version on every pod; mixed versions are expected only briefly, during a rollout.
