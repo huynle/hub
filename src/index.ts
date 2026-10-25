@@ -16,6 +16,7 @@ import { HUB_TOOL, HUB_TOOL_DESCRIPTION, HUB_TOOL_INPUT, runHubTool } from "./sp
 import { cliEntry, installLaunchers } from "./spoke/launchers"
 import { listServiceSessions } from "./spoke/listing"
 import { ensureLocalHub } from "./spoke/localhub"
+import { PromptReferences } from "./spoke/prompt-refs"
 import { replyPermission, type PermissionLocation } from "./spoke/locations"
 import { foregroundEndpoint, formOutcome } from "./spoke/own-server"
 import { joinProcess, type Membership } from "./spoke/singleton"
@@ -301,6 +302,15 @@ export default Plugin.define({
       )
     } catch (cause) {
       console.error("[hub] could not register the hub tool", cause)
+    }
+
+    try {
+      // @name / @@role in a prompt get context from the hub as an attached text file; the text is never changed
+      // and the harness's own @ meanings win (src/spoke/prompt-refs.ts, design §2.4).
+      const references = new PromptReferences(() => membership.active())
+      await ctx.session.hook("prompt", (event) => references.onPrompt(event))
+    } catch (cause) {
+      console.error("[hub] could not register the prompt hook", cause)
     }
 
     await registerShellEnv(ctx, (sessionID) => membership.active()?.shellIdentity(sessionID))
