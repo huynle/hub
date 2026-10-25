@@ -6,6 +6,7 @@
 // Voice mode speaking a streamed reply before its text ends (each sentence playing while its MP3 still downloads), with the turn timed (a browser with a silent fake mic), Voice mode with the screen off (the phone muting/ending the mic or suspending audio: paused in the Voice bar and the notification, listening again on unlock),
 // progressive history (newest page first, older pages while scrolling up, anchored, Retry), timeline order (subagents
 // where they were spawned, live rows in arrival order and after a reload), rich Markdown (tables, task lists, highlighted code, copy) and the text size (Settings, pinch, ctrl+wheel, kept after reload, phone at 1.8),
+// the agents console (Settings → Agents: grants CRUD, acting switches, Activity; a blocker's recommendation, who answered, escalation details),
 // and speech detection (fake mics looping background noise: nothing sent, unless the on-device model is blocked; and a spoken request: one utterance, a hallucinated “Thank you.” shown as ignored). Screenshots go to $SMOKE_SHOTS (default: the OS temp
 // dir). Run `npm run build:web && npm run test:e2e`. Chromium: $CHROMIUM_PATH, else Playwright's cache, else PATH.
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
