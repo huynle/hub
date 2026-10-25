@@ -24,6 +24,7 @@ describe("centralConfig", () => {
       turnTimeoutMs: 600_000,
       vapidSubject: "mailto:hub@localhost",
       auth: { mode: "pairing" },
+      agentsNever: [],
     })
   })
 
