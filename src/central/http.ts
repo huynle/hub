@@ -46,6 +46,7 @@ import { ConnDirectory } from "./cluster/directory"
 import { PodRpc } from "./cluster/rpc"
 import { ClusterView } from "./cluster/view"
 import { LeaderLoop, NoLeaderError } from "./cluster/leader"
+import { ClusterRecommendations } from "./cluster/recommend"
 import { randomBytes, randomUUID } from "node:crypto"
 import { LaunchEngine } from "./agent/launch-engine"
 import { LaunchTokens } from "./agent/launch-tokens"
@@ -782,11 +783,17 @@ export function startCentral(options: CentralOptions): Central {
   }
   // needs_user escalations (P3-T8): one Decision per (holder, request); answered as the user; closed when the
   // request goes elsewhere.
+  // Cluster mode: a recommendation on a request another pod holds goes to that pod.
+  const recommendations = config.cluster ? new ClusterRecommendations({ bus: backends.bus, podID: config.cluster.podID, registry }) : undefined
+  recommendations?.start().catch((cause) => console.error(`[hub] cluster recommendations did not start: ${(cause as Error).message}`))
   const escalations: Escalations = new Escalations({
     state: backends.state,
     counters: backends.counters,
     decisions,
-    registry,
+    registry: {
+      sessionTenant: (sessionID) => registry.sessionTenant(sessionID),
+      recommend: (requestID, recommendation) => (recommendations ?? registry).recommend(requestID, recommendation),
+    },
     actions,
     audit,
     now,
@@ -1745,7 +1752,7 @@ export function startCentral(options: CentralOptions): Central {
     routes: [...routes.map(({ method, path, access }) => ({ method, path, access })), ...agent.routes.map(({ method, path }) => ({ method, path, access: "agent" as const }))],
     async stop() {
       // Step down first (releasing the leases), so another pod takes the timed jobs over at once.
-      await Promise.allSettled(leaders.map((loop) => loop.stop()))
+      await Promise.allSettled([...leaders.map((loop) => loop.stop()), recommendations?.stop()])
       launches.shutdown()
       webhooks.stop()
       tokenPush.stop()
