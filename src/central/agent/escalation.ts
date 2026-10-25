@@ -142,7 +142,7 @@ export class Escalations {
   private async open(escalation: Escalation, holder: Party): Promise<Decision> {
     const { userID } = escalation
     const { decisions, counters } = this.deps
-    const open = (await decisions.list(userID, { state: "open" })).filter((d) => d.action).length
+    const open = (await decisions.list(userID, { state: "open" })).filter((d) => d.action?.kind === "permission").length
     if (open >= ESCALATIONS_OPEN_MAX) throw rateLimited(`At most ${ESCALATIONS_OPEN_MAX} escalations wait for the user at once`, 60)
     const opened = await counters.incr(`escalations:${userID}:${partyKey(holder)}`, HOUR_MS)
     if (opened > ESCALATIONS_PER_HOLDER_HOUR) throw rateLimited(`At most ${ESCALATIONS_PER_HOLDER_HOUR} escalations an hour`, 3600)
