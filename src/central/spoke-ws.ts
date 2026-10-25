@@ -16,10 +16,16 @@
 // Draining (design §10, drain()): new upgrades are refused with 503, new requests to this pod's connections fail as
 // offline, and each connection gets bye{reason:"draining", retryAfterMs} once its requests in flight are answered
 // (at the deadline at the latest), so it reconnects (to another pod) after a short jittered delay.
+// Harness events (phase 7): a spoke of a harness other than OpenCode may send only the harness event subset
+// (harnessEventProblem); an event outside it, or with invalid data, is dropped and logged, never fatal. OpenCode
+// spokes' events are not checked this way (their native shapes are the hub's own).
 import type { Server, ServerWebSocket, WebSocketHandler } from "bun"
 import {
   encode,
+  harnessEventProblem,
+  helloHarness,
   helloRole,
+  isOpenCodeHello,
   HUB_FEATURES,
   MAX_FRAME,
   NODE_ROLE,
@@ -99,6 +105,8 @@ export interface SpokeSocketData {
   expiryTimer?: ReturnType<typeof setTimeout>
   /** Draining: the bye was sent. */
   drained?: boolean
+  /** A non-OpenCode spoke's harness (set with the hello): its events are checked against the harness subset. */
+  checkedHarness?: string
 }
 
 type Socket = ServerWebSocket<SpokeSocketData>
@@ -571,6 +579,7 @@ export class SpokeHub {
       clearTimeout(ws.data.helloTimer)
       ws.data.ready = true
       ws.data.role = "spoke"
+      if (!isOpenCodeHello(message)) ws.data.checkedHarness = helloHarness(message).harness
       registry.connect(connID, { id: ws.data.machineID, name: ws.data.machineName }, message, launch ? { launchID: launch.launchID } : {})
       this.registerConn(ws)
       void this.options.store.touchMachine(ws.data.machineID)
@@ -587,8 +596,15 @@ export class SpokeHub {
         return this.resendConversations(connID)
       case "terminals":
         return registry.setTerminals(connID, message)
-      case "event":
+      case "event": {
+        const problem = ws.data.checkedHarness === undefined ? undefined : harnessEventProblem(message.event)
+        if (problem) {
+          const type = typeof message.event.type === "string" ? message.event.type.slice(0, 100) : "?"
+          console.warn(`[hub] dropped a ${ws.data.checkedHarness} spoke's ${type} event (${connID}): ${problem}`)
+          return
+        }
         return registry.observe(connID, message.event)
+      }
       case "req":
         void this.answer(ws, message)
         return

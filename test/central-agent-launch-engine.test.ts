@@ -202,13 +202,14 @@ function world(options: { deps?: Partial<LaunchEngineDeps>; service?: boolean; l
   }
   const prompts: { sessionID: string; text: string; resetHops: boolean }[] = []
   const stops: string[] = []
-  let promptOutcome: "turn" | "steer" | "offline" = "turn"
+  let promptOutcome: "turn" | "steer" | "offline" | "unsupported" = "turn"
   const turn = deferred<any>()
   const actions = {
     async prompt(input: { sessionID: string; text: string; resetHops: boolean }): Promise<any> {
       prompts.push({ sessionID: input.sessionID, text: input.text, resetHops: input.resetHops })
       primeOrder.push(`prompt:${input.sessionID}`)
       if (promptOutcome === "offline") return { outcome: "offline" }
+      if (promptOutcome === "unsupported") return { outcome: "unsupported", feature: "turn", harness: "claude-code" }
       if (promptOutcome === "steer") return { outcome: "done", mode: "steer", inboxID: "i1" }
       return { outcome: "done", mode: "turn", result: turn.promise }
     },
@@ -262,7 +263,7 @@ function world(options: { deps?: Partial<LaunchEngineDeps>; service?: boolean; l
     deps,
     engine,
     features,
-    setPrompt(outcome: "turn" | "steer" | "offline") {
+    setPrompt(outcome: "turn" | "steer" | "offline" | "unsupported") {
       promptOutcome = outcome
     },
     setService(conn: string | undefined, harness = "opencode") {
@@ -513,6 +514,17 @@ describe("provisioning failures", () => {
     await w.engine.start()
     const launch = await launched(w)
     expect(launch).toMatchObject({ state: "ended", outcome: "failed" })
+    w.engine.shutdown()
+  })
+
+  test("a spoke that cannot run the prompt's turn fails the launch, naming the feature and harness", async () => {
+    const w = world()
+    w.setPrompt("unsupported")
+    w.connectNode()
+    await w.engine.start()
+    const launch = await launched(w)
+    expect(launch).toMatchObject({ state: "ended", outcome: "failed" })
+    expect(launch.reason).toContain("The claude-code spoke does not support turn")
     w.engine.shutdown()
   })
 })

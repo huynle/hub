@@ -2,7 +2,10 @@
 // tree runs, else a locked turn) and stop it. The console routes and the agent act verbs both call these; each
 // returns an outcome instead of an HTTP response, so every caller maps it to its own errors (the console answers
 // gone with 409, the agent API with 410) and adds its own checks (grants, audit) around the same execution.
-import type { FormAnswer, PermissionDecision, PromptImage, ResultFor, TurnResult } from "../protocol"
+// Core ops are features (CORE_OPS): an OpenCode spoke serves them all, a spoke of another harness only those it
+// announced. Each action checks the feature it sends (stop; turn or steer; permission; form) and answers
+// unsupported {feature, harness} instead of sending an op the spoke would not serve.
+import type { CoreOp, FormAnswer, PermissionDecision, PromptImage, ResultFor, TurnResult } from "../protocol"
 import { randomUUID } from "node:crypto"
 import { MemoryKv } from "./backend/memory-kv"
 import type { Kv, Locks } from "./backend/types"
@@ -12,7 +15,7 @@ import type { SpokeHub } from "./spoke-ws"
 /** The registry calls the executor needs (a fake in tests). */
 export type ActionRegistry = Pick<
   Registry,
-  "permissionTargets" | "dropPermission" | "formTargets" | "dropForm" | "owner" | "running" | "exposed" | "beginTurn" | "cancelTurns"
+  "permissionTargets" | "dropPermission" | "formTargets" | "dropForm" | "owner" | "running" | "exposed" | "beginTurn" | "cancelTurns" | "supports" | "harnessOf"
 >
 export type ActionSpokes = Pick<SpokeHub, "request">
 
@@ -41,6 +44,12 @@ export interface Gone {
 /** No connected process owns the session. */
 export interface Offline {
   readonly outcome: "offline"
+}
+/** The process that would run the action does not serve its core op (`feature`); `harness` is that process's. */
+export interface Unsupported {
+  readonly outcome: "unsupported"
+  readonly feature: CoreOp
+  readonly harness: string
 }
 
 export interface PermissionInput {
@@ -83,12 +92,17 @@ export interface Stopped extends Done {
 }
 
 export interface Actions {
-  answerPermission(input: PermissionInput): Promise<Done | Gone>
-  answerForm(input: FormInput): Promise<Done | Gone>
-  /** Throws BusyError when another turn holds the lock. */
-  prompt(input: PromptInput): Promise<Offline | Steered | TurnStarted>
-  stop(sessionID: string): Promise<Offline | Stopped>
+  /** Unsupported when no process holding the request serves "permission". */
+  answerPermission(input: PermissionInput): Promise<Done | Gone | Unsupported>
+  /** Unsupported when no process holding the form serves "form". */
+  answerForm(input: FormInput): Promise<Done | Gone | Unsupported>
+  /** Throws BusyError when another turn holds the lock. Unsupported when the owner lacks steer (running) or turn (idle). */
+  prompt(input: PromptInput): Promise<Offline | Steered | TurnStarted | Unsupported>
+  stop(sessionID: string): Promise<Offline | Stopped | Unsupported>
 }
+
+/** How callers word an Unsupported outcome (as the read routes do). */
+export const unsupportedMessage = ({ feature, harness }: Pick<Unsupported, "feature" | "harness">): string => `The ${harness} spoke does not support ${feature}`
 
 const DONE: Done = { outcome: "done" }
 const GONE: Gone = { outcome: "gone" }
@@ -100,6 +114,13 @@ const ANSWERED_MS = 10 * 60_000
 const answeredKey = (requestID: string) => `action:answered:${requestID}`
 
 export function createActions({ registry, spokes, humanTurn, kv = new MemoryKv(), turns }: ActionDeps): Actions {
+  const unsupported = (connID: string, feature: CoreOp): Unsupported | undefined =>
+    registry.supports(connID, feature) ? undefined : { outcome: "unsupported", feature, harness: registry.harnessOf(connID) ?? "unknown" }
+  /** The targets serving `feature`, or unsupported when there are targets but none serves it. */
+  const serving = <T extends { readonly connID: string }>(all: readonly T[], feature: CoreOp): T[] | Unsupported => {
+    const targets = all.filter((t) => registry.supports(t.connID, feature))
+    return targets.length || !all.length ? targets : unsupported(all[0]!.connID, feature)!
+  }
   /** Takes the session's cluster-wide turn lease (BusyError when another pod's turn holds it); resolves its release. */
   const shareTurn = async (sessionID: string): Promise<() => void> => {
     if (!turns) return () => {}
@@ -111,7 +132,8 @@ export function createActions({ registry, spokes, humanTurn, kv = new MemoryKv()
   return {
     async answerPermission({ rootID, requestID, decision, message }) {
       if ((await kv.get(answeredKey(requestID))) !== undefined) return GONE
-      const targets = registry.permissionTargets(rootID, requestID)
+      const targets = serving(registry.permissionTargets(rootID, requestID), "permission")
+      if (!Array.isArray(targets)) return targets
       if (!targets.length) return GONE
       // Requests answered through the hub (on any pod) are gone for a second answer, even before (or without)
       // permission.replied; claimed before sending, so two pods racing never both send it.
@@ -135,7 +157,8 @@ export function createActions({ registry, spokes, humanTurn, kv = new MemoryKv()
     },
 
     async answerForm(input) {
-      const targets = registry.formTargets(input.rootID, input.formID)
+      const targets = serving(registry.formTargets(input.rootID, input.formID), "form")
+      if (!Array.isArray(targets)) return targets
       if (!targets.length) return GONE
       let failure: unknown
       for (const target of targets) {
@@ -157,10 +180,13 @@ export function createActions({ registry, spokes, humanTurn, kv = new MemoryKv()
     async prompt({ sessionID, text, images, resetHops }) {
       const connID = registry.owner(sessionID)
       if (!connID) return OFFLINE
+      const steer = registry.running(sessionID)
+      const lacking = unsupported(connID, steer ? "steer" : "turn")
+      if (lacking) return lacking
       const attached = images?.length ? { images: [...images] } : {}
       if (resetHops) await humanTurn(sessionID)
       // While anything in the tree runs, typed input redirects the current work instead of queueing.
-      if (registry.running(sessionID)) {
+      if (steer) {
         const { inboxID } = await spokes.request(connID, { op: "steer", sessionID, text, ...attached })
         return { outcome: "done", mode: "steer", inboxID }
       }
@@ -197,6 +223,8 @@ export function createActions({ registry, spokes, humanTurn, kv = new MemoryKv()
     async stop(sessionID) {
       const connID = registry.owner(sessionID)
       if (!connID) return OFFLINE
+      const lacking = unsupported(connID, "stop")
+      if (lacking) return lacking
       const result = await spokes.request(connID, { op: "stop", sessionID })
       registry.cancelTurns(sessionID)
       return { outcome: "done", result }

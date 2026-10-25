@@ -43,7 +43,7 @@ import type { ModelSelection, NodeLaunchPhase, NodeLaunchReport, NodeRequest, No
 import type { Clock, Counters, Locks, StateStore, Timers } from "../backend/types"
 import type { HubLaunches } from "../config"
 import type { Registry } from "../registry"
-import type { Actions } from "../actions"
+import { type Actions, unsupportedMessage } from "../actions"
 import type { Decisions } from "./decisions"
 import type { Delivery } from "./delivery"
 import type { Directory } from "./directory"
@@ -776,6 +776,7 @@ export class LaunchEngine {
       await this.updateWork(userID, launch.id, { prompted: true })
       const prompted = await actions.prompt({ sessionID, text: spec.prompt, resetHops: false })
       if (prompted.outcome === "offline") throw new Error("The session went offline before its prompt")
+      if (prompted.outcome === "unsupported") throw new Error(unsupportedMessage(prompted))
       if (prompted.mode === "steer") this.sawWorking(userID, launch.id)
       else void prompted.result.then(
         () => this.sawWorking(userID, launch.id),
