@@ -24,13 +24,19 @@ describe("planDelivery", () => {
     expect(planDelivery({ wake: true, meta: meta({ kind: "ask", delivery: "queue" }) }, busy)).toMatchObject({ delivery: "queue", delivered: "queued" })
   })
 
-  test("wake:false admits without waking and reports queued, idle or busy", () => {
-    expect(planDelivery({ wake: false, meta: meta() }, idle)).toEqual({ delivery: "queue", resume: false, delivered: "queued" })
+  // A queued item gets its own model call once a turn ends (it wakes the session); a steered one without resume
+  // waits for the next turn and arrives before its prompt (OpenCode 2.1.4, test/spoke-deliver.it.test.ts).
+  test("wake:false admits without waking (steer, no resume) and reports queued, idle or busy", () => {
+    expect(planDelivery({ wake: false, meta: meta() }, idle)).toEqual({ delivery: "steer", resume: false, delivered: "queued" })
     expect(planDelivery({ wake: false, meta: meta({ kind: "ask" }) }, busy)).toEqual({ delivery: "steer", resume: false, delivered: "queued" })
   })
 
+  test("wake:false keeps the hub's explicit delivery choice", () => {
+    expect(planDelivery({ wake: false, meta: meta({ delivery: "queue" }) }, idle)).toEqual({ delivery: "queue", resume: false, delivered: "queued" })
+  })
+
   test("a subagent session is never woken", () => {
-    expect(planDelivery({ wake: true, meta: meta() }, { ...idle, subagent: true })).toEqual({ delivery: "queue", resume: false, delivered: "queued" })
+    expect(planDelivery({ wake: true, meta: meta() }, { ...idle, subagent: true })).toEqual({ delivery: "steer", resume: false, delivered: "queued" })
   })
 
   test("an open form retains the message (OpenCode holds it until the form is answered)", () => {

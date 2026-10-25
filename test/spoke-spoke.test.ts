@@ -1619,7 +1619,7 @@ describe("deliver", () => {
     host.push(created("ses_a"))
     await until(() => lastSessions(server)?.sessions.length === 1)
     expect(await server.request(deliver({ wake: false }))).toMatchObject({ ok: true, result: { delivered: "queued" } })
-    expect(calls.synthetic[0]).toMatchObject({ resume: false, delivery: "queue" })
+    expect(calls.synthetic[0]).toMatchObject({ resume: false, delivery: "steer" })
   })
 
   test("a subagent session is never woken", async () => {
