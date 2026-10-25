@@ -46,7 +46,11 @@ export type EngineNodes = { list(ownerID?: string): NodeView[]; forMachine(machi
 export interface EngineNodeOps {
   requestNode<R extends NodeRequest>(connID: string, req: R): Promise<NodeResultFor[R["op"]]>
 }
-export type EngineRegistry = Pick<Registry, "serviceFor" | "supports" | "connTenant" | "hasSession" | "idle" | "session" | "subscribe" | "onSessions">
+export type EngineRegistry = Pick<Registry, "serviceFor" | "supports" | "connTenant" | "hasSession" | "idle" | "session" | "subscribe" | "onSessions" | "launchConn">
+/** Mints the launch-bound token (hlt1) a sandboxed harness connects back with (LaunchTokens). */
+export interface EngineLaunchTokens {
+  mint(machineID: string, launchID: string): Promise<{ readonly token: string; readonly exp: number } | undefined>
+}
 /** Spoke ops (SpokeHub.request). */
 export interface EngineSpokes {
   request(connID: string, req: ServerRequest): Promise<unknown>
@@ -74,6 +78,10 @@ export interface LaunchEngineDeps {
   readonly delivery: EngineDelivery
   readonly decisions: EngineDecisions
   readonly actions: EngineActions
+  /** Launch-bound tokens for sandboxed (openshell) launches; without them (or hubURL) such launches fail. */
+  readonly launchTokens?: EngineLaunchTokens
+  /** The hub's public URL, handed to the node at start (the node rewrites a loopback URL for its sandbox). */
+  readonly hubURL?: string
   /** Users that may have launches (restart recovery and the placement sweep). */
   readonly users: () => Promise<readonly string[]> | readonly string[]
   readonly now?: Clock
@@ -99,6 +107,8 @@ export interface LaunchWork {
   readonly seenWorking?: boolean
   /** The launch ended while its node was away: the cleanup policy to apply when it comes back. */
   readonly cleanup?: CleanupPolicy
+  /** The node was asked to start the launch's harness (openshell): it must be stopped at the end. */
+  readonly started?: boolean
 }
 
 /** How long a session must stay idle (or asking) with nothing changing before its launch ends. */
@@ -119,6 +129,9 @@ class StopRequested extends Error {}
 
 /** The node is gone (or never came back): the launch is lost. */
 class LostError extends Error {}
+
+/** How long the engine waits for a started sandbox harness to connect back (its launch-bound connection). */
+export const LAUNCH_CONNECT_MS = 120_000
 
 /** How long a restarted hub waits for a provisioning launch's node to (re)connect or let the launch go. */
 export const NODE_RETURN_MS = 5 * 60_000
@@ -189,6 +202,7 @@ export function placementNodes(nodes: Pick<EngineNodes, "list">): { nodes(userID
         workspaceRoots: node.workspaceRoots,
         draining: node.draining,
         launchIDs: node.launches.map((l) => l.launchID),
+        features: node.features,
       })),
   }
 }
@@ -380,7 +394,9 @@ export class LaunchEngine {
       await this.putWork(userID, launch.id, { fence: placed.fence })
       const workspace = await this.prepare(userID, launch)
       checkpoint()
-      const sessionID = await this.create(userID, launch, workspace)
+      const connID = await this.harnessConn(userID, launch, workspace)
+      checkpoint()
+      const sessionID = await this.create(userID, launch, workspace, connID)
       checkpoint()
       await this.identify(userID, launch, sessionID, checkpoint)
     })
@@ -408,7 +424,9 @@ export class LaunchEngine {
         workspace = await this.prepare(userID, launch)
         checkpoint()
       }
-      const sessionID = await this.create(userID, launch, workspace)
+      const connID = await this.harnessConn(userID, launch, workspace)
+      checkpoint()
+      const sessionID = await this.create(userID, launch, workspace, connID)
       checkpoint()
       await this.identify(userID, launch, sessionID, checkpoint)
     })
@@ -540,10 +558,50 @@ export class LaunchEngine {
     return workspace
   }
 
-  private async create(userID: string, launch: Launch, workspace: PreparedWorkspace): Promise<string> {
-    const { registry, spokes } = this.deps
+  /**
+   * The connection that creates the launch's session: the machine's service spoke (host), or for openshell the
+   * launch-bound connection of the harness the node starts in its sandbox.
+   */
+  private async harnessConn(userID: string, launch: Launch, workspace: PreparedWorkspace): Promise<string> {
+    const { registry } = this.deps
+    if (launch.spec.runtime.kind === "openshell") return this.startHarness(userID, launch, workspace)
     const connID = registry.serviceFor(launch.machineID!)
     if (connID === undefined || !registry.supports(connID, "launch")) throw new Error("The machine has no connected service spoke with launch")
+    return connID
+  }
+
+  /** Mints the launch's token, has the node start the harness with it and waits for its launch-bound connection. */
+  private async startHarness(userID: string, launch: Launch, workspace: PreparedWorkspace): Promise<string> {
+    const { launchTokens, hubURL, nodeOps, nodes } = this.deps
+    if (!launchTokens || hubURL === undefined) throw new Error("This hub cannot start sandboxed launches")
+    const node = nodes.forMachine(launch.machineID!)
+    if (!node) throw new Error("The node is not connected")
+    const minted = await launchTokens.mint(launch.machineID!, launch.id)
+    if (!minted) throw new Error("The hub could not mint the launch token")
+    await this.updateWork(userID, launch.id, { started: true })
+    await nodeOps.requestNode(node.connID, { op: "start", launchID: launch.id, workspace, harness: launch.spec.harness, hub: { url: hubURL, token: minted.token } })
+    return this.waitForLaunchConn(launch.id)
+  }
+
+  /** The launch's launch-bound connection, now or once it connects. */
+  private waitForLaunchConn(launchID: string): Promise<string> {
+    const { registry } = this.deps
+    const now = registry.launchConn(launchID)
+    if (now !== undefined) return Promise.resolve(now)
+    return new Promise((resolve) => {
+      const off = registry.subscribe((message) => {
+        if (message.type !== "catalog") return
+        const connID = registry.launchConn(launchID)
+        if (connID === undefined) return
+        off()
+        resolve(connID)
+      })
+    })
+  }
+
+  private async create(userID: string, launch: Launch, workspace: PreparedWorkspace, connID: string): Promise<string> {
+    const { registry, spokes } = this.deps
+    if (!registry.supports(connID, "launch")) throw new Error("The launch's spoke does not create launch sessions")
     const { spec } = launch
     const result = (await spokes.request(connID, {
       op: "create",
