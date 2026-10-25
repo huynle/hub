@@ -25,9 +25,11 @@ async function stdin(): Promise<string> {
   }
 }
 
-// Only `watch` and `mcp` run until interrupted: Ctrl-C ends them cleanly (exit 0); other commands keep the default.
+// Only `watch`, `mcp` and `node run` run until interrupted: SIGINT/SIGTERM end them cleanly (exit 0; the service
+// units stop the node with SIGTERM); other commands keep the default.
+const nodeRun = argv[0] === "node" && argv[1] === "run"
 const controller = new AbortController()
-if (argv[0] === "watch" || argv[0] === "mcp") for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => controller.abort())
+if (argv[0] === "watch" || argv[0] === "mcp" || nodeRun) for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => controller.abort())
 
 process.exitCode = await run(argv, {
   env: process.env,
@@ -41,3 +43,5 @@ process.exitCode = await run(argv, {
 })
 // A signal ends `hub mcp` with its stdin still open; let go of it so the process can exit.
 if (argv[0] === "mcp") process.stdin.destroy()
+// Nothing else (sockets, timers) may keep a stopped node alive.
+if (nodeRun) process.exit()
