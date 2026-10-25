@@ -3,6 +3,7 @@
 import type { WebAssets } from "./assets"
 import { PAIR_TTL_MS } from "./auth"
 import { isLoopbackURL } from "../loopback"
+import { ClusterUnavailableError } from "./backend"
 import { loadCentralConfig, type CentralConfig } from "./config"
 import { startCentral } from "./http"
 
@@ -96,7 +97,15 @@ export function runHub(options: RunHubOptions): void {
   }
   for (const warning of loaded.warnings) console.warn(`[hub] warning: ${warning}`)
   const config = loaded.config
-  const central = startCentral({ config, web: options.web, version: options.version })
+  let central: ReturnType<typeof startCentral>
+  try {
+    central = startCentral({ config, web: options.web, version: options.version })
+  } catch (cause) {
+    // Cluster mode in a build without it: one clear line (it never names the database or Valkey URL).
+    if (!(cause instanceof ClusterUnavailableError)) throw cause
+    console.error(`[hub] ${cause.message}`)
+    process.exit(1)
+  }
 
   console.log(`[hub] Hub ${options.version} listening on ${central.url} (public URL ${central.publicURL})`)
   console.log(`[hub] state: ${config.stateDir}`)

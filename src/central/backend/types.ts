@@ -166,6 +166,28 @@ export interface Locks {
   holder(key: string): Promise<Lease | undefined>
 }
 
+// ---- Kv ---------------------------------------------------------------------------------------------------
+
+/** `set` options: `px` expires the key after that many milliseconds; `nx` writes only when the key is absent. */
+export interface KvSetOptions {
+  readonly px?: number
+  readonly nx?: boolean
+}
+
+/**
+ * Short-lived shared strings (pairing and sign-in codes, OIDC state, directory entries): SET [PX] [NX], GET,
+ * GETDEL and DEL in a cluster. Values are strings; callers encode structured data themselves.
+ */
+export interface Kv {
+  /** Writes the value (dropping any earlier expiry unless `px` is given); false when `nx` and the key exists. */
+  set(key: string, value: string, options?: KvSetOptions): Promise<boolean>
+  get(key: string): Promise<string | undefined>
+  /** Reads and removes the key in one step (a one-time code is redeemed once). */
+  getdel(key: string): Promise<string | undefined>
+  /** Removes the key; true when it existed. */
+  del(key: string): Promise<boolean>
+}
+
 // ---- Catalog ----------------------------------------------------------------------------------------------
 
 export type CatalogValue = Record<string, unknown>
@@ -212,4 +234,5 @@ export interface Backends {
   readonly counters: Counters
   readonly locks: Locks
   readonly catalog: Catalog
+  readonly kv: Kv
 }

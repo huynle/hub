@@ -2,7 +2,7 @@
 // optional hub config file (~/.config/hub/hub.json or $HUB_CONFIG) over built-in defaults. The file's speech
 // settings sit between the phone's saved settings and the env (see speech/settings.ts).
 import { existsSync, readFileSync, statSync } from "node:fs"
-import { homedir } from "node:os"
+import { homedir, hostname } from "node:os"
 import path from "node:path"
 import { hubEnv } from "../env"
 import { isLoopbackHost } from "../loopback"
@@ -66,6 +66,27 @@ export interface CentralConfig {
   readonly launchCaps?: HubLaunches
   /** hub.json `agents.webhooks.allowPrivate`: webhooks may target http, loopback, private and local hosts (admin opt-in). */
   readonly webhooksAllowPrivate?: true
+  /** Cluster mode (design §9): set only when HUB_DATABASE_URL and HUB_VALKEY_URL (or hub.json cluster) are. */
+  readonly cluster?: ClusterConfig
+}
+
+/**
+ * Cluster mode: shared state in Postgres, cross-pod messages and short-lived data in Valkey. The URLs hold
+ * credentials: they are non-enumerable (never serialized or printed with the config) and never put in messages.
+ */
+export interface ClusterConfig {
+  /** This pod's id (HUB_POD_ID, default the hostname): RPC topics and leases name it. */
+  readonly podID: string
+  /** postgres:// or postgresql:// (non-enumerable). */
+  readonly databaseURL: string
+  /** redis:// or rediss:// (non-enumerable). */
+  readonly valkeyURL: string
+}
+
+/** hub.json `cluster` (env HUB_DATABASE_URL / HUB_VALKEY_URL win). */
+export interface HubCluster {
+  readonly database?: string
+  readonly valkey?: string
 }
 
 /** hub.json `agents.launches`: per-user launch caps (design §6.2, §7). */
@@ -101,11 +122,13 @@ export interface HubFile {
   readonly speech?: StoredSpeech
   readonly auth?: HubAuth
   readonly agents?: HubAgents
+  readonly cluster?: HubCluster
 }
 
 type Env = Readonly<Record<string, string | undefined>>
 
-const HUB_KEYS = new Set(["host", "port", "publicURL", "stateDir", "speech", "auth", "agents"])
+const HUB_KEYS = new Set(["host", "port", "publicURL", "stateDir", "speech", "auth", "agents", "cluster"])
+const CLUSTER_KEYS = ["database", "valkey"] as const
 const AGENTS_KEYS = new Set(["never", "launches", "webhooks"])
 const WEBHOOK_KEYS = new Set(["allowPrivate"])
 const LAUNCH_CAP_KEYS = ["maxQueued", "maxActive", "perHour"] as const
@@ -198,6 +221,7 @@ export function readHubFile(file: string, home: string = homedir()): { file?: Hu
   }
   if (raw.auth !== undefined) hub.auth = readHubAuth(raw.auth, file, warnings, fail)
   if (raw.agents !== undefined) hub.agents = readHubAgents(raw.agents, file, warnings, fail)
+  if (raw.cluster !== undefined) hub.cluster = readHubCluster(raw.cluster, file, warnings, fail)
   if (raw.speech !== undefined) {
     if (!isObj(raw.speech)) fail("speech must be an object with stt and/or tts")
     const speech = { ...(raw.speech as Record<string, unknown>) }
@@ -241,6 +265,38 @@ function readHubAuth(raw: unknown, file: string, warnings: string[], fail: (mess
     warnings.push(`${file} is readable by other users, so its auth.clientSecret is ignored. Fix it with: chmod 600 ${file}`)
   }
   return auth
+}
+
+/** hub.json `cluster`. Values are never echoed; URLs with a password are dropped from a file others can read. */
+function readHubCluster(raw: unknown, file: string, warnings: string[], fail: (message: string) => never): HubCluster {
+  if (!isObj(raw)) fail("cluster must be an object with database and valkey URLs")
+  const input = raw as Record<string, unknown>
+  for (const key of Object.keys(input)) {
+    if (!(CLUSTER_KEYS as readonly string[]).includes(key)) warnings.push(`${file}: unknown key "cluster.${key}" ignored`)
+  }
+  const shared = (statSync(file).mode & 0o044) !== 0
+  const cluster: { -readonly [K in keyof HubCluster]: HubCluster[K] } = {}
+  for (const key of CLUSTER_KEYS) {
+    const value = input[key]
+    if (value === undefined) continue
+    if (typeof value !== "string" || !value.trim()) fail(`cluster.${key} must be a non-empty URL string`)
+    const url = (value as string).trim()
+    if (shared && hasPassword(url)) {
+      warnings.push(`${file} is readable by other users, so its cluster.${key} is ignored (it holds a password). Fix it with: chmod 600 ${file}`)
+      continue
+    }
+    cluster[key] = url
+  }
+  return cluster
+}
+
+function hasPassword(url: string): boolean {
+  try {
+    return new URL(url).password !== ""
+  } catch {
+    // Unparseable: assume the worst; centralConfig rejects it anyway.
+    return true
+  }
 }
 
 function readHubAgents(raw: unknown, file: string, warnings: string[], fail: (message: string) => never): HubAgents {
@@ -337,6 +393,53 @@ function authConfig(env: Env, file: HubAuth = {}): AuthConfig {
   return auth as unknown as OidcConfig
 }
 
+const POD_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+const DATABASE_KEY = "HUB_DATABASE_URL (cluster.database)"
+const VALKEY_KEY = "HUB_VALKEY_URL (cluster.valkey)"
+
+/** The URL when its scheme is one of `protocols`; errors name the key, never the value (it holds credentials). */
+function serviceURL(raw: string, name: string, protocols: readonly string[]): string {
+  let protocol: string
+  try {
+    protocol = new URL(raw).protocol
+  } catch {
+    throw new Error(`${name} is not a valid URL`)
+  }
+  if (!protocols.includes(protocol)) throw new Error(`${name} must be a ${protocols.map((p) => `${p}//`).join(" or ")} URL`)
+  return raw
+}
+
+/**
+ * Cluster settings from env over hub.json, or undefined (single process). Both URLs or neither; cluster mode
+ * requires HUB_TOKEN_KEYS (keys every pod shares) and OIDC sign-in (pairing codes and the local owner are
+ * single-process). Throws without echoing the URLs.
+ */
+function clusterConfig(env: Env, auth: AuthConfig, file: HubCluster = {}): ClusterConfig | undefined {
+  const database = env.HUB_DATABASE_URL?.trim() || file.database
+  const valkey = env.HUB_VALKEY_URL?.trim() || file.valkey
+  if (!database && !valkey) return undefined
+  if (!database || !valkey) {
+    throw new Error(`${DATABASE_KEY} and ${VALKEY_KEY} must be set together for cluster mode; only ${database ? DATABASE_KEY : VALKEY_KEY} is set`)
+  }
+  const databaseURL = serviceURL(database, DATABASE_KEY, ["postgres:", "postgresql:"])
+  const valkeyURL = serviceURL(valkey, VALKEY_KEY, ["redis:", "rediss:"])
+  if (!env.HUB_TOKEN_KEYS?.trim()) {
+    throw new Error("Cluster mode requires HUB_TOKEN_KEYS: token signing keys every pod shares (the token-keys.json shape)")
+  }
+  if (auth.mode !== "oidc") {
+    throw new Error("Cluster mode requires HUB_AUTH=oidc: pairing mode (pairing codes, the local owner) works in a single process only")
+  }
+  const podID = env.HUB_POD_ID?.trim() || hostname()
+  if (!POD_ID.test(podID)) {
+    throw new Error(`HUB_POD_ID must be 1-128 letters, digits, '.', '_' or '-' (starting with a letter or digit), got ${JSON.stringify(podID)}`)
+  }
+  const cluster = { podID }
+  // Getters: printed as nothing, skipped by JSON.stringify.
+  Object.defineProperty(cluster, "databaseURL", { get: () => databaseURL, enumerable: false })
+  Object.defineProperty(cluster, "valkeyURL", { get: () => valkeyURL, enumerable: false })
+  return cluster as ClusterConfig
+}
+
 export function centralConfig(rawEnv: Env = process.env, home: string = homedir(), file: HubFile = {}): CentralConfig {
   const env = hubEnv(rawEnv)
   const host = env.HUB_HOST || file.host || "127.0.0.1"
@@ -347,6 +450,8 @@ export function centralConfig(rawEnv: Env = process.env, home: string = homedir(
   if (!/^https?:\/\/[^\s/]+$/.test(publicURL)) {
     throw new Error(`HUB_PUBLIC_URL must be an http(s) origin without a path, got ${JSON.stringify(publicURL)}`)
   }
+  const auth = authConfig(env, file.auth)
+  const cluster = clusterConfig(env, auth, file.cluster)
   return {
     host,
     port,
@@ -362,10 +467,11 @@ export function centralConfig(rawEnv: Env = process.env, home: string = homedir(
     // Push services want a contact: an https URL or mailto. The public URL works for hosted hubs.
     vapidSubject: env.HUB_VAPID_SUBJECT || (publicURL.startsWith("https://") ? publicURL : "mailto:hub@localhost"),
     ...(file.speech ? { speech: file.speech } : {}),
-    auth: authConfig(env, file.auth),
+    auth,
     agentsNever: [...(file.agents?.never ?? [])],
     ...(file.agents?.launches ? { launchCaps: { ...file.agents.launches } } : {}),
     ...(file.agents?.webhooks?.allowPrivate === true ? { webhooksAllowPrivate: true as const } : {}),
+    ...(cluster ? { cluster } : {}),
   }
 }
 

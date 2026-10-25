@@ -7,7 +7,7 @@ import type { Clock, Counters, Lease, Locks } from "./types"
 const SWEEP_EVERY = 1000
 
 /** A map whose entries expire at `expiresAt`; reads drop expired entries. */
-class ExpiringMap<V extends { readonly expiresAt: number }> {
+export class ExpiringMap<V extends { readonly expiresAt: number }> {
   private readonly entries = new Map<string, V>()
   private writes = 0
 
