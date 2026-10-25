@@ -1,0 +1,12 @@
+{
+  "name": "@huynle/hub-sdk",
+  "version": "0.6.1",
+  "private": true,
+  "description": "Typed client for the hub's /api/agent (internal; shipped inside @huynle/hub, not published on its own).",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./package.json": "./package.json"
+  }
+}

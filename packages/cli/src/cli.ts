@@ -1,10 +1,12 @@
-// The hub CLI (`hub` / `hubctl`, design §2.2, §4, §8): reads and names sessions through the hub's /api/agent.
+// The hub CLI (`hub` / `hubctl`, design §2.2, §4, §8): reads and names sessions through the hub's /api/agent, with
+// the hub SDK (packages/sdk) as its client.
 // `run(argv, io)` is the whole program (main.ts wires it to the process); it returns the exit code.
+import type { HubClient } from "../../sdk/src/index.ts"
 import pkg from "../package.json" with { type: "json" }
 import { parse, str, UsageError, type CommandSpec, type Parsed } from "./args"
 import { loginFile, readLogin, removeLogin, resolveCredentials, writeLogin, type Credentials, type Env } from "./credentials"
-import { atName, logText, whoamiText, type Actor, roleText, sessionsText, showText, statusText, whoText, type SessionView } from "./format"
-import { call, CliError, EXIT } from "./http"
+import { atName, logText, whoamiText, type Actor, roleText, sessionsText, showText, statusText, whoText } from "./format"
+import { CliError, EXIT, withHub } from "./http"
 import { watch } from "./watch"
 
 export { EXIT } from "./http"
@@ -53,6 +55,8 @@ interface Context {
   readonly parsed: Parsed
   readonly json: boolean
   credentials(): Credentials
+  /** Calls the hub with the resolved credentials (SDK errors become CliErrors). */
+  hub<T>(use: (hub: HubClient) => Promise<T>): Promise<T>
 }
 
 interface Command extends CommandSpec {
@@ -61,9 +65,6 @@ interface Command extends CommandSpec {
 
 const out = (io: Io, text: string) => io.stdout(text.endsWith("\n") ? text : `${text}\n`)
 const printJSON = (io: Io, value: unknown) => out(io, JSON.stringify(value, null, 2))
-/** A path segment; `@` stays readable (it is valid in a path). */
-const enc = (segment: string) => encodeURIComponent(segment).replace(/%40/g, "@")
-
 
 /** Warns when this shell's OpenCode session is not the one the credential acts as (design §1.3, 31swaq28). */
 function crossCheck(io: Io, actor: Actor | undefined) {
@@ -73,28 +74,20 @@ function crossCheck(io: Io, actor: Actor | undefined) {
   io.stderr(`hub: warning: this shell belongs to OpenCode session ${own}, but the credential acts as ${as}\n`)
 }
 
-/** `?a=1&b=2` from flags (repeatable ones as repeated keys); empty when none are set. */
-function query(pairs: [string, string | string[] | undefined][]): string {
-  const params = new URLSearchParams()
-  for (const [key, value] of pairs) for (const v of Array.isArray(value) ? value : value === undefined ? [] : [value]) params.append(key, v)
-  const text = params.toString()
-  return text ? `?${text}` : ""
-}
-
 /** Prints the raw answer with --json, else its text. */
 const answer = (context: Context, body: unknown, text: (body: any) => string) => (context.json ? printJSON(context.io, body) : out(context.io, text(body)))
 
 const COMMANDS: Record<string, Command> = {
   whoami: {
     async handle(context) {
-      const body = await call<{ actor: Actor; user: { id: string } }>(context.credentials(), "/api/agent/whoami")
+      const body = await context.hub((hub) => hub.whoami())
       answer(context, body, whoamiText)
       crossCheck(context.io, body.actor)
     },
   },
   status: {
     async handle(context) {
-      const body = await call<{ you?: Actor }>(context.credentials(), "/api/agent/status")
+      const body = await context.hub((hub) => hub.status())
       answer(context, body, statusText)
       crossCheck(context.io, body.you)
     },
@@ -103,20 +96,15 @@ const COMMANDS: Record<string, Command> = {
     flags: { project: "string", state: "string", machine: "string", label: "multi" },
     async handle(context) {
       const { flags } = context.parsed
-      const q = query([
-        ["project", str(flags, "project")],
-        ["state", str(flags, "state")],
-        ["machine", str(flags, "machine")],
-        ["label", flags.label as string[] | undefined],
-      ])
-      const body = await call<{ sessions: SessionView[] }>(context.credentials(), `/api/agent/sessions${q}`)
+      const filter = { project: str(flags, "project"), state: str(flags, "state"), machine: str(flags, "machine"), label: flags.label as string[] | undefined }
+      const body = await context.hub((hub) => hub.sessions(filter))
       answer(context, body, (b) => sessionsText(b.sessions ?? []))
     },
   },
   show: {
     args: ["<addr>"],
     async handle(context) {
-      const body = await call(context.credentials(), `/api/agent/sessions/${enc(context.parsed.args[0]!)}`)
+      const body = await context.hub((hub) => hub.show(context.parsed.args[0]!))
       answer(context, body, showText)
     },
   },
@@ -126,7 +114,7 @@ const COMMANDS: Record<string, Command> = {
     async handle(context) {
       const n = str(context.parsed.flags, "n")
       if (n !== undefined && !/^\d+$/.test(n)) throw new UsageError("-n must be a number (1–200)")
-      const body = await call<{ rows: [] }>(context.credentials(), `/api/agent/sessions/${enc(context.parsed.args[0]!)}/log${query([["n", n]])}`)
+      const body = await context.hub((hub) => hub.log(context.parsed.args[0]!, { n }))
       answer(context, body, (b) => logText(b.rows ?? []))
     },
   },
@@ -135,8 +123,8 @@ const COMMANDS: Record<string, Command> = {
     flags: { project: "string", role: "string" },
     async handle(context) {
       const { flags, args } = context.parsed
-      const role = str(flags, "role") ?? args[0]?.replace(/^@@/, "")
-      const body = await call<{ sessions: [] }>(context.credentials(), `/api/agent/who${query([["project", str(flags, "project")], ["role", role]])}`)
+      const role = str(flags, "role") ?? args[0]
+      const body = await context.hub((hub) => hub.who({ project: str(flags, "project"), role }))
       answer(context, body, (b) => whoText(b.sessions ?? []))
     },
   },
@@ -145,10 +133,7 @@ const COMMANDS: Record<string, Command> = {
     flags: { session: "string" },
     async handle(context) {
       const session = str(context.parsed.flags, "session")
-      const body = await call<{ sessionID: string; name: string; alias?: string }>(context.credentials(), "/api/agent/name", {
-        method: "POST",
-        body: { name: context.parsed.args[0]!, ...(session ? { session } : {}) },
-      })
+      const body = await context.hub((hub) => hub.name(context.parsed.args[0]!, { session }))
       answer(context, body, (b) => `${b.sessionID} is ${atName(b.name)}${b.alias ? ` (was ${atName(b.alias)}, kept as an alias for 24 h)` : ""}`)
     },
   },
@@ -158,10 +143,7 @@ const COMMANDS: Record<string, Command> = {
     async handle(context) {
       const { flags, args } = context.parsed
       const session = str(flags, "session")
-      const body = await call<{ sessionID: string; role: string; project?: string; exclusive?: boolean; generation?: number }>(context.credentials(), "/api/agent/roles/claim", {
-        method: "POST",
-        body: { role: args[0]!.replace(/^@@/, ""), ...(flags.exclusive ? { exclusive: true } : {}), ...(session ? { session } : {}) },
-      })
+      const body = await context.hub((hub) => hub.claimRole(args[0]!, { exclusive: flags.exclusive === true, session }))
       answer(context, body, (b) => `${b.sessionID} holds ${roleText(b)}${b.exclusive ? " (exclusive)" : ""}${b.generation !== undefined ? ` generation ${b.generation}` : ""}`)
     },
   },
@@ -170,21 +152,14 @@ const COMMANDS: Record<string, Command> = {
     flags: { session: "string" },
     async handle(context) {
       const session = str(context.parsed.flags, "session")
-      const body = await call<{ sessionID: string; role: string; project?: string }>(context.credentials(), "/api/agent/roles/release", {
-        method: "POST",
-        body: { role: context.parsed.args[0]!.replace(/^@@/, ""), ...(session ? { session } : {}) },
-      })
+      const body = await context.hub((hub) => hub.releaseRole(context.parsed.args[0]!, { session }))
       answer(context, body, (b) => `${b.sessionID} released ${roleText(b)}`)
     },
   },
   watch: {
     flags: { blocked: "bool", session: "string" },
     async handle({ io, parsed, credentials }) {
-      const q = query([
-        ["blocked", parsed.flags.blocked ? "1" : undefined],
-        ["session", str(parsed.flags, "session")],
-      ])
-      await watch(credentials(), `/api/agent/watch${q}`, (line) => io.stdout(line), io.signal)
+      await watch(credentials(), { blocked: parsed.flags.blocked === true, session: str(parsed.flags, "session") }, (line) => io.stdout(line), io.signal)
     },
   },
   login: {
@@ -197,7 +172,7 @@ const COMMANDS: Record<string, Command> = {
       const token = (str(parsed.flags, "token") ?? (io.stdin ? await io.stdin() : "")).trim()
       if (!token) throw new UsageError("needs an app token: --token, or on stdin (create one in the console: Settings → Agents)")
       const credentials: Credentials = { url, token, source: "login" }
-      const body = await call<{ actor: Actor; user: { id: string } }>(credentials, "/api/agent/whoami")
+      const body = await withHub(credentials, (hub) => hub.whoami())
       writeLogin(file, { url, token })
       answer(context, body, (b) => `logged in to ${url}\n${whoamiText(b)}\nsaved in ${file}`)
     },
@@ -274,7 +249,7 @@ export async function run(argv: string[], io: Io): Promise<number> {
       if (!found) throw new CliError(EXIT.unauthorized, "not logged in to a hub", "Run `hub login --url <hub URL>` with an app token, or run inside a hub session's shell (HUB_URL + HUB_SESSION_TOKEN)")
       return found
     }
-    await command.handle({ io, parsed, json, credentials })
+    await command.handle({ io, parsed, json, credentials, hub: (use) => withHub(credentials(), use) })
     return EXIT.ok
   } catch (cause) {
     if (cause instanceof UsageError) {

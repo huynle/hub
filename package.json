@@ -47,6 +47,8 @@
     "src",
     "packages/protocol/src",
     "packages/protocol/package.json",
+    "packages/sdk/src",
+    "packages/sdk/package.json",
     "packages/cli/dist/hub-cli.js",
     "bin",
     "web/dist",
@@ -60,6 +62,7 @@
   ],
   "workspaces": [
     "packages/protocol",
+    "packages/sdk",
     "packages/cli"
   ],
   "engines": {
