@@ -4,12 +4,16 @@
 // open asks to idle recipients, with fake spokes, a fake directory, a fake clock and fake timers.
 import { describe, expect, test } from "bun:test"
 import type { AgentActor } from "../src/central/agent/actor"
-import { Delivery, type DeliveryAlert, type DeliveryRegistry } from "../src/central/agent/delivery"
+import { mkdtempSync } from "node:fs"
+import { tmpdir } from "node:os"
+import path from "node:path"
+import { Delivery, REWAKE_BACKOFF_MS, REWAKE_TICK_MS, type DeliveryAlert, type DeliveryRegistry } from "../src/central/agent/delivery"
 import type { DirectoryEntry, Resolved } from "../src/central/agent/directory"
 import { AgentError } from "../src/central/agent/errors"
 import { HOP_CAP, type MessageLimits } from "../src/central/agent/message-limits"
 import { parseAddress } from "../src/central/agent/names"
 import { MemoryCounters } from "../src/central/backend/memory-counters"
+import { FileStateStore } from "../src/central/backend/file-state"
 import { MemoryStateStore } from "../src/central/backend/memory-state"
 import type { StateStore, Timers } from "../src/central/backend/types"
 import type { DeliverRequest, DeliverResult } from "../src/protocol"
@@ -454,5 +458,142 @@ describe("replies and declines", () => {
     s.conns.get("c1")!.sessions.delete("ses_a")
     const reply = await s.delivery.reply(U, asSession("ses_b"), ask.message.id, "a!")
     expect(reply.delivery).toBe("pending")
+  })
+})
+
+describe("re-wake of open asks", () => {
+  const [first, second, third] = REWAKE_BACKOFF_MS as [number, number, number]
+
+  /** An ask from @alpha to an idle @beta, delivered, with the loop running. */
+  async function asked(options: Parameters<typeof setup>[0] = {}) {
+    const s = setup(options)
+    s.connect("c1", ["ses_a", "ses_b"])
+    s.idle.add("ses_b")
+    const ask = await s.delivery.send(U, asSession("ses_a"), "@beta", "ask", "q?")
+    s.delivery.start()
+    const reminders = () => s.sent.filter((x) => x.req.messageID !== ask.message.id)
+    return { ...s, ask, reminders }
+  }
+
+  test("an idle recipient is woken again with backoff, then the user is told", async () => {
+    const s = await asked()
+    await s.clock.advance(first - REWAKE_TICK_MS)
+    expect(s.reminders()).toHaveLength(0)
+    await s.clock.advance(REWAKE_TICK_MS)
+    expect(s.reminders()).toHaveLength(1)
+    const { req } = s.reminders()[0]!
+    expect(req).toMatchObject({ sessionID: "ses_b", wake: true, meta: { kind: "ask", from: "@alpha", to: "@beta", delivery: "steer" } })
+    expect(req.messageID).not.toBe(s.ask.message.id)
+    expect(req.text).toContain(s.ask.message.id)
+    expect(req.text).toContain("still open")
+    await s.clock.advance(second)
+    expect(s.reminders()).toHaveLength(2)
+    await s.clock.advance(third)
+    expect(s.reminders()).toHaveLength(3)
+    expect(s.alerts).toHaveLength(0)
+    await s.clock.advance(third)
+    expect(s.reminders()).toHaveLength(3)
+    expect(s.alerts).toEqual([{ userID: U, alert: { kind: "unanswered", sessionID: "ses_b", messageID: s.ask.message.id, text: expect.stringContaining("@beta") } }])
+    await s.clock.advance(10 * HOUR)
+    expect(s.reminders()).toHaveLength(3)
+    expect(s.alerts).toHaveLength(1)
+  })
+
+  test("an answered ask is not re-woken", async () => {
+    const s = await asked()
+    await s.delivery.reply(U, asSession("ses_b"), s.ask.message.id, "done")
+    const before = s.sent.length
+    await s.clock.advance(HOUR)
+    expect(s.sent).toHaveLength(before)
+  })
+
+  test("a busy recipient is left alone; the backoff starts over once it is idle", async () => {
+    const s = await asked()
+    s.idle.delete("ses_b")
+    await s.clock.advance(first + 5 * MIN)
+    expect(s.reminders()).toHaveLength(0)
+    s.idle.add("ses_b")
+    // The last busy check was at first + 5 min: the wait runs from there.
+    await s.clock.advance(first - REWAKE_TICK_MS)
+    expect(s.reminders()).toHaveLength(0)
+    await s.clock.advance(REWAKE_TICK_MS)
+    expect(s.reminders()).toHaveLength(1)
+  })
+
+  test("only asks are re-woken, not plain messages", async () => {
+    const s = setup()
+    s.connect("c1", ["ses_b"])
+    s.idle.add("ses_b")
+    await s.delivery.send(U, asUser, "@beta", "msg", "fyi")
+    s.delivery.start()
+    await s.clock.advance(HOUR)
+    expect(s.sent).toHaveLength(1)
+  })
+
+  test("asks sent with wake:false are not re-woken", async () => {
+    const s = setup()
+    s.connect("c1", ["ses_b"])
+    s.idle.add("ses_b")
+    await s.delivery.send(U, asUser, "@beta", "ask", "whenever", { wake: false })
+    s.delivery.start()
+    await s.clock.advance(HOUR)
+    expect(s.sent).toHaveLength(1)
+  })
+
+  test("a pending ask is not re-woken while its recipient is offline", async () => {
+    const s = setup()
+    s.idle.add("ses_b")
+    await s.delivery.send(U, asUser, "@beta", "ask", "q?")
+    s.delivery.start()
+    await s.clock.advance(HOUR)
+    expect(s.sent).toHaveLength(0)
+    expect(s.alerts).toHaveLength(0)
+  })
+
+  test("a spent wake budget postpones the reminder", async () => {
+    const s = await asked({ limits: { wake: 1 } })
+    await s.clock.advance(first)
+    expect(s.reminders()).toHaveLength(0)
+    // The window (10 min) rolls over: the budget is back.
+    await s.clock.advance(10 * MIN)
+    expect(s.reminders()).toHaveLength(1)
+  })
+
+  test("stop() ends the loop", async () => {
+    const s = await asked()
+    s.delivery.stop()
+    expect(s.clock.pending()).toBe(0)
+    await s.clock.advance(HOUR)
+    expect(s.reminders()).toHaveLength(0)
+  })
+})
+
+describe("restart", () => {
+  test("pending messages and re-wakes survive a restart (FileStateStore)", async () => {
+    const stateDir = mkdtempSync(path.join(tmpdir(), "hub-delivery-"))
+    const clock = fakeClock()
+    const firstStore = new FileStateStore({ stateDir, now: clock.now, timers: clock.timers })
+    const s = setup({ state: firstStore, clock })
+    s.connect("c1", ["ses_a", "ses_b"])
+    const ask = await s.delivery.send(U, asSession("ses_b"), "@alpha", "ask", "q?")
+    s.conns.delete("c1")
+    const offline = await s.delivery.send(U, asUser, "@beta", "msg", "while you were away")
+    expect(offline.delivery).toBe("pending")
+    await firstStore.flush()
+    s.delivery.stop()
+
+    // A new hub process: new store over the same folder, new engine.
+    const restarted = s.make(new FileStateStore({ stateDir, now: clock.now, timers: clock.timers }))
+    restarted.start()
+    s.idle.add("ses_a")
+    s.connect("c2", ["ses_a", "ses_b"])
+    await restarted.onSessions("c2")
+    expect(s.sent.at(-1)!.req).toMatchObject({ messageID: offline.message.id, sessionID: "ses_b" })
+    expect((await restarted.messages.get(U, offline.message.id))?.delivery).toBe("turn")
+    const before = s.sent.length
+    await clock.advance(REWAKE_BACKOFF_MS[0]!)
+    expect(s.sent.slice(before).map((x) => x.req.sessionID)).toEqual(["ses_a"])
+    expect(s.sent.at(-1)!.req.text).toContain(ask.message.id)
+    restarted.stop()
   })
 })

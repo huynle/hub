@@ -1,14 +1,34 @@
-// The delivery engine (design §3.3, §3.4; decisions jswt9p22, 52aqsopo).
+// The delivery engine (design §3.3, §3.4; decisions jswt9p22, 52aqsopo): stores agent messages (./messages) and
+// delivers them to their recipient sessions through the spokes. No routes: the message routes (P2-T6) call it.
+//
+// - Owner selection: the user's connections that report the session (Registry.sessionTargets, owner first) and
+//   announce "deliver"; one that fails or answers malformed is skipped for the next (same messageID: OpenCode
+//   dedupes it, even across restarts). Only spokes without "deliver" report the session: unsupported
+//   {feature: "deliver"} and nothing is stored. No fallback through steer/turn.
+// - Modes: plain msg → delivery "queue" (after the running turn), ask/reply/decline/urgent → "steer"; wake
+//   unless wake:false, a subagent recipient, the hop cap (alerted once when crossed) or a spent wake budget.
+// - Roles: one holder, the idle one (by real evidence) else the most recently active, else (all offline) the
+//   one seen last; the message records the holder generation. sendAll: every holder, a message each.
+// - Pending: no deliver-capable connection reports the recipient (offline) or every one failed → kept for
+//   PENDING_MS in the StateStore and delivered oldest first on the user's next sessions frame (onSessions).
+//   OpenCode holds admitted messages itself across forms, interrupts and restarts (P2-T0), so there is no
+//   "retained" retry loop on the hub.
+// - Re-wake: an open ask to an idle recipient (Registry.idle: native or hooks evidence) is woken again after
+//   each REWAKE_BACKOFF_MS delay with a short reminder (its own id), then the user is alerted once. Busy,
+//   offline or pending recipients push the wait back. State lives in the StateStore (survives restarts); the
+//   loop looks at users seen since start (a send or a sessions frame of theirs).
+// - Loop protection (./message-limits): pair/user rate limits before storing, hop per message, human turns
+//   (console, voice, typed in the harness) reset a session's chain (humanTurn).
 import type { DeliverRequest, DeliverResult, DeliveryMode, MessageKind as WireKind } from "../../protocol"
 import { isDeliverResult } from "../../protocol"
 import type { Clock, Counters, StateStore, Timers } from "../backend/types"
 import type { AgentActor } from "./actor"
 import type { DirectoryEntry, Resolved } from "./directory"
-import { type Party, type PartyInfo, partyFromActor, partyKey, renderEnvelope } from "./envelope"
+import { type Party, type PartyInfo, partyFromActor, partyKey, partyLabel, renderEnvelope } from "./envelope"
 import { AgentError } from "./errors"
 import { HOP_CAP, HopTracker, MessageLimiter, type MessageLimits, overHopCap } from "./message-limits"
 import { parseAddress } from "./names"
-import { type Delivery as DeliveryState, type Message, Messages } from "./messages"
+import { type Delivery as DeliveryState, type Message, Messages, newMessageID } from "./messages"
 
 /** What the engine reads from the Registry. */
 export interface DeliveryRegistry {
@@ -78,11 +98,40 @@ export interface Replied extends Sent {
   readonly original: Message
 }
 
+const defaultTimers: Timers = {
+  set: (fn, ms) => {
+    const handle = setTimeout(fn, ms)
+    ;(handle as { unref?: () => void }).unref?.()
+    return handle
+  },
+  clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+}
+
 /** How long an offline recipient's message waits for its session to come back. */
 export const PENDING_MS = 24 * 60 * 60_000
 
+/** Delays before each re-wake of an idle recipient with an open ask; one more after the last, then the user is told. */
+export const REWAKE_BACKOFF_MS: readonly number[] = [5 * 60_000, 15 * 60_000, 45 * 60_000]
+/** How often the re-wake loop looks for due asks. */
+export const REWAKE_TICK_MS = 30_000
+
 /** StateStore collection: messageID → Pending. */
 const PENDING = "message-pending"
+
+/** StateStore collection: ask id → Rewake. */
+const REWAKE = "message-rewake"
+
+/** An open ask whose idle recipient the loop wakes again. */
+interface Rewake {
+  readonly messageID: string
+  readonly sessionID: string
+  /** Re-wakes sent so far. */
+  readonly reminders: number
+  readonly nextAt: number
+}
+
+/** The wait after `reminders` re-wakes (the last delay repeats). */
+const backoff = (reminders: number) => REWAKE_BACKOFF_MS[Math.min(reminders, REWAKE_BACKOFF_MS.length - 1)]!
 
 /** A message waiting for its (offline) recipient session. */
 interface Pending {
@@ -112,13 +161,21 @@ export class Delivery {
   readonly limiter: MessageLimiter
   private readonly deps: DeliveryDeps
   private readonly now: Clock
+  private readonly timers: Timers
+  private readonly newID: () => string
   /** Per user: the flush in progress (flushes run one at a time). */
   private readonly flushing = new Map<string, Promise<void>>()
+  /** Users seen since start (sent a message, or one of their spokes reported sessions): the loop looks at these. */
+  private readonly users = new Set<string>()
+  private timer: unknown
+  private running = false
 
   constructor(deps: DeliveryDeps) {
     this.deps = deps
     const now = (this.now = deps.now ?? Date.now)
-    this.messages = new Messages({ state: deps.state, now, ...(deps.newID ? { newID: deps.newID } : {}) })
+    this.timers = deps.timers ?? defaultTimers
+    this.newID = deps.newID ?? newMessageID
+    this.messages = new Messages({ state: deps.state, now, newID: this.newID })
     this.hops = new HopTracker({ state: deps.state, now })
     this.limiter = new MessageLimiter({ counters: deps.counters, now, ...(deps.limits ? { limits: deps.limits } : {}) })
   }
@@ -172,7 +229,33 @@ export class Delivery {
   /** Registry.onSessions: a spoke reported its sessions (connected, reconnected, or its periodic snapshot). */
   async onSessions(connID: string): Promise<void> {
     const userID = this.deps.registry.connTenant(connID)
-    if (userID !== undefined) await this.flush(userID)
+    if (userID === undefined) return
+    this.users.add(userID)
+    await this.flush(userID)
+  }
+
+  /** Starts the re-wake loop (every REWAKE_TICK_MS). */
+  start(): void {
+    if (this.running) return
+    this.running = true
+    this.schedule()
+  }
+
+  stop(): void {
+    this.running = false
+    if (this.timer !== undefined) this.timers.clear(this.timer)
+    this.timer = undefined
+  }
+
+  /** One pass of the re-wake loop over every known user (the loop calls it; tests may too). */
+  async tick(): Promise<void> {
+    for (const userID of [...this.users]) {
+      try {
+        await this.rewake(userID)
+      } catch (cause) {
+        console.error(`[hub] re-wake failed: ${cause instanceof Error ? cause.message : String(cause)}`)
+      }
+    }
   }
 
   // ---- internals ----------------------------------------------------------------------------------------
@@ -183,7 +266,7 @@ export class Delivery {
     this.gate(userID, sessionID)
     await this.limiter.admit(userID, from, recipient)
     const hop = await this.hops.next(userID, from)
-    const generation = generationOf(resolved, entry)
+    const generation = resolved.address.kind === "role" ? roleGeneration(entry, resolved.address) : undefined
     const message = await this.messages.send(userID, {
       from,
       to: addr,
@@ -195,8 +278,74 @@ export class Delivery {
       ...(options.expiresInMs === undefined ? {} : { expiresInMs: options.expiresInMs }),
     })
     await this.hops.received(userID, recipient, hop)
-    const wake = await this.wakeFor(userID, message, options.wake !== false && entry.parentID === undefined)
+    this.users.add(userID)
+    const wanted = options.wake !== false && entry.parentID === undefined
+    const wake = await this.wakeFor(userID, message, wanted)
+    if (kind === "ask" && wanted && !overHopCap(hop)) {
+      const rewake: Rewake = { messageID: message.id, sessionID, reminders: 0, nextAt: message.at + backoff(0) }
+      await this.deps.state.put(userID, REWAKE, message.id, rewake)
+    }
     return this.deliver(userID, message, sessionID, wake, options.urgent === true)
+  }
+
+  private schedule(): void {
+    this.timer = this.timers.set(() => {
+      this.timer = undefined
+      void this.tick().finally(() => {
+        if (this.running && this.timer === undefined) this.schedule()
+      })
+    }, REWAKE_TICK_MS)
+  }
+
+  /** Re-wakes the user's idle recipients of due open asks; after the last re-wake, tells the user. */
+  private async rewake(userID: string): Promise<void> {
+    const { registry } = this.deps
+    for (const { key, value } of await this.deps.state.list<Rewake>(userID, REWAKE)) {
+      const t = this.now()
+      if (value.nextAt > t) continue
+      const ask = await this.messages.get(userID, value.messageID)
+      if (!ask || ask.state !== "open") {
+        await this.deps.state.delete(userID, REWAKE, key)
+        continue
+      }
+      const postpone = () => this.deps.state.put(userID, REWAKE, key, { ...value, nextAt: t + backoff(value.reminders) })
+      const reachable = ask.delivery !== undefined && ask.delivery !== "pending" && this.targets(userID, value.sessionID).length > 0
+      if (!reachable || !registry.idle(value.sessionID)) {
+        await postpone()
+        continue
+      }
+      if (value.reminders >= REWAKE_BACKOFF_MS.length) {
+        await this.deps.state.delete(userID, REWAKE, key)
+        this.deps.alert?.(userID, {
+          kind: "unanswered",
+          sessionID: value.sessionID,
+          messageID: ask.id,
+          text: `${partyLabel(ask.recipient)} has not answered ${partyLabel(ask.from)}'s ask after ${value.reminders} reminders`,
+        })
+        continue
+      }
+      if (!(await this.limiter.wake(userID, ask.recipient)) || !(await this.remind(userID, ask, value.sessionID))) {
+        await postpone()
+        continue
+      }
+      const reminders = value.reminders + 1
+      await this.deps.state.put(userID, REWAKE, key, { ...value, reminders, nextAt: t + backoff(reminders) })
+    }
+  }
+
+  /** Sends a short wake-up about an open ask (its own id: the ask itself was already admitted). */
+  private async remind(userID: string, ask: Message, sessionID: string): Promise<boolean> {
+    const id = this.newID()
+    const hint = `↩ hub reply ${ask.id} "…" · hub decline ${ask.id} --why "…"`
+    const req: DeliverRequest = {
+      op: "deliver",
+      sessionID,
+      messageID: id,
+      text: `[hub] reminder · ask ${ask.id} from ${partyLabel(ask.from)} is still open · ${id}\n${hint}`,
+      wake: true,
+      meta: { kind: "ask", from: wireAddress(ask.from), to: ask.to, delivery: "steer" },
+    }
+    return (await this.request(userID, sessionID, req)) !== undefined
   }
 
   /** One session of a resolved address (see send). */
@@ -227,6 +376,7 @@ export class Delivery {
     const answered = await store({ from, replyTo, hop, ...(generation === undefined ? {} : { generation }) })
     const { message } = answered
     await this.hops.received(userID, message.recipient, hop)
+    this.users.add(userID)
     if (message.recipient.kind !== "session") return answered
     const sessionID = message.recipient.sessionID
     const wake = await this.wakeFor(userID, message, options.wake !== false && !this.isSubagent(userID, sessionID))
@@ -256,7 +406,7 @@ export class Delivery {
     if (original.generation === undefined || address?.kind !== "role") return undefined
     try {
       const entry = this.deps.directory.resolve(userID, sessionID).sessions[0]
-      return entry?.roles.find((r) => r.role === address.role && (address.project === undefined || r.project === undefined || r.project === address.project))?.generation
+      return entry && roleGeneration(entry, address)
     } catch {
       return undefined
     }
@@ -296,7 +446,14 @@ export class Delivery {
 
   /** Tries each deliver-capable connection in turn (same message id: the harness dedupes it). */
   private async attempt(userID: string, message: Message, sessionID: string, wake: boolean, urgent: boolean): Promise<Sent | undefined> {
-    const req = this.request(message, sessionID, wake, urgent)
+    const result = await this.request(userID, sessionID, this.deliverRequest(message, sessionID, wake, urgent))
+    if (!result) return undefined
+    const updated = (await this.messages.setDelivery(userID, message.id, result.delivered)) ?? message
+    return { message: updated, delivery: result.delivered }
+  }
+
+  /** Sends the request to each of the user's deliver-capable connections for the session until one takes it. */
+  private async request(userID: string, sessionID: string, req: DeliverRequest): Promise<DeliverResult | undefined> {
     for (const connID of this.targets(userID, sessionID)) {
       let result: unknown
       try {
@@ -304,9 +461,7 @@ export class Delivery {
       } catch {
         continue
       }
-      if (!isDeliverResult(result)) continue
-      const updated = (await this.messages.setDelivery(userID, message.id, result.delivered)) ?? message
-      return { message: updated, delivery: result.delivered }
+      if (isDeliverResult(result)) return result
     }
     return undefined
   }
@@ -324,7 +479,7 @@ export class Delivery {
     }
   }
 
-  private request(message: Message, sessionID: string, wake: boolean, urgent: boolean): DeliverRequest {
+  private deliverRequest(message: Message, sessionID: string, wake: boolean, urgent: boolean): DeliverRequest {
     const delivery: DeliveryMode = message.kind === "msg" && !urgent ? "queue" : "steer"
     return {
       op: "deliver",
@@ -352,10 +507,8 @@ export class Delivery {
   }
 }
 
-/** The holder generation a role address reached (undefined for names and IDs). */
-function generationOf(resolved: Resolved, entry: DirectoryEntry): number | undefined {
-  const address = resolved.address
-  if (address.kind !== "role") return undefined
+/** The session's holder generation of the role (and project scope) an address names; undefined: not held. */
+function roleGeneration(entry: DirectoryEntry, address: { readonly role: string; readonly project?: string }): number | undefined {
   return entry.roles.find((r) => r.role === address.role && (address.project === undefined || r.project === undefined || r.project === address.project))?.generation
 }
 
