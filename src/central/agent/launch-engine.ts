@@ -596,6 +596,7 @@ export class LaunchEngine {
     const now = registry.launchConn(launchID)
     if (now !== undefined) return Promise.resolve(now)
     const pipeline = this.pipelines.get(launchID)
+    if (pipeline?.stop !== undefined) return Promise.reject(new StopRequested())
     return new Promise((resolve, reject) => {
       const off = registry.subscribe((message) => {
         if (message.type !== "catalog") return

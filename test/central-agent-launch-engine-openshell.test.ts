@@ -401,3 +401,77 @@ describe("waiting for the sandbox's spoke", () => {
     w.engine.shutdown()
   })
 })
+
+describe("openshell stop during start", () => {
+  test("a stop arriving while the node starts the harness does not wait for its connection", async () => {
+    const w = world()
+    w.control.connectOnStart = false
+    const hold = deferred<unknown>()
+    w.nodeHolds.set("start", hold)
+    w.connectNode()
+    await w.engine.start()
+    const launch = await launched(w)
+    const stopping = w.engine.stop(U, launch.id)
+    await settle()
+    hold.resolve({ started: true })
+    expect(await stopping).toMatchObject({ state: "ended", outcome: "stopped" })
+    expect(w.ops()).toEqual(["prepare", "start", "cancel", "stop", "cleanup"])
+    w.engine.shutdown()
+  })
+})
+
+/** A running openshell launch on a fresh world. */
+async function running(extra: Record<string, unknown> = {}) {
+  const w = world()
+  w.connectNode()
+  await w.engine.start()
+  const launch = await launched(w, extra)
+  expect(launch.state).toBe("running")
+  return { w, launch, sessionID: launch.sessionID! }
+}
+
+describe("openshell end", () => {
+  test("idle: the harness is stopped gracefully, then artifacts collected and the workspace cleaned up", async () => {
+    const { w, launch, sessionID } = await running()
+    w.setSession(sessionID, { state: "working", idle: false })
+    await settle()
+    w.setSession(sessionID, { state: "idle", idle: true })
+    await w.clock.advance(31_000)
+    expect(await w.launch(launch.id)).toMatchObject({ state: "ended", outcome: "idle", artifacts: { commits: 2 } })
+    expect(w.nodeCalls.slice(2).map((r) => [r.op, (r as any).mode ?? (r as any).policy])).toEqual([
+      ["stop", "graceful"],
+      ["collect", undefined],
+      ["cleanup", "keep"],
+    ])
+    w.engine.shutdown()
+  })
+
+  test("DELETE: the session is stopped, then the harness killed, artifacts collected, the workspace cleaned up", async () => {
+    const { w, launch, sessionID } = await running({ end: { cleanup: "remove" } })
+    expect(await w.engine.stop(U, launch.id)).toMatchObject({ state: "ended", outcome: "stopped" })
+    expect(w.stops).toEqual([sessionID])
+    expect(w.nodeCalls.slice(2).map((r) => [r.op, (r as any).mode ?? (r as any).policy])).toEqual([
+      ["stop", "kill"],
+      ["collect", undefined],
+      ["cleanup", "remove"],
+    ])
+    w.engine.shutdown()
+  })
+
+  test("a short gap of the sandbox's spoke (gateway restart, policy change) is not lost; 10 minutes is", async () => {
+    const { w, launch, sessionID } = await running({ end: { when: "never" } })
+    w.dropLaunch(launch.id)
+    w.dropSession(sessionID)
+    await w.clock.advance(9 * 60_000)
+    w.connectLaunch(launch.id)
+    w.setSession(sessionID, { state: "idle", idle: true })
+    await w.clock.advance(60_000)
+    expect((await w.launch(launch.id))!.state).toBe("running")
+    w.dropLaunch(launch.id)
+    w.dropSession(sessionID)
+    await w.clock.advance(10 * 60_000 + 1_000)
+    expect(await w.launch(launch.id)).toMatchObject({ state: "ended", outcome: "lost" })
+    expect(w.nodeCalls.find((r) => r.op === "stop")).toMatchObject({ mode: "kill" })
+    w.engine.shutdown()
+  })
+})
