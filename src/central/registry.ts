@@ -4,7 +4,8 @@
 // (which sessions speak their replies on the phone).
 import path from "node:path"
 import { helloHarness, spokeFeatures, type EvidenceLevel, type ForwardedEvent, type Hello, type HerdrWorkspace, type ProcessKind, type SessionInfo, type SpokeFeature, type SpokeMode, type TerminalInfo, type Terminals } from "../protocol"
-import { StatusBoard, permissionRequest, type Blocker, type PermissionRequest, type SessionStatus } from "../status"
+import { StatusBoard, permissionRequest, type Blocker, type BlockerRecommendation, type PermissionRequest, type SessionStatus } from "../status"
+import { sanitizeLabel } from "./agent/envelope"
 import { DoneWatch } from "./done"
 import { SentenceStream } from "./say-stream"
 import type { ActivityStep, NotificationKind } from "./push"
@@ -146,6 +147,20 @@ const STOP_REASONS: Readonly<Record<string, string>> = { shutdown: "OpenCode shu
 
 /** Machine ID → tenant (owning user ID). Every machine belongs to exactly one tenant. */
 export type TenantOf = (machineID: string) => string | undefined
+
+/** A pending permission: where it was asked, every connection that forwarded it, what it asks. */
+interface PendingPermission {
+  connIDs: string[]
+  readonly sessionID: string
+  readonly tenant?: string
+  readonly request?: PermissionRequest
+  recommendation?: BlockerRecommendation
+}
+
+/** Characters of a recommendation's author and reason on a blocker. */
+const RECOMMENDATION_BY_MAX = 200
+const RECOMMENDATION_WHY_MAX = 1_000
+const DECISION_ID = /^dec_[A-Za-z0-9]{1,64}$/
 
 /** A pending permission or question somewhere in a session's tree, with where it was asked. */
 export interface TreeBlocker extends Blocker {
@@ -299,7 +314,9 @@ export class Registry {
    * permission requestID → its session and every connection that forwarded it, first first. Usually one
    * process holds it, but several may report the session; a reply tries them in order.
    */
-  private readonly permissions = new Map<string, { connIDs: string[]; sessionID: string; request?: PermissionRequest }>()
+  private readonly permissions = new Map<string, PendingPermission>()
+  /** Told when a pending permission goes away (replied, dropped, its processes gone). */
+  private readonly permissionClosedListeners = new Set<(requestID: string, sessionID: string, tenant: string | undefined) => void>()
   /** Sessions with a hub turn in flight, with how to end the waiting request early (stop/interrupt). */
   private readonly active = new Map<string, { readonly cancel?: () => void }>()
   private readonly listeners = new Set<(message: RegistryMessage, tenant?: string) => void>()
@@ -475,6 +492,7 @@ export class Registry {
       if (origin.connIDs.length) continue
       this.permissions.delete(requestID)
       this.observeBoards({ type: "permission.replied", data: { sessionID: origin.sessionID, requestID } })
+      this.permissionClosed(requestID, origin)
     }
     for (const [formID, origin] of this.forms) {
       if (!origin.connIDs.includes(connID)) continue
@@ -550,7 +568,7 @@ export class Registry {
         return
       }
       const request = permissionRequest(data)
-      this.permissions.set(data.id, { connIDs: [connID], sessionID, ...(request ? { request } : {}) })
+      this.permissions.set(data.id, { connIDs: [connID], sessionID, tenant, ...(request ? { request } : {}) })
       this.alert("permission", sessionID, { requestID: data.id })
     }
     if (event.type === "form.created" && sessionID) {
@@ -566,8 +584,10 @@ export class Registry {
         this.alert("question", sessionID)
       }
     }
+    let closedPermission: [string, PendingPermission] | undefined
     if (event.type === "permission.replied" && typeof data.requestID === "string") {
-      this.permissions.delete(data.requestID)
+      const origin = this.permissions.get(data.requestID)
+      if (origin && this.permissions.delete(data.requestID)) closedPermission = [data.requestID, origin]
     }
     if ((event.type === "form.replied" || event.type === "form.cancelled") && typeof data.id === "string") {
       this.forms.delete(data.id)
@@ -595,6 +615,7 @@ export class Registry {
       for (const listener of [...this.humanTurnListeners]) listener(sessionID, tenant)
     }
     if (event.type === "session.deleted" && sessionID) this.setConversation(sessionID, false)
+    if (closedPermission) this.permissionClosed(...closedPermission)
   }
 
   /** Records when a session's run started (kept by the first process to report it while it runs). */
@@ -973,11 +994,19 @@ export class Registry {
     return board && this.live(board.snapshot().sessions)
   }
 
-  /** Adds `since` (run start) to working entries. */
+  /** Adds `since` (run start) to working entries and agents' recommendations to permission blockers. */
   private live(sessions: SessionStatus[]): LiveStatus[] {
     return sessions.map((s) => {
       const since = s.state === "working" ? this.since.get(s.id) : undefined
-      return since === undefined ? s : { ...s, since }
+      const recommended = s.blockers.some((b) => b.kind === "permission" && this.permissions.get(b.id)?.recommendation)
+      const blockers = recommended
+        ? s.blockers.map((b) => {
+            const recommendation = b.kind === "permission" ? this.permissions.get(b.id)?.recommendation : undefined
+            return recommendation ? { ...b, recommendation } : b
+          })
+        : s.blockers
+      const entry = recommended ? { ...s, blockers } : s
+      return since === undefined ? entry : { ...entry, since }
     })
   }
 
@@ -1428,6 +1457,43 @@ export class Registry {
     if (!origin) return
     this.permissions.delete(requestID)
     this.observeBoards({ type: "permission.replied", data: { sessionID: origin.sessionID, requestID } })
+    this.permissionClosed(requestID, origin)
+  }
+
+  /** Listens for pending permissions going away (replied, dropped, every process holding one gone). */
+  onPermissionClosed(listener: (requestID: string, sessionID: string, tenant: string | undefined) => void): () => void {
+    this.permissionClosedListeners.add(listener)
+    return () => this.permissionClosedListeners.delete(listener)
+  }
+
+  /**
+   * Shows an agent's recommendation on a pending permission's blocker (sanitised; the status goes out again);
+   * false when no such request is pending. It goes with the request.
+   */
+  recommend(requestID: string, recommendation: BlockerRecommendation): boolean {
+    const origin = this.permissions.get(requestID)
+    if (!origin) return false
+    const why = recommendation.why === undefined ? "" : sanitizeLabel(recommendation.why, RECOMMENDATION_WHY_MAX)
+    origin.recommendation = {
+      by: sanitizeLabel(recommendation.by, RECOMMENDATION_BY_MAX) || "An agent",
+      recommends: "approve",
+      ...(why ? { why } : {}),
+      ...(recommendation.decisionID && DECISION_ID.test(recommendation.decisionID) ? { decisionID: recommendation.decisionID } : {}),
+    }
+    const rootID = this.rootOf(origin.sessionID)
+    const board = rootID === undefined ? undefined : this.boards.get(rootID)
+    if (rootID !== undefined && board) this.emit({ type: "status", sessionID: rootID, sessions: this.live(board.snapshot().sessions) })
+    return true
+  }
+
+  private permissionClosed(requestID: string, origin: PendingPermission): void {
+    for (const listener of [...this.permissionClosedListeners]) {
+      try {
+        listener(requestID, origin.sessionID, origin.tenant)
+      } catch (cause) {
+        console.error(`[hub] permission ${requestID}: closed listener failed: ${cause instanceof Error ? cause.message : String(cause)}`)
+      }
+    }
   }
 
   /**
