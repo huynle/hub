@@ -294,6 +294,9 @@ cookie, else `403 forbidden`). The first answer wins, a later one gets `409 {cod
 asker as the user's reply to its ask (`Decision dec_…: Hold [hold]`). At the deadline, `onTimeout` (only an option
 marked `safe`) answers it (`answeredBy: "timeout"`); without one the Decision stays open and is pushed again once.
 `deadline` is in seconds and must fall before the ask expires (default: a day past the deadline, at most 7 days).
+The console shows open Decisions as cards on Home and in the sessions they concern (SSE `{type: "decision",
+decision}` on every open, answer, timeout, escalation and expiry); a `decision` push opens its card
+(`?decision=<id>`).
 
 Reads come from the hub's catalog; only `show` (summary) and `log` (timeline) ask the session's spoke, so they
 depend on what its harness supports. A session token reads all of its user's sessions but names and claims roles

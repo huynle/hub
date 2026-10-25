@@ -159,6 +159,13 @@ the protocol up:
 - **Push kinds `decision` and `message`** (both on by default, high urgency, sent even while a device shows the
   session, generic bodies): a Decision opened or escalated; a `msg` to `@me`, an unanswered ask after every
   re-wake, or a message loop (these two were `question` before).
+- **Decision cards in the console**: open Decisions show on Home and in the session view of the asking session
+  and the sessions they are about: question, options (the recommended one marked, with why; safe ones marked),
+  urgency, a live deadline countdown with the timeout's option, and "Answer here (tap)" for `tap` Decisions.
+  Answer with an option (and an optional note) or text; an answer that lost the race says "Already answered or
+  expired". SSE `{type: "decision", decision}` goes to the user's streams whenever a Decision opens, is
+  answered (also by timeout), escalates or expires; a `decision` push carries `decisionID` and its tap opens
+  `/s/<session>?decision=<id>` (or `/?decision=…`), which marks the card.
 - **Prompt references**: `@name`, `@name.project`, `@@role` and `@@role.project` typed into an OpenCode prompt
   still go to that session unchanged; the plugin's prompt hook adds one attached text file
   (`hub-references.txt`, a `data:` URI the model sees inside the same message) listing each address that names
