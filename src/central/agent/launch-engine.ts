@@ -54,7 +54,12 @@ import { type Launch, type LaunchFilter, type LaunchOutcome, type LaunchState, L
 import { Placement, PlacementLoop, type Placed, type PlacementNode } from "./placement"
 
 /** The NodeRegistry calls the engine needs. */
-export type EngineNodes = { list(ownerID?: string): NodeView[]; forMachine(machineID: string): NodeView | undefined; subscribe(listener: NodeListener): () => void }
+export type EngineNodes = {
+  list(ownerID?: string): NodeView[]
+  forMachine(machineID: string): NodeView | undefined
+  /** With remote: also other pods' nodes (cluster mode: the supervisor follows every node of the cluster). */
+  subscribe(listener: NodeListener, options?: { readonly remote?: boolean }): () => void
+}
 /** Node ops (SpokeHub.requestNode). */
 export interface EngineNodeOps {
   requestNode<R extends NodeRequest>(connID: string, req: R): Promise<NodeResultFor[R["op"]]>
@@ -114,6 +119,9 @@ export interface LaunchEngineDeps {
   /** Cluster mode: the leader's supervisor, for an engine that does not supervise (see EngineSupervisor). */
   readonly supervisor?: EngineSupervisor
 }
+
+/** Node events of every pod (cluster mode; the same as local ones on a single hub). */
+const REMOTE = { remote: true } as const
 
 const LIVE: readonly LaunchState[] = ["queued", "placing", "provisioning", "running"]
 /** Engine state per launch beside the store's record (StateStore collection, key: the launch ID). */
@@ -362,7 +370,7 @@ export class LaunchEngine {
         if (event.type === "disconnected" || event.node.ownerID === undefined) return
         if (event.type === "connected") void this.reconcile(event.node)
         void this.loop.kick(event.node.ownerID)
-      }),
+      }, REMOTE),
       registry.subscribe((message) => {
         if (message.type === "status") {
           const ids = new Set([message.sessionID, ...message.sessions.map((s) => s.id)])
@@ -542,7 +550,7 @@ export class LaunchEngine {
         if (event.type !== "connected" || event.node.machineID !== machineID) return
         done()
         resolve(event.node)
-      })
+      }, REMOTE)
       const timer = this.timers.set(() => {
         done()
         reject(new LostError(`The node did not come back within ${NODE_RETURN_MS / 60_000} minutes`))
@@ -586,7 +594,7 @@ export class LaunchEngine {
           done()
           reject(new LostError("The node went away"))
         }
-      })
+      }, REMOTE)
       const timer = this.timers.set(() => {
         done()
         reject(new LostError(`The node did not let the launch go within ${NODE_RETURN_MS / 60_000} minutes`))
