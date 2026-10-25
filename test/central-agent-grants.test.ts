@@ -207,3 +207,93 @@ describe("Grants.list, get, update and revoke", () => {
     expect(listed).not.toContain(ids[1])
   })
 })
+
+describe("Grants.usable (checked on every use)", () => {
+  const HUB = { directory: "/Users/huy/projects/hub/.worktrees/x" }
+
+  test("a pinned session holder: only that session, only in scope, only granted verbs, only while active", async () => {
+    const { grants, directory, alice, report, advance } = setup()
+    report(alice, "ses_aaa", "ses_bbb")
+    directory.setName(alice, "ses_aaa", "orch")
+    const grant = await grants.create(alice, spec("@orch", { expires: "1h" }))
+    expect((await grants.usable(sessionActor(alice, "ses_aaa"), "approve", HUB)).map((g) => g.id)).toEqual([grant.id])
+    expect(await grants.usable(sessionActor(alice, "ses_bbb"), "approve", HUB)).toEqual([])
+    expect(await grants.usable(sessionActor(alice, "ses_aaa"), "prompt", HUB)).toEqual([])
+    expect(await grants.usable(sessionActor(alice, "ses_aaa"), "approve", { directory: "/Users/huy/projects/hubby" })).toEqual([])
+    expect(await grants.usable(sessionActor(alice, "ses_aaa"), "approve", { directory: "relative/hub" })).toEqual([])
+    advance(HOUR)
+    expect(await grants.usable(sessionActor(alice, "ses_aaa"), "approve", HUB)).toEqual([])
+  })
+
+  test("an @name grant never follows a later holder of the name", async () => {
+    const { grants, directory, alice, report, advance } = setup()
+    report(alice, "ses_aaa", "ses_bbb")
+    directory.setName(alice, "ses_aaa", "orch")
+    await grants.create(alice, spec("@orch", { expires: "2d" }))
+    directory.setName(alice, "ses_aaa", "old")
+    advance(25 * HOUR)
+    directory.setName(alice, "ses_bbb", "orch")
+    expect(await grants.usable(sessionActor(alice, "ses_bbb"), "approve", HUB)).toEqual([])
+    expect((await grants.usable(sessionActor(alice, "ses_aaa"), "approve", HUB)).length).toBe(1)
+  })
+
+  test("a reserved role holder follows the role", async () => {
+    const { grants, directory, alice, report } = setup()
+    report(alice, "ses_aaa", "ses_bbb")
+    const grant = await grants.create(alice, spec("@@orchestrator"))
+    expect(await grants.usable(sessionActor(alice, "ses_aaa"), "approve", HUB)).toEqual([])
+    directory.claimRole(alice, "ses_aaa", "orchestrator", { byUser: true })
+    expect((await grants.usable(sessionActor(alice, "ses_aaa"), "approve", HUB)).map((g) => g.id)).toEqual([grant.id])
+    directory.releaseRole(alice, "ses_aaa", "orchestrator")
+    directory.claimRole(alice, "ses_bbb", "orchestrator", { byUser: true })
+    expect(await grants.usable(sessionActor(alice, "ses_aaa"), "approve", HUB)).toEqual([])
+    expect((await grants.usable(sessionActor(alice, "ses_bbb"), "approve", HUB)).length).toBe(1)
+  })
+
+  test("an app holder: only that token, only while the owner still has it", async () => {
+    const { grants, store, alice, appToken } = setup()
+    appToken(alice, "fedcba9876543210")
+    await grants.create(alice, spec("app:fedcba9876543210"))
+    expect((await grants.usable(appActor(alice, "fedcba9876543210"), "deny", HUB)).length).toBe(1)
+    expect(await grants.usable(appActor(alice, "0123456789abcdef"), "deny", HUB)).toEqual([])
+    store.updateAgentData(alice, (d) => void (d.appTokens = []))
+    expect(await grants.usable(appActor(alice, "fedcba9876543210"), "deny", HUB)).toEqual([])
+  })
+
+  test("another user's session or token never uses the owner's grant; users and revoked grants get none", async () => {
+    const { grants, directory, alice, bob, report } = setup()
+    report(alice, "ses_aaa")
+    directory.setName(alice, "ses_aaa", "orch")
+    const grant = await grants.create(alice, spec("@orch"))
+    expect(await grants.usable(sessionActor(bob, "ses_aaa"), "approve", HUB)).toEqual([])
+    expect(await grants.usable({ kind: "user", userID: alice, deviceID: "dev_1", via: "cookie" }, "approve", HUB)).toEqual([])
+    await grants.revoke(alice, grant.id)
+    expect(await grants.usable(sessionActor(alice, "ses_aaa"), "approve", HUB)).toEqual([])
+  })
+
+  test("a disabled owner's grants are unusable", async () => {
+    const { grants, store, alice, report } = setup()
+    report(alice, "ses_aaa")
+    await grants.create(alice, spec("ses_aaa"))
+    store.setUser(alice, { disabled: true })
+    expect(await grants.usable(sessionActor(alice, "ses_aaa"), "approve", HUB)).toEqual([])
+  })
+})
+
+describe("Grants.consume (maxActionsPerHour)", () => {
+  test("counts actions per grant in the clock hour; past the cap rate_limited with retryAfter", async () => {
+    const { grants, alice, advance } = setup()
+    const a = await grants.create(alice, spec("@@orchestrator", { maxActionsPerHour: 2 }))
+    const b = await grants.create(alice, spec("@@orchestrator", { maxActionsPerHour: 2 }))
+    await grants.consume(a)
+    await grants.consume(a)
+    const limited = await failure(grants.consume(a))
+    expect(limited.code).toBe("rate_limited")
+    const retryAfter = limited.options.extra?.retryAfter as number
+    expect(retryAfter).toBeGreaterThan(0)
+    expect(retryAfter).toBeLessThanOrEqual(3600)
+    await grants.consume(b)
+    advance(retryAfter * 1000)
+    await grants.consume(a)
+  })
+})

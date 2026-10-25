@@ -8,13 +8,17 @@
 //   `app:<id>` holder must be one of the owner's app tokens. All must belong to the owner, at creation and on use.
 // - `expires` becomes an absolute expiresAt; revoke ends a grant (kept, for the audit's "grant g_12"). Ended
 //   grants beyond GRANTS_KEPT are dropped, oldest first.
+// - Use (acting.ts): usable() answers the active grants an actor holds for a verb on a session directory (scope:
+//   canonical project paths on path boundaries), re-checking owner, holder and token every time; consume() counts
+//   an action against maxActionsPerHour in fixed clock-hour windows (Counters), rate_limited past it.
 // - The admin audit gets only {actor: owner, action: grant.*, target: id}, never holder, scope or permissions.
 import { randomBytes } from "node:crypto"
 import type { Counters, StateStore } from "../backend/types"
 import type { AuditEntry, Store } from "../store"
 import type { Directory } from "./directory"
 import { AgentError } from "./errors"
-import { type GrantSpec, type GrantVerb, validateGrant } from "./policy"
+import type { AgentActor, AppActor, SessionActor } from "./actor"
+import { type GrantSpec, type GrantVerb, inProjects, validateGrant } from "./policy"
 import { updateVersioned } from "./versioned"
 
 /** Active (unexpired, unrevoked) grants per user. */
@@ -23,6 +27,7 @@ export const GRANTS_ACTIVE_MAX = 50
 export const GRANTS_KEPT = 200
 
 const COLLECTION = "grants"
+const HOUR_MS = 3_600_000
 const ID = /^g_[0-9a-f]{16}$/
 
 export type GrantState = "active" | "expired" | "revoked"
@@ -52,7 +57,7 @@ export interface GrantView extends Grant {
 export interface GrantsDeps {
   readonly state: StateStore
   /** The hourly action counts (consume). */
-  readonly counters?: Counters
+  readonly counters: Counters
   readonly directory: Pick<Directory, "resolve">
   readonly store: Pick<Store, "user" | "agentData">
   /** The hub-wide admin audit (Store): summaries only. */
@@ -134,6 +139,53 @@ export class Grants {
     if (missing || !next) throw notFound()
     this.deps.admin?.audit({ actor: owner, action, target: id })
     return next
+  }
+
+  /**
+   * The active grants the actor holds that allow `verb` on a session in `target.directory` (newest first),
+   * checked now: the owner is the actor's user and still enabled; a pinned holder is this session; a role
+   * holder's role is held by this session now; an app holder is this token and the owner still has it.
+   * Users act without grants (none). The caller still applies the policy, self-tree ban and kill switches.
+   */
+  async usable(actor: AgentActor, verb: GrantVerb, target: { readonly directory: string }): Promise<Grant[]> {
+    if (actor.kind === "user") return []
+    const user = this.deps.store.user(actor.userID)
+    if (!user || user.disabled) return []
+    const at = this.now()
+    const out: Grant[] = []
+    for (const grant of await this.all(actor.userID)) {
+      if (grant.owner !== actor.userID || grantState(grant, at) !== "active" || !grant.allow.includes(verb)) continue
+      if (!inProjects(target.directory, grant.scope.projects) || !this.holds(grant, actor)) continue
+      out.push(grant)
+    }
+    return out.sort((a, b) => b.created - a.created)
+  }
+
+  /** Counts one action under the grant in the current clock hour; past maxActionsPerHour rate_limited (retryAfter). */
+  async consume(grant: Grant): Promise<void> {
+    const at = this.now()
+    const hour = Math.floor(at / HOUR_MS)
+    const count = await this.deps.counters.incr(`grant-actions:${grant.owner}:${grant.id}:${hour}`, HOUR_MS)
+    if (count > grant.maxActionsPerHour) {
+      const retryAfter = Math.max(1, Math.ceil(((hour + 1) * HOUR_MS - at) / 1000))
+      throw new AgentError("rate_limited", `The grant allows ${grant.maxActionsPerHour} actions an hour`, { extra: { retryAfter } })
+    }
+  }
+
+  /** The actor is the grant's holder now (same owner assumed). */
+  private holds(grant: Grant, actor: SessionActor | AppActor): boolean {
+    if (grant.holder.startsWith("app:")) {
+      if (actor.kind !== "app" || grant.holder !== `app:${actor.tokenID}`) return false
+      return (this.deps.store.agentData(grant.owner).appTokens ?? []).some((t) => t.id === actor.tokenID)
+    }
+    if (actor.kind !== "session") return false
+    if (grant.holderSessionID !== undefined) return grant.holderSessionID === actor.sessionID
+    if (!grant.holder.startsWith("@@")) return false
+    try {
+      return this.deps.directory.resolve(grant.owner, grant.holder).sessions.some((s) => s.sessionID === actor.sessionID)
+    } catch {
+      return false
+    }
   }
 
   private owner(owner: string): void {
