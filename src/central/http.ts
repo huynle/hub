@@ -17,6 +17,7 @@ import { isNotificationKind, Push, type PushSender } from "./push"
 import { pushEndpointProblem, resolveHost as systemResolveHost, type ResolveHost } from "./push-target"
 import { fileBackends, type Backends } from "./backend"
 import { createResolver, type BearerVerifier, type CredentialMode } from "./agent/actor"
+import { AgentAudit } from "./agent/audit"
 import { Decisions, type Decision } from "./agent/decisions"
 import { Delivery } from "./agent/delivery"
 import { AgentError } from "./agent/errors"
@@ -550,7 +551,8 @@ export function startCentral(options: CentralOptions): Central {
   // One credential resolver for every /api request: device cookie, device token, session and app tokens.
   // Every stored agent message also goes to the user's console streams (live transcript rows).
   feed.subscribe((userID, message) => broadcast({ type: "message", message }, { tenant: userID }))
-  const agentDeps = { store, sessionTokens, directory, registry, spokes, delivery, decisions, feed, heartbeatMs, now }
+  const audit = new AgentAudit({ state: backends.state, now, admin: store, recorded: (userID, entry) => broadcast({ type: "agent", entry }, { tenant: userID }) })
+  const agentDeps = { store, sessionTokens, directory, registry, spokes, delivery, decisions, feed, heartbeatMs, now, audit }
   const resolveActor = createResolver({
     cookieName: COOKIE,
     findDevice: (token) => store.findDevice(token),
