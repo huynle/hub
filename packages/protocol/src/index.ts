@@ -9,12 +9,14 @@
 // OpenCode spoke that predates this split and also implies IMPLIED_OPENCODE_FEATURES. The hub announces its own features in the welcome (HUB_FEATURES), and a spoke
 // sends a newer request only when the hub listed it. Neither side bumps PROTOCOL_VERSION for a new feature.
 //
-// Modules: launch.ts (launch vocabulary and workspace checks), node.ts (the `hub node` hello, frames and ops on the
-// same socket), webhook.ts (webhook signature format), wire.ts (shared frame primitives). All are re-exported here.
+// Modules: harness-events.ts (the forwarded events a non-OpenCode spoke may send, with their shapes), launch.ts
+// (launch vocabulary and workspace checks), node.ts (the `hub node` hello, frames and ops on the same socket),
+// webhook.ts (webhook signature format), wire.ts (shared frame primitives). All are re-exported here.
 
 import { featureList, HUB_URL_MAX_CHARS, ID, isByeFrame as isBye, isHubURL, isObj, isResFrame as isRes, isWelcomeFrame, MAX_FRAME, MAX_RETRY_AFTER_MS, nonEmpty, num, parseFrame as parse, str, token, UNSAFE_CHARS } from "./wire.ts"
 import type { NodeMessage, NodeServerMessage } from "./node.ts"
 
+export * from "./harness-events.ts"
 export * from "./launch.ts"
 export * from "./node.ts"
 export * from "./webhook.ts"
@@ -161,7 +163,7 @@ export interface Terminals {
   readonly herdr?: { readonly workspaces: readonly HerdrWorkspace[] }
 }
 
-/** Subset of OpenCode events the spoke forwards (see FORWARDED_EVENTS). */
+/** Subset of OpenCode events the spoke forwards (see FORWARDED_EVENTS; HARNESS_EVENTS for other harnesses). */
 export interface ForwardedEvent {
   readonly type: string
   readonly data: Record<string, unknown>
