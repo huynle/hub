@@ -106,8 +106,8 @@ describe("deliver result", () => {
 describe("messaging features", () => {
   test("deliver is a spoke feature that must be announced: old OpenCode spokes do not imply it", () => {
     expect(KNOWN_SPOKE_FEATURES as readonly string[]).toContain("deliver")
-    // Not announced until the spoke handles the op (P2-T3): a hub must not send deliver to a spoke that drops it.
-    expect(SPOKE_FEATURES as readonly string[]).not.toContain("deliver")
+    // The OpenCode spoke handles the op (P2-T3); older spokes never announced it, so the hub does not send it to them.
+    expect(SPOKE_FEATURES as readonly string[]).toContain("deliver")
     expect(IMPLIED_OPENCODE_FEATURES as readonly string[]).not.toContain("deliver")
     expect(featureForOp("deliver" as any)).toBe("deliver" as any)
     const oldHello = { t: "hello", v: PROTOCOL_VERSION, processID: "p1", kind: "standalone", directory: "/tmp/x", pid: 1, mode: "always", opencodeVersion: "2.0.25", pluginVersion: "0.1.0" }

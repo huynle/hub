@@ -114,6 +114,18 @@ the protocol up:
   `SPOKE_FEATURES` (old OpenCode spokes do not imply it, so the hub must check before sending); the welcome's
   `HUB_FEATURES` gains `messaging`. `session.inbox.delivered` may carry `origin: "user" | "hub"` (same event
   type, so older hubs keep accepting it), and timeline rows gain the `message` kind (`TimelineMessageItem`).
+- **OpenCode spoke delivers hub messages** (`deliver` announced when OpenCode has `session.synthetic`). The
+  envelope goes in as a synthetic message with metadata `{source: "hub", messageID, kind, from, to, replyTo?}`
+  (the model sees only the text) and OpenCode's client id (the hub's `msg_…` id, else a stable `msg_hub…` id
+  derived from it), so a retry is applied once. An idle session gets a turn (`turn`); a busy one gets a plain
+  message after the running turn (`queued`) and an ask into it (`steer`) unless `meta.delivery` says otherwise;
+  with a form open OpenCode holds it (`retained`). `wake: false` and subagent sessions are admitted without
+  starting a turn (`queued`, steer without resume: it arrives with the next turn, or joins one already running).
+  A repeated `messageID` returns the first result without another admission (only a retry that now asks to wake
+  a message admitted without waking is sent again). No voice model, agent or conversation changes. For hubs
+  with `messaging`, `session.inbox.delivered` carries `origin: "user"` (typed or phone prompts) or `"hub"` (a
+  delivered message) when the spoke saw the item enqueued. Opt-in check against a real `opencode serve`:
+  `HUB_IT_OPENCODE=1 bun test test/spoke-deliver.it.test.ts`.
 
 ### Other changes
 

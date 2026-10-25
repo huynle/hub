@@ -140,6 +140,10 @@ function hostFrom(ctx: Context, locations: () => PermissionLocation[], kind: "se
     opencodeVersion: ctx.app?.version ?? "unknown",
     events: (signal) => ctx.event.subscribe({ signal }) as AsyncIterable<any>,
     prompt: (input) => session.prompt(input),
+    // OpenCode's native synthetic messages (hub deliveries); without them the spoke does not announce "deliver".
+    ...(typeof session.synthetic === "function"
+      ? { synthetic: async (input: Parameters<NonNullable<SpokeHost["synthetic"]>>[0]) => unwrap<{ id?: string }>(await session.synthetic(input), (v) => typeof v.id === "string") }
+      : {}),
     context: (sessionID) => session.context({ sessionID }),
     listModels: async () => unwrap<ReadonlyArray<unknown>>(await (ctx.model as any).list({}), Array.isArray),
     getSession: async (sessionID) => unwrap(await session.get({ sessionID }), (v) => typeof v.id === "string"),
