@@ -17,7 +17,7 @@ import { isNotificationKind, Push, type PushSender } from "./push"
 import { pushEndpointProblem, resolveHost as systemResolveHost, type ResolveHost } from "./push-target"
 import { Webhooks } from "./agent/webhooks"
 import { WEBHOOK_SCOPE } from "./agent/webhook-routes"
-import { fileBackends, type Backends } from "./backend"
+import { hubBackends, type Backends } from "./backend"
 import { createResolver, type AgentActor, type BearerVerifier, type CredentialMode } from "./agent/actor"
 import { ActingSwitch } from "./agent/acting-switch"
 import { AgentAudit } from "./agent/audit"
@@ -101,7 +101,7 @@ export interface Central {
   readonly spokes: SpokeHub
   readonly push: Push
   readonly speechSettings: SpeechService
-  /** Backends for new code (state, bus, event log, counters, locks, catalog). */
+  /** Backends for new code (state, bus, event log, counters, locks, catalog, kv). */
   readonly backends: Backends
   /** Agent messages: store and delivery to sessions (the message routes use it). */
   readonly delivery: Delivery
@@ -271,9 +271,9 @@ export function startCentral(options: CentralOptions): Central {
   const heartbeatMs = options.timing?.heartbeatMs ?? SSE_HEARTBEAT_MS
   const web: WebAssets = options.web ?? diskAssets(options.webDir ?? path.join(import.meta.dir, "..", "..", "web", "dist"))
   const now = options.now ?? Date.now
+  /** Used only by new code; existing state stays in the store, registry and event log. Selected first: cluster mode fails before touching the state dir. */
+  const backends = options.backends ?? hubBackends(config, { now })
   const store = Store.open(config.stateDir, now, { mode: config.auth.mode })
-  /** Used only by new code; existing state stays in the store, registry and event log. */
-  const backends = options.backends ?? fileBackends({ stateDir: config.stateDir, now })
   // A machine's tenant is its owner (read live: ownership moves on migration).
   const registry = new Registry(now, undefined, (machineID) => store.machines().find((m) => m.id === machineID)?.ownerID)
   const nodes = new NodeRegistry((machineID) => store.machines().find((m) => m.id === machineID)?.ownerID, now)
