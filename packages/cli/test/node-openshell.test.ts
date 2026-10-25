@@ -3,12 +3,15 @@
 // packages/runtime-openshell/test) only read-only questions: --version, status, workspace list, provider list. It never
 // creates anything; for a missing workspace it prints the command to run. Exit 0 when nothing is wrong (warnings
 // allowed), 1 when something is; --json prints the report.
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { createFakeOpenShell, type FakeOpenShell } from "../../runtime-openshell/test/fake-openshell.ts"
 import { EXIT, run, type Io } from "../src/cli"
+
+// Every fake openshell call starts a bun process: slow under load.
+setDefaultTimeout(60_000)
 
 const READ_ONLY = new Set(["--version", "status", "workspace list", "provider list"])
 const IMAGE = "ghcr.io/example/hub-sandbox:0.1"

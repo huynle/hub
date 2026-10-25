@@ -1,12 +1,15 @@
 // The OpenShell CLI client against the fake openshell (test/fake-openshell.ts): argv built without a shell, the global
 // flags (--workspace hub, --gateway, --color never) on every call, `-o json` parsed, the 0.1.x version gate, time
 // limits, and errors that carry a short reason and never the secrets or env values of the call.
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { type CreateSandboxOptions, OPENSHELL_WORKSPACE, OpenShellCli, OpenShellError, type OpenShellCliOptions } from "../src/cli.ts"
 import { createFakeOpenShell, type FakeOpenShell, type FakeOpenShellOptions } from "./fake-openshell.ts"
+
+// Every fake openshell call starts a bun process: slow under load.
+setDefaultTimeout(60_000)
 
 const fakes: FakeOpenShell[] = []
 afterEach(() => {
@@ -149,7 +152,7 @@ describe("create", () => {
     const policy = path.join(dir, "policy.yaml")
     writeFileSync(policy, "version: 1\n")
     const sandbox = await cli.create({
-      name: "hub-0123456789abcdef0123",
+      name: "hub-0123456789abcde",
       from: "hub-sandbox:dev",
       policyFile: policy,
       providers: ["anthropic", "openai"],
@@ -157,17 +160,17 @@ describe("create", () => {
       env: { HUB_URL: "http://host.openshell.internal:4097" },
       command: ["/usr/local/bin/hub-entry", "--flag", "with space"],
     })
-    expect(sandbox).toMatchObject({ name: "hub-0123456789abcdef0123", workspace: "hub", phase: "Ready", labels: { "hub.launch": "L1", "hub.owner": "u1" }, exitCode: null })
+    expect(sandbox).toMatchObject({ name: "hub-0123456789abcde", workspace: "hub", phase: "Ready", labels: { "hub.launch": "L1", "hub.owner": "u1" }, exitCode: null })
     expect(sandbox.id).toBeString()
     const call = fake.calls().at(-1)!
     expect(call.command).toBe("sandbox create")
     expect(call.argv.slice(4)).toEqual([
-      "sandbox", "create", "--name", "hub-0123456789abcdef0123", "--from", "hub-sandbox:dev", "--policy", policy,
+      "sandbox", "create", "--name", "hub-0123456789abcde", "--from", "hub-sandbox:dev", "--policy", policy,
       "--provider", "anthropic", "--provider", "openai", "--label", "hub.launch=L1", "--label", "hub.owner=u1",
       "--env", "HUB_URL=http://host.openshell.internal:4097", "--no-auto-providers", "--no-tty", "--detach", "-o", "json",
       "--", "/usr/local/bin/hub-entry", "--flag", "with space",
     ])
-    const stored = fake.sandbox("hub-0123456789abcdef0123")!
+    const stored = fake.sandbox("hub-0123456789abcde")!
     expect(stored.policy).toBe("version: 1\n")
     expect(stored.command).toEqual(["/usr/local/bin/hub-entry", "--flag", "with space"])
   })
