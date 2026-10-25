@@ -25,6 +25,8 @@ interface SubscriberConnection {
   readonly client: Promise<BusRedis>
   readonly topics: Set<string>
   readonly syncChannel: string
+  /** The connection once it is open (close() closes it at once). */
+  open?: BusRedis
 }
 
 export class ValkeyBus implements Bus {
@@ -37,6 +39,7 @@ export class ValkeyBus implements Bus {
   private readonly subscribers = new Map<number, SubscriberConnection>()
   private readonly inFlight = new Set<Promise<void>>()
   private readonly syncWaiters = new Map<string, () => void>()
+  private closed = false
 
   constructor(url: string, options: ValkeyBusOptions = {}) {
     this.makeClient = options.client ?? (() => new Bun.RedisClient(url))
@@ -51,6 +54,7 @@ export class ValkeyBus implements Bus {
   }
 
   async subscribe(topic: string, handler: BusHandler): Promise<Unsubscribe> {
+    this.assertOpen()
     let index = 0
     while (this.subscribers.get(index)?.topics.has(topic)) index++
     const subscriber = this.subscriber(index)
@@ -123,7 +127,22 @@ export class ValkeyBus implements Bus {
     void run.finally(() => this.inFlight.delete(run))
   }
 
+  /** Closes every connection; later calls reject. */
+  close(): void {
+    if (this.closed) return
+    this.closed = true
+    this.main?.close()
+    // A connection still opening closes itself when it arrives (see subscriber()).
+    for (const subscriber of this.subscribers.values()) subscriber.open?.close()
+    this.subscribers.clear()
+  }
+
+  private assertOpen(): void {
+    if (this.closed) throw new Error("bus closed")
+  }
+
   private connection(): BusRedis {
+    this.assertOpen()
     return (this.main ??= this.makeClient())
   }
 
@@ -134,6 +153,11 @@ export class ValkeyBus implements Bus {
     const client = this.connection()
       .duplicate()
       .then(async (duplicate) => {
+        if (this.closed) {
+          duplicate.close()
+          throw new Error("bus closed")
+        }
+        subscriber.open = duplicate
         await duplicate.subscribe(syncChannel, (token) => this.syncWaiters.get(token)?.())
         return duplicate
       })
