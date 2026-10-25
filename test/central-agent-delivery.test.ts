@@ -8,7 +8,8 @@ import { mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { Delivery, REWAKE_BACKOFF_MS, REWAKE_TICK_MS, type DeliveryAlert, type DeliveryRegistry } from "../src/central/agent/delivery"
-import type { DirectoryEntry, Resolved } from "../src/central/agent/directory"
+import type { DirectoryEntry, NamedListener, Resolved } from "../src/central/agent/directory"
+import { renderPrimer } from "../src/central/agent/envelope"
 import { AgentError } from "../src/central/agent/errors"
 import { HOP_CAP, type MessageLimits } from "../src/central/agent/message-limits"
 import { parseAddress } from "../src/central/agent/names"
@@ -129,9 +130,30 @@ function world() {
   }
 }
 
-function setup(options: { state?: StateStore; clock?: ReturnType<typeof fakeClock>; limits?: Partial<MessageLimits> } = {}) {
+/** The directory's primer support (Directory.primed / markPrimed / onNamed), faked. */
+function primerDirectory(directory: ReturnType<typeof world>["directory"]) {
+  const primed = new Set<string>()
+  const listeners = new Set<NamedListener>()
+  return {
+    primed,
+    /** An explicit name change, as Directory.setName announces it. */
+    name: (userID: string, sessionID: string, name: string) => listeners.forEach((l) => l(userID, sessionID, name)),
+    directory: {
+      ...directory,
+      primed: (userID: string, sessionID: string) => primed.has(`${userID}/${sessionID}`),
+      markPrimed: (userID: string, sessionID: string) => void primed.add(`${userID}/${sessionID}`),
+      onNamed: (listener: NamedListener) => {
+        listeners.add(listener)
+        return () => void listeners.delete(listener)
+      },
+    },
+  }
+}
+
+function setup(options: { state?: StateStore; clock?: ReturnType<typeof fakeClock>; limits?: Partial<MessageLimits>; primer?: boolean } = {}) {
   const clock = options.clock ?? fakeClock()
   const w = world()
+  const primer = primerDirectory(w.directory)
   const state = options.state ?? new MemoryStateStore({ now: clock.now })
   const alerts: Array<{ userID: string; alert: DeliveryAlert }> = []
   let n = 0
@@ -140,7 +162,7 @@ function setup(options: { state?: StateStore; clock?: ReturnType<typeof fakeCloc
       state: store,
       counters: new MemoryCounters({ now: clock.now }),
       registry: w.registry,
-      directory: w.directory,
+      directory: options.primer ? primer.directory : w.directory,
       send: w.send,
       now: clock.now,
       timers: clock.timers,
@@ -150,7 +172,7 @@ function setup(options: { state?: StateStore; clock?: ReturnType<typeof fakeCloc
     })
   w.addSession("ses_a", { name: "alpha" })
   w.addSession("ses_b", { name: "beta" })
-  return { ...w, clock, state, alerts, delivery: make(), make }
+  return { ...w, clock, state, alerts, primer, delivery: make(), make }
 }
 
 describe("send to a session", () => {
@@ -167,6 +189,144 @@ describe("send to a session", () => {
     expect(req.text).toContain(`[hub] msg from @alpha to you`)
     expect(req.text).toContain("hello there")
     expect((await s.delivery.messages.get(U, sent.message.id))?.delivery).toBe("turn")
+  })
+})
+
+describe("identity primer", () => {
+  const kinds = (s: ReturnType<typeof setup>) => s.sent.map((x) => x.req.meta.kind)
+
+  test("the first message to a session is preceded by one primer, admitted without waking", async () => {
+    const s = setup({ primer: true })
+    s.addSession("ses_b", { name: "beta", roles: [{ role: "reviewer", generation: 1 }, { role: "lead", project: "hub", generation: 1 }] })
+    s.connect("c1", ["ses_a", "ses_b"])
+    const sent = await s.delivery.send(U, asSession("ses_a"), "@beta", "msg", "hello")
+    expect(kinds(s)).toEqual(["primer", "msg"])
+    const { req } = s.sent[0]!
+    expect(req).toMatchObject({ op: "deliver", sessionID: "ses_b", wake: false, meta: { kind: "primer", from: "hub", to: "@beta", delivery: "steer" } })
+    expect(req.text).toBe(renderPrimer({ name: "beta", sessionID: "ses_b", roles: ["reviewer", "lead.hub"] }))
+    expect(req.messageID).not.toBe(sent.message.id)
+    expect(s.primer.primed.has(`${U}/ses_b`)).toBe(true)
+    await s.delivery.send(U, asSession("ses_a"), "@beta", "ask", "again?")
+    await s.delivery.send(U, asUser, "@beta", "msg", "and again")
+    expect(kinds(s)).toEqual(["primer", "msg", "ask", "msg"])
+  })
+
+  test("a primed session (persisted by the directory) gets no primer after a restart", async () => {
+    const s = setup({ primer: true })
+    s.connect("c1", ["ses_b"])
+    await s.delivery.send(U, asUser, "@beta", "msg", "one")
+    const restarted = s.make()
+    await restarted.send(U, asUser, "@beta", "msg", "two")
+    expect(kinds(s)).toEqual(["primer", "msg", "msg"])
+  })
+
+  test("a session without a name is primed by its id", async () => {
+    const s = setup({ primer: true })
+    s.addSession("ses_anon")
+    s.connect("c1", ["ses_anon"])
+    await s.delivery.send(U, asUser, "ses_anon", "msg", "hi")
+    expect(s.sent[0]!.req.meta).toMatchObject({ kind: "primer", to: "ses_anon" })
+    expect(s.sent[0]!.req.text).toContain("You are ses_anon.")
+  })
+
+  test("replies to a session are primed too", async () => {
+    const s = setup({ primer: true })
+    s.connect("c1", ["ses_a", "ses_b"])
+    const ask = await s.delivery.send(U, asUser, "@beta", "ask", "q?")
+    s.sent.length = 0
+    await s.delivery.reply(U, asSession("ses_b"), ask.message.id, "answer")
+    expect(kinds(s)).toEqual([])
+    s.addSession("ses_c", { name: "gamma" })
+    s.connect("c2", ["ses_c"])
+    const fromC = await s.delivery.send(U, asSession("ses_c"), "@beta", "ask", "q2?")
+    s.sent.length = 0
+    await s.delivery.reply(U, asSession("ses_b"), fromC.message.id, "a2")
+    expect(kinds(s)).toEqual(["primer", "reply"])
+    expect(s.sent[0]!.req.sessionID).toBe("ses_c")
+  })
+
+  test("an offline recipient is primed when its pending message is delivered, just before it", async () => {
+    const s = setup({ primer: true })
+    const first = await s.delivery.send(U, asUser, "@beta", "msg", "one")
+    expect(first.delivery).toBe("pending")
+    expect(s.sent).toHaveLength(0)
+    expect(s.primer.primed.size).toBe(0)
+    s.connect("c1", ["ses_b"])
+    await s.delivery.onSessions("c1")
+    expect(kinds(s)).toEqual(["primer", "msg"])
+    expect(s.sent[1]!.req.messageID).toBe(first.message.id)
+  })
+
+  test("a spoke without deliver: unsupported, no primer, not primed", async () => {
+    const s = setup({ primer: true })
+    s.connect("old", ["ses_b"], { deliver: false })
+    expect(await s.delivery.send(U, asUser, "@beta", "msg", "hi").catch((cause) => cause.code)).toBe("unsupported")
+    expect(s.sent).toHaveLength(0)
+    expect(s.primer.primed.size).toBe(0)
+  })
+
+  test("a primer the spoke refuses does not block the message and is tried again next time", async () => {
+    const s = setup({ primer: true })
+    let refuse = true
+    s.connect("c1", ["ses_b"], { answer: (req) => (req.meta.kind === "primer" && refuse ? Promise.reject(new Error("timeout")) : { delivered: req.wake ? "turn" : "queued" }) })
+    const sent = await s.delivery.send(U, asUser, "@beta", "msg", "one")
+    expect(sent.delivery).toBe("turn")
+    expect(s.primer.primed.size).toBe(0)
+    refuse = false
+    await s.delivery.send(U, asUser, "@beta", "msg", "two")
+    expect(kinds(s)).toEqual(["primer", "msg", "primer", "msg"])
+    expect(s.primer.primed.has(`${U}/ses_b`)).toBe(true)
+  })
+
+  test("concurrent first messages send one primer", async () => {
+    const s = setup({ primer: true })
+    s.connect("c1", ["ses_b"])
+    await Promise.all([s.delivery.send(U, asUser, "@beta", "msg", "one"), s.delivery.send(U, asUser, "@beta", "msg", "two")])
+    expect(kinds(s).filter((k) => k === "primer")).toHaveLength(1)
+    expect(kinds(s)[0]).toBe("primer")
+  })
+
+  test("an explicit name primes an unprimed online session once, with its new name, without waking", async () => {
+    const s = setup({ primer: true })
+    s.connect("c1", ["ses_b"])
+    s.entries.set("ses_b", { ...s.entries.get("ses_b")!, name: "renamed" })
+    s.primer.name(U, "ses_b", "renamed")
+    await settle()
+    expect(kinds(s)).toEqual(["primer"])
+    expect(s.sent[0]!.req).toMatchObject({ wake: false, meta: { kind: "primer", to: "@renamed" } })
+    expect(s.sent[0]!.req.text).toContain("You are @renamed")
+    // A later explicit rename primes again, so the session learns its new name; messages don't.
+    s.entries.set("ses_b", { ...s.entries.get("ses_b")!, name: "again" })
+    s.primer.name(U, "ses_b", "again")
+    await settle()
+    await s.delivery.send(U, asUser, "@again", "msg", "hi")
+    expect(kinds(s)).toEqual(["primer", "primer", "msg"])
+    expect(s.sent[1]!.req.text).toContain("You are @again")
+  })
+
+  test("an explicit name of an offline session sends nothing; its first message later primes it", async () => {
+    const s = setup({ primer: true })
+    s.primer.name(U, "ses_b", "beta")
+    await settle()
+    expect(s.sent).toHaveLength(0)
+    expect(s.primer.primed.size).toBe(0)
+    s.connect("c1", ["ses_b"])
+    await s.delivery.send(U, asUser, "@beta", "msg", "hi")
+    expect(kinds(s)).toEqual(["primer", "msg"])
+  })
+
+  test("a connected session that is never messaged or explicitly named gets no primer", async () => {
+    const s = setup({ primer: true })
+    s.connect("c1", ["ses_a", "ses_b"])
+    await s.delivery.onSessions("c1")
+    expect(s.sent).toHaveLength(0)
+  })
+
+  test("without directory primer support nothing is primed (messages unchanged)", async () => {
+    const s = setup()
+    s.connect("c1", ["ses_b"])
+    await s.delivery.send(U, asUser, "@beta", "msg", "hi")
+    expect(kinds(s)).toEqual(["msg"])
   })
 })
 
