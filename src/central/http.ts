@@ -15,7 +15,7 @@ import { emailAllowed, type CentralConfig } from "./config"
 import { authPage, cookieValue, deviceName, OIDC_COOKIE, OidcClient, OidcError } from "./oidc"
 import { isNotificationKind, Push, type PushSender } from "./push"
 import { pushEndpointProblem, resolveHost as systemResolveHost, type ResolveHost } from "./push-target"
-import { memoryBackends, type Backends } from "./backend"
+import { fileBackends, type Backends } from "./backend"
 import { createResolver, type BearerVerifier, type CredentialMode } from "./agent/actor"
 import { hubDirectory } from "./agent/directory-routes"
 import { agentApi, agentRoutes, agentVerifiers, isAgentPath, wellKnown, type AgentRoute } from "./agent/routes"
@@ -236,7 +236,7 @@ export function startCentral(options: CentralOptions): Central {
   const now = options.now ?? Date.now
   const store = Store.open(config.stateDir, now, { mode: config.auth.mode })
   /** Used only by new code; existing state stays in the store, registry and event log. */
-  const backends = options.backends ?? memoryBackends({ now })
+  const backends = options.backends ?? fileBackends({ stateDir: config.stateDir, now })
   // A machine's tenant is its owner (read live: ownership moves on migration).
   const registry = new Registry(now, undefined, (machineID) => store.machines().find((m) => m.id === machineID)?.ownerID)
   const push = new Push({ store, subject: config.vapidSubject, sender: options.pushSender })
@@ -1411,6 +1411,7 @@ export function startCentral(options: CentralOptions): Central {
       // Bun 1.3.5 quirk: once the server has closed a WebSocket itself, stop(true)'s promise never
       // resolves even though the listener is closed. Don't wait on it forever.
       await Promise.race([server.stop(true), Bun.sleep(250)])
+      await backends.state.flush?.().catch((cause) => console.error(`[hub] agent state not saved: ${(cause as Error).message}`))
     },
   }
 }

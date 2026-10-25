@@ -1,5 +1,7 @@
-// The hub's backends (design §9): interfaces in ./types, in-memory implementations for the single-process hub.
-// startCentral creates the bundle (or takes one in its options) and exposes it to new code only.
+// The hub's backends (design §9): interfaces in ./types, in-memory implementations for the single-process hub,
+// and a file StateStore under <stateDir>/agent. startCentral creates the file bundle (or takes one in its
+// options), exposes it to new code only, and flushes its state on stop.
+import { FileStateStore, type FileStateStoreOptions } from "./file-state"
 import { MemoryBus } from "./memory-bus"
 import { MemoryCatalog } from "./memory-catalog"
 import { MemoryCounters, MemoryLocks } from "./memory-counters"
@@ -27,4 +29,23 @@ export function memoryBackends(options: MemoryBackendsOptions = {}): Backends {
     locks: new MemoryLocks({ now }),
     catalog: new MemoryCatalog({ now }),
   }
+}
+
+
+export interface FileBackendsOptions extends MemoryBackendsOptions, Pick<FileStateStoreOptions, "debounceMs" | "warn"> {
+  /** The hub's state directory; the StateStore writes under <stateDir>/agent. */
+  readonly stateDir: string
+}
+
+/** The StateStore in files under the state directory, every other backend in process memory, on one clock. */
+export function fileBackends(options: FileBackendsOptions): Backends {
+  const { stateDir, debounceMs, warn, ...memory } = options
+  const state = new FileStateStore({
+    stateDir,
+    ...(memory.now ? { now: memory.now } : {}),
+    ...(memory.timers ? { timers: memory.timers } : {}),
+    ...(debounceMs !== undefined ? { debounceMs } : {}),
+    ...(warn ? { warn } : {}),
+  })
+  return { ...memoryBackends(memory), state }
 }
