@@ -13,6 +13,7 @@ import { HarnessSpoke, type HarnessSpokeOptions } from "../../spoke-sdk/src/inde
 import { parseHookInput } from "./hook-input.ts"
 import { ensurePrivateDir, SOCKET_PATH_MAX } from "./paths.ts"
 import { createMcpRouter, MCP_END, type McpRouter } from "./mcp.ts"
+import { hubReferences } from "./references.ts"
 import { ClaudeSessions, type SessionsOptions } from "./sessions.ts"
 import { ask, onLines, WIRE_VERSION } from "./wire.ts"
 
@@ -32,6 +33,7 @@ export interface DaemonOptions {
   readonly permissionWaitMs?: number
   /** How often launches' processes are checked (default 30 s). */
   readonly livenessIntervalMs?: number
+  /** Prompt references (default: looked up at the hub with the session's token). */
   readonly references?: SessionsOptions["references"]
   readonly log?: (line: string) => void
   readonly socket?: HarnessSpokeOptions["socket"]
@@ -96,7 +98,7 @@ export async function startDaemon(options: DaemonOptions): Promise<ClaudeDaemon>
     spoke,
     ...(options.tokenWaitMs !== undefined ? { tokenWaitMs: options.tokenWaitMs } : {}),
     ...(options.permissionWaitMs !== undefined ? { permissionWaitMs: options.permissionWaitMs } : {}),
-    ...(options.references ? { references: options.references } : {}),
+    references: options.references ?? hubReferences((id) => spoke.sessionToken(id)),
   })
 
   const launches = new Map<string, number>()
