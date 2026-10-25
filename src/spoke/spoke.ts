@@ -9,6 +9,7 @@ import {
   COMPACTED_EVENTS,
   FORWARDED_EVENTS,
   HARNESS_OPENCODE,
+  isLaunchCreate,
   SEED_JOBS_MAX,
   SPOKE_FEATURES,
   type DeliverRequest,
@@ -24,6 +25,7 @@ import {
   type ServerRequest,
   type SessionTokensRequest,
   type ActTokensRequest,
+  type CreateRequest,
   type SessionModelPrefs,
   type SpokeRequest,
   type TerminalInfo,
@@ -38,6 +40,7 @@ import { DeliveryLedger, deliverMetadata, deliverText, harnessMessageID, InboxOr
 import { pollEnrollment, startEnrollment } from "./enroll"
 import { HerdrWatcher, openInHerdr, type HerdrRunner } from "./herdr"
 import type { LocalHubResult } from "./localhub"
+import { launchDirectoryProblem } from "./node-roots"
 import { PresenceBook } from "./presence"
 import { SessionTokenStore } from "./session-tokens"
 import { changeStats, contextUsage, filePatch, mcpServers } from "./summary"
@@ -199,6 +202,11 @@ export interface SpokeOptions {
   readonly autoNameWaitMs?: number
   /** After generation returns without a session.renamed event, how long to wait for it (default 1.5 s). */
   readonly autoNameSettleMs?: number
+  /**
+   * The machine's node workspace roots (node.json, src/spoke/node-roots.ts), read on each launch create: a launch's
+   * directory must be under one. Absent: no roots, so launch creates are refused.
+   */
+  readonly workspaceRoots?: () => readonly string[]
 }
 
 export type EnrollmentState = "pending" | "approved" | "denied" | "expired" | "error"
@@ -936,7 +944,7 @@ export class Spoke {
   private async handle(req: ServerRequest): Promise<unknown> {
     // Session browser ops are not gated by exposure: they are how a session gets exposed.
     if (req.op === "expose") return this.expose(req.sessionID, req.on)
-    if (req.op === "create") return this.create(req.directory, req.title, req.herdrWorkspace)
+    if (req.op === "create") return this.create(req)
     if (req.op === "sessionTokens") return this.storeTokens(this.tokens, req)
     if (req.op === "actTokens") return this.storeTokens(this.actTokens, req)
     // Inspection and control need a session this process knows; Voice (conversation) is gated separately.
@@ -1322,15 +1330,23 @@ export class Spoke {
    * of a Herdr pane. With `herdrWorkspace`, also opens it in a new tab of that Herdr workspace; if that
    * fails the session still exists and the result carries a warning instead of `openedIn`.
    */
-  private async create(directory: string, title?: string, herdrWorkspace?: string): Promise<ResultFor["create"] & { warning?: string }> {
+  private async create(req: CreateRequest): Promise<ResultFor["create"] & { warning?: string }> {
+    const { directory, title, herdrWorkspace } = req
     if (this.options.kind !== "service" || !this.host.createSession) {
       throw new Error("Only the background service creates sessions")
     }
     const target = path.resolve(directory)
-    const workspace =
-      this.workspaces().get(target) ?? (this.herdr?.hasDirectory(target) ? { project: target, projectName: path.basename(target) || target } : undefined)
+    const launch = isLaunchCreate(req)
+    const workspace = launch
+      ? await this.launchWorkspace(req, target)
+      : this.workspaces().get(target) ?? (this.herdr?.hasDirectory(target) ? { project: target, projectName: path.basename(target) || target } : undefined)
     if (!workspace) throw new Error("unknown workspace")
     const session = await this.host.createSession({ directory: target, ...(title ? { title } : {}) })
+    if (launch) {
+      // Agent first: switching the agent may reset the model.
+      if (req.agent) await this.host.switchAgent(session.id, req.agent)
+      if (req.model) await this.switchModel(session.id, { providerID: req.model.providerID, id: req.model.modelID, ...(req.model.variant ? { variant: req.model.variant } : {}) })
+    }
     const now = Date.now()
     this.tracker.observe({ type: "session.created", data: { sessionID: session.id, title: title ?? "", location: { directory: target } } }, now)
     this.tracker.setInfo(session.id, { title: title ?? "", directory: target, updated: now, ...workspace })
@@ -1339,6 +1355,33 @@ export class Spoke {
     if (!herdrWorkspace) return { sessionID: session.id }
     const warning = await this.openInHerdr(herdrWorkspace, target, session.id, title)
     return warning ? { sessionID: session.id, warning } : { sessionID: session.id, openedIn: "herdr" }
+  }
+
+  /**
+   * The workspace of a launch create (feature "launch"): its directory must exist under the node workspace roots
+   * (a worktree or clone `hub node` prepared need not be one this process reported), and its agent and model must
+   * be ones this OpenCode has. Checked before the session is created.
+   */
+  private async launchWorkspace(req: CreateRequest, target: string): Promise<{ project: string; projectName: string }> {
+    const problem = launchDirectoryProblem(target, this.options.workspaceRoots?.() ?? [])
+    if (problem) throw new Error(problem)
+    if (req.agent && !(await this.host.hasAgent(req.agent))) throw new Error(`Unknown agent ${req.agent}`)
+    if (req.model && !(await this.hasModel(req.model))) {
+      throw new Error(`Unknown model ${req.model.providerID}/${req.model.modelID}${req.model.variant ? `#${req.model.variant}` : ""}`)
+    }
+    return this.workspaces().get(target) ?? { project: target, projectName: path.basename(target) || target }
+  }
+
+  /** Whether OpenCode's model list has `model` (and its variant); true when this OpenCode cannot list models. */
+  private async hasModel(model: NonNullable<CreateRequest["model"]>): Promise<boolean> {
+    if (!this.host.listModels) return true
+    return (await this.host.listModels()).some((value: any) => {
+      const id = typeof value?.id === "string" && value.id ? value.id : value?.modelID
+      if (value?.providerID !== model.providerID || id !== model.modelID) return false
+      if (!model.variant) return true
+      const variants = Array.isArray(value.variants) ? value.variants : []
+      return variants.some((v: any) => (typeof v === "string" ? v : v?.id) === model.variant)
+    })
   }
 
   /** Opens a session in a new Herdr tab; returns a warning when that did not work. */

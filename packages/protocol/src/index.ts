@@ -322,8 +322,7 @@ export const IMPLIED_OPENCODE_FEATURES = [
 export const KNOWN_SPOKE_FEATURES = [...IMPLIED_OPENCODE_FEATURES, "autoName", "sessionTokens", "deliver", "hubPrompt", "permissionMessage", "actTokens", "launch"] as const
 export type SpokeFeature = (typeof KNOWN_SPOKE_FEATURES)[number]
 /** What this package's OpenCode spoke announces (without "deliver" and "hubPrompt" when its OpenCode has no synthetic messages). */
-/** What this package's OpenCode spoke announces: "launch" joins when the spoke serves launch creates (P4-T6). */
-export const SPOKE_FEATURES: readonly SpokeFeature[] = KNOWN_SPOKE_FEATURES.filter((f) => f !== "launch")
+export const SPOKE_FEATURES: readonly SpokeFeature[] = KNOWN_SPOKE_FEATURES
 
 /**
  * Features the hub announces in its welcome. "harness": it reads hello `harness`, `harnessVersion` and `evidence`.
@@ -333,8 +332,8 @@ export const SPOKE_FEATURES: readonly SpokeFeature[] = KNOWN_SPOKE_FEATURES.filt
  */
 export const KNOWN_HUB_FEATURES = ["harness", "messaging", "nodes", "launches"] as const
 export type HubFeature = (typeof KNOWN_HUB_FEATURES)[number]
-/** What this hub announces: "nodes" joins with NodeHub (P4-T4), "launches" with the launch routes (P4-T9). */
-export const HUB_FEATURES: readonly HubFeature[] = ["harness", "messaging"]
+/** What this hub announces: "launches" joins with the launch routes (P4-T9). */
+export const HUB_FEATURES: readonly HubFeature[] = ["harness", "messaging", "nodes"]
 
 /** A spoke's harness, version and evidence level; a hello without `harness` is an OpenCode native spoke. */
 export function helloHarness(hello: Hello): { readonly harness: string; readonly harnessVersion: string; readonly evidence: EvidenceLevel | "unknown" } {

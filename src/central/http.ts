@@ -38,7 +38,8 @@ import { BusyError, Registry } from "./registry"
 import { createActions } from "./actions"
 import { audioFormat, SpeechError } from "./speech/provider"
 import { SpeechService } from "./speech/service"
-import { RequestTimeoutError, RequestTooLargeError, SpokeError, SpokeHub, type Notifier, type SpokeSocketData } from "./spoke-ws"
+import { NodeRegistry } from "./nodes"
+import { RequestTimeoutError, RequestTooLargeError, SpokeError, SpokeHub, type Notifier, type SpokeHubOptions, type SpokeSocketData } from "./spoke-ws"
 import { ACTIVITY_INTERVAL_MAX, ACTIVITY_INTERVAL_MIN, LOCAL_USER, PUSH_PREF_KEYS, quietHoursInput, Store, VIEW_PREF_KEYS, type DeviceRecord, type LegacyPushPrefs, type PushPrefs, type UserRecord, type ViewPrefs } from "./store"
 
 export interface Speech {
@@ -78,6 +79,8 @@ export interface CentralOptions {
     readonly turnAcceptMs?: number
     readonly heartbeatMs?: number
     readonly staleMs?: number
+    /** Per node op request timeouts (see NODE_TIMEOUTS_MS). */
+    readonly nodeTimeoutsMs?: SpokeHubOptions["nodeTimeoutsMs"]
   }
 }
 
@@ -87,6 +90,8 @@ export interface Central {
   readonly store: Store
   readonly auth: Auth
   readonly registry: Registry
+  /** Connected `hub node` daemons (never in the registry). */
+  readonly nodes: NodeRegistry
   readonly spokes: SpokeHub
   readonly push: Push
   readonly speechSettings: SpeechService
@@ -257,6 +262,7 @@ export function startCentral(options: CentralOptions): Central {
   const backends = options.backends ?? fileBackends({ stateDir: config.stateDir, now })
   // A machine's tenant is its owner (read live: ownership moves on migration).
   const registry = new Registry(now, undefined, (machineID) => store.machines().find((m) => m.id === machineID)?.ownerID)
+  const nodes = new NodeRegistry((machineID) => store.machines().find((m) => m.id === machineID)?.ownerID, now)
   const push = new Push({ store, subject: config.vapidSubject, sender: options.pushSender })
   const notifier = options.notifier ?? push
   /** SSE subscribers, one user each. */
@@ -349,6 +355,7 @@ export function startCentral(options: CentralOptions): Central {
     store,
     auth,
     registry,
+    nodes,
     publicURL,
     notifier,
     broadcast: (message, tenant) => broadcast(message, { tenant }),
@@ -629,7 +636,7 @@ export function startCentral(options: CentralOptions): Central {
     try {
       if (pathname === "/spoke/ws") return spokes.upgrade(request, server)
       if (method === "GET" && pathname === "/healthz") {
-        return Response.json({ ok: true, version: options.version ?? "0.0.0", spokes: registry.connections() })
+        return Response.json({ ok: true, version: options.version ?? "0.0.0", spokes: registry.connections(), nodes: nodes.count() })
       }
       if (method === "POST" && pathname === "/spoke/enroll") {
         const start = auth.startEnrollment((await body(request)).machineName)
@@ -1522,6 +1529,7 @@ export function startCentral(options: CentralOptions): Central {
     store,
     auth,
     registry,
+    nodes,
     spokes,
     push,
     speechSettings,
