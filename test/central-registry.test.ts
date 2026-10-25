@@ -122,7 +122,7 @@ describe("status from events", () => {
     registry.observe("c1", ev("form.created", { form: { id: "frm_1", sessionID: "ses_1", title: "Pick" } }))
     const status = registry.status("ses_1")!
     expect(status.find((s) => s.id === "ses_child")?.blockers).toEqual([
-      { kind: "permission", id: "per_1", summary: "bash: ls" },
+      { kind: "permission", id: "per_1", summary: "bash: ls", action: "bash", resources: ["ls"] },
     ])
     expect(status[0]?.blockers).toEqual([{ kind: "form", id: "frm_1", summary: "Pick" }])
     expect(status[0]?.state).toBe("blocked")

@@ -167,7 +167,7 @@ describe("GET /api/agent/sessions/:addr (show)", () => {
     expect(res.status).toBe(200)
     const body = await json(res)
     expect(body).toMatchObject({ id: "ses_1", name: "@api-refactor", roles: [], title: "API refactor", state: "blocked", harness: "opencode", online: true, project: "hub" })
-    expect(body.blockers[0]).toEqual({ kind: "permission", id: "per_1", summary: "bash: git push origin main", sessionID: "ses_1" })
+    expect(body.blockers[0]).toEqual({ kind: "permission", id: "per_1", summary: "bash: git push origin main", action: "bash", resources: ["git push origin main"], sessionID: "ses_1" })
     expect(body.blockers[1]).toMatchObject({ kind: "form", id: "frm_1", fields: [{ key: "choice", type: "string" }] })
     expect(body.summary).toEqual({ context: { used: 10 }, branch: "main" })
     expect(body.unsupported).toBeUndefined()
