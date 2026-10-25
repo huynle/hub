@@ -195,6 +195,17 @@ describe("payloads per kind", () => {
     expect(pushPayload("message", "ses_1", "t", "secret text")).toEqual({ kind: "message", sessionID: "ses_1", title: "t · Message", body: "Tap to see it." })
   })
 
+  test("a decision push names its Decision (the tap opens its card); other kinds never carry one", () => {
+    expect(pushPayload("decision", "ses_1", "t", undefined, { decisionID: "dec_abc" })).toEqual({
+      kind: "decision",
+      sessionID: "ses_1",
+      title: "t · Decision",
+      body: "A decision waits for you. Tap to answer.",
+      decisionID: "dec_abc",
+    })
+    expect(pushPayload("message", "ses_1", "t", undefined, { decisionID: "dec_abc" })).not.toHaveProperty("decisionID")
+  })
+
   test("urgency and lifetime per kind", () => {
     for (const kind of ["question", "permission", "failed", "decision", "message"] as const) expect(sendOptionsFor(kind)).toEqual({ TTL: URGENT_TTL_SECONDS, urgency: "high" })
     for (const kind of ["done", "subagentFailed", "jobFailed", "stopped"] as const) expect(sendOptionsFor(kind)).toEqual({ TTL: URGENT_TTL_SECONDS, urgency: "normal" })
