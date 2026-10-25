@@ -36,17 +36,39 @@ async function postJSON(path, body) {
   })
 }
 
-/** The pending permission's summary (e.g. "bash: bun test"), fetched from the hub, never carried by the push. */
-async function permissionSummary(sessionID, requestID) {
+/** The pending permission's blocker (summary "bash: bun test", an agent's recommendation), fetched from the hub, never carried by the push. */
+async function pendingPermission(sessionID, requestID) {
   try {
     const res = await fetch(`/api/sessions/${encodeURIComponent(sessionID)}`, { credentials: "same-origin" })
     if (!res.ok) return undefined
     const session = await res.json()
     const blocker = (session.blockers || []).find((b) => b && b.kind === "permission" && b.id === requestID)
-    return blocker ? String(blocker.summary || "a tool call") : undefined
+    return blocker ? { summary: String(blocker.summary || "a tool call"), decisionID: blocker.recommendation && blocker.recommendation.decisionID } : undefined
   } catch {
     return undefined
   }
+}
+
+/** The Decision of an escalation, or undefined when it cannot be read. */
+async function fetchDecision(decisionID) {
+  try {
+    const res = await fetch(`/api/decisions/${encodeURIComponent(decisionID)}`, { credentials: "same-origin" })
+    if (!res.ok) return undefined
+    const { decision } = await res.json()
+    return decision || undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Whether a permission an agent escalated may still be answered from the notification: not when its Decision is
+ * tap tier (only a tap in the console answers it) or cannot be read (fail closed).
+ */
+async function quickAnswersAllowed(decisionID) {
+  if (typeof decisionID !== "string" || !/^dec_[A-Za-z0-9]{1,64}$/.test(decisionID)) return true
+  const decision = await fetchDecision(decisionID)
+  return !!decision && decision.tier !== "tap"
 }
 
 /** Who an escalation's recommendation is from, as the console names it. */
@@ -58,18 +80,12 @@ function partyName(from) {
 
 /** An open escalation's recommendation ("@orchestrator recommends Approve once: …"), fetched from the hub, never carried by the push. */
 async function escalationSummary(decisionID) {
-  try {
-    const res = await fetch(`/api/decisions/${encodeURIComponent(decisionID)}`, { credentials: "same-origin" })
-    if (!res.ok) return undefined
-    const { decision } = await res.json()
-    if (!decision || decision.state !== "open" || !decision.action || !decision.recommendation) return undefined
-    const option = (decision.options || []).find((o) => o && o.id === decision.recommendation.option)
-    if (!option) return undefined
-    const why = decision.recommendation.why ? `: ${decision.recommendation.why}` : ""
-    return `${partyName(decision.from)} recommends ${option.label}${why}`
-  } catch {
-    return undefined
-  }
+  const decision = await fetchDecision(decisionID)
+  if (!decision || decision.state !== "open" || !decision.action || !decision.recommendation) return undefined
+  const option = (decision.options || []).find((o) => o && o.id === decision.recommendation.option)
+  if (!option) return undefined
+  const why = decision.recommendation.why ? `: ${decision.recommendation.why}` : ""
+  return `${partyName(decision.from)} recommends ${option.label}${why}`
 }
 
 self.addEventListener("push", (event) => {
@@ -88,18 +104,22 @@ self.addEventListener("push", (event) => {
       let body = data.body || ""
       let actions = [{ action: "open", title: "Open" }]
       // Answer from the notification only when the hub confirms the request is pending and we can show what it is.
+      // A Decision push never gets quick answers (a tap-tier one must be answered by a tap in the console).
       if (decisionID) {
         const summary = await escalationSummary(decisionID)
         if (summary) body = summary.length > 180 ? `${summary.slice(0, 179)}…` : summary
       }
       if (kind === "permission" && sessionID && requestID) {
-        const summary = await permissionSummary(sessionID, requestID)
-        if (summary) {
-          body = summary.length > 140 ? `${summary.slice(0, 139)}…` : summary
-          actions = [
-            { action: "allow-once", title: "Allow once" },
-            { action: "reject", title: "Reject" },
-          ]
+        const pending = await pendingPermission(sessionID, requestID)
+        if (pending) {
+          body = pending.summary.length > 140 ? `${pending.summary.slice(0, 139)}…` : pending.summary
+          // Escalated by an agent into a tap-tier Decision: no Allow once / Reject here.
+          if (await quickAnswersAllowed(pending.decisionID)) {
+            actions = [
+              { action: "allow-once", title: "Allow once" },
+              { action: "reject", title: "Reject" },
+            ]
+          }
         }
       }
       await self.registration.showNotification(data.title || "Hub", {
