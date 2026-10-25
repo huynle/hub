@@ -45,7 +45,7 @@ Formerly **opencode-voice** and, briefly, **opencode-hub**
   several people.
 
 In a harness, `/hub` configures the harness's connection to the hub, and each feature is its own
-`/<command>`: today `/voice`; more features will be added the same way.
+`/<command>`: today `/voice`, `/who` and `/msg`; more features will be added the same way.
 
 Requires OpenCode v2 (tested with 2.0.25) for the OpenCode harness. The hub runs on OpenCode's own
 runtime, a standalone binary, Docker, or [Bun](https://bun.sh) ≥ 1.3.
@@ -73,6 +73,8 @@ Then, in OpenCode:
 |---|---|
 | **`/hub`** | Configures this harness's hub connection: the server URL, connect and approve (enroll) this machine, which sessions to share (mode), pair a phone, and open the hub in the browser. The first time it offers **Set up Hub** with two paths (below). |
 | **`/voice`** | The Voice feature: talks to the session on screen. It connects (running the setup first when needed), shares the session for Voice and opens it in the browser with Voice mode starting. |
+| **`/who [project \| @@role]`** | Lists the hub's named and role-holding sessions (name, project, state, online, roles), asked as the session on screen. |
+| **`/msg @name text`** | Sends the text word for word to another session (`@name`, `@@role`, `@name.project`, `ses_…`, or `@me` for you) as the session on screen. Needs a shared, connected session. |
 
 ### Local: everything on this computer
 

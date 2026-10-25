@@ -14,7 +14,13 @@ export interface HubCommand {
   readonly slash: string
   /** Shown in the command palette after "Hub: ". */
   readonly title: string
-  readonly run: () => Promise<unknown>
+  /**
+   * The command takes arguments: `/<slash> text` runs it with the raw text after the name (quotes and inner
+   * spacing kept). Without it, any text after the name sends the whole line to the model instead.
+   */
+  readonly arguments?: boolean
+  /** `input`: the raw arguments; undefined (palette, key binding) and "" (no text) both mean none. */
+  readonly run: (input?: string) => Promise<unknown>
 }
 
 /** The shape OpenCode's keymap layer takes for one command. */
@@ -23,8 +29,8 @@ export interface KeymapCommand {
   readonly title: string
   readonly group: string
   readonly palette: true
-  readonly slash: { readonly name: string }
-  readonly run: () => void
+  readonly slash: { readonly name: string; readonly arguments?: true }
+  readonly run: (input?: string) => void
 }
 
 /**
@@ -44,9 +50,10 @@ export function hubCommands(features: readonly HubCommand[], onError: (cause: un
       title: `${COMMAND_GROUP}: ${feature.title}`,
       group: COMMAND_GROUP,
       palette: true,
-      slash: { name: feature.slash },
-      run: () => {
-        void feature.run().catch(onError)
+      slash: feature.arguments ? { name: feature.slash, arguments: true } : { name: feature.slash },
+      // Keyboard dispatch may pass something other than text; only a string is the command's input.
+      run: (input?: unknown) => {
+        void feature.run(typeof input === "string" ? input : undefined).catch(onError)
       },
     }
   })

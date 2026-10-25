@@ -27,4 +27,25 @@ describe("hubCommands", () => {
     await Bun.sleep(0)
     expect((errors[0] as Error).message).toBe("nope")
   })
+
+  test("a command with arguments gets the raw text after its name; others keep the plain slash", () => {
+    const seen: Array<string | undefined> = []
+    const [plain, withArgs] = hubCommands(
+      [feature("voice"), { id: "msg", slash: "msg", title: "msg title", arguments: true, run: async (input) => void seen.push(input) }],
+      () => {},
+    )
+    expect(plain!.slash).toEqual({ name: "voice" })
+    expect(withArgs!.slash).toEqual({ name: "msg", arguments: true })
+    withArgs!.run('@bob  hello "there"')
+    withArgs!.run("")
+    withArgs!.run(undefined)
+    expect(seen).toEqual(['@bob  hello "there"', "", undefined])
+  })
+
+  test("a key event or other non-string input reaches run as no arguments", () => {
+    const seen: unknown[] = []
+    const [cmd] = hubCommands([{ id: "who", slash: "who", title: "who", arguments: true, run: async (input) => void seen.push(input) }], () => {})
+    ;(cmd!.run as (input?: unknown) => void)({ name: "return" })
+    expect(seen).toEqual([undefined])
+  })
 })

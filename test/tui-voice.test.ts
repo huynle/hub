@@ -1,6 +1,6 @@
 // /hub and /voice in the TUI: two separate commands (src/tui.ts), and the /voice flow (src/voice-command.ts):
 // set up or connect the hub when needed, share the session for Voice, open the browser on it with ?voice=1.
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
 import plugin from "../src/tui"
 import { startVoice, type VoiceCommandDeps, type VoiceStatus } from "../src/voice-command"
 
@@ -25,6 +25,59 @@ function registeredCommands() {
   return commands
 }
 
+async function until(done: () => boolean, ms = 2000) {
+  const end = Date.now() + ms
+  while (!done()) {
+    if (Date.now() > end) throw new Error("timed out")
+    await Bun.sleep(5)
+  }
+}
+
+/** The TUI plugin with a fake context on `route`: RPC calls are recorded; `fail` makes a method reject. */
+function tuiWith(route: { type: string; sessionID?: string }, fail: Record<string, unknown> = {}) {
+  const layers: Array<() => { commands: any[] }> = []
+  const calls: Array<[string, unknown]> = []
+  const toasts: Array<{ title: string; message: string; variant: string }> = []
+  const alerts: Array<{ title: string; message: string }> = []
+  const answers: Record<string, unknown> = {
+    hubMsg: { id: "m_1", to: "@bob", delivery: "queued" },
+    hubWho: { sessions: [{ sessionID: "ses_bob", name: "bob", project: "hub", online: true, roles: [] }] },
+    formActions: { actions: [] },
+  }
+  const rpc = new Proxy(
+    {},
+    {
+      get: (_target, method: string) => async (input: unknown) => {
+        calls.push([method, input])
+        if (method === "formActions") await Bun.sleep(50)
+        if (method in fail) throw fail[method]
+        return answers[method] ?? {}
+      },
+    },
+  )
+  const context: any = {
+    client: { rpc: () => rpc },
+    location: undefined,
+    data: { location: { default: () => undefined }, session: { root: (id: string) => id } },
+    ui: {
+      toast: { show: (t: (typeof toasts)[number]) => void toasts.push(t) },
+      router: { current: () => route },
+      dialog: { alert: async (a: (typeof alerts)[number]) => void alerts.push(a), confirm: async () => false, select: async () => undefined, prompt: async () => undefined },
+      tabs: { enabled: () => false, list: () => [] },
+    },
+    keymap: { layer: (fn: () => { commands: any[] }) => layers.push(fn) },
+  }
+  const dispose = (plugin as any).setup(context)
+  cleanups.push(() => typeof dispose === "function" && dispose())
+  const commands = layers.flatMap((fn) => fn().commands)
+  return { calls, toasts, alerts, command: (name: string) => commands.find((c) => c.slash?.name === name)! }
+}
+
+const cleanups: Array<() => unknown> = []
+afterEach(() => {
+  for (const c of cleanups.splice(0)) c()
+})
+
 describe("TUI commands", () => {
   test("/hub and /voice are separate commands; no name or alias is registered twice", () => {
     const commands = registeredCommands()
@@ -40,6 +93,43 @@ describe("TUI commands", () => {
     expect(typeof voice.run).toBe("function")
     expect(hub).toMatchObject({ id: "hub.open", group: "Hub" })
     expect(voice).toMatchObject({ id: "hub.voice", group: "Hub" })
+  })
+
+  test("/who and /msg take arguments; /hub and /voice do not", () => {
+    const commands = registeredCommands()
+    const who = commands.find((c) => c.slash?.name === "who")!
+    const msg = commands.find((c) => c.slash?.name === "msg")!
+    expect(who).toMatchObject({ id: "hub.who", group: "Hub", slash: { name: "who", arguments: true } })
+    expect(msg).toMatchObject({ id: "hub.msg", group: "Hub", slash: { name: "msg", arguments: true } })
+    expect(commands.find((c) => c.slash?.name === "hub")!.slash.arguments).toBeUndefined()
+    expect(commands.find((c) => c.slash?.name === "voice")!.slash.arguments).toBeUndefined()
+  })
+
+  test("/msg @x text calls hubMsg word for word as the current session; on the home screen it is a toast", async () => {
+    const inSession = tuiWith({ type: "session", sessionID: "ses_me" })
+    inSession.command("msg").run('@bob  hello "you"')
+    await until(() => inSession.toasts.length > 0)
+    expect(inSession.calls).toContainEqual(["hubMsg", { sessionID: "ses_me", to: "@bob", text: 'hello "you"' }])
+    expect(inSession.toasts).toContainEqual({ title: "Hub", message: "Sent to @bob (queued)", variant: "success" })
+
+    const home = tuiWith({ type: "home" })
+    home.command("msg").run("@bob hi")
+    await until(() => home.toasts.length > 0)
+    expect(home.calls.filter(([method]) => method === "hubMsg")).toEqual([])
+    expect(home.toasts[0]).toMatchObject({ variant: "warning", message: expect.stringMatching(/open a session/i) })
+  })
+
+  test("/who lists the hub's sessions in a dialog as the current session; RPC errors are toasts", async () => {
+    const tui = tuiWith({ type: "session", sessionID: "ses_me" })
+    tui.command("who").run("hub")
+    await until(() => tui.alerts.length > 0)
+    expect(tui.calls).toContainEqual(["hubWho", { sessionID: "ses_me", project: "hub" }])
+    expect(tui.alerts[0]!.message).toBe("@bob · hub · online")
+
+    const failing = tuiWith({ type: "session", sessionID: "ses_me" }, { hubMsg: { type: "not_connected", message: "This session has no hub token yet" } })
+    failing.command("msg").run("@bob hi")
+    await until(() => failing.toasts.length > 0)
+    expect(failing.toasts[0]).toMatchObject({ variant: "error", message: "This session has no hub token yet" })
   })
 
   test("is the hub.tui plugin", () => {

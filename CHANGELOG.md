@@ -168,6 +168,13 @@ the protocol up:
   The lookup (`who`, `status`, `inbox` as the session) runs only when an address appears, gives up after 1.5 s,
   fails open and is cached for 10 s per session. Opt-in check: `HUB_IT_OPENCODE=1 bun test
   test/spoke-prompt-refs.it.test.ts`.
+- **TUI `/who` and `/msg`**: `/who [project | @@role]` lists the hub's named and role-holding sessions (name,
+  project, state, online, roles) in a dialog; `/msg @name text` (also `@@role`, `@name.project`, `ses_…`, `@me`)
+  sends the text word for word as the session on screen, with that session's own hub token, and toasts where it
+  went (`Sent to @bob (queued)`). `/msg` alone (or from the palette) asks for `@name text`. On the home screen
+  both say to open a session first. New RPC methods `hubWho {sessionID, project?, role?}` and `hubMsg
+  {sessionID, to, text}` (error `unsupported` when the hub lacks `messaging`); Hub commands may now take slash
+  arguments (`HubCommand.arguments`, `run(input?)`).
 
 ### Other changes
 

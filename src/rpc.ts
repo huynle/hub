@@ -15,11 +15,13 @@ const empty = obj({})
 const errorData = { type: "object" } as const
 
 /**
- * not_connected: no live connection · invalid: bad input · unreachable: server could not be reached ·
- * unavailable: spoke not running in this process · server_error: the hub refused the request.
+ * not_connected: no live connection (or the session has no hub token yet) · invalid: bad input ·
+ * unreachable: server could not be reached · unavailable: spoke not running in this process ·
+ * server_error: the hub refused the request · unsupported: the hub lacks the feature (messaging).
  */
 const errors = {
   not_connected: errorData,
+  unsupported: errorData,
   invalid: errorData,
   unreachable: errorData,
   unavailable: errorData,
@@ -90,6 +92,29 @@ const methods = {
   },
   /** Conversation mode for a session in this process (same path as the server's "conversation" op). */
   conversation: { input: obj({ sessionID: str, on: bool }, ["sessionID", "on"]), output: obj({ agent: str }, ["agent"]), errors },
+  /**
+   * /who: the hub's named and role-holding sessions (optionally one project or one role), asked as the TUI's
+   * current session (its own hub token). Labels are sanitised.
+   */
+  hubWho: {
+    input: obj({ sessionID: str, project: str, role: str }, ["sessionID"]),
+    output: obj(
+      {
+        sessions: {
+          type: "array",
+          items: obj({ sessionID: str, name: str, project: str, state: str, online: bool, roles: { type: "array", items: str } }, ["sessionID", "online", "roles"]),
+        },
+      },
+      ["sessions"],
+    ),
+    errors,
+  },
+  /** /msg: sends `text` word for word to `to` as the TUI's current session (its own hub token). */
+  hubMsg: {
+    input: obj({ sessionID: str, to: str, text: str }, ["sessionID", "to", "text"]),
+    output: obj({ id: str, to: str, delivery: str }, ["id", "to"]),
+    errors,
+  },
 } as const
 
 export const HubRpc = Rpc.define({ id: "hub", methods, events: {} })

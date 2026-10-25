@@ -12,6 +12,7 @@ import { checkServer, parseServerInput } from "./setup"
 import { defineVoiceAgent, orchestratorParts, STOP_TOOL, STOP_TOOL_DESCRIPTION } from "./spoke/conversation"
 import { envInjector, hubBinDir, ShellCorrelator, stripInheritedHubEnv } from "./spoke/env-inject"
 import { herdrRunner } from "./spoke/herdr"
+import { HubRpcError, hubMsg, hubWho } from "./spoke/hub-rpc"
 import { HUB_TOOL, HUB_TOOL_DESCRIPTION, HUB_TOOL_INPUT, runHubTool } from "./spoke/hub-tool"
 import { cliEntry, installLaunchers } from "./spoke/launchers"
 import { listServiceSessions } from "./spoke/listing"
@@ -322,6 +323,7 @@ export default Plugin.define({
         return await action(spoke)
       } catch (cause) {
         if (cause instanceof SpokeError) return rpc.error(cause.name, cause.message, {})
+        if (cause instanceof HubRpcError) return rpc.error(cause.code, cause.message, {})
         return rpc.error("server_error", cause instanceof Error ? cause.message : String(cause), {})
       }
     }
@@ -359,6 +361,9 @@ export default Plugin.define({
           s.presence(sessionIDs.filter((id): id is string => typeof id === "string").slice(0, 200), typeof reporter === "string" ? reporter.slice(0, 100) : undefined)
           return {}
         }),
+      // The TUI's /who and /msg, as its current session (src/spoke/hub-rpc.ts).
+      hubWho: (value, rpc) => run(rpc, (s) => hubWho(s, value)),
+      hubMsg: (value, rpc) => run(rpc, (s) => hubMsg(s, value)),
     } satisfies Parameters<typeof ctx.rpc.register<typeof HubRpc>>[1]
     // "hub", plus the opencode-voice id "voice" for clients built against the old name (see src/rpc.ts).
     for (const definition of [HubRpc, VoiceRpc]) {
