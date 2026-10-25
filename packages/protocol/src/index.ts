@@ -2,10 +2,11 @@
 // A spoke (a harness plugin; OpenCode first) connects outbound with `Authorization: Bearer <machineToken>`.
 // Every frame is one object with a `t` discriminator. Unknown or malformed frames are rejected.
 //
-// Core and features: every spoke serves the core ops (turn, steer, interrupt, stop, permission, form); the
-// rest are features a spoke announces in its hello (SPOKE_FEATURES) and the hub uses only when announced.
-// A hello without `harness` comes from an OpenCode spoke that predates this split and implies
-// IMPLIED_OPENCODE_FEATURES. The hub announces its own features in the welcome (HUB_FEATURES), and a spoke
+// Core and features: the core ops (CORE_OPS: turn, steer, interrupt, stop, permission, form) and the optional
+// features a spoke announces in its hello (SPOKE_FEATURES); the hub uses only what a spoke serves (spokeFeatures).
+// An OpenCode spoke (a hello without `harness` or with harness "opencode") serves every core op without announcing
+// it; any other harness announces the core ops it serves, like any feature. A hello without `harness` comes from an
+// OpenCode spoke that predates this split and also implies IMPLIED_OPENCODE_FEATURES. The hub announces its own features in the welcome (HUB_FEATURES), and a spoke
 // sends a newer request only when the hub listed it. Neither side bumps PROTOCOL_VERSION for a new feature.
 //
 // Modules: launch.ts (launch vocabulary and workspace checks), node.ts (the `hub node` hello, frames and ops on the
@@ -324,10 +325,24 @@ export const IMPLIED_OPENCODE_FEATURES = [
  * "launch": its create op takes a launch's `launchID`, `agent` and `model` (see isLaunchCreate); a launch create's
  * directory may be a new workspace under the machine's node workspace roots rather than one the spoke reported.
  */
-export const KNOWN_SPOKE_FEATURES = [...IMPLIED_OPENCODE_FEATURES, "autoName", "sessionTokens", "deliver", "hubPrompt", "permissionMessage", "actTokens", "launch"] as const
+const OPTIONAL_SPOKE_FEATURES = [...IMPLIED_OPENCODE_FEATURES, "autoName", "sessionTokens", "deliver", "hubPrompt", "permissionMessage", "actTokens", "launch"] as const
+
+/**
+ * The core ops. An OpenCode spoke serves them all without announcing them; a spoke of another harness announces
+ * each one it serves (a hooks spoke may serve "permission" but not "turn"), and the hub sends only those. Hubs that
+ * predate this ignore the announcement and send them anyway, so announcing them is additive.
+ */
+export const CORE_OPS = ["turn", "steer", "interrupt", "stop", "permission", "form"] as const
+export type CoreOp = (typeof CORE_OPS)[number]
+
+/** Every feature a spoke may serve: the core ops and the optional features. */
+export const KNOWN_SPOKE_FEATURES = [...CORE_OPS, ...OPTIONAL_SPOKE_FEATURES] as const
 export type SpokeFeature = (typeof KNOWN_SPOKE_FEATURES)[number]
-/** What this package's OpenCode spoke announces (without "deliver" and "hubPrompt" when its OpenCode has no synthetic messages). */
-export const SPOKE_FEATURES: readonly SpokeFeature[] = KNOWN_SPOKE_FEATURES
+/**
+ * What this package's OpenCode spoke announces (without "deliver" and "hubPrompt" when its OpenCode has no synthetic
+ * messages). No core op: an OpenCode spoke implies them.
+ */
+export const SPOKE_FEATURES: readonly SpokeFeature[] = OPTIONAL_SPOKE_FEATURES
 
 /**
  * Features the hub announces in its welcome. "harness": it reads hello `harness`, `harnessVersion` and `evidence`.
@@ -347,9 +362,19 @@ export function helloHarness(hello: Hello): { readonly harness: string; readonly
   return { harness: hello.harness, harnessVersion: hello.harnessVersion ?? "", evidence }
 }
 
-/** The features a spoke serves: those it announced, plus IMPLIED_OPENCODE_FEATURES for a hello without `harness`. */
+/** Whether a hello comes from an OpenCode spoke: no `harness` (a spoke that predates it) or harness "opencode". */
+export const isOpenCodeHello = (hello: Hello): boolean => hello.harness === undefined || hello.harness === HARNESS_OPENCODE
+
+/**
+ * The features a spoke serves: those it announced, plus CORE_OPS for an OpenCode hello and IMPLIED_OPENCODE_FEATURES
+ * for a hello without `harness`.
+ */
 export function spokeFeatures(hello: Hello): ReadonlySet<string> {
-  return new Set([...(hello.harness === undefined ? IMPLIED_OPENCODE_FEATURES : []), ...(hello.features ?? [])])
+  return new Set([
+    ...(isOpenCodeHello(hello) ? CORE_OPS : []),
+    ...(hello.harness === undefined ? IMPLIED_OPENCODE_FEATURES : []),
+    ...(hello.features ?? []),
+  ])
 }
 
 export interface Sessions {
@@ -525,16 +550,12 @@ export type ServerRequest =
    */
   | { readonly op: "deliver"; readonly sessionID: string; readonly messageID: string; readonly text: string; readonly wake: boolean; readonly meta: DeliverMeta }
 
-/** The feature a spoke must announce for the hub to send `op`, or undefined for a core op every spoke serves. */
-export function featureForOp(op: ServerRequest["op"]): SpokeFeature | undefined {
+/**
+ * The feature a spoke must serve (spokeFeatures) for the hub to send `op`: the op itself for a core op (CORE_OPS,
+ * implied by OpenCode spokes), else the optional feature that serves it.
+ */
+export function featureForOp(op: ServerRequest["op"]): SpokeFeature {
   switch (op) {
-    case "turn":
-    case "steer":
-    case "interrupt":
-    case "stop":
-    case "permission":
-    case "form":
-      return undefined
     case "setModelPrefs":
       return "modelPrefs"
     default:
@@ -544,8 +565,7 @@ export function featureForOp(op: ServerRequest["op"]): SpokeFeature | undefined 
 
 /** Every feature a spoke must announce for the hub to send `req`: its op's (featureForOp) and its options'. */
 export function requestFeatures(req: ServerRequest): SpokeFeature[] {
-  const op = featureForOp(req.op)
-  const out: SpokeFeature[] = op ? [op] : []
+  const out: SpokeFeature[] = [featureForOp(req.op)]
   if (req.op === "deliver" && req.meta.kind === "prompt") out.push("hubPrompt")
   if (req.op === "permission" && req.message !== undefined) out.push("permissionMessage")
   if (isLaunchCreate(req)) out.push("launch")
