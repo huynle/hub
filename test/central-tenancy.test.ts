@@ -7,6 +7,7 @@ import { Push, type PushSendOptions } from "../src/central/push"
 import { Store, type PushTarget } from "../src/central/store"
 import { harness, session, spoke, sse, waitFor, type Harness } from "./central-harness"
 import { fakeProvider, oidcEnv, signIn, type FakeProvider } from "./oidc-fake"
+import { run as cli } from "../packages/cli/src/cli"
 import { mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -367,6 +368,222 @@ describe("bob cannot act on alice's sessions (approve, deny, answer, prompt, sto
     await pending()
     expect((await as(alice, "/api/agent/sessions/ses_alice/approve", { method: "POST", json: { requestID: "per_alice" } })).status).toBe(200)
     expect(alice.requests.filter((r) => r.op === "permission")).toEqual([{ op: "permission", sessionID: "ses_alice", requestID: "per_alice", decision: "once" }])
+  })
+})
+
+describe("bob cannot reach alice's grants, escalations, grant requests or agent audit (HTTP and CLI)", () => {
+  /** Alice's phase-3 world: a grant, an app token acting under it, an escalation Decision and a grant-request Decision. */
+  interface AliceWorld {
+    grantID: string
+    appTokenID: string
+    escalationID: string
+    requestDecisionID: string
+  }
+  /** Bob's credentials: a device token (CLI login), and a session of his own with its shell and act tokens. */
+  interface BobCreds {
+    env: Record<string, string>
+    home: string
+    session: { shell: string; act: string }
+    spoke: Client
+  }
+
+  const bearer = (token: string, pathname: string, init: RequestInit & { json?: unknown } = {}) =>
+    h.api(pathname, { ...init, cookie: null, origin: null, headers: { authorization: `Bearer ${token}` } })
+
+  async function aliceWorld(): Promise<AliceWorld> {
+    alice.spoke.send(event("permission.asked", { sessionID: "ses_alice", id: "per_alice", action: "shell", resources: ["rm -rf dist"] }))
+    await waitFor(() => h.registry.permissionTargets("ses_alice", "per_alice").length === 1)
+    const app = await json(await as(alice, "/api/agent/app-tokens", { method: "POST", json: { label: "alice bot", scopes: ["sessions:act", "messages:send"] } }))
+    const grant = await as(alice, "/api/agent/grants", {
+      method: "POST",
+      json: { holder: `app:${app.id}`, scope: { projects: ["/home/user/work"] }, allow: ["approve", "deny"], permissions: { allow: ["shell:bun test*"] } },
+    })
+    expect(grant.status).toBe(201)
+    const grantID = (await json(grant)).grant.id as string
+    // Outside the grant: needs_user, with a Decision for alice.
+    const escalated = await bearer(app.token, "/api/agent/sessions/ses_alice/approve", { method: "POST", json: { requestID: "per_alice", why: "alice secret why" } })
+    expect(escalated.status).toBe(403)
+    const escalationID = (await json(escalated)).error.decisionID as string
+    expect(escalationID).toMatch(/^dec_/)
+    const requested = await bearer(app.token, "/api/agent/grants/requests", {
+      method: "POST",
+      json: { grant: { scope: { projects: ["/home/user/work"] }, allow: ["stop"] }, why: "alice secret request" },
+    })
+    expect(requested.status).toBe(201)
+    const requestDecisionID = (await json(requested)).decision.id as string
+    return { grantID, appTokenID: app.id, escalationID, requestDecisionID }
+  }
+
+  async function bobCreds(): Promise<BobCreds> {
+    const { code } = await json(await as(bob, "/api/devices/link", { method: "POST", json: {} }))
+    const { token } = await json(await h.api("/api/devices/redeem", { method: "POST", json: { code }, cookie: null, origin: null }))
+    const home = mkdtempSync(path.join(tmpdir(), "voice-tenancy-cli-"))
+    const env = { XDG_CONFIG_HOME: path.join(home, "xdg") }
+    expect(await cli(["login", "--url", h.url, "--token", token], { env, home, stdout: () => {}, stderr: () => {} })).toBe(0)
+    // A second spoke of bob's announcing session and act tokens, so his session has both.
+    const machine = h.store.addMachine("bob desktop", bob.id)
+    const tokens: { shell?: string; act?: string } = {}
+    const client = await spoke(h, {
+      machine,
+      processID: "p_bob_tokens",
+      hello: { kind: "service", directory: "/home/user/work", harness: "opencode", harnessVersion: "2.1.4", evidence: "native", features: ["sessionTokens", "actTokens", "deliver"] } as any,
+    })
+    client.ws.addEventListener("message", (message) => {
+      const frame = JSON.parse(String(message.data))
+      if (frame.t !== "req") return
+      const op = frame.req.op
+      if (op === "sessionTokens" || op === "actTokens") {
+        const mine = frame.req.tokens.find((t: any) => t.sessionID === "ses_bobtok")
+        if (mine) tokens[op === "sessionTokens" ? "shell" : "act"] = mine.token
+        client.send({ t: "res", id: frame.id, ok: true, result: { applied: frame.req.tokens.map((t: any) => t.sessionID), skipped: [] } })
+      } else client.send({ t: "res", id: frame.id, ok: true, result: op === "deliver" ? { delivered: "queued" } : {} })
+    })
+    client.send({ t: "sessions", sessions: [session("ses_bobtok", { owned: true, directory: "/home/user/work", title: "bob tokens" })] })
+    await waitFor(() => tokens.shell !== undefined && tokens.act !== undefined, 5000)
+    return { env, home, session: { shell: tokens.shell!, act: tokens.act! }, spoke: client }
+  }
+
+  async function bobCli(creds: { env: Record<string, string>; home: string }, argv: string[]) {
+    let stdout = ""
+    const code = await cli([...argv, "--json"], { env: creds.env, home: creds.home, stdout: (s) => (stdout += s), stderr: (s) => (stdout ||= s) })
+    let body: any
+    try {
+      body = JSON.parse(stdout)
+    } catch {
+      body = { raw: stdout }
+    }
+    return { code, body }
+  }
+
+  const ACT_OPS = ["permission", "form", "deliver", "steer", "turn", "stop"]
+
+  test("grants: bob's list is empty; alice's grant is not_found on every grant route, like an unknown id; admins neither", async () => {
+    const world = await aliceWorld()
+    const before = await json(await as(alice, `/api/agent/grants/${world.grantID}`))
+    expect((await json(await as(bob, "/api/agent/grants"))).grants).toEqual([])
+    const spec = { holder: `app:${world.appTokenID}`, scope: { projects: ["/home/user/work"] }, allow: ["approve", "deny", "stop"] }
+    for (const id of [world.grantID, "g_0000000000000000"]) {
+      for (const [method, body] of [["GET"], ["PUT", spec], ["DELETE"]] as Array<[string, unknown?]>) {
+        for (const who of [bob, admin]) {
+          const res = await as(who, `/api/agent/grants/${id}`, body === undefined ? { method } : { method, json: body })
+          expect({ id, method, status: res.status }).toEqual({ id, method, status: 404 })
+          expect((await json(res)).error.code).toBe("not_found")
+        }
+      }
+    }
+    // A grant naming alice's app token or session as its holder is refused as not found.
+    for (const holder of [`app:${world.appTokenID}`, "ses_alice"]) {
+      const res = await as(bob, "/api/agent/grants", { method: "POST", json: { ...spec, holder } })
+      expect({ holder, status: res.status }).toEqual({ holder, status: 404 })
+    }
+    expect((await json(await as(bob, "/api/agent/grants"))).grants).toEqual([])
+    expect((await json(await as(admin, "/api/agent/grants"))).grants).toEqual([])
+    expect(await json(await as(alice, `/api/agent/grants/${world.grantID}`))).toEqual(before)
+  })
+
+  test("escalation and grant-request Decisions: not_found on the console and agent routes, never listed, still open", async () => {
+    const world = await aliceWorld()
+    for (const id of [world.escalationID, world.requestDecisionID]) {
+      for (const who of [bob, admin]) {
+        expect((await as(who, `/api/decisions/${id}`)).status).toBe(404)
+        expect((await as(who, `/api/decisions/${id}/answer`, { method: "POST", json: { option: "approve" } })).status).toBe(404)
+        expect((await as(who, `/api/agent/decisions/${id}`)).status).toBe(404)
+      }
+    }
+    for (const pathname of ["/api/decisions", "/api/decisions?state=open", "/api/agent/decisions", "/api/agent/inbox"]) {
+      const text = JSON.stringify(await json(await as(bob, pathname)))
+      expect(text).not.toContain("alice secret")
+      expect(text).not.toContain(world.escalationID)
+      expect(text).not.toContain(world.requestDecisionID)
+    }
+    expect((await h.decisions.get(alice.id, world.escalationID))?.state).toBe("open")
+    expect((await h.decisions.get(alice.id, world.requestDecisionID))?.state).toBe("open")
+    // The escalated request was not answered, and no grant was created for alice.
+    expect(alice.requests.filter((r) => r.op === "permission")).toEqual([])
+    expect((await json(await as(alice, "/api/agent/grants"))).grants).toHaveLength(1)
+  })
+
+  test("agent audit: bob's log (and his SSE) never carries alice's entries", async () => {
+    const bobEvents = sse(await as(bob, "/api/events"))
+    await bobEvents.next((m) => m.type === "catalog")
+    const world = await aliceWorld()
+    const aliceAudit = (await json(await as(alice, "/api/agent/audit"))).entries
+    expect(aliceAudit.map((e: any) => e.verb)).toEqual(expect.arrayContaining(["approve", "grant.request"]))
+    expect((await json(await as(bob, "/api/agent/audit"))).entries).toEqual([])
+    expect((await json(await as(admin, "/api/agent/audit"))).entries).toEqual([])
+    // Bob's own action is the marker: his stream gets his agent entry, never alice's.
+    expect((await as(bob, "/api/agent/acting", { method: "PUT", json: { enabled: true } })).status).toBe(200)
+    const seen: any[] = []
+    await bobEvents.next((m) => {
+      seen.push(m)
+      return m.type === "agent"
+    })
+    expect(seen.filter((m) => m.type === "agent").map((m) => m.entry.verb)).toEqual(["acting.resume"])
+    expect(JSON.stringify(seen)).not.toContain("ses_alice")
+    expect(JSON.stringify(seen)).not.toContain(world.grantID)
+    await bobEvents.cancel()
+  })
+
+  test("the CLI as bob's device: grant show/revoke/create, act verbs on alice's are not found (exit 3); lists are empty", async () => {
+    const world = await aliceWorld()
+    const creds = await bobCreds()
+    const list = await bobCli(creds, ["grant", "list"])
+    expect(list.code).toBe(0)
+    expect(list.body.grants).toEqual([])
+    const cases: string[][] = [
+      ["grant", "show", world.grantID],
+      ["grant", "revoke", world.grantID],
+      ["grant", "create", "--holder", `app:${world.appTokenID}`, "--project", "/home/user/work", "--allow", "stop"],
+      ["grant", "create", "--holder", "ses_alice", "--project", "/home/user/work", "--allow", "stop"],
+      ["approve", "ses_alice", "per_alice"],
+      ["deny", "ses_alice", "per_alice", "--why", "spoof"],
+      ["answer", "ses_alice", "form_alice", "--cancel"],
+      ["prompt", "ses_alice", "spoof"],
+      ["stop", "ses_alice"],
+      ["approve", "ses_bob", "per_alice"],
+    ]
+    for (const argv of cases) {
+      const r = await bobCli(creds, argv)
+      expect({ argv, code: r.code }).toEqual({ argv, code: 3 })
+      expect(r.body.error.code).toBe("not_found")
+    }
+    const decisions = await bobCli(creds, ["decisions", "list"])
+    expect(decisions.code).toBe(0)
+    expect(JSON.stringify(decisions.body)).not.toContain("alice secret")
+    expect(alice.requests.filter((r) => ACT_OPS.includes(r.op))).toEqual([])
+    expect((await json(await as(alice, `/api/agent/grants/${world.grantID}`))).grant.state).toBe("active")
+    creds.spoke.close()
+  })
+
+  test("bob's session: its act token gets not_found on alice's sessions; a grant request naming her session is not found", async () => {
+    const world = await aliceWorld()
+    const creds = await bobCreds()
+    // Even under a grant of bob's own covering the same project path.
+    const own = await as(bob, "/api/agent/grants", {
+      method: "POST",
+      json: { holder: "ses_bobtok", scope: { projects: ["/home/user/work"] }, allow: ["approve", "deny", "answer", "prompt", "stop"], permissions: { allow: ["shell"] } },
+    })
+    expect(own.status).toBe(201)
+    for (const [verb, body] of [
+      ["approve", { requestID: "per_alice" }],
+      ["deny", { requestID: "per_alice", why: "spoof" }],
+      ["answer", { formID: "form_alice", cancel: true }],
+      ["prompt", { text: "spoof" }],
+      ["stop", {}],
+    ] as Array<[string, unknown]>) {
+      const res = await bearer(creds.session.act, `/api/agent/sessions/ses_alice/${verb}`, { method: "POST", json: body })
+      expect({ verb, status: res.status }).toEqual({ verb, status: 404 })
+      expect((await json(res)).error.code).toBe("not_found")
+    }
+    // The CLI as the session (its shell token): a grant request held by alice's session is not found.
+    const asSession = { env: { HUB_URL: h.url, HUB_SESSION_TOKEN: creds.session.shell }, home: creds.home }
+    const requested = await bobCli(asSession, ["grant", "request", "--holder", "ses_alice", "--project", "/home/user/work", "--allow", "stop", "--why", "spoof"])
+    expect(requested.code).toBe(3)
+    expect(requested.body.error.code).toBe("not_found")
+    const open = (await json(await as(alice, "/api/decisions?state=open"))).decisions.map((d: any) => d.id).sort()
+    expect(open).toEqual([world.escalationID, world.requestDecisionID].sort())
+    expect(alice.requests.filter((r) => ACT_OPS.includes(r.op))).toEqual([])
+    creds.spoke.close()
   })
 })
 
