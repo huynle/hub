@@ -147,10 +147,17 @@ const CLOSE_LAUNCH_EXPIRED = 4005
 /** Longest delay setTimeout takes; later expiries re-arm. */
 const MAX_TIMER_MS = 2 ** 31 - 1
 const LAUNCH_TOKEN = /^hlt1\./
+/** How many closed launches are remembered (launch IDs are never reused). */
+const CLOSED_LAUNCHES = 1000
 
 export class SpokeHub {
   private readonly sockets = new Map<string, Socket>()
   private readonly pending = new Map<string, Pending>()
+  /**
+   * Launches closed here, with the reason: a socket whose token was verified just before its launch ended opens
+   * after closeLaunch ran, and is turned away then.
+   */
+  private readonly closedLaunches = new Map<string, string>()
   private readonly heartbeat: ReturnType<typeof setInterval>
   private seq = 0
   readonly websocket: WebSocketHandler<SpokeSocketData>
@@ -256,6 +263,8 @@ export class SpokeHub {
 
   /** Disconnects the connections bound to a launch (when it ends). */
   closeLaunch(launchID: string, reason = "launch ended"): void {
+    this.closedLaunches.set(launchID, reason)
+    if (this.closedLaunches.size > CLOSED_LAUNCHES) this.closedLaunches.delete(this.closedLaunches.keys().next().value!)
     for (const ws of this.sockets.values()) if (ws.data.launch?.launchID === launchID) this.bye(ws, reason, CLOSE_LAUNCH_ENDED)
   }
 
@@ -271,7 +280,11 @@ export class SpokeHub {
 
   private open(ws: Socket): void {
     this.sockets.set(ws.data.connID, ws)
-    if (ws.data.launch) this.armExpiry(ws, ws.data.launch.exp)
+    if (ws.data.launch) {
+      const closed = this.closedLaunches.get(ws.data.launch.launchID)
+      if (closed !== undefined) return this.bye(ws, closed, CLOSE_LAUNCH_ENDED)
+      this.armExpiry(ws, ws.data.launch.exp)
+    }
     ws.data.helloTimer = setTimeout(() => {
       if (!ws.data.ready) this.bye(ws, "hello timeout")
     }, this.options.helloTimeoutMs ?? 10_000)

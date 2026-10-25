@@ -213,6 +213,17 @@ describe("one connection per launch, closed when the launch ends", () => {
     expect(two.ws.readyState).toBe(WebSocket.OPEN)
   })
 
+  test("a launch closed before its connection opened is not accepted later (verify/end race)", async () => {
+    start()
+    const token = await mint()
+    // The launch ended after the token was verified; the lookup has not caught up yet.
+    hub.closeLaunch("lch_1", "launch ended")
+    const client = await boxed({ token })
+    expect(client.first).toMatchObject({ t: "bye", reason: "launch ended" })
+    await client.closed
+    expect(registry.connections()).toBe(0)
+  })
+
   test("the connection is closed when its token expires", async () => {
     lifetimeMs = 400
     start()
