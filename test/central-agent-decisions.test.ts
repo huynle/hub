@@ -463,6 +463,8 @@ describe("Decisions that act (escalations, P3-T8)", () => {
     expect(after.state).toBe("closed")
     expect(after.answer).toBeUndefined()
     expect(s.changes.at(-1)).toEqual({ userID: U, id: decision.id, state: "closed" })
+    const reply = (await s.delivery.messages.list(U, { kind: "user" })).find((m) => m.kind === "reply")!
+    expect(reply.text).toBe(`Decision ${decision.id} closed: The request was answered elsewhere or ended`)
   })
 
   test("the action fails: the Decision stays open (the user may try again) and the error goes through", async () => {

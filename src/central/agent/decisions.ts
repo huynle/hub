@@ -173,6 +173,9 @@ const defaultTimers: Timers = {
 /** `dec_` + 22 base62 characters from the CSPRNG. */
 export const newDecisionID = (): string => `dec_${newMessageID().slice(4)}`
 
+/** The hub replying for the user (timeouts, closes). */
+const HUB_USER = (userID: string): UserActor => ({ kind: "user", userID, deviceID: "hub", via: "cookie" })
+
 const invalid = (message: string) => new AgentError("invalid", message)
 const gone = () => new AgentError("gone", "The decision is already answered or expired")
 const notFound = () => new AgentError("not_found", "No such decision")
@@ -330,8 +333,7 @@ export class Decisions {
     )
     if (!closed) return undefined
     this.emit(userID, closed)
-    const hub: UserActor = { kind: "user", userID, deviceID: "hub", via: "cookie" }
-    await this.replyTo(userID, closed, `Decision ${id} closed: ${why}`, hub)
+    await this.replyTo(userID, closed, `Decision ${id} closed: ${why}`, HUB_USER(userID))
     return closed
   }
 
@@ -435,7 +437,10 @@ export class Decisions {
       const { answer: _answer, ...rest } = current
       return { ...rest, state: "closed", closed: { at: this.now(), reason: why } }
     })
-    if (closed) this.emit(userID, closed)
+    if (closed) {
+      this.emit(userID, closed)
+      await this.replyTo(userID, closed, `Decision ${closed.id} closed: ${why}`, HUB_USER(userID))
+    }
     throw gone()
   }
 
@@ -472,8 +477,7 @@ export class Decisions {
         const decision = await this.settle(userID, value.id, { option: option.id, answeredBy: "timeout", at: t })
         if (decision) {
           this.emit(userID, decision)
-          const hub: UserActor = { kind: "user", userID, deviceID: "hub", via: "cookie" }
-          await this.replyTo(userID, decision, `Decision ${decision.id}: no answer by the deadline; took the safe option ${option.label} [${option.id}]`, hub)
+          await this.replyTo(userID, decision, `Decision ${decision.id}: no answer by the deadline; took the safe option ${option.label} [${option.id}]`, HUB_USER(userID))
         }
         continue
       }
