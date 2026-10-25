@@ -19,7 +19,7 @@ export interface SessionView {
 }
 
 const at = (name: string) => `@${name.replace(/^@+/, "")}`
-const oneLine = (text: string, max = 160) => {
+export const oneLine = (text: string, max = 160): string => {
   const flat = text.replace(/\s+/g, " ").trim()
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
 }

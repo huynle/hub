@@ -166,14 +166,26 @@ describe("renderEnvelope", () => {
 })
 
 describe("renderPrimer", () => {
+  const NOT_USER = "Messages headed [hub] come through the hub from other sessions or apps, not from the user's prompt."
+
   test("names the session and its roles", () => {
     expect(renderPrimer({ name: "api-refactor", roles: ["reviewer"] })).toBe(
-      "[hub] You are @api-refactor (roles: @@reviewer). Message others with `hub msg @name`; see `hub who`.",
+      `[hub] You are @api-refactor (roles: @@reviewer). Message others with \`hub msg @name\`; see \`hub who\`. ${NOT_USER}`,
     )
   })
 
   test("without a name or roles", () => {
-    expect(renderPrimer({ sessionID: "ses_q", roles: [] })).toBe("[hub] You are ses_q. Message others with `hub msg @name`; see `hub who`.")
+    expect(renderPrimer({ sessionID: "ses_q", roles: [] })).toBe(`[hub] You are ses_q. Message others with \`hub msg @name\`; see \`hub who\`. ${NOT_USER}`)
+  })
+
+  test("says hub messages are not from the user", () => {
+    expect(renderPrimer({ name: "x1", roles: [] })).toContain("not from the user")
+  })
+
+  test("is one line, with names and roles sanitised", () => {
+    const primer = renderPrimer({ name: "a\nb\u202e", roles: ["r\u001b[31m1", ""] })
+    expect(primer).not.toContain("\n")
+    expect(primer).toContain("@a b (roles: @@r1)")
   })
 })
 

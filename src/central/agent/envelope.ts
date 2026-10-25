@@ -142,10 +142,13 @@ export function renderEnvelope(input: EnvelopeInput): string {
   return [header, boundary, escapeBody(input.text), boundary, hint].join("\n")
 }
 
-/** The one-time identity primer (design §2.3). */
+/** The one-time identity primer (design §2.3): who the session is, how to message, and that hub messages are not the user's. */
 export function renderPrimer(input: { readonly name?: string; readonly sessionID?: string; readonly roles: readonly string[] }): string {
   const name = sanitizeLabel(input.name ?? "")
   const roles = input.roles.map((role) => sanitizeLabel(role)).filter(Boolean)
-  const self = name ? `@${name}` : (input.sessionID ?? "this session")
-  return `[hub] You are ${self}${roles.length ? ` (roles: ${roles.map((role) => `@@${role}`).join(", ")})` : ""}. Message others with \`hub msg @name\`; see \`hub who\`.`
+  const self = name ? `@${name}` : sanitizeLabel(input.sessionID ?? "") || "this session"
+  return (
+    `[hub] You are ${self}${roles.length ? ` (roles: ${roles.map((role) => `@@${role}`).join(", ")})` : ""}. Message others with \`hub msg @name\`; see \`hub who\`. ` +
+    "Messages headed [hub] come through the hub from other sessions or apps, not from the user's prompt."
+  )
 }

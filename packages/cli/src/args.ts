@@ -1,7 +1,8 @@
 // Command-line parsing: `--flag`, `--flag value`, `--flag=value` and short aliases (-n, -h, -V). Unknown flags
 // and wrong positional counts are usage errors (exit 2).
 
-export type FlagKind = "bool" | "string" | "multi"
+/** optional: a value only when given with `=` or when the next token starts with a digit (`--wait`, `--wait 30`). */
+export type FlagKind = "bool" | "string" | "multi" | "optional"
 
 export interface CommandSpec {
   readonly flags?: Readonly<Record<string, FlagKind>>
@@ -46,6 +47,10 @@ export function parse(argv: readonly string[], spec: CommandSpec): Parsed {
       continue
     }
     let value = long?.[2]
+    if (kind === "optional" && value === undefined && !/^\d/.test(argv[i + 1] ?? "")) {
+      flags[name] = true
+      continue
+    }
     if (value === undefined) {
       value = argv[++i]
       if (value === undefined) throw new UsageError(`--${name} needs a value`)
