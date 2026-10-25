@@ -1,6 +1,7 @@
 // The Runtime interface (design §6.4): what `hub node` drives for each launch, prepare → (start) → collect →
 // cleanup. A runtime keeps no state of its own between ops: prepare returns the Workspace and collect and cleanup
-// get it back (the hub stores it), so a restarted node can still collect and clean up what an earlier run prepared.
+// get it back with the launch ID (a RunHandle; the hub stores it), so a restarted node can still collect and clean
+// up what an earlier run prepared. A runtime must not trust a handle: it re-checks the workspace on every op.
 //
 // The `host` runtime has no start/stop: the session runs in the machine's long-running harness service, which the
 // hub asks to create it. Sandbox runtimes (openshell) will implement start/stop.
@@ -32,7 +33,7 @@ export interface RuntimeContext {
   readonly progress?: (message: string) => void
 }
 
-/** A started run (sandbox runtimes); the host runtime never starts anything. */
+/** A launch's prepared (or started) workspace, as collect, cleanup and stop get it. */
 export interface RunHandle {
   readonly launchID: string
   readonly workspace: Workspace
@@ -53,8 +54,9 @@ export interface Runtime {
   prepare(input: PrepareInput, ctx?: RuntimeContext): Promise<Workspace>
   start?(workspace: Workspace, input: PrepareInput, ctx?: RuntimeContext): Promise<RunHandle>
   stop?(handle: RunHandle, mode: StopMode): Promise<void>
-  collect(workspace: Workspace, ctx?: RuntimeContext): Promise<Artifacts>
-  cleanup(workspace: Workspace, policy: CleanupPolicy, ctx?: RuntimeContext): Promise<CleanupResult>
+  collect(handle: RunHandle, ctx?: RuntimeContext): Promise<Artifacts>
+  /** Keep, or remove without force: uncommitted or unpushed work, a reused workspace or another launch's keeps it. */
+  cleanup(handle: RunHandle, policy: CleanupPolicy, ctx?: RuntimeContext): Promise<CleanupResult>
 }
 
 /** A runtime error with a message fit for the hub (and the launch's reason): no stack, no secrets. */
