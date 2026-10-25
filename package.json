@@ -79,7 +79,8 @@
     "packages/node",
     "packages/runtime-openshell",
     "packages/spoke-sdk",
-    "packages/testkit"
+    "packages/testkit",
+    "packages/conformance"
   ],
   "engines": {
     "bun": ">=1.3"

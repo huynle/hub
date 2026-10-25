@@ -18,6 +18,7 @@ COPY packages/node/package.json ./packages/node/
 COPY packages/runtime-openshell/package.json ./packages/runtime-openshell/
 COPY packages/spoke-sdk/package.json ./packages/spoke-sdk/
 COPY packages/testkit/package.json ./packages/testkit/
+COPY packages/conformance/package.json ./packages/conformance/
 RUN npm ci --no-audit --no-fund --ignore-scripts
 COPY web ./web
 RUN npx vite build --config web/vite.config.ts
@@ -33,6 +34,7 @@ COPY packages/node/package.json ./packages/node/
 COPY packages/runtime-openshell/package.json ./packages/runtime-openshell/
 COPY packages/spoke-sdk/package.json ./packages/spoke-sdk/
 COPY packages/testkit/package.json ./packages/testkit/
+COPY packages/conformance/package.json ./packages/conformance/
 # Bun migrates package-lock.json; --frozen-lockfile keeps the pinned versions.
 RUN bun install --production --frozen-lockfile --ignore-scripts
 COPY docker/hub-deps.ts ./
