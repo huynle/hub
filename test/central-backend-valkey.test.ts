@@ -3,6 +3,7 @@
 // a real Valkey (HUB_IT_CLUSTER=1 and docker, see test/cluster-it.ts) and skips otherwise.
 import { afterAll, afterEach, describe, expect, test } from "bun:test"
 import { ValkeyConnection, type ValkeyClient } from "../src/central/backend/valkey-client"
+import { ValkeyCounters } from "../src/central/backend/valkey-counters"
 import { ValkeyKv } from "../src/central/backend/valkey-kv"
 import { cluster } from "./backend-impls"
 
@@ -74,5 +75,38 @@ describe.skipIf(!cluster)("Valkey (real server)", () => {
     open.push(kv)
     expect(await kv.set("k", "v")).toBe(true)
     expect(await kv.get("k")).toBe("v")
+  })
+
+  test("ValkeyCounters: the window starts at the first increment (server-side) and later ones do not extend it", async () => {
+    const at = await url()
+    const counters = new ValkeyCounters(at)
+    open.push(counters)
+    expect(await counters.incr("rate:alice", 400)).toBe(1)
+    const client = raw(at)
+    const ttl = Number(await client.send("PTTL", ["ctr:rate:alice"]))
+    expect(ttl).toBeGreaterThan(0)
+    expect(ttl).toBeLessThanOrEqual(400)
+    await Bun.sleep(200)
+    expect(await counters.incr("rate:alice", 400)).toBe(2)
+    expect(Number(await client.send("PTTL", ["ctr:rate:alice"]))).toBeLessThanOrEqual(220)
+    expect(await counters.get("rate:alice")).toBe(2)
+    await Bun.sleep(350)
+    expect(await counters.get("rate:alice")).toBe(0)
+    expect(await counters.incr("rate:alice", 400)).toBe(1)
+  })
+
+  test("ValkeyCounters: concurrent increments each get their own count", async () => {
+    const counters = new ValkeyCounters(await url())
+    open.push(counters)
+    const counts = await Promise.all(Array.from({ length: 20 }, () => counters.incr("k", 60_000)))
+    expect([...counts].sort((a, b) => a - b)).toEqual(Array.from({ length: 20 }, (_, i) => i + 1))
+    expect(await counters.get("k")).toBe(20)
+  })
+
+  test("ValkeyCounters: invalid windows are refused", async () => {
+    const counters = new ValkeyCounters(await url())
+    open.push(counters)
+    for (const ttl of [0, -1, 1.5, Number.NaN]) await expect(counters.incr("k", ttl)).rejects.toThrow(/ttl/)
+    expect(await counters.get("k")).toBe(0)
   })
 })
