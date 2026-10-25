@@ -80,6 +80,15 @@ export const END_TICK_MS = 15_000
 /** How long a running launch's session may go unreported before the launch is lost. */
 export const SESSION_LOST_MS = 10 * 60_000
 
+/** A provisioning run in this process; stop: a stop was asked for (its reason). */
+interface Pipeline {
+  done: Promise<void>
+  stop?: string
+}
+
+/** Thrown at a provisioning checkpoint after a stop. */
+class StopRequested extends Error {}
+
 /** A running launch being watched for its end. */
 interface Watch {
   readonly userID: string
@@ -149,6 +158,8 @@ export class LaunchEngine {
   private readonly unsubscribe: (() => void)[] = []
   /** Ends in progress, by launch ID. */
   private readonly ending = new Map<string, Promise<Launch | undefined>>()
+  /** Provisioning runs in this process, by launch ID. */
+  private readonly pipelines = new Map<string, Pipeline>()
   /** Running launches watched for their end, by launch ID. */
   private readonly watches = new Map<string, Watch>()
   /** Launches whose prompt was seen working before their watch was armed. */
@@ -247,16 +258,74 @@ export class LaunchEngine {
 
   // ---- provisioning ------------------------------------------------------------------------------------
 
+  /**
+   * Stops a launch (DELETE): a queued one ends at once; a provisioning one is cancelled on the node and ends before
+   * its session is created or prompted; a running one has its session stopped, then artifacts and cleanup. Throws
+   * not_found (unknown, or another user's) or gone (already ended).
+   */
+  async stop(userID: string, id: string, reason = "Stopped"): Promise<Launch> {
+    for (;;) {
+      const launch = await this.store.get(userID, id)
+      if (!launch) throw new AgentError("not_found", `No launch ${id}`)
+      switch (launch.state) {
+        case "ended":
+          throw new AgentError("gone", "The launch already ended")
+        case "queued":
+        case "placing":
+          try {
+            const ended = await this.store.transition(userID, id, "ended", { reason, outcome: "stopped", from: ["queued", "placing"] })
+            this.changed(ended)
+            return ended
+          } catch (cause) {
+            // Placement moved it on meanwhile: stop it where it is now.
+            if (cause instanceof LaunchTransitionError && cause.code !== "gone") continue
+            throw cause
+          }
+        case "provisioning": {
+          const pipeline = this.pipelines.get(id)
+          if (pipeline) {
+            pipeline.stop = reason
+            const node = launch.machineID !== undefined ? this.deps.nodes.forMachine(launch.machineID) : undefined
+            if (node) await this.deps.nodeOps.requestNode(node.connID, { op: "cancel", launchID: id }).catch(() => undefined)
+            await pipeline.done
+            return (await this.store.get(userID, id))!
+          }
+          return (await this.end(userID, id, "stopped", reason))!
+        }
+        case "running":
+          return (await this.end(userID, id, "stopped", reason, { stopSession: true }))!
+      }
+    }
+  }
+
   /** A placed launch: prepare → create → roles, name, primer → prompt → running. */
-  private async provision(placed: Placed): Promise<void> {
+  private provision(placed: Placed): Promise<void> {
+    const { userID, launch } = placed
+    if (this.pipelines.has(launch.id)) return this.pipelines.get(launch.id)!.done
+    const pipeline: Pipeline = { done: Promise.resolve() }
+    this.pipelines.set(launch.id, pipeline)
+    pipeline.done = this.provisionNow(placed, pipeline).finally(() => this.pipelines.delete(launch.id))
+    return pipeline.done
+  }
+
+  private async provisionNow(placed: Placed, pipeline: Pipeline): Promise<void> {
     const { userID, launch } = placed
     this.changed(launch)
+    const checkpoint = () => {
+      if (pipeline.stop !== undefined) throw new StopRequested()
+    }
     try {
       await this.putWork(userID, launch.id, { fence: placed.fence })
       const workspace = await this.prepare(userID, launch)
+      checkpoint()
       const sessionID = await this.create(userID, launch, workspace)
-      await this.identify(userID, launch, sessionID)
+      checkpoint()
+      await this.identify(userID, launch, sessionID, checkpoint)
     } catch (cause) {
+      if (pipeline.stop !== undefined) {
+        await this.end(userID, launch.id, "stopped", pipeline.stop)
+        return
+      }
       const gone = this.deps.nodes.forMachine(launch.machineID!) === undefined
       await this.end(userID, launch.id, gone ? "lost" : "failed", gone ? "The node went away while preparing the launch" : `Failed: ${errorText(cause)}`)
     }
@@ -295,7 +364,7 @@ export class LaunchEngine {
   }
 
   /** Roles, the name and the primer, then the prompt; the launch is running. */
-  private async identify(userID: string, launch: Launch, sessionID: string): Promise<void> {
+  private async identify(userID: string, launch: Launch, sessionID: string, checkpoint: () => void = () => {}): Promise<void> {
     const { directory, delivery, actions } = this.deps
     const { spec } = launch
     directory.sync(userID)
@@ -310,6 +379,7 @@ export class LaunchEngine {
     }
     if (spec.name !== undefined) directory.setName(userID, sessionID, spec.name)
     await delivery.prime(userID, sessionID)
+    checkpoint()
     if (spec.prompt !== undefined) {
       await this.updateWork(userID, launch.id, { prompted: true })
       const prompted = await actions.prompt({ sessionID, text: spec.prompt, resetHops: false })

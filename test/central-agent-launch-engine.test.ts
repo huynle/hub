@@ -614,3 +614,70 @@ describe("end watcher", () => {
     w.engine.shutdown()
   })
 })
+
+describe("stop", () => {
+  test("a queued launch ends stopped at once", async () => {
+    const w = world()
+    await w.engine.start()
+    const queued = await launched(w)
+    const stopped = await w.engine.stop(U, queued.id)
+    expect(stopped).toMatchObject({ state: "ended", outcome: "stopped" })
+    expect(w.changes.at(-1)).toMatchObject({ id: queued.id, outcome: "stopped" })
+    w.engine.shutdown()
+  })
+
+  test("stopping during prepare cancels it on the node and ends stopped, not failed", async () => {
+    const w = world()
+    const hold = deferred<unknown>()
+    w.nodeHolds.set("prepare", hold)
+    w.nodeAnswers.cancel = () => {
+      hold.reject(new Error("prepare cancelled"))
+      return { cancelled: true }
+    }
+    w.connectNode()
+    await w.engine.start()
+    const launch = await launched(w)
+    const stopped = await w.engine.stop(U, launch.id)
+    expect(stopped).toMatchObject({ state: "ended", outcome: "stopped" })
+    expect(w.nodeCalls.map((r) => r.op)).toEqual(["prepare", "cancel"])
+    expect(w.spokeCalls).toEqual([])
+    w.engine.shutdown()
+  })
+
+  test("a stop arriving as prepare finishes still stops before the session is created; the fresh workspace is removed", async () => {
+    const w = world()
+    const hold = deferred<unknown>()
+    w.nodeHolds.set("prepare", hold)
+    w.nodeAnswers.cancel = () => {
+      hold.resolve(w.nodeAnswers.prepare!(w.nodeCalls[0]))
+      return { cancelled: false }
+    }
+    w.connectNode()
+    await w.engine.start()
+    const launch = await launched(w)
+    expect(await w.engine.stop(U, launch.id)).toMatchObject({ state: "ended", outcome: "stopped" })
+    expect(w.spokeCalls).toEqual([])
+    expect(w.nodeCalls.find((r) => r.op === "cleanup")).toMatchObject({ policy: "remove" })
+    w.engine.shutdown()
+  })
+
+  test("a running launch: its session is stopped, artifacts collected, the workspace cleaned up by policy", async () => {
+    const { w, launch, sessionID } = await running({ end: { cleanup: "remove" } })
+    const stopped = await w.engine.stop(U, launch.id)
+    expect(stopped).toMatchObject({ state: "ended", outcome: "stopped", artifacts: { commits: 2 } })
+    expect(w.stops).toEqual([sessionID])
+    expect(w.nodeCalls.find((r) => r.op === "cleanup")).toMatchObject({ policy: "remove" })
+    w.engine.shutdown()
+  })
+
+  test("an ended launch is gone; an unknown or another user's launch is not_found", async () => {
+    const w = world()
+    await w.engine.start()
+    const queued = await launched(w)
+    await w.engine.stop(U, queued.id)
+    await expect(w.engine.stop(U, queued.id)).rejects.toMatchObject({ code: "gone" })
+    await expect(w.engine.stop(U, "l_nope")).rejects.toMatchObject({ code: "not_found" })
+    await expect(w.engine.stop("u2", queued.id)).rejects.toMatchObject({ code: "not_found" })
+    w.engine.shutdown()
+  })
+})
