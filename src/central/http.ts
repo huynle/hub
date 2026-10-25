@@ -558,7 +558,7 @@ export function startCentral(options: CentralOptions): Central {
   const audit = new AgentAudit({ state: backends.state, now, admin: store, recorded: (userID, entry) => broadcast({ type: "agent", entry }, { tenant: userID }) })
   const grants = new Grants({ state: backends.state, counters: backends.counters, directory, store, admin: store, now })
   const acting = new ActingSwitch({ store, never: config.agentsNever, audit })
-  const agentDeps = { store, sessionTokens, directory, registry, spokes, delivery, decisions, feed, heartbeatMs, now, audit, grants, acting }
+  const agentDeps = { store, sessionTokens, directory, registry, spokes, delivery, decisions, feed, heartbeatMs, now, audit, grants, acting, actions, maxPromptChars: MAX_PROMPT_CHARS }
   const resolveActor = createResolver({
     cookieName: COOKIE,
     findDevice: (token) => store.findDevice(token),

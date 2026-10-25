@@ -21,6 +21,9 @@ import { type AgentAudit, auditRoutes } from "./audit"
 import { grantRoutes } from "./grant-routes"
 import type { Grants } from "./grants"
 import { type ActingSwitch, actingSwitchRoutes } from "./acting-switch"
+import { Acting, type ActingRegistry, type Escalate } from "./acting"
+import { actingRoutes } from "./acting-routes"
+import type { Actions } from "../actions"
 
 export const AGENT_PREFIX = "/api/agent"
 
@@ -54,7 +57,7 @@ export interface AgentDeps {
   /** Names, roles and address resolution (P1-T8); its routes are added when given. */
   readonly directory?: Directory
   /** The hub's catalog (P1-T9): the read routes are added when given with the directory. */
-  readonly registry?: ReadRegistry
+  readonly registry?: ReadRegistry & ActingRegistry
   /** Hub → spoke requests (show, log). */
   readonly spokes?: SpokeRequester
   /** Agent messages (P2-T5): the message routes are added when given with the directory. */
@@ -67,6 +70,15 @@ export interface AgentDeps {
   readonly grants?: Grants
   /** Kill switches (P3-T4): GET/PUT /api/agent/acting when given; the acting verbs check it. */
   readonly acting?: ActingSwitch
+  /**
+   * The shared action executor (P3-T6): with acting, grants, audit, registry, directory and spokes, the act verbs
+   * POST /api/agent/sessions/:addr/{approve,deny,answer,prompt,stop} (P3-T7).
+   */
+  readonly actions?: Actions
+  /** needs_user escalations of the act verbs (P3-T8 opens a Decision); without it needs_user is only answered. */
+  readonly escalate?: Escalate
+  /** The console's prompt limit, for the user's prompts on the act route. */
+  readonly maxPromptChars?: number
   /** Stored messages as they are sent (the hub also streams them to the console); a new feed when absent. */
   readonly feed?: MessageFeed
   /** Heartbeat of GET /api/agent/watch. */
@@ -106,7 +118,27 @@ export function agentRoutes(deps: AgentDeps): AgentRoute[] {
     ...(deps.audit ? auditRoutes(deps.audit) : []),
     ...(deps.grants ? grantRoutes(deps.grants, deps.now) : []),
     ...(deps.acting ? actingSwitchRoutes(deps.acting) : []),
+    ...actVerbRoutes(deps),
   ]
+}
+
+/** The act verbs, when every part they need is given. */
+function actVerbRoutes(deps: AgentDeps): AgentRoute[] {
+  const { actions, acting, grants, audit, registry, directory, spokes } = deps
+  if (!actions || !acting || !grants || !audit || !registry || !directory || !spokes) return []
+  return actingRoutes(
+    new Acting({
+      registry,
+      directory,
+      actions,
+      spokes,
+      grants,
+      acting,
+      audit,
+      ...(deps.escalate ? { escalate: deps.escalate } : {}),
+      ...(deps.maxPromptChars !== undefined ? { maxPromptChars: deps.maxPromptChars } : {}),
+    }),
+  )
 }
 
 export interface AgentApiOptions {

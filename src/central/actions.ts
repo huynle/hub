@@ -38,6 +38,8 @@ export interface PermissionInput {
   readonly rootID: string
   readonly requestID: string
   readonly decision: PermissionDecision
+  /** Why (a reject's reason, for spokes announcing "permissionMessage"; the caller checks the feature). */
+  readonly message?: string
 }
 
 export type FormInput =
@@ -85,14 +87,14 @@ const STOPPED: TurnResult = { outcome: "interrupted", message: "Stopped", reply:
 
 export function createActions({ registry, spokes, humanTurn }: ActionDeps): Actions {
   return {
-    async answerPermission({ rootID, requestID, decision }) {
+    async answerPermission({ rootID, requestID, decision, message }) {
       const targets = registry.permissionTargets(rootID, requestID)
       if (!targets.length) return GONE
       // Try every process that saw the request: only the one (and the location) running the session holds it.
       let failure: unknown
       for (const target of targets) {
         try {
-          const result = await spokes.request(target.connID, { op: "permission", sessionID: target.sessionID, requestID, decision })
+          const result = await spokes.request(target.connID, { op: "permission", sessionID: target.sessionID, requestID, decision, ...(message !== undefined ? { message } : {}) })
           if (!result?.gone) return DONE
         } catch (cause) {
           // Older spokes pass OpenCode's "Permission request not found" through as an error.
