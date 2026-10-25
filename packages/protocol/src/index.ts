@@ -307,8 +307,10 @@ export const IMPLIED_OPENCODE_FEATURES = [
  * "permissionMessage": it passes a permission reply's `message` (a deny reason) on to the harness.
  * "actTokens": it keeps the act tokens the hub sends (actTokens op) apart from session tokens, never in any
  * environment, for its own act verbs only (the OpenCode hub tool).
+ * "launch": its create op takes a launch's `launchID`, `agent` and `model` (see isLaunchCreate); a launch create's
+ * directory may be a new workspace under the machine's node workspace roots rather than one the spoke reported.
  */
-export const KNOWN_SPOKE_FEATURES = [...IMPLIED_OPENCODE_FEATURES, "autoName", "sessionTokens", "deliver", "hubPrompt", "permissionMessage", "actTokens"] as const
+export const KNOWN_SPOKE_FEATURES = [...IMPLIED_OPENCODE_FEATURES, "autoName", "sessionTokens", "deliver", "hubPrompt", "permissionMessage", "actTokens", "launch"] as const
 export type SpokeFeature = (typeof KNOWN_SPOKE_FEATURES)[number]
 /** What this package's OpenCode spoke announces (without "deliver" and "hubPrompt" when its OpenCode has no synthetic messages). */
 export const SPOKE_FEATURES: readonly SpokeFeature[] = KNOWN_SPOKE_FEATURES
@@ -472,12 +474,21 @@ export type ServerRequest =
   | { readonly op: "timelineFile"; readonly sessionID: string; readonly messageID: string; readonly index: number }
   /** Enable or disable voice for one session (adds/removes it from the machine config's session list). */
   | { readonly op: "expose"; readonly sessionID: string; readonly on: boolean }
-  /** Create a session in a workspace directory the spoke already reported. */
   /**
    * Create a session in a workspace directory the spoke already reported. With `herdrWorkspace`, also open
    * it in a new tab of that Herdr workspace (`opencode --session <id>` in the directory).
+   * Launch fields (feature "launch", see isLaunchCreate): `launchID` the launch the session is for, `agent` and
+   * `model` the agent and model to start it with (the spoke refuses an agent or model its harness lacks).
    */
-  | { readonly op: "create"; readonly directory: string; readonly title?: string; readonly herdrWorkspace?: string }
+  | {
+      readonly op: "create"
+      readonly directory: string
+      readonly title?: string
+      readonly herdrWorkspace?: string
+      readonly launchID?: string
+      readonly agent?: string
+      readonly model?: ModelSelection
+    }
   /**
    * Session tokens for sessions the spoke reported (feature "sessionTokens"); each replaces the session's older
    * one. `hubURL`: the URL the sessions' shells reach the hub at. No session is adopted or exposed by this op.
@@ -521,8 +532,19 @@ export function requestFeatures(req: ServerRequest): SpokeFeature[] {
   const out: SpokeFeature[] = op ? [op] : []
   if (req.op === "deliver" && req.meta.kind === "prompt") out.push("hubPrompt")
   if (req.op === "permission" && req.message !== undefined) out.push("permissionMessage")
+  if (isLaunchCreate(req)) out.push("launch")
   return out
 }
+
+export type CreateRequest = Extract<ServerRequest, { op: "create" }>
+
+/** Whether `req` is a create carrying launch fields (feature "launch"). */
+export function isLaunchCreate(req: ServerRequest): req is CreateRequest {
+  return req.op === "create" && (req.launchID !== undefined || req.agent !== undefined || req.model !== undefined)
+}
+
+/** Longest agent name a launch create carries. */
+export const AGENT_NAME_MAX = 100
 
 /** Longest permission reply message (deny reason). */
 export const PERMISSION_MESSAGE_MAX = 1000
@@ -767,6 +789,8 @@ const permissionMessage = (v: unknown): v is string => nonEmpty(v) && v.length <
 /** A non-empty address of at most DELIVER_ID_MAX characters without characters that could fake a header. */
 const address = (v: unknown): v is string => nonEmpty(v) && v.length <= DELIVER_ID_MAX && !UNSAFE_CHARS.test(v)
 const deliverID = (v: unknown): v is string => typeof v === "string" && v.length <= DELIVER_ID_MAX && ID.test(v)
+/** An agent name: 1–AGENT_NAME_MAX printable characters, not starting with "-" or a space. */
+const agentName = (v: unknown): v is string => nonEmpty(v) && v.length <= AGENT_NAME_MAX && !UNSAFE_CHARS.test(v) && !/^[-\s]/.test(v)
 
 /** Why `v` is not an acceptable deliver request, or undefined when it is. */
 export function deliverProblem(v: unknown): string | undefined {
@@ -920,7 +944,10 @@ function isServerRequest(v: unknown): v is ServerRequest {
         v.directory.startsWith("/") &&
         v.directory.length <= 4096 &&
         (v.title === undefined || (str(v.title) && v.title.length <= 200)) &&
-        (v.herdrWorkspace === undefined || (nonEmpty(v.herdrWorkspace) && v.herdrWorkspace.length <= 100))
+        (v.herdrWorkspace === undefined || (nonEmpty(v.herdrWorkspace) && v.herdrWorkspace.length <= 100)) &&
+        (v.launchID === undefined || deliverID(v.launchID)) &&
+        (v.agent === undefined || agentName(v.agent)) &&
+        (v.model === undefined || isModelSelection(v.model))
       )
     case "sessionTokens":
       return Array.isArray(v.tokens) && v.tokens.length <= SESSION_TOKENS_MAX && v.tokens.every(isSessionToken) && (v.hubURL === undefined || isHubURL(v.hubURL))
