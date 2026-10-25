@@ -77,7 +77,7 @@ describe("Grants.create", () => {
 
   test("rejects an invalid grant (validateGrant)", async () => {
     const { grants, alice } = setup()
-    expect((await failure(grants.create(alice, spec("@@orchestrator", { allow: ["launch"] })))).code).toBe("invalid")
+    expect((await failure(grants.create(alice, spec("@@orchestrator", { allow: ["delete"] })))).code).toBe("invalid")
     expect((await failure(grants.create(alice, { holder: "@@reviewer", scope: { projects: ["/x"] }, allow: ["approve"] }))).code).toBe("invalid")
   })
 

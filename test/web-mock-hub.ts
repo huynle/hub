@@ -860,7 +860,7 @@ const agentError = (status: number, code: string, message: string) => Response.j
 const grantState = (g: MockGrant) => (g.revokedAt !== undefined ? "revoked" : Date.now() >= g.expiresAt ? "expired" : "active")
 const grantView = (g: MockGrant) => ({ ...g, state: grantState(g) })
 const DURATION_MS: Record<string, number> = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }
-const VERBS = ["approve", "deny", "answer", "prompt", "stop", "roles"]
+const VERBS = ["approve", "deny", "answer", "prompt", "stop", "roles", "launch"]
 /** The hub's grant validation, roughly (src/central/agent/policy.ts validateGrant): a Response when invalid. */
 function grantSpec(body: Record<string, any>): Response | Record<string, any> {
   const holder = body.holder

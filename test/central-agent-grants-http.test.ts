@@ -70,7 +70,7 @@ describe("/api/agent/grants", () => {
 
   test("invalid grants and unknown ids answer the agent envelope", async () => {
     h = harness({ agent: { verifiers } } as any)
-    const bad = await h.api(PREFIX, { method: "POST", json: { ...GRANT, allow: ["launch"] } })
+    const bad = await h.api(PREFIX, { method: "POST", json: { ...GRANT, allow: ["delete"] } })
     expect(bad.status).toBe(400)
     expect((await json(bad)).error.code).toBe("invalid")
     const missing = await h.api(`${PREFIX}/g_0123456789abcdef`)

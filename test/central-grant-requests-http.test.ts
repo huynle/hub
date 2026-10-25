@@ -103,7 +103,7 @@ describe("POST /api/agent/grants/requests", () => {
 
   test("invalid grants, another holder (forbidden), another user's session (not_found)", async () => {
     await start()
-    const bad = await bearer(SHELL, { grant: { ...GRANT, allow: ["launch"] }, why: "x" })
+    const bad = await bearer(SHELL, { grant: { ...GRANT, allow: ["delete"] }, why: "x" })
     expect(bad.status).toBe(400)
     expect((await bearer(SHELL, { grant: GRANT })).status).toBe(400)
     const other = await bearer(SHELL, { grant: { ...GRANT, holder: "ses_w" }, why: "x" })

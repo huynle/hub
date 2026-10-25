@@ -6,6 +6,7 @@ import { AgentError } from "../src/central/agent/errors"
 import {
   GRANT_DEFAULT_EXPIRES_MS,
   GRANT_DEFAULT_MAX_ACTIONS_PER_HOUR,
+  GRANT_VERBS,
   allowsResource,
   canonicalProject,
   evaluatePermission,
@@ -426,10 +427,16 @@ describe("validateGrant", () => {
     invalid({ ...base, holder: undefined }, /holder/)
   })
 
-  test("children and launch are phase 4", () => {
-    invalid({ ...base, scope: { ...base.scope, children: true } }, /children/)
-    invalid({ ...base, scope: { ...base.scope, launch: {} } }, /launch/)
-    invalid({ ...base, allow: ["approve", "launch"] }, /launch/)
+  test("children is still deferred (phase 4)", () => {
+    invalid({ ...base, scope: { ...base.scope, children: true } }, /children is not available yet \(phase 4\)/)
+    invalid({ ...base, children: true }, /children is not available yet \(phase 4\)/)
+  })
+
+  test("launch is a grant verb (phase 4)", () => {
+    expect(GRANT_VERBS).toContain("launch")
+    expect(validateGrant({ ...base, allow: ["approve", "launch", "launch"] }).allow).toEqual(["approve", "launch"])
+    invalid({ ...base, scope: { ...base.scope, launch: {} } }, /Unknown scope field launch/)
+    invalid({ ...base, launch: true }, /Unknown grant field launch/)
   })
 
   test("scope needs canonical projects", () => {
