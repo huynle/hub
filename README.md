@@ -41,6 +41,9 @@ Formerly **opencode-voice** and, briefly, **opencode-hub**
 - **Agent messaging**: sessions, scripts and you message each other through the hub (`hub msg @reviewer …`,
   `hub ask`, the OpenCode `hub` tool, `/msg`, `hub mcp`); asks to `@me` become Decisions you answer from the
   console ([Agent messaging](#agent-messaging)).
+- **Launches**: you, a script or an app start a session on one of your machines (`hub launch --branch feat/x
+  --prompt "…"`): a `hub node` daemon prepares a git worktree, the session gets its name, roles, labels and first
+  prompt, and ends by itself when it is done, with signed webhooks for apps ([docs/launches.md](docs/launches.md)).
 - **Session details**: context usage, todos, MCP status, branch and per-file diffs, on demand; unread
   marks synced per user.
 - **Self-hostable**: a hub on your computer with nothing extra to install, or your own hub for phones
@@ -522,6 +525,31 @@ entry}`. Admins see only a summary in the hub audit (the user, `agent.<verb>` an
 `grant.create`, `grant.update`, `grant.revoke` with the grant id), never sessions, requests, reasons, holders or
 patterns.
 
+## Launches
+
+A **launch** starts a session for you on one of your machines and ends it when it is done. On each machine that
+should take launches, enrol it (the OpenCode plugin's `/hub` dialog), list where its repositories live in
+`~/.config/hub/node.json` and run the node daemon:
+
+```sh
+echo '{"workspaceRoots": ["/Users/you/projects"]}' > ~/.config/hub/node.json
+hub node install        # writes the launchd agent / systemd user unit and prints how to load it
+```
+
+Then, from anywhere:
+
+```sh
+hub launch --repo ~/projects/app --branch feat/search --name search --prompt "Add full-text search" --cleanup remove
+hub launches list       # queued → placing → provisioning → running → ended (idle, stopped, …)
+```
+
+The node makes the git worktree `~/projects/app/.worktrees/feat/search`, the machine's OpenCode service starts the
+session there as `@search`, the hub primes and prompts it, and once the session has worked and stays idle the
+launch ends `idle` and the worktree is removed (the branch stays; nothing uncommitted is ever removed). Apps launch
+with an app token (scope `sessions:launch`) under a grant with verb `launch`, retry safely with a `key`, tag
+launches with labels and follow them with signed webhooks. Everything, from the spec's fields and limits to
+placement, caps, the node's git rules and webhook signatures: [docs/launches.md](docs/launches.md).
+
 ## hub CLI
 
 `hub` (also installed as `hubctl`) reads, names, messages and acts on your sessions through the hub's [`/api/agent` API](#agent-identity-agent-api),
@@ -614,7 +642,7 @@ instead (a session, or an app token with `messages:send`): the same flags, the h
 and a `--why` the user reads; it prints the Decision it opened, and the user's answer comes back as a reply. See
 [Agent actions and grants](#agent-actions-and-grants).
 
-**Launching.** `hub launch` starts a session on a machine running `hub node` (design §6): the flags become the
+**Launching.** `hub launch` starts a session on a machine running `hub node` ([docs/launches.md](docs/launches.md)): the flags become the
 body of `POST /api/agent/launches`, with only the given fields (the hub fills in its defaults: harness `opencode`,
 mode `worktree` — which needs `--branch` and uses `<repo>/.worktrees/<branch>` —, runtime `host`, end `idle`,
 cleanup `keep`). `--repo` defaults to the working directory and relative paths resolve against it; the path is the
@@ -630,7 +658,8 @@ grant with verb `launch` covering the repo (exit 5 otherwise; the kill switch pa
 through the OpenCode `hub` tool's act token. Apps and sessions see and stop only the launches they started.
 Too many launches exit 6 with the retry time. Apps that register a webhook verify its `Hub-Signature` with the
 SDK's `verifyWebhook({body, headers, secret})` (HMAC-SHA256 of `<t>.<raw body>`, compared in constant time,
-timestamps older than 5 minutes refused).
+timestamps older than 5 minutes refused). The spec's fields and limits, states, placement, caps and webhooks are in
+[docs/launches.md](docs/launches.md).
 
 **hub node.** `hub node run` is the per-machine daemon that prepares launch workspaces: it needs an enrolled
 machine (it only reads the machine token in `~/.config/hub/config.json`) and `~/.config/hub/node.json` with at
@@ -643,7 +672,8 @@ the command (so `hubctl node install` from a hub session runs the bundle with th
 hub never runs them. `--dry-run` prints the file without writing it; a second install says it is up to date (or
 updates it), and warns when the node would not run yet. `hub node uninstall` removes the file and prints the
 commands that stop the service; `hub node status` shows the file (up to date or not), the enrolment (never the
-token), node.json and the commands to inspect the service.
+token), node.json and the commands to inspect the service. What the node does to your repositories (worktrees under
+`<repo>/.worktrees/<branch>`, cleanup that never forces) is in [docs/launches.md](docs/launches.md#hub-node).
 
 **Credentials.** `HUB_URL` + `HUB_SESSION_TOKEN` (the spoke sets them in each session's shells; the CLI then
 acts as that session) win over the login file. Outside a session, `hub login --url https://hub.example` stores
@@ -1513,6 +1543,8 @@ in the file).
 | `speech.tts` | `{provider, model, voice, baseURL?, speed?, apiKey?}` |
 | `auth` | `{mode, issuer?, clientId, clientSecret, allowed, admins}`; see [Multi-user](#multi-user-sign-in-with-google) |
 | `agents.never` | permission patterns (`action[:glob]`) no agent may ever approve, for every user, checked before any grant; see [Agent actions and grants](#agent-actions-and-grants) |
+| `agents.launches` | per-user launch caps `{maxQueued?, maxActive?, perHour?}` (defaults 50, 4, 60); see [docs/launches.md](docs/launches.md#placement-and-caps) |
+| `agents.webhooks.allowPrivate` | `true` lets webhooks target `http://`, loopback and private hosts (self-hosted receivers); see [docs/launches.md](docs/launches.md#where-webhooks-may-go) |
 
 Server fields: env vars (`HUB_HOST`, `HUB_PORT`, `HUB_PUBLIC_URL`, `HUB_STATE_DIR`) > hub.json >
 defaults. Speech: phone settings > hub.json > env vars. Values are checked like the phone's speech
