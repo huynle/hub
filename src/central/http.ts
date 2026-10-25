@@ -593,7 +593,7 @@ export function startCentral(options: CentralOptions): Central {
   registry.onSessions((connID) => void delivery.onSessions(connID).catch((cause) => console.error(`[hub] message flush failed: ${(cause as Error).message}`)))
   registry.onHumanTurn((sessionID) => void humanTurn(sessionID))
   /** Permission, form, prompt and stop execution, shared by the console routes and the agent act verbs. */
-  const actions = createActions({ registry, spokes, humanTurn })
+  const actions = createActions({ registry, spokes, humanTurn, kv: backends.kv })
   delivery.start()
   // Launches (design §6): placement onto the user's nodes, prepare on the node, the session through the machine's
   // service spoke, then its end; restart recovery runs on start. Every change goes to launchFeed: the owner's

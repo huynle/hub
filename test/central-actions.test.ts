@@ -4,6 +4,8 @@
 // spokes record every call.
 import { describe, expect, test } from "bun:test"
 import { createActions, type ActionRegistry, type ActionSpokes } from "../src/central/actions"
+import { MemoryKv } from "../src/central/backend/memory-kv"
+import type { Kv } from "../src/central/backend/types"
 import { BusyError } from "../src/central/registry"
 import type { TurnResult } from "../src/protocol"
 
@@ -17,6 +19,8 @@ function fakes(options: {
   exposed?: boolean
   busy?: boolean
   reply?: (connID: string, req: Req) => unknown
+  /** Shared with another executor (another pod). */
+  kv?: Kv
 } = {}) {
   const requests: Array<{ connID: string; req: Req }> = []
   const calls: string[] = []
@@ -47,7 +51,7 @@ function fakes(options: {
     }) as ActionSpokes["request"],
   }
   const hops: string[] = []
-  const actions = createActions({ registry, spokes, humanTurn: async (sessionID) => void hops.push(sessionID) })
+  const actions = createActions({ registry, spokes, humanTurn: async (sessionID) => void hops.push(sessionID), ...(options.kv ? { kv: options.kv } : {}) })
   return { actions, requests, calls, locks, hops }
 }
 
@@ -98,6 +102,52 @@ describe("answerPermission", () => {
     })
     await expect(actions.answerPermission({ rootID: "s", requestID: "per_1", decision: "once" })).rejects.toThrow("boom")
     expect(calls).not.toContain("dropPermission per_1")
+  })
+})
+
+// Cluster mode (P6-T8): "answered through the hub" is a Kv key (SET NX PX, 10 minutes), so a request answered on
+// one pod is gone on every other, and two pods racing to answer never both send it.
+describe("answerPermission on a shared Kv (two pods)", () => {
+  const target = { permissionTargets: [{ connID: "c1", sessionID: "s" }], reply: () => ({}) }
+
+  test("a request answered on A is gone on B without asking a spoke", async () => {
+    const kv = new MemoryKv()
+    const a = fakes({ ...target, kv })
+    const b = fakes({ ...target, kv })
+    expect(await a.actions.answerPermission({ rootID: "s", requestID: "per_1", decision: "once" })).toEqual({ outcome: "done" })
+    expect(await b.actions.answerPermission({ rootID: "s", requestID: "per_1", decision: "once" })).toEqual({ outcome: "gone" })
+    expect(b.requests).toEqual([])
+  })
+
+  test("two pods answering at once: one sends it, the other is gone", async () => {
+    const kv = new MemoryKv()
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const a = fakes({ ...target, kv, reply: () => held.then(() => ({})) })
+    const b = fakes({ ...target, kv })
+    const first = a.actions.answerPermission({ rootID: "s", requestID: "per_2", decision: "once" })
+    expect(await b.actions.answerPermission({ rootID: "s", requestID: "per_2", decision: "reject" })).toEqual({ outcome: "gone" })
+    release()
+    expect(await first).toEqual({ outcome: "done" })
+    expect(b.requests).toEqual([])
+  })
+
+  test("an answer that failed leaves the request answerable on any pod", async () => {
+    const kv = new MemoryKv()
+    const a = fakes({ ...target, kv, reply: () => { throw new Error("boom") } })
+    const b = fakes({ ...target, kv })
+    await expect(a.actions.answerPermission({ rootID: "s", requestID: "per_3", decision: "once" })).rejects.toThrow("boom")
+    expect(await b.actions.answerPermission({ rootID: "s", requestID: "per_3", decision: "once" })).toEqual({ outcome: "done" })
+  })
+
+  test("answered for 10 minutes", async () => {
+    let t = 0
+    const kv = new MemoryKv({ now: () => t })
+    const a = fakes({ ...target, kv })
+    await a.actions.answerPermission({ rootID: "s", requestID: "per_4", decision: "once" })
+    expect(await kv.get("action:answered:per_4")).toBeDefined()
+    t += 10 * 60_000
+    expect(await kv.get("action:answered:per_4")).toBeUndefined()
   })
 })
 
