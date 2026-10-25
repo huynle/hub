@@ -43,6 +43,7 @@ import { SpeechService } from "./speech/service"
 import { NodeRegistry } from "./nodes"
 import { randomBytes } from "node:crypto"
 import { LaunchEngine } from "./agent/launch-engine"
+import { LAUNCH_TOKEN_STATES, LaunchTokens } from "./agent/launch-tokens"
 import { LaunchFeed, launchInfo } from "./agent/launch-routes"
 import { RequestTimeoutError, RequestTooLargeError, SpokeError, SpokeHub, type Notifier, type SpokeHubOptions, type SpokeSocketData } from "./spoke-ws"
 import { ACTIVITY_INTERVAL_MAX, ACTIVITY_INTERVAL_MIN, LOCAL_USER, PUSH_PREF_KEYS, quietHoursInput, Store, VIEW_PREF_KEYS, type DeviceRecord, type LegacyPushPrefs, type PushPrefs, type UserRecord, type ViewPrefs } from "./store"
@@ -112,6 +113,8 @@ export interface Central {
   readonly launches: LaunchEngine
   /** Every launch change, per user (SSE 'launch' events and the agent watch subscribe; webhooks hang off it). */
   readonly launchFeed: LaunchFeed
+  /** Launch-bound (hlt1) tokens: what a sandboxed harness connects back to /spoke/ws with (phase 5). */
+  readonly launchTokens: LaunchTokens
   /** Webhooks (P4-T10): registrations and the outbox sender; launch changes are published to it. */
   readonly webhooks: Webhooks
   /** The JSON API's route table (method, path, access), for audits and tests. */
@@ -362,6 +365,9 @@ export function startCentral(options: CentralOptions): Central {
   /** Speech settings scope of a user: "local" (pairing mode) uses the server default directly. */
   const speechScope = (userID: string) => (userID === LOCAL_USER ? undefined : userID)
   const speechFor = (userID: string): Speech => options.speech ?? speechSettings.forUser(speechScope(userID))
+  const tokenKeys = TokenKeys.open(config.stateDir)
+  // Launch-bound tokens (phase 5): checked against the launch engine's store (created below; read only at use).
+  const launchTokens = new LaunchTokens({ keys: tokenKeys, store, launches: { launch: (userID, launchID) => launches.store.get(userID, launchID) }, publicURL, now })
   spokes = new SpokeHub({
     store,
     auth,
@@ -371,10 +377,11 @@ export function startCentral(options: CentralOptions): Central {
     notifier,
     broadcast: (message, tenant) => broadcast(message, { tenant }),
     turnTimeoutMs: config.turnTimeoutMs,
+    launchTokens,
     ...options.timing,
   })
   // Session tokens (design §1.3): minted for the sessions spokes report, pushed on their sessions frames.
-  const sessionTokens = new SessionTokens({ keys: TokenKeys.open(config.stateDir), store, sessions: registry, publicURL, now })
+  const sessionTokens = new SessionTokens({ keys: tokenKeys, store, sessions: registry, publicURL, now })
   const tokenPush = new SessionTokenPush({
     registry,
     tokens: sessionTokens,
@@ -598,6 +605,10 @@ export function startCentral(options: CentralOptions): Central {
     users: () => store.users().map((u) => u.id),
     now,
     onLaunchChanged: (launch) => launchFeed.publish(launch.owner, launch),
+  })
+  // A launch-bound connection lives only while its launch is provisioning or running.
+  launchFeed.subscribe((_userID, launch) => {
+    if (!LAUNCH_TOKEN_STATES.includes(launch.state)) spokes.closeLaunch(launch.id)
   })
   void launches.start().catch((cause) => console.error(`[hub] launches did not start: ${(cause as Error).message}`))
   // Webhooks (P4-T10): launch changes go to the owner's matching registrations through the durable outbox; URLs
@@ -1591,6 +1602,7 @@ export function startCentral(options: CentralOptions): Central {
     acting,
     launches,
     launchFeed,
+    launchTokens,
     webhooks,
     routes: [...routes.map(({ method, path, access }) => ({ method, path, access })), ...agent.routes.map(({ method, path }) => ({ method, path, access: "agent" as const }))],
     async stop() {
