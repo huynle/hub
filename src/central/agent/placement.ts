@@ -1,8 +1,9 @@
 // Placement (design §6.2, §9; decision znbg8xa5): which of the user's nodes takes a launch.
 // - matchNode is pure: over a snapshot of candidates it applies the hard constraints (the user's own machines only,
-//   not draining, the runtime kind, the harness (host: always; other runtimes when they list harnesses), the
-//   runtime profile, the workspace under one of the node's roots, and for host launches a connected service spoke
-//   announcing "launch"), then the placement's machine and labels (mode require: hard; prefer: ranking only), then
+//   not draining, the runtime kind, the harness listed for that runtime, the runtime profile when one is named,
+//   the workspace under one of the node's roots, for host launches a connected service spoke announcing "launch",
+//   and for openshell launches the node feature "sandbox" (it starts and stops the harness itself; the sandbox's
+//   launch-bound spoke creates the session, so no service spoke is needed)), then the placement's machine and labels (mode require: hard; prefer: ranking only), then
 //   free slots (capacity minus used minus reservations). The best node has the preference, then most free slots,
 //   then the lowest machine ID. A launch that cannot be placed waits for capacity (a fitting node is full) or for a
 //   match (no node fits; the reason names each node's first problem).
@@ -46,6 +47,8 @@ export interface PlacementNode {
   readonly draining: boolean
   /** The launches the node reports carrying (they count in `used`). */
   readonly launchIDs: readonly string[]
+  /** Optional node features from its hello (e.g. "sandbox"); missing: none. */
+  readonly features?: readonly string[]
 }
 
 /** A node with what the matcher needs besides its own report. */
@@ -73,10 +76,11 @@ function hardProblem(spec: LaunchSpec, node: Candidate): string | undefined {
   const kind = spec.runtime.kind
   const runtime = node.runtimes.find((r) => r.kind === kind)
   if (!runtime) return `has no ${kind} runtime`
-  if ((kind === "host" || runtime.harnesses !== undefined) && !runtime.harnesses?.includes(spec.harness)) return `has no ${spec.harness} harness`
+  if (!runtime.harnesses?.includes(spec.harness)) return `has no ${spec.harness} harness`
   if (spec.runtime.profile !== undefined && !runtime.profiles?.includes(spec.runtime.profile)) return `has no ${spec.runtime.profile} profile`
   if (!node.workspaceRoots.some((root) => underRoot(spec.workspace.repo, root))) return `does not serve ${spec.workspace.repo}`
   if (kind === "host" && !node.launchService) return "has no connected service spoke with launch"
+  if (kind === "openshell" && !node.features?.includes("sandbox")) return "does not serve sandboxes"
   return undefined
 }
 

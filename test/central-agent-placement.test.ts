@@ -1,7 +1,8 @@
 // Placement (design §6.2, §9; decision znbg8xa5): which of the user's nodes takes a launch. A pure matcher over a
 // snapshot of the user's connected nodes (owner machines only, not draining, runtime + harness, workspace roots,
 // labels and machine required or preferred, free slots minus reservations, a connected service spoke announcing
-// "launch" for host launches), then per-user admission caps and a FIFO placement pass under a fenced lease.
+// "launch" for host launches, the node feature "sandbox" for openshell launches), then per-user admission caps
+// and a FIFO placement pass under a fenced lease.
 import { describe, expect, test } from "bun:test"
 import { type LaunchSpec, validateLaunchSpec } from "../src/central/agent/launch-spec"
 import { LaunchStore } from "../src/central/agent/launch-store"
@@ -71,14 +72,24 @@ describe("matchNode: hard constraints", () => {
     expect(result).toEqual({ ok: false, wait: "no_match", reason: "No node fits: mbp has no claude harness" })
   })
 
-  test("openshell: the profile must be listed; harnesses are checked only when listed", () => {
+  test("openshell: the profile (when named) and the harness must be listed; no service spoke is needed", () => {
     const shell = spec({ runtime: { kind: "openshell", profile: "net-off" }, workspace: { repo: "/p/x", mode: "clone", remote: "https://github.com/a/b" } })
-    const sandbox = node({ runtimes: [{ kind: "openshell", profiles: ["untrusted-code"] }], launchService: false })
+    const sandbox = node({ runtimes: [{ kind: "openshell", profiles: ["untrusted-code"], harnesses: ["opencode"] }], features: ["sandbox"], launchService: false })
     expect(matchNode(U, shell, [sandbox])).toEqual({ ok: false, wait: "no_match", reason: "No node fits: mbp has no net-off profile" })
-    const ok = node({ runtimes: [{ kind: "openshell", profiles: ["net-off"] }], launchService: false })
+    const ok = node({ runtimes: [{ kind: "openshell", profiles: ["net-off"], harnesses: ["opencode"] }], features: ["sandbox"], launchService: false })
     expect(matchNode(U, shell, [ok])).toMatchObject({ ok: true })
-    const listed = node({ runtimes: [{ kind: "openshell", profiles: ["net-off"], harnesses: ["claude"] }], launchService: false })
+    const unlisted = node({ runtimes: [{ kind: "openshell", profiles: ["net-off"] }], features: ["sandbox"], launchService: false })
+    expect(matchNode(U, shell, [unlisted])).toEqual({ ok: false, wait: "no_match", reason: "No node fits: mbp has no opencode harness" })
+    const listed = node({ runtimes: [{ kind: "openshell", profiles: ["net-off"], harnesses: ["claude"] }], features: ["sandbox"], launchService: false })
     expect(matchNode(U, shell, [listed])).toEqual({ ok: false, wait: "no_match", reason: "No node fits: mbp has no opencode harness" })
+    const noProfile = spec({ runtime: { kind: "openshell" }, workspace: { repo: "/p/x", mode: "clone", remote: "https://github.com/a/b" } })
+    expect(matchNode(U, noProfile, [node({ runtimes: [{ kind: "openshell", harnesses: ["opencode"] }], features: ["sandbox"], launchService: false })])).toMatchObject({ ok: true })
+  })
+
+  test("openshell: the node must serve sandboxes (feature sandbox: start and stop)", () => {
+    const shell = spec({ runtime: { kind: "openshell" }, workspace: { repo: "/p/x", mode: "clone", remote: "https://github.com/a/b" } })
+    const old = node({ runtimes: [{ kind: "openshell", harnesses: ["opencode"] }], launchService: false })
+    expect(matchNode(U, shell, [old])).toEqual({ ok: false, wait: "no_match", reason: "No node fits: mbp does not serve sandboxes" })
   })
 
   test("the workspace must be under one of the node's roots (path components, not prefixes)", () => {
