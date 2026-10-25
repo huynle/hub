@@ -10,6 +10,7 @@ import { CliError, EXIT, withHub } from "./http"
 import { serveMcp } from "./mcp"
 import { ASK_EXPIRES_DEFAULT_S, askOutcome, declinedText, durationArg, inboxText, mutedText, repliedText, sentText, textArg } from "./messaging"
 import { watch } from "./watch"
+import { DECISION_FLAGS, decisionOptions, decisionsText, openedText, stateArg } from "./decisions"
 
 export { EXIT } from "./http"
 
@@ -51,6 +52,11 @@ Messaging (text "-" reads it from stdin)
                                       it expires; exit 0 answered, 1 declined or no answer yet, 8 expired
   hub reply <msgID> "text" [--no-wake]   goes to the real sender
   hub decline <msgID> --why "reason"
+  hub ask @me "question" [--option id=label[:safe]]... [--recommend id [--why "…"]] [--urgency low|normal|high]
+         [--deadline 2h [--on-timeout <safe id>]] [--tier confirm|tap] [--about <addr>]...
+                                      opens a Decision for the user (answered in the console; the answer
+                                      comes back as a reply); --on-timeout picks a safe option at the deadline
+  hub decisions list [--state open|answered|expired]   the Decisions you asked
   hub inbox                           asks to answer, your open asks, recent messages, mutes
   hub mute <addr> · hub unmute <addr>    refuse (or accept again) messages from a session
 
@@ -62,7 +68,7 @@ Login (outside a hub session)
   hub logout
 
 Options: --json (raw responses), --help, --version
-Addresses: ses_… (or an unambiguous prefix), @name, @@role, @name.project
+Addresses: ses_… (or an unambiguous prefix), @name, @@role, @name.project, @me (the user)
 Credentials: HUB_URL + HUB_SESSION_TOKEN (set in a session's shells), else the \`hub login\` file.
 Exit codes: 0 ok, 1 other, 2 usage, 3 not found/ambiguous/taken, 4 needs user, 5 forbidden/paused,
   6 rate limited, 7 unsupported/offline, 8 gone, 9 unauthorized/expired`
@@ -196,9 +202,10 @@ const COMMANDS: Record<string, Command> = {
   },
   ask: {
     args: ["<addr>", "<text>"],
-    flags: { all: "bool", "no-wake": "bool", urgent: "bool", expires: "string", wait: "optional" },
+    flags: { all: "bool", "no-wake": "bool", urgent: "bool", expires: "string", wait: "optional", ...DECISION_FLAGS },
     async handle(context) {
       const { flags, args } = context.parsed
+      const decision = decisionOptions(flags, args[0]!)
       const text = await textArg(args[1]!, context.io.stdin)
       const expiresFlag = str(flags, "expires")
       const expires = expiresFlag === undefined ? undefined : durationArg(expiresFlag, "--expires")
@@ -210,9 +217,9 @@ const COMMANDS: Record<string, Command> = {
         answer(context, body, (b) => b.sent.map(sentText).join("\n") || "no recipients")
         return
       }
-      const body = await context.hub<Asked>((hub) => hub.ask(args[0]!, text, { ...options, ...(wait !== undefined ? { wait } : {}) }))
+      const body = await context.hub<Asked>((hub) => hub.ask(args[0]!, text, { ...options, ...decision, ...(wait !== undefined ? { wait } : {}) }))
       const outcome = askOutcome(body, wait)
-      answer(context, body, () => outcome.text)
+      answer(context, body, () => (body.decision ? `${outcome.text}\n${openedText(body.decision)}` : outcome.text))
       if (outcome.note) context.io.stderr(`hub: ${outcome.note}\n`)
       return outcome.exit
     },
@@ -237,6 +244,14 @@ const COMMANDS: Record<string, Command> = {
       const reason = await textArg(why, context.io.stdin, "reason")
       const body = await context.hub((hub) => hub.decline(args[0]!, reason))
       answer(context, body, declinedText)
+    },
+  },
+  "decisions list": {
+    flags: { state: "string" },
+    async handle(context) {
+      const state = stateArg(str(context.parsed.flags, "state"))
+      const body = await context.hub((hub) => hub.decisions(state ? { state } : {}))
+      answer(context, body, (b) => decisionsText(b.decisions ?? []))
     },
   },
   inbox: {
@@ -289,7 +304,7 @@ const COMMANDS: Record<string, Command> = {
 }
 
 /** Commands with sub-verbs (`hub role claim`). */
-const GROUPS: Record<string, string[]> = { role: ["claim", "release"] }
+const GROUPS: Record<string, string[]> = { role: ["claim", "release"], decisions: ["list"] }
 
 function reportError(io: Io, error: CliError, json: boolean) {
   if (json && error.envelope) printJSON(io, { error: error.envelope })

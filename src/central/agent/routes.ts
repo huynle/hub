@@ -12,6 +12,7 @@ import { directoryRoutes } from "./directory-routes"
 import { readRoutes, type ReadRegistry, type SpokeRequester } from "./read-routes"
 import { agentAllows, type AgentActor, type AgentAllow, type BearerVerifier, type Credential, type Resolver } from "./actor"
 import { appTokenRoutes, appTokenVerifier } from "./app-tokens"
+import type { Decisions } from "./decisions"
 import type { Delivery } from "./delivery"
 import { MessageFeed, messageRoutes } from "./message-routes"
 import type { SessionTokens } from "./session-tokens"
@@ -54,6 +55,8 @@ export interface AgentDeps {
   readonly spokes?: SpokeRequester
   /** Agent messages (P2-T5): the message routes are added when given with the directory. */
   readonly delivery?: Delivery
+  /** Decisions (ask @me, P2-T9): with the message routes. */
+  readonly decisions?: Decisions
   /** Stored messages as they are sent (the hub also streams them to the console); a new feed when absent. */
   readonly feed?: MessageFeed
   /** Heartbeat of GET /api/agent/watch. */
@@ -81,7 +84,7 @@ export function agentRoutes(deps: AgentDeps): AgentRoute[] {
   const feed = deps.feed ?? new MessageFeed()
   return [
     ...(deps.directory ? directoryRoutes(deps.directory) : []),
-    ...(deps.directory && deps.delivery ? messageRoutes({ delivery: deps.delivery, directory: deps.directory, store: deps.store, feed }) : []),
+    ...(deps.directory && deps.delivery ? messageRoutes({ delivery: deps.delivery, directory: deps.directory, store: deps.store, feed, ...(deps.decisions ? { decisions: deps.decisions } : {}) }) : []),
     ...(deps.directory && deps.registry ? readRoutes({ store: deps.store, directory: deps.directory, registry: deps.registry, ...(deps.delivery ? { feed } : {}), ...(deps.spokes ? { spokes: deps.spokes } : {}), ...(deps.heartbeatMs !== undefined ? { heartbeatMs: deps.heartbeatMs } : {}), ...(deps.now ? { now: deps.now } : {}) }) : []),
     {
       method: "GET",

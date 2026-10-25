@@ -82,6 +82,8 @@ describe("subscriptions and prefs", () => {
     longTool: false,
     say: true,
     activity: false,
+    decision: true,
+    message: true,
   }
 
   test("prefs default to needs-you, all done, failed, hand-offs and say; are per device and persist", () => {
@@ -164,6 +166,8 @@ describe("payloads per kind", () => {
     expect(Object.keys(NOTIFICATION_LABELS).sort()).toEqual([...PUSH_PREF_KEYS].sort())
     const title = (kind: any, text?: string, subject?: string) => pushPayload(kind, "ses_1", "KVM Rewrite", text, { subject }).title
     expect(title("question")).toBe("KVM Rewrite · Question")
+    expect(title("decision")).toBe("KVM Rewrite · Decision")
+    expect(title("message")).toBe("KVM Rewrite · Message")
     expect(title("permission")).toBe("KVM Rewrite · Needs permission")
     expect(title("done")).toBe("KVM Rewrite · All done")
     expect(title("failed")).toBe("KVM Rewrite · Failed")
@@ -186,10 +190,13 @@ describe("payloads per kind", () => {
     expect(pushPayload("failed", "s", "t").body).toBe("Tap to open the session.")
     expect(pushPayload("jobFailed", "s", "t", "x".repeat(300), { subject: "exited 1" }).body.length).toBeLessThanOrEqual(180)
     expect(pushPayload("done", "s", "t").body).toBe("Nothing is running or waiting. Tap to open.")
+    // Decisions and agent messages never carry their text (an agent wrote it): a generic body, the session to open.
+    expect(pushPayload("decision", "ses_1", "t", "Drop column legacy_id?")).toEqual({ kind: "decision", sessionID: "ses_1", title: "t · Decision", body: "A decision waits for you. Tap to answer." })
+    expect(pushPayload("message", "ses_1", "t", "secret text")).toEqual({ kind: "message", sessionID: "ses_1", title: "t · Message", body: "Tap to see it." })
   })
 
   test("urgency and lifetime per kind", () => {
-    for (const kind of ["question", "permission", "failed"] as const) expect(sendOptionsFor(kind)).toEqual({ TTL: URGENT_TTL_SECONDS, urgency: "high" })
+    for (const kind of ["question", "permission", "failed", "decision", "message"] as const) expect(sendOptionsFor(kind)).toEqual({ TTL: URGENT_TTL_SECONDS, urgency: "high" })
     for (const kind of ["done", "subagentFailed", "jobFailed", "stopped"] as const) expect(sendOptionsFor(kind)).toEqual({ TTL: URGENT_TTL_SECONDS, urgency: "normal" })
     for (const kind of ["turn", "retry", "subagentDone", "jobDone", "longTool", "activity"] as const) expect(sendOptionsFor(kind)).toEqual({ TTL: 300, urgency: "normal" })
     for (const kind of ["say", "handoff", "test"] as const) expect(sendOptionsFor(kind)).toEqual({ TTL: 300, urgency: "high" })

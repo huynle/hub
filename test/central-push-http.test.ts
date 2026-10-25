@@ -59,7 +59,7 @@ describe("push API", () => {
     const ok = await h.api("/api/push/subscribe", { method: "POST", json })
     expect(ok.status).toBe(200)
     // The old "finished" key still works: it is all done now.
-    expect(await ok.json()).toEqual({ prefs: { handoff: true, question: true, permission: true, done: false, failed: true, turn: true, stopped: false, retry: false, subagentDone: false, subagentFailed: false, jobDone: false, jobFailed: false, longTool: false, say: true, activity: false } })
+    expect(await ok.json()).toEqual({ prefs: { handoff: true, question: true, permission: true, done: false, failed: true, turn: true, stopped: false, retry: false, subagentDone: false, subagentFailed: false, jobDone: false, jobFailed: false, longTool: false, say: true, activity: false, decision: true, message: true } })
     await h.api("/api/push/subscribe", { method: "POST", json: { subscription: subscription() } })
     await h.api("/api/push/subscribe", { method: "POST", json: { subscription: subscription(2) } })
     expect(h.store.pushSubscriptions().map((s) => s.endpoint)).toEqual([subscription().endpoint, subscription(2).endpoint])
@@ -83,7 +83,7 @@ describe("push API", () => {
     pushHarness()
     expect((await h.api("/api/push/prefs", { cookie: null })).status).toBe(401)
     expect(await (await h.api("/api/push/prefs")).json()).toEqual({
-      prefs: { handoff: true, question: true, permission: true, done: true, failed: true, turn: false, stopped: false, retry: false, subagentDone: false, subagentFailed: false, jobDone: false, jobFailed: false, longTool: false, say: true, activity: false },
+      prefs: { handoff: true, question: true, permission: true, done: true, failed: true, turn: false, stopped: false, retry: false, subagentDone: false, subagentFailed: false, jobDone: false, jobFailed: false, longTool: false, say: true, activity: false, decision: true, message: true },
       quietHours: null,
       activityMinutes: 5,
       muted: [],
@@ -91,7 +91,7 @@ describe("push API", () => {
     })
     expect((await h.api("/api/push/prefs", { method: "PUT", json: { turn: true }, origin: null })).status).toBe(403)
     const put = await h.api("/api/push/prefs", { method: "PUT", json: { subagentDone: true, jobFailed: true, question: "nope", extra: 1 } })
-    expect(await put.json()).toMatchObject({ prefs: { handoff: true, question: true, permission: true, done: true, failed: true, turn: false, stopped: false, retry: false, subagentDone: true, subagentFailed: false, jobDone: false, jobFailed: true, longTool: false, say: true, activity: false } })
+    expect(await put.json()).toMatchObject({ prefs: { handoff: true, question: true, permission: true, done: true, failed: true, turn: false, stopped: false, retry: false, subagentDone: true, subagentFailed: false, jobDone: false, jobFailed: true, longTool: false, say: true, activity: false, decision: true, message: true } })
     expect((await (await h.api("/api/push/prefs")).json()) as any).toMatchObject({ prefs: { subagentDone: true, jobFailed: true } })
     // Clients up to 0.7 send `finished`: it sets all done (no longer every turn).
     expect(await (await h.api("/api/push/prefs", { method: "PUT", json: { finished: false } })).json()).toMatchObject({ prefs: { done: false, turn: false } })

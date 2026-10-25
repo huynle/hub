@@ -793,3 +793,45 @@ describe("restart", () => {
     restarted.stop()
   })
 })
+
+describe("@me: the user's address", () => {
+  test("a session's msg to @me is stored for the user (no spoke delivery) and alerts the user once", async () => {
+    const s = setup()
+    s.connect("c1", ["ses_a"])
+    const sent = await s.delivery.send(U, asSession("ses_a"), "@me", "msg", "build is green")
+    expect(sent.delivery).toBeUndefined()
+    expect(sent.message).toMatchObject({ kind: "msg", to: "@me", from: { kind: "session", sessionID: "ses_a" }, recipient: { kind: "user" }, state: "sent" })
+    expect(s.sent).toEqual([])
+    expect((await s.delivery.messages.inbox(U, { kind: "user" })).messages.map((m) => m.id)).toEqual([sent.message.id])
+    expect(s.alerts).toEqual([{ userID: U, alert: { kind: "user", sessionID: "ses_a", messageID: sent.message.id, text: "@alpha sent you a message" } }])
+  })
+
+  test("an ask to @me stays open for the user (no alert here: the Decision pushes) and the user's reply goes back to the asker", async () => {
+    const s = setup()
+    s.connect("c1", ["ses_a"])
+    const asked = await s.delivery.send(U, asSession("ses_a"), "@me", "ask", "Proceed?")
+    expect(asked.message).toMatchObject({ kind: "ask", state: "open", recipient: { kind: "user" } })
+    expect(s.alerts).toEqual([])
+    const replied = await s.delivery.reply(U, asUser, asked.message.id, "yes")
+    expect(replied.original.state).toBe("answered")
+    expect(replied.delivery).toBe("turn")
+    expect(s.sent.at(-1)!.req).toMatchObject({ sessionID: "ses_a", meta: { kind: "reply", from: "@me", replyTo: asked.message.id } })
+  })
+
+  test("@me is never a session: the user cannot message themselves; @me.project is malformed; sendAll sends one", async () => {
+    const s = setup()
+    s.addSession("ses_m", { name: "me" })
+    await expect(s.delivery.send(U, asUser, "@me", "msg", "hi")).rejects.toMatchObject({ code: "invalid" })
+    await expect(s.delivery.send(U, asSession("ses_a"), "@me.hub", "msg", "hi")).rejects.toMatchObject({ code: "invalid" })
+    const all = await s.delivery.sendAll(U, asSession("ses_a"), "@me", "msg", "hi")
+    expect(all.map((x) => x.message.recipient)).toEqual([{ kind: "user" }])
+  })
+
+  test("an app may message @me too (no session: the alert has no session)", async () => {
+    const s = setup()
+    const app: AgentActor = { kind: "app", userID: U, tokenID: "tok_1", scopes: ["messages:send"], label: "brain" }
+    const sent = await s.delivery.send(U, app, "@me", "msg", "nightly report ready")
+    expect(sent.message.from).toMatchObject({ kind: "app", tokenID: "tok_1" })
+    expect(s.alerts.map((a) => a.alert)).toEqual([{ kind: "user", sessionID: "", messageID: sent.message.id, text: "app brain sent you a message" }])
+  })
+})

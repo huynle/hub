@@ -113,6 +113,10 @@ export interface PushPrefs {
   say: boolean
   /** Activity updates: a collapsing digest per session (subagents, long tools, jobs ending, idle), at most one per interval. */
   activity: boolean
+  /** A session (or app) asks you to decide something (`hub ask @me`): a Decision waits for your answer. */
+  decision: boolean
+  /** Agent messaging needs you: a message to @me, an ask left unanswered after every re-wake, or a message loop. */
+  message: boolean
 }
 
 export const PUSH_PREF_KEYS = [
@@ -131,6 +135,8 @@ export const PUSH_PREF_KEYS = [
   "longTool",
   "say",
   "activity",
+  "decision",
+  "message",
 ] as const satisfies readonly (keyof PushPrefs)[]
 
 /** Defaults: anything that needs you, all done, failed, hand-offs and spoken replies; the finer kinds are opt-in. */
@@ -151,6 +157,8 @@ export const DEFAULT_PUSH_PREFS: Readonly<PushPrefs> = Object.freeze({
   say: true,
   // Opt-in per device (Settings → Notifications → Activity updates).
   activity: false,
+  decision: true,
+  message: true,
 })
 
 /** Default and allowed range of a device's activity update interval, in minutes. */
