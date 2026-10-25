@@ -38,7 +38,9 @@ function fakeClock() {
   return {
     now: () => t,
     timers,
+    /** Lets pending work settle (at the current time), then moves the clock, running due timers in order. */
     async advance(ms: number) {
+      await settle()
       const end = t + ms
       for (;;) {
         const due = [...pending].filter(([, p]) => p.at <= end).sort((a, b) => a[1].at - b[1].at)[0]
@@ -478,6 +480,137 @@ describe("provisioning failures", () => {
     await w.engine.start()
     const launch = await launched(w)
     expect(launch).toMatchObject({ state: "ended", outcome: "failed" })
+    w.engine.shutdown()
+  })
+})
+
+/** A running launch on a fresh world (started engine, connected node). */
+async function running(extra: Record<string, unknown> = {}, options: Parameters<typeof world>[0] = {}) {
+  const w = world(options)
+  w.connectNode()
+  await w.engine.start()
+  const launch = await launched(w, extra)
+  expect(launch.state).toBe("running")
+  return { w, launch, sessionID: launch.sessionID! }
+}
+
+describe("end watcher", () => {
+  test("idle ends only after the prompt was seen working, then 30 s settled; artifacts collected, workspace kept", async () => {
+    const { w, launch, sessionID } = await running()
+    await w.clock.advance(120_000)
+    expect((await w.launch(launch.id))!.state).toBe("running")
+    w.setSession(sessionID, { state: "working", idle: false })
+    await settle()
+    w.setSession(sessionID, { state: "idle", idle: true })
+    await w.clock.advance(29_000)
+    expect((await w.launch(launch.id))!.state).toBe("running")
+    await w.clock.advance(2_000)
+    const ended = (await w.launch(launch.id))!
+    expect(ended).toMatchObject({ state: "ended", outcome: "idle", artifacts: { branch: "feat/x", head: "abcdef1", commits: 2, dirty: false } })
+    expect(ended.reason).toContain("workspace kept")
+    expect(w.nodeCalls.filter((r) => r.op !== "prepare").map((r) => [r.op, (r as any).policy])).toEqual([["collect", undefined], ["cleanup", "keep"]])
+    expect(w.stops).toEqual([])
+    w.engine.shutdown()
+  })
+
+  test("working again during the settle starts it over", async () => {
+    const { w, launch, sessionID } = await running()
+    w.setSession(sessionID, { state: "working", idle: false })
+    w.setSession(sessionID, { state: "idle", idle: true })
+    await w.clock.advance(20_000)
+    w.setSession(sessionID, { state: "working", idle: false })
+    w.setSession(sessionID, { state: "idle", idle: true })
+    await w.clock.advance(20_000)
+    expect((await w.launch(launch.id))!.state).toBe("running")
+    await w.clock.advance(11_000)
+    expect(await w.launch(launch.id)).toMatchObject({ state: "ended", outcome: "idle" })
+    w.engine.shutdown()
+  })
+
+  test("the prompt's turn finishing counts as seen working", async () => {
+    const { w, launch } = await running()
+    w.turn.resolve({ outcome: "succeeded", reply: "done" })
+    await settle()
+    await w.clock.advance(31_000)
+    expect(await w.launch(launch.id)).toMatchObject({ state: "ended", outcome: "idle" })
+    w.engine.shutdown()
+  })
+
+  test("blockers, the session's open asks and its open Decisions hold an idle end", async () => {
+    const { w, launch, sessionID } = await running()
+    w.setSession(sessionID, { state: "working", idle: false })
+    w.setSession(sessionID, { state: "blocked", idle: false, blockers: [{ kind: "permission", id: "p1" }] })
+    await w.clock.advance(120_000)
+    w.waiting.set(sessionID, 1)
+    w.setSession(sessionID, { state: "idle", idle: true, blockers: [] })
+    await w.clock.advance(120_000)
+    w.waiting.set(sessionID, 0)
+    w.openDecisions.set(sessionID, 1)
+    await w.clock.advance(120_000)
+    expect((await w.launch(launch.id))!.state).toBe("running")
+    w.openDecisions.set(sessionID, 0)
+    await w.clock.advance(60_000)
+    expect(await w.launch(launch.id)).toMatchObject({ state: "ended", outcome: "idle" })
+    w.engine.shutdown()
+  })
+
+  test("asked: a question left open ends needs_user, session and workspace kept", async () => {
+    const { w, launch, sessionID } = await running({ end: { when: "asked", cleanup: "remove" } })
+    w.setSession(sessionID, { state: "working", idle: false })
+    w.setSession(sessionID, { state: "blocked", idle: false, blockers: [{ kind: "question", id: "q1" }] })
+    await w.clock.advance(31_000)
+    expect(await w.launch(launch.id)).toMatchObject({ state: "ended", outcome: "needs_user" })
+    expect(w.nodeCalls.find((r) => r.op === "cleanup")).toMatchObject({ policy: "keep" })
+    expect(w.stops).toEqual([])
+    w.engine.shutdown()
+  })
+
+  test("asked: an open Decision while idle ends needs_user; plain idle still ends idle", async () => {
+    const asked = await running({ end: { when: "asked" } })
+    asked.w.setSession(asked.sessionID, { state: "working", idle: false })
+    asked.w.openDecisions.set(asked.sessionID, 1)
+    asked.w.setSession(asked.sessionID, { state: "idle", idle: true })
+    await asked.w.clock.advance(31_000)
+    expect(await asked.w.launch(asked.launch.id)).toMatchObject({ outcome: "needs_user" })
+    asked.w.engine.shutdown()
+    const plain = await running({ end: { when: "asked" } })
+    plain.w.setSession(plain.sessionID, { state: "working", idle: false })
+    plain.w.setSession(plain.sessionID, { state: "idle", idle: true })
+    await plain.w.clock.advance(31_000)
+    expect(await plain.w.launch(plain.launch.id)).toMatchObject({ outcome: "idle" })
+    plain.w.engine.shutdown()
+  })
+
+  test("never: idle does not end it", async () => {
+    const { w, launch, sessionID } = await running({ end: { when: "never" } })
+    w.setSession(sessionID, { state: "working", idle: false })
+    w.setSession(sessionID, { state: "idle", idle: true })
+    await w.clock.advance(600_000)
+    expect((await w.launch(launch.id))!.state).toBe("running")
+    w.engine.shutdown()
+  })
+
+  test("timeout stops the session and ends the launch timeout, removing the workspace when asked", async () => {
+    const { w, launch, sessionID } = await running({ end: { when: "never", timeout: "2m", cleanup: "remove" } })
+    await w.clock.advance(119_000)
+    expect((await w.launch(launch.id))!.state).toBe("running")
+    await w.clock.advance(2_000)
+    expect(await w.launch(launch.id)).toMatchObject({ state: "ended", outcome: "timeout" })
+    expect(w.stops).toEqual([sessionID])
+    expect(w.nodeCalls.find((r) => r.op === "cleanup")).toMatchObject({ policy: "remove" })
+    w.engine.shutdown()
+  })
+
+  test("a session unreported for 10 minutes is lost; one that comes back is not", async () => {
+    const { w, launch, sessionID } = await running({ end: { when: "never" } })
+    w.dropSession(sessionID)
+    await w.clock.advance(300_000)
+    w.setSession(sessionID, { state: "idle", idle: true })
+    await w.clock.advance(600_000)
+    expect((await w.launch(launch.id))!.state).toBe("running")
+    w.dropSession(sessionID)
+    await w.clock.advance(601_000)
+    expect(await w.launch(launch.id)).toMatchObject({ state: "ended", outcome: "lost" })
     w.engine.shutdown()
   })
 })

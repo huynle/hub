@@ -10,7 +10,7 @@ import type { Delivery } from "./delivery"
 import type { Directory } from "./directory"
 import { AgentError } from "./errors"
 import { validateLaunchSpec } from "./launch-spec"
-import type { CleanupPolicy } from "./launch-spec"
+import type { CleanupPolicy, LaunchSpec } from "./launch-spec"
 import { type Launch, type LaunchOutcome, type LaunchState, LaunchStore, LaunchTransitionError } from "./launch-store"
 import { Placement, PlacementLoop, type Placed, type PlacementNode } from "./placement"
 
@@ -69,6 +69,42 @@ export interface LaunchWork {
   readonly sessionID?: string
   /** The prompt was handed to the session (at most once). */
   readonly prompted?: boolean
+  /** The session was seen working after its prompt (an idle end may start). */
+  readonly seenWorking?: boolean
+}
+
+/** How long a session must stay idle (or asking) with nothing changing before its launch ends. */
+export const END_SETTLE_MS = 30_000
+/** How often running launches are looked at again (asks and Decisions change without registry events). */
+export const END_TICK_MS = 15_000
+/** How long a running launch's session may go unreported before the launch is lost. */
+export const SESSION_LOST_MS = 10 * 60_000
+
+/** A running launch being watched for its end. */
+interface Watch {
+  readonly userID: string
+  readonly launchID: string
+  readonly sessionID: string
+  readonly when: LaunchSpec["end"]["when"]
+  seenWorking: boolean
+  /** The end it would take and since when that has held. */
+  candidate?: { readonly outcome: LaunchOutcome; readonly since: number }
+  unreportedSince?: number
+  settleTimer?: unknown
+  lostTimer?: unknown
+  timeoutTimer?: unknown
+  /** An evaluation runs; again: one more after it. */
+  evaluating?: boolean
+  again?: boolean
+}
+
+const defaultTimers: Timers = {
+  set: (fn, ms) => {
+    const handle = setTimeout(fn, ms)
+    ;(handle as { unref?: () => void }).unref?.()
+    return handle
+  },
+  clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 }
 
 /** A launch as the API shows it: the stored launch plus its session's directory. */
@@ -113,9 +149,16 @@ export class LaunchEngine {
   private readonly unsubscribe: (() => void)[] = []
   /** Ends in progress, by launch ID. */
   private readonly ending = new Map<string, Promise<Launch | undefined>>()
+  /** Running launches watched for their end, by launch ID. */
+  private readonly watches = new Map<string, Watch>()
+  /** Launches whose prompt was seen working before their watch was armed. */
+  private readonly seenEarly = new Set<string>()
+  private readonly timers: Timers
+  private tickTimer: unknown
 
   constructor(private readonly deps: LaunchEngineDeps) {
     this.now = deps.now ?? Date.now
+    this.timers = deps.timers ?? defaultTimers
     this.store = new LaunchStore({ state: deps.state, now: this.now })
     const { registry } = deps
     this.placement = new Placement({
@@ -178,17 +221,27 @@ export class LaunchEngine {
         if (event.type === "disconnected" || event.node.ownerID === undefined) return
         void this.loop.kick(event.node.ownerID)
       }),
+      registry.subscribe((message) => {
+        if (message.type === "status") {
+          const ids = new Set([message.sessionID, ...message.sessions.map((s) => s.id)])
+          for (const watch of this.watches.values()) if (ids.has(watch.sessionID)) this.evaluate(watch)
+        } else if (message.type === "catalog") for (const watch of this.watches.values()) this.evaluate(watch)
+      }),
       registry.onSessions((connID) => {
         const userID = registry.connTenant(connID)
         if (userID !== undefined) void this.loop.kick(userID)
       }),
     )
     this.loop.start()
+    this.scheduleTick()
     for (const userID of await this.deps.users()) void this.loop.kick(userID)
   }
 
   shutdown(): void {
     this.loop.stop()
+    if (this.tickTimer !== undefined) this.timers.clear(this.tickTimer)
+    this.tickTimer = undefined
+    for (const id of [...this.watches.keys()]) this.disarm(id)
     for (const off of this.unsubscribe.splice(0)) off()
   }
 
@@ -261,6 +314,11 @@ export class LaunchEngine {
       await this.updateWork(userID, launch.id, { prompted: true })
       const prompted = await actions.prompt({ sessionID, text: spec.prompt, resetHops: false })
       if (prompted.outcome === "offline") throw new Error("The session went offline before its prompt")
+      if (prompted.mode === "steer") this.sawWorking(userID, launch.id)
+      else void prompted.result.then(
+        () => this.sawWorking(userID, launch.id),
+        () => this.sawWorking(userID, launch.id),
+      )
     }
     const running = await this.store.transition(userID, launch.id, "running", {
       reason: ["Running", ...notes].join("; "),
@@ -269,6 +327,128 @@ export class LaunchEngine {
       from: ["provisioning"],
     })
     this.changed(running)
+    this.arm(userID, running, false)
+  }
+
+  // ---- the end watcher ----------------------------------------------------------------------------------
+
+  /** Watches a running launch for its end (timeout, idle or asked, a lost session). */
+  private arm(userID: string, launch: Launch, seenWorking: boolean): void {
+    if (this.watches.has(launch.id) || launch.sessionID === undefined) return
+    const watch: Watch = { userID, launchID: launch.id, sessionID: launch.sessionID, when: launch.spec.end.when, seenWorking: seenWorking || this.seenEarly.delete(launch.id) }
+    this.watches.set(launch.id, watch)
+    const { timeoutMs } = launch.spec.end
+    if (timeoutMs !== undefined) {
+      watch.timeoutTimer = this.timers.set(
+        () => void this.end(userID, launch.id, "timeout", "Timed out", { stopSession: true }),
+        Math.max(0, launch.at + timeoutMs - this.now()),
+      )
+    }
+    this.evaluate(watch)
+  }
+
+  private disarm(id: string): void {
+    const watch = this.watches.get(id)
+    if (!watch) return
+    this.watches.delete(id)
+    for (const timer of [watch.settleTimer, watch.lostTimer, watch.timeoutTimer]) if (timer !== undefined) this.timers.clear(timer)
+  }
+
+  /** The launch's prompt was seen working: an idle end may start from now on. */
+  private sawWorking(userID: string, id: string): void {
+    const watch = this.watches.get(id)
+    if (!watch) {
+      this.seenEarly.add(id)
+      return
+    }
+    if (!watch.seenWorking) {
+      watch.seenWorking = true
+      void this.updateWork(userID, id, { seenWorking: true }).catch((cause) => console.error(`[hub] launch ${id}: ${errorText(cause)}`))
+    }
+    this.evaluate(watch)
+  }
+
+  private scheduleTick(): void {
+    this.tickTimer = this.timers.set(() => {
+      for (const watch of this.watches.values()) this.evaluate(watch)
+      this.scheduleTick()
+    }, END_TICK_MS)
+  }
+
+  /** Looks at the watched launch now (one evaluation at a time per launch; a call during one makes one more). */
+  private evaluate(watch: Watch): void {
+    if (watch.evaluating) {
+      watch.again = true
+      return
+    }
+    watch.evaluating = true
+    void (async () => {
+      try {
+        do {
+          watch.again = false
+          await this.evaluateNow(watch)
+        } while (watch.again && this.watches.get(watch.launchID) === watch)
+      } catch (cause) {
+        console.error(`[hub] launch ${watch.launchID}: end check failed: ${errorText(cause)}`)
+      } finally {
+        watch.evaluating = false
+      }
+    })()
+  }
+
+  private async evaluateNow(watch: Watch): Promise<void> {
+    if (this.watches.get(watch.launchID) !== watch || this.ending.has(watch.launchID)) return
+    const { registry, delivery, decisions } = this.deps
+    const { userID, sessionID } = watch
+    const now = this.now()
+    if (!registry.hasSession(sessionID)) {
+      this.clearCandidate(watch)
+      watch.unreportedSince ??= now
+      if (now - watch.unreportedSince >= SESSION_LOST_MS) {
+        await this.end(userID, watch.launchID, "lost", `The session was not reported for ${SESSION_LOST_MS / 60_000} minutes`)
+      } else if (watch.lostTimer === undefined) {
+        watch.lostTimer = this.timers.set(() => {
+          watch.lostTimer = undefined
+          this.evaluate(watch)
+        }, watch.unreportedSince + SESSION_LOST_MS - now)
+      }
+      return
+    }
+    watch.unreportedSince = undefined
+    if (watch.lostTimer !== undefined) this.timers.clear(watch.lostTimer)
+    watch.lostTimer = undefined
+    const view = registry.session(sessionID)
+    if (view?.state === "working") {
+      this.clearCandidate(watch)
+      if (!watch.seenWorking) this.sawWorking(userID, watch.launchID)
+      return
+    }
+    if (!watch.seenWorking || watch.when === "never") return
+    const party = { kind: "session", sessionID } as const
+    const asks = (await delivery.messages.inbox(userID, party)).waiting.length
+    const open = (view?.blockers.length ?? 0) + asks + (await decisions.list(userID, { state: "open", from: party })).length > 0
+    const idle = registry.idle(sessionID)
+    const outcome: LaunchOutcome | undefined =
+      idle && !open ? "idle" : watch.when === "asked" && open && (idle || view?.state === "blocked") ? "needs_user" : undefined
+    if (outcome === undefined) return this.clearCandidate(watch)
+    // Times are when the state was read (now), not after the awaits.
+    if (watch.candidate?.outcome !== outcome) {
+      this.clearCandidate(watch)
+      watch.candidate = { outcome, since: now }
+      watch.settleTimer = this.timers.set(() => {
+        watch.settleTimer = undefined
+        this.evaluate(watch)
+      }, Math.max(0, now + END_SETTLE_MS - this.now()))
+      return
+    }
+    if (now - watch.candidate.since < END_SETTLE_MS) return
+    await this.end(userID, watch.launchID, outcome, outcome === "idle" ? "Idle: the session finished" : "Needs the user: the session asked a question")
+  }
+
+  private clearCandidate(watch: Watch): void {
+    watch.candidate = undefined
+    if (watch.settleTimer !== undefined) this.timers.clear(watch.settleTimer)
+    watch.settleTimer = undefined
   }
 
   // ---- the end ---------------------------------------------------------------------------------------------
@@ -320,6 +500,7 @@ export class LaunchEngine {
         ...(artifacts ? { artifacts } : {}),
         from: LIVE,
       })
+      this.disarm(id)
       this.changed(ended)
       void this.loop.kick(userID)
       return ended
