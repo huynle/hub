@@ -17,7 +17,9 @@ import { isNotificationKind, Push, type PushSender } from "./push"
 import { pushEndpointProblem, resolveHost as systemResolveHost, type ResolveHost } from "./push-target"
 import { fileBackends, type Backends } from "./backend"
 import { createResolver, type BearerVerifier, type CredentialMode } from "./agent/actor"
+import { ActingSwitch } from "./agent/acting-switch"
 import { AgentAudit } from "./agent/audit"
+import { Grants } from "./agent/grants"
 import { Decisions, type Decision } from "./agent/decisions"
 import { Delivery } from "./agent/delivery"
 import { AgentError } from "./agent/errors"
@@ -90,6 +92,8 @@ export interface Central {
   readonly delivery: Delivery
   /** Decisions (ask @me): answered by the user on /api/decisions. */
   readonly decisions: Decisions
+  /** Kill switches (per user and hub-wide) and hub.json agents.never, for the acting verbs. */
+  readonly acting: ActingSwitch
   /** The JSON API's route table (method, path, access), for audits and tests. */
   readonly routes: readonly RouteInfo[]
   stop(): Promise<void>
@@ -552,7 +556,9 @@ export function startCentral(options: CentralOptions): Central {
   // Every stored agent message also goes to the user's console streams (live transcript rows).
   feed.subscribe((userID, message) => broadcast({ type: "message", message }, { tenant: userID }))
   const audit = new AgentAudit({ state: backends.state, now, admin: store, recorded: (userID, entry) => broadcast({ type: "agent", entry }, { tenant: userID }) })
-  const agentDeps = { store, sessionTokens, directory, registry, spokes, delivery, decisions, feed, heartbeatMs, now, audit }
+  const grants = new Grants({ state: backends.state, counters: backends.counters, directory, store, admin: store, now })
+  const acting = new ActingSwitch({ store, never: config.agentsNever, audit })
+  const agentDeps = { store, sessionTokens, directory, registry, spokes, delivery, decisions, feed, heartbeatMs, now, audit, grants, acting }
   const resolveActor = createResolver({
     cookieName: COOKIE,
     findDevice: (token) => store.findDevice(token),
@@ -964,6 +970,15 @@ export function startCentral(options: CentralOptions): Central {
       return new Response(null, { status: 204 })
     }),
     route("GET", "/api/admin/audit", "admin", () => Response.json(store.auditLog())),
+    // The hub-wide agent kill switch: pauses every agent action for every user (reading and messaging still work).
+    route("GET", "/api/admin/agents/acting", "admin", () => Response.json({ enabled: !store.actingPaused() }, { headers: NO_STORE })),
+    route("PUT", "/api/admin/agents/acting", "admin", async ({ request, user }) => {
+      const enabled = (await body(request)).enabled
+      if (typeof enabled !== "boolean") return error(400, "enabled must be true or false")
+      store.setActingPaused(!enabled)
+      store.audit({ actor: user.id, action: enabled ? "agents.acting.resume" : "agents.acting.pause" })
+      return Response.json({ enabled }, { headers: NO_STORE })
+    }),
     // Decisions (asks to @me): the user's own; answered only here (tap: the console cookie, not a device token).
     route("GET", "/api/decisions", "user", async ({ url, user }) => {
       try {
@@ -1467,6 +1482,7 @@ export function startCentral(options: CentralOptions): Central {
     backends,
     delivery,
     decisions,
+    acting,
     routes: [...routes.map(({ method, path, access }) => ({ method, path, access })), ...agent.routes.map(({ method, path }) => ({ method, path, access: "agent" as const }))],
     async stop() {
       tokenPush.stop()
