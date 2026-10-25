@@ -119,6 +119,19 @@ describe("drain (single process)", () => {
     expect(await late.text()).toBe("retry: 2000\n\n")
   })
 
+  test("agent watch streams end with the retry: hint too, and a new one while draining gets it at once", async () => {
+    h = await harness()
+    const response = await h.api("/api/agent/watch")
+    expect(response.status).toBe(200)
+    const text = readAll(response)
+    await Bun.sleep(50)
+    await h.drain({ timeoutMs: 1000 })
+    const body = await text
+    expect(body).toContain('"type":"ready"')
+    expect(body.endsWith("retry: 2000\n\n")).toBe(true)
+    expect(await (await h.api("/api/agent/watch")).text()).toBe("retry: 2000\n\n")
+  })
+
   test("drain is idempotent and stop() after it is quick", async () => {
     h = await harness()
     await spoke(h, { sessions: [session("ses_1")] })

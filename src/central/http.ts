@@ -421,6 +421,8 @@ export function startCentral(options: CentralOptions): Central {
   let spokes!: SpokeHub
   /** Set by drain() (design §10): /readyz fails and new SSE streams are sent away. */
   let draining: Promise<void> | undefined
+  /** Aborted by drain(): the agent watch streams end with a `retry:` hint. */
+  const drainSignal = new AbortController()
   /** At most one machine per hub process is approved without confirmation (see localAutoApprove). */
   let autoApproved = false
 
@@ -903,7 +905,7 @@ export function startCentral(options: CentralOptions): Central {
         },
       })
     : undefined
-  const agentDeps = { store, sessionTokens, directory, registry, spokes, delivery, decisions, feed, heartbeatMs, now, audit, grants, grantRequests, acting, actions, escalate, launches, launchFeed, webhooks, maxPromptChars: MAX_PROMPT_CHARS, ...(watchRegistry ? { watchRegistry } : {}) }
+  const agentDeps = { draining: drainSignal.signal, store, sessionTokens, directory, registry, spokes, delivery, decisions, feed, heartbeatMs, now, audit, grants, grantRequests, acting, actions, escalate, launches, launchFeed, webhooks, maxPromptChars: MAX_PROMPT_CHARS, ...(watchRegistry ? { watchRegistry } : {}) }
   const resolveActor = createResolver({
     cookieName: COOKIE,
     findDevice: (token) => deviceOfToken(token),
@@ -1854,6 +1856,7 @@ export function startCentral(options: CentralOptions): Central {
     // Withdraw this pod's slices: the other pods stop showing its connections (the new pod republishes them).
     await view?.stop().catch((cause) => console.error(`[hub] cluster view not withdrawn: ${(cause as Error).message}`))
     for (const listener of [...listeners]) listener.end(SSE_RETRY_MS)
+    drainSignal.abort()
     await connections
   }
 
