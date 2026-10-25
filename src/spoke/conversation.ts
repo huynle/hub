@@ -5,12 +5,8 @@
 
 export const VOICE_AGENT = "voice"
 
-/** metadata.source of the prompts the hub sends. opencode-hub (0.5) wrote "opencode-hub", opencode-voice (<= 0.4) "opencode-voice". */
-export const PROMPT_SOURCE = "hub"
-const PROMPT_SOURCES: readonly unknown[] = [PROMPT_SOURCE, "opencode-hub", "opencode-voice"]
-/** True for prompt metadata written by the hub, under either name. */
-export const isHubPrompt = (metadata: unknown): boolean =>
-  typeof metadata === "object" && metadata !== null && PROMPT_SOURCES.includes((metadata as { source?: unknown }).source)
+// PROMPT_SOURCE and isHubPrompt live in the spoke SDK (a harness-neutral marker for the hub's prompts).
+export { PROMPT_SOURCE, isHubPrompt } from "../../packages/spoke-sdk/src/prompt-source.ts"
 
 export const VOICE_AGENT_DESCRIPTION =
   "Voice front-end: short spoken replies; delegates real work to background subagents. Used by Hub conversation mode."

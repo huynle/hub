@@ -57,6 +57,8 @@
     "packages/runtime-openshell/src",
     "packages/runtime-openshell/package.json",
     "packages/runtime-openshell/image",
+    "packages/spoke-sdk/src",
+    "packages/spoke-sdk/package.json",
     "bin",
     "web/dist",
     "docker",
@@ -75,7 +77,8 @@
     "packages/cli",
     "packages/runtime-sdk",
     "packages/node",
-    "packages/runtime-openshell"
+    "packages/runtime-openshell",
+    "packages/spoke-sdk"
   ],
   "engines": {
     "bun": ">=1.3"
