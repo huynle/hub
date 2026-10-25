@@ -206,6 +206,17 @@ export class SharedRows {
     return key
   }
 
+  /**
+   * Adds the audit rows the cache lacks (entries other pods wrote that store.changed has not brought yet, or never
+   * will after a lost message), so the next keyAudit sorts after every entry written before it on any pod.
+   */
+  async syncAudit(): Promise<void> {
+    await this.ready()
+    const rows = await this.store.list<AuditEntry>(HUB_ROWS, "audit")
+    const known = new Set(this.cache.get().audit.map((entry) => this.auditKeys.get(entry)))
+    for (const row of rows) if (!known.has(row.key)) applyRow(this.cache.get(), { collection: "audit", key: row.key }, row.value, this)
+  }
+
   auditKey(entry: AuditEntry): string | undefined {
     return this.auditKeys.get(entry)
   }

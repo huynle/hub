@@ -304,6 +304,22 @@ for (const variant of variants) {
       expect(a.store.auditLog().map((e) => e.action)).toEqual(["a4", "a3", "a2", "a1", "a0"])
       expect(b.store.auditLog().map((e) => e.action)).toEqual(["a4", "a3", "a2", "a1", "a0"])
     })
+
+    test("audit entries written one after another on two pods keep that order, even in the same millisecond and with store.changed lost", async () => {
+      // Regression: each pod keyed its entry after the newest key in its own cache; when the other pod's entry had
+      // not reached it yet (the Bus is asynchronous or lost the message) and the clock tied, the random key suffix
+      // decided the order.
+      const { a, b } = await variant.make({ isolatedBus: true, now: () => 1_000 })
+      const actions = Array.from({ length: 12 }, (_, i) => `a${i}`)
+      for (const [i, action] of actions.entries()) await (i % 2 ? a : b).store.audit({ actor: "system", action })
+      const stored = (await a.state.list<{ action: string }>(HUB_ROWS, "audit")).map((row) => row.value.action)
+      expect(stored).toEqual(actions)
+      for (const pod of [a, b]) {
+        pod.timers.fire()
+        for (let i = 0; i < 50 && pod.store.auditLog().length < actions.length; i++) await Bun.sleep(10)
+        expect(pod.store.auditLog().map((e) => e.action)).toEqual([...actions].reverse())
+      }
+    })
   })
 }
 
