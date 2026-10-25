@@ -66,9 +66,9 @@ describe("acting features", () => {
     const features = (req: unknown) => P.requestFeatures(req as ServerRequest)
     expect(features(prompt())).toEqual(["deliver", "hubPrompt"])
     expect(features({ ...prompt(), meta: { kind: "msg", from: "@a", to: "@b" } })).toEqual(["deliver"])
-    expect(features(permission({ message: "no" }))).toEqual(["permissionMessage"])
-    expect(features(permission())).toEqual([])
-    expect(features({ op: "turn", sessionID: "ses_1", text: "hi", voiceStyle: false })).toEqual([])
+    expect(features(permission({ message: "no" }))).toEqual(["permission", "permissionMessage"])
+    expect(features(permission())).toEqual(["permission"])
+    expect(features({ op: "turn", sessionID: "ses_1", text: "hi", voiceStyle: false })).toEqual(["turn"])
     expect(features({ op: "timeline", sessionID: "ses_1" })).toEqual([featureForOp("timeline")])
   })
 

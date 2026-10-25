@@ -404,8 +404,8 @@ describe("harness-neutral hello", () => {
     expect(SPOKE_FEATURES.length).toBeLessThanOrEqual(64)
   })
 
-  test("core ops need no feature; optional ops map to the feature that serves them", () => {
-    for (const op of ["turn", "steer", "interrupt", "stop", "permission", "form"] as const) expect(featureForOp(op)).toBeUndefined()
+  test("core ops map to themselves (OpenCode spokes imply them); optional ops map to the feature that serves them", () => {
+    for (const op of ["turn", "steer", "interrupt", "stop", "permission", "form"] as const) expect(featureForOp(op)).toBe(op)
     expect(featureForOp("timeline")).toBe("timeline")
     expect(featureForOp("setModelPrefs")).toBe("modelPrefs")
     expect(featureForOp("autoName")).toBe("autoName")

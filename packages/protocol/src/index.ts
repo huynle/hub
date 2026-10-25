@@ -2,20 +2,25 @@
 // A spoke (a harness plugin; OpenCode first) connects outbound with `Authorization: Bearer <machineToken>`.
 // Every frame is one object with a `t` discriminator. Unknown or malformed frames are rejected.
 //
-// Core and features: every spoke serves the core ops (turn, steer, interrupt, stop, permission, form); the
-// rest are features a spoke announces in its hello (SPOKE_FEATURES) and the hub uses only when announced.
-// A hello without `harness` comes from an OpenCode spoke that predates this split and implies
-// IMPLIED_OPENCODE_FEATURES. The hub announces its own features in the welcome (HUB_FEATURES), and a spoke
+// Core and features: the core ops (CORE_OPS: turn, steer, interrupt, stop, permission, form) and the optional
+// features a spoke announces in its hello (SPOKE_FEATURES); the hub uses only what a spoke serves (spokeFeatures).
+// An OpenCode spoke (a hello without `harness` or with harness "opencode") serves every core op without announcing
+// it; any other harness announces the core ops it serves, like any feature. A hello without `harness` comes from an
+// OpenCode spoke that predates this split and also implies IMPLIED_OPENCODE_FEATURES. The hub announces its own features in the welcome (HUB_FEATURES), and a spoke
 // sends a newer request only when the hub listed it. Neither side bumps PROTOCOL_VERSION for a new feature.
 //
-// Modules: launch.ts (launch vocabulary and workspace checks), node.ts (the `hub node` hello, frames and ops on the
-// same socket), webhook.ts (webhook signature format), wire.ts (shared frame primitives). All are re-exported here.
+// Modules: harness-events.ts (the forwarded events a non-OpenCode spoke may send, with their shapes), launch.ts
+// (launch vocabulary and workspace checks), node.ts (the `hub node` hello, frames and ops on the same socket),
+// preset.ts (the harness preset schema), webhook.ts (webhook signature format), wire.ts (shared frame primitives).
+// All are re-exported here.
 
 import { featureList, HUB_URL_MAX_CHARS, ID, isByeFrame as isBye, isHubURL, isObj, isResFrame as isRes, isWelcomeFrame, MAX_FRAME, MAX_RETRY_AFTER_MS, nonEmpty, num, parseFrame as parse, str, token, UNSAFE_CHARS } from "./wire.ts"
 import type { NodeMessage, NodeServerMessage } from "./node.ts"
 
+export * from "./harness-events.ts"
 export * from "./launch.ts"
 export * from "./node.ts"
+export * from "./preset.ts"
 export * from "./webhook.ts"
 export { HUB_URL_MAX_CHARS, isHubURL, MAX_FRAME, MAX_RETRY_AFTER_MS }
 
@@ -160,7 +165,7 @@ export interface Terminals {
   readonly herdr?: { readonly workspaces: readonly HerdrWorkspace[] }
 }
 
-/** Subset of OpenCode events the spoke forwards (see FORWARDED_EVENTS). */
+/** Subset of OpenCode events the spoke forwards (see FORWARDED_EVENTS; HARNESS_EVENTS for other harnesses). */
 export interface ForwardedEvent {
   readonly type: string
   readonly data: Record<string, unknown>
@@ -266,10 +271,11 @@ export interface Hello {
   readonly pid: number
   readonly mode: SpokeMode
   /**
-   * OpenCode's version. Required by hubs that predate `harness`, so every spoke sends it: OpenCode spokes their
-   * OpenCode version, other harnesses their own version (or "").
+   * OpenCode's version: required in an OpenCode hello (no `harness`, or harness "opencode"), optional for other
+   * harnesses. Hubs that predate `harness` require it from every spoke, so a non-OpenCode spoke that wants to reach
+   * them sends it anyway (its own version, or "").
    */
-  readonly opencodeVersion: string
+  readonly opencodeVersion?: string
   readonly pluginVersion: string
   /** Optional ops this spoke supports (see SPOKE_FEATURES); older spokes send none. */
   readonly features?: readonly string[]
@@ -324,10 +330,24 @@ export const IMPLIED_OPENCODE_FEATURES = [
  * "launch": its create op takes a launch's `launchID`, `agent` and `model` (see isLaunchCreate); a launch create's
  * directory may be a new workspace under the machine's node workspace roots rather than one the spoke reported.
  */
-export const KNOWN_SPOKE_FEATURES = [...IMPLIED_OPENCODE_FEATURES, "autoName", "sessionTokens", "deliver", "hubPrompt", "permissionMessage", "actTokens", "launch"] as const
+const OPTIONAL_SPOKE_FEATURES = [...IMPLIED_OPENCODE_FEATURES, "autoName", "sessionTokens", "deliver", "hubPrompt", "permissionMessage", "actTokens", "launch"] as const
+
+/**
+ * The core ops. An OpenCode spoke serves them all without announcing them; a spoke of another harness announces
+ * each one it serves (a hooks spoke may serve "permission" but not "turn"), and the hub sends only those. Hubs that
+ * predate this ignore the announcement and send them anyway, so announcing them is additive.
+ */
+export const CORE_OPS = ["turn", "steer", "interrupt", "stop", "permission", "form"] as const
+export type CoreOp = (typeof CORE_OPS)[number]
+
+/** Every feature a spoke may serve: the core ops and the optional features. */
+export const KNOWN_SPOKE_FEATURES = [...CORE_OPS, ...OPTIONAL_SPOKE_FEATURES] as const
 export type SpokeFeature = (typeof KNOWN_SPOKE_FEATURES)[number]
-/** What this package's OpenCode spoke announces (without "deliver" and "hubPrompt" when its OpenCode has no synthetic messages). */
-export const SPOKE_FEATURES: readonly SpokeFeature[] = KNOWN_SPOKE_FEATURES
+/**
+ * What this package's OpenCode spoke announces (without "deliver" and "hubPrompt" when its OpenCode has no synthetic
+ * messages). No core op: an OpenCode spoke implies them.
+ */
+export const SPOKE_FEATURES: readonly SpokeFeature[] = OPTIONAL_SPOKE_FEATURES
 
 /**
  * Features the hub announces in its welcome. "harness": it reads hello `harness`, `harnessVersion` and `evidence`.
@@ -342,14 +362,24 @@ export const HUB_FEATURES: readonly HubFeature[] = ["harness", "messaging", "nod
 
 /** A spoke's harness, version and evidence level; a hello without `harness` is an OpenCode native spoke. */
 export function helloHarness(hello: Hello): { readonly harness: string; readonly harnessVersion: string; readonly evidence: EvidenceLevel | "unknown" } {
-  if (hello.harness === undefined) return { harness: HARNESS_OPENCODE, harnessVersion: hello.opencodeVersion, evidence: "native" }
+  if (hello.harness === undefined) return { harness: HARNESS_OPENCODE, harnessVersion: hello.opencodeVersion ?? "", evidence: "native" }
   const evidence = (EVIDENCE_LEVELS as readonly string[]).includes(hello.evidence ?? "") ? (hello.evidence as EvidenceLevel) : "unknown"
   return { harness: hello.harness, harnessVersion: hello.harnessVersion ?? "", evidence }
 }
 
-/** The features a spoke serves: those it announced, plus IMPLIED_OPENCODE_FEATURES for a hello without `harness`. */
+/** Whether a hello comes from an OpenCode spoke: no `harness` (a spoke that predates it) or harness "opencode". */
+export const isOpenCodeHello = (hello: Hello): boolean => hello.harness === undefined || hello.harness === HARNESS_OPENCODE
+
+/**
+ * The features a spoke serves: those it announced, plus CORE_OPS for an OpenCode hello and IMPLIED_OPENCODE_FEATURES
+ * for a hello without `harness`.
+ */
 export function spokeFeatures(hello: Hello): ReadonlySet<string> {
-  return new Set([...(hello.harness === undefined ? IMPLIED_OPENCODE_FEATURES : []), ...(hello.features ?? [])])
+  return new Set([
+    ...(isOpenCodeHello(hello) ? CORE_OPS : []),
+    ...(hello.harness === undefined ? IMPLIED_OPENCODE_FEATURES : []),
+    ...(hello.features ?? []),
+  ])
 }
 
 export interface Sessions {
@@ -525,16 +555,12 @@ export type ServerRequest =
    */
   | { readonly op: "deliver"; readonly sessionID: string; readonly messageID: string; readonly text: string; readonly wake: boolean; readonly meta: DeliverMeta }
 
-/** The feature a spoke must announce for the hub to send `op`, or undefined for a core op every spoke serves. */
-export function featureForOp(op: ServerRequest["op"]): SpokeFeature | undefined {
+/**
+ * The feature a spoke must serve (spokeFeatures) for the hub to send `op`: the op itself for a core op (CORE_OPS,
+ * implied by OpenCode spokes), else the optional feature that serves it.
+ */
+export function featureForOp(op: ServerRequest["op"]): SpokeFeature {
   switch (op) {
-    case "turn":
-    case "steer":
-    case "interrupt":
-    case "stop":
-    case "permission":
-    case "form":
-      return undefined
     case "setModelPrefs":
       return "modelPrefs"
     default:
@@ -544,8 +570,7 @@ export function featureForOp(op: ServerRequest["op"]): SpokeFeature | undefined 
 
 /** Every feature a spoke must announce for the hub to send `req`: its op's (featureForOp) and its options'. */
 export function requestFeatures(req: ServerRequest): SpokeFeature[] {
-  const op = featureForOp(req.op)
-  const out: SpokeFeature[] = op ? [op] : []
+  const out: SpokeFeature[] = [featureForOp(req.op)]
   if (req.op === "deliver" && req.meta.kind === "prompt") out.push("hubPrompt")
   if (req.op === "permission" && req.message !== undefined) out.push("permissionMessage")
   if (isLaunchCreate(req)) out.push("launch")
@@ -972,7 +997,7 @@ export function parseSpokeMessage(raw: string | Buffer): SpokeMessage | undefine
         str(m.directory) &&
         num(m.pid) &&
         (m.mode === "always" || m.mode === "session") &&
-        str(m.opencodeVersion) &&
+        (str(m.opencodeVersion) || (m.opencodeVersion === undefined && m.harness !== undefined && m.harness !== HARNESS_OPENCODE)) &&
         str(m.pluginVersion) &&
         (m.features === undefined || featureList(m.features)) &&
         (m.harness === undefined || token(m.harness, 64)) &&
