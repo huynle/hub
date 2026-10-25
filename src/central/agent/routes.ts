@@ -19,6 +19,7 @@ import type { SessionTokens } from "./session-tokens"
 import { AgentError, agentFailure } from "./errors"
 import { type AgentAudit, auditRoutes } from "./audit"
 import { grantRoutes } from "./grant-routes"
+import type { GrantRequests } from "./grant-requests"
 import type { Grants } from "./grants"
 import { type ActingSwitch, actingSwitchRoutes } from "./acting-switch"
 import { Acting, type ActingRegistry, type Escalate } from "./acting"
@@ -68,6 +69,8 @@ export interface AgentDeps {
   readonly audit?: AgentAudit
   /** Grants (P3-T2): the /api/agent/grants routes when given. */
   readonly grants?: Grants
+  /** Grant requests (P3-T9): POST /api/agent/grants/requests with the grant routes. */
+  readonly grantRequests?: GrantRequests
   /** Kill switches (P3-T4): GET/PUT /api/agent/acting when given; the acting verbs check it. */
   readonly acting?: ActingSwitch
   /**
@@ -116,7 +119,7 @@ export function agentRoutes(deps: AgentDeps): AgentRoute[] {
     },
     ...appTokenRoutes(deps.store),
     ...(deps.audit ? auditRoutes(deps.audit) : []),
-    ...(deps.grants ? grantRoutes(deps.grants, deps.now) : []),
+    ...(deps.grants ? grantRoutes(deps.grants, deps.now, deps.grantRequests) : []),
     ...(deps.acting ? actingSwitchRoutes(deps.acting) : []),
     ...actVerbRoutes(deps),
   ]

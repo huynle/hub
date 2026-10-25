@@ -18,6 +18,8 @@ import type {
   FormAnswer,
   FormAnswered,
   Grant,
+  GrantRequested,
+  GrantRequestSpec,
   GrantSpec,
   Inbox,
   LogRow,
@@ -432,6 +434,14 @@ export class HubClient {
   /** Revokes a grant (gone when it already ended). */
   revokeGrant(id: string, options: CallOptions = {}): Promise<{ grant: Grant }> {
     return this.call("DELETE", `${AGENT}/grants/${segment(id)}`, signalOf(options))
+  }
+
+  /**
+   * Asks the user for a grant (sessions; app tokens with messages:send): opens a tap Decision for the user, whose
+   * approval creates the grant; the answer comes back as a reply to the ask (with the grant id when approved).
+   */
+  requestGrant(grant: GrantRequestSpec, why: string, options: CallOptions = {}): Promise<GrantRequested> {
+    return this.call("POST", `${AGENT}/grants/requests`, { body: { grant, why }, ...signalOf(options) })
   }
 
   // App tokens (user credentials only).

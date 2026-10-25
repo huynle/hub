@@ -11,7 +11,7 @@ import { serveMcp } from "./mcp"
 import { ASK_EXPIRES_DEFAULT_S, askOutcome, declinedText, durationArg, inboxText, mutedText, repliedText, sentText, textArg } from "./messaging"
 import { watch } from "./watch"
 import { DECISION_FLAGS, decisionOptions, decisionsText, openedText, stateArg } from "./decisions"
-import { GRANT_FLAGS, grantError, grantSpecArg, grantsText, grantText, userOnly } from "./grants"
+import { GRANT_FLAGS, GRANT_REQUEST_FLAGS, grantError, grantRequestArg, grantSpecArg, grantsText, grantText, requestedText, userOnly } from "./grants"
 import { answeredText, approvedText, deliveryArg, deniedText, formAnswerArg, needsUserLines, promptedText, stoppedText } from "./acting"
 
 export { EXIT } from "./http"
@@ -58,7 +58,7 @@ Messaging (text "-" reads it from stdin)
          [--deadline 2h [--on-timeout <safe id>]] [--tier confirm|tap] [--about <addr>]...
                                       opens a Decision for the user (answered in the console; the answer
                                       comes back as a reply); --on-timeout picks a safe option at the deadline
-  hub decisions list [--state open|answered|expired]   the Decisions you asked
+  hub decisions list [--state open|answered|expired|closed]   the Decisions you asked
   hub inbox                           asks to answer, your open asks, recent messages, mutes
   hub mute <addr> · hub unmute <addr>    refuse (or accept again) messages from a session
 
@@ -75,6 +75,10 @@ Grants (the user only: the console, or \`hub login\` with a device token; exit 5
   hub grant create --holder <ses_…|@name|@@orchestrator…|app:<id>> --project <path>... --allow approve,deny,…
          [--permit <pattern>]... [--never <pattern>]... [--expires 8h] [--max-per-hour N] [--allow-always]
          | --json '{…}' | --json -   what a session or app token may do, in which projects, until when
+  hub grant request --project <path>... --allow approve,deny,… [--permission-allow <pattern>]... [--never <pattern>]...
+         [--expires 8h] [--max-per-hour N] [--allow-always] [--holder <@@role you hold>] --why "…"
+                                      (agents) ask the user for a grant: opens a tap Decision; the answer comes
+                                      back as a reply (with the grant id when approved)
 
 MCP
   hub mcp                             an MCP server on stdio: these verbs as tools, with this CLI's credential
@@ -374,6 +378,16 @@ const COMMANDS: Record<string, Command> = {
       answer(context, body, (b) => `created ${grantText(b.grant)}`)
     },
   },
+  "grant request": {
+    flags: GRANT_REQUEST_FLAGS,
+    async handle(context) {
+      const why = str(context.parsed.flags, "why")
+      if (!why?.trim()) throw new UsageError('needs --why "…" (the reason the user reads)')
+      const grant = await grantRequestArg(context.parsed.flags, context.io.stdin)
+      const body = await context.hub((hub) => hub.requestGrant(grant, why))
+      answer(context, body, requestedText)
+    },
+  },
   "grant revoke": {
     args: ["<grantID>"],
     async handle(context) {
@@ -412,7 +426,7 @@ const COMMANDS: Record<string, Command> = {
 }
 
 /** Commands with sub-verbs (`hub role claim`). */
-const GROUPS: Record<string, string[]> = { role: ["claim", "release"], decisions: ["list"], grant: ["list", "show", "create", "revoke"] }
+const GROUPS: Record<string, string[]> = { role: ["claim", "release"], decisions: ["list"], grant: ["list", "show", "create", "revoke", "request"] }
 
 function reportError(io: Io, error: CliError, json: boolean) {
   if (json && error.envelope) printJSON(io, { error: error.envelope })

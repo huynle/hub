@@ -5,7 +5,7 @@
 // asker as a reply. A real delivery engine over fake spokes, a fake clock and fake timers.
 import { describe, expect, test } from "bun:test"
 import type { AgentActor, UserActor } from "../src/central/agent/actor"
-import { DECISION_STATES, DECISION_TICK_MS, Decisions, type Decision } from "../src/central/agent/decisions"
+import { type ActOutcome, DECISION_STATES, DECISION_TICK_MS, Decisions, type Decision } from "../src/central/agent/decisions"
 import { Delivery, type DeliveryRegistry } from "../src/central/agent/delivery"
 import type { DirectoryEntry, Resolved } from "../src/central/agent/directory"
 import { AgentError } from "../src/central/agent/errors"
@@ -425,7 +425,7 @@ describe("closed elsewhere (P3-T8)", () => {
 describe("Decisions that act (escalations, P3-T8)", () => {
   const ACTION = { kind: "permission" as const, requestID: "per_1", rootID: "ses_b", sessionID: "ses_b", always: false }
   const APPROVE = [{ id: "approve", label: "Approve once" }, { id: "deny", label: "Deny", safe: true }]
-  function acting(outcome: () => Promise<"done" | "gone">) {
+  function acting(outcome: () => Promise<ActOutcome>) {
     const s = setup()
     const calls: Array<{ userID: string; id: string; option?: string; by: string }> = []
     const decisions = new Decisions({
@@ -465,6 +465,28 @@ describe("Decisions that act (escalations, P3-T8)", () => {
     expect(s.changes.at(-1)).toEqual({ userID: U, id: decision.id, state: "closed" })
     const reply = (await s.delivery.messages.list(U, { kind: "user" })).find((m) => m.kind === "reply")!
     expect(reply.text).toBe(`Decision ${decision.id} closed: The request was answered elsewhere or ended`)
+  })
+
+  test("the action may add a note to the asker's reply (a grant request answers the grant id)", async () => {
+    const s = acting(async () => ({ outcome: "done", note: "Grant g_0123456789abcdef created" }))
+    const { decision } = await openActing(s)
+    const { reply } = await s.decisions.answer(U, decision.id, { option: "approve" }, cookieUser)
+    expect(reply!.text).toBe(`Decision ${decision.id}: Approve once [approve]\nGrant g_0123456789abcdef created`)
+  })
+
+  test("the action's subject gone with its own reason: the Decision closes with that reason", async () => {
+    const s = acting(async () => ({ outcome: "gone", reason: "The requesting session is gone" }))
+    const { decision } = await openActing(s)
+    await expect(s.decisions.answer(U, decision.id, { option: "approve" }, cookieUser)).rejects.toMatchObject({ code: "gone" })
+    const after = (await s.decisions.get(U, decision.id))!
+    expect(after).toMatchObject({ state: "closed", closed: { reason: "The requesting session is gone" } })
+  })
+
+  test("a grant action is stored as given (the hub's, never an asker's)", async () => {
+    const s = acting(async () => "done")
+    const grant = { kind: "grant" as const, requester: "ses:ses_a", grant: { holder: "ses_a", scope: { projects: ["/p"] }, allow: ["approve"] } }
+    const { decision } = await s.decisions.ask(U, asSession("ses_a"), { question: "@alpha requests a grant", options: APPROVE, tier: "tap" }, { action: grant })
+    expect(decision.action).toEqual(grant)
   })
 
   test("the action fails: the Decision stays open (the user may try again) and the error goes through", async () => {
