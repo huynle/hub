@@ -74,6 +74,32 @@ export interface TimelinePage {
   readonly older?: string
 }
 
+/** Timeline row kinds. "message": a hub message (src/spoke/timeline.ts has the others). */
+export const TIMELINE_KINDS = ["user", "assistant", "reasoning", "tool", "message"] as const
+export type TimelineKind = (typeof TIMELINE_KINDS)[number]
+
+/** A message row's direction from the session's point of view: delivered to it (in) or sent by it (out). */
+export const MESSAGE_DIRECTIONS = ["in", "out"] as const
+export type MessageDirection = (typeof MESSAGE_DIRECTIONS)[number]
+
+/**
+ * A hub message as a timeline row. Inbound rows come from the spoke's timeline (a message the hub delivered,
+ * `messageID` the deliver messageID); outbound rows come from the hub's message store. `text` is the body,
+ * without the envelope.
+ */
+export interface TimelineMessageItem {
+  readonly key: string
+  readonly messageID: string
+  readonly sessionID: string
+  readonly kind: "message"
+  readonly text: string
+  readonly at?: number
+  /** Ordering position, as for the other rows. */
+  readonly pos?: number
+  readonly direction: MessageDirection
+  readonly message: Pick<DeliverMeta, "kind" | "from" | "to" | "replyTo">
+}
+
 export interface SessionInfo {
   readonly id: string
   readonly title: string
@@ -140,6 +166,8 @@ export const FORWARDED_EVENTS: ReadonlySet<string> = new Set([
   "session.execution.interrupted",
   "session.text.delta",
   "session.text.ended",
+  // data: InboxDeliveredData. Newer spokes add `origin` (who put the prompt in the inbox); the type is unchanged,
+  // so older hubs keep accepting it.
   "session.inbox.delivered",
   "session.agent.selected",
   // Activity feed. The spoke sends these in compact form (see compactActivity): tool inputs are
@@ -173,6 +201,17 @@ export const FORWARDED_EVENTS: ReadonlySet<string> = new Set([
   // Hub-defined: a session's status and running jobs as the spoke found them (startup, stream reconnect).
   "session.seed",
 ])
+
+/** Who put a prompt into a session's inbox: the user (a typed or voice prompt) or the hub (a delivered message). */
+export const INBOX_ORIGINS = ["user", "hub"] as const
+export type InboxOrigin = (typeof INBOX_ORIGINS)[number]
+
+/** `session.inbox.delivered` data as forwarded. `origin` is optional: older spokes do not send it. */
+export interface InboxDeliveredData {
+  readonly sessionID: string
+  readonly inboxID: string
+  readonly origin?: InboxOrigin
+}
 
 /**
  * OpenCode events the spoke forwards only in another (compact) form: a subagent tool's progress, which names the

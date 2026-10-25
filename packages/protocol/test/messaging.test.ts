@@ -121,3 +121,38 @@ describe("messaging features", () => {
     expect(parseServerMessage(j(welcome))).toEqual(welcome as any)
   })
 })
+
+describe("message timeline rows", () => {
+  test("timeline rows have a message kind next to the existing ones", () => {
+    expect(P.TIMELINE_KINDS).toEqual(["user", "assistant", "reasoning", "tool", "message"])
+  })
+
+  test("a message row carries the message's kind, addresses and direction; it is a typed TimelinePage item", () => {
+    const row: protocol.TimelineMessageItem = {
+      key: "msg_7f:message",
+      messageID: "msg_7f",
+      sessionID: "ses_1",
+      kind: "message",
+      text: "hi",
+      at: 1,
+      pos: 1000,
+      direction: "in",
+      message: { kind: "reply", from: "@api-refactor", to: "@@reviewer", replyTo: "msg_1" },
+    }
+    const page: protocol.TimelinePage = { items: [row] }
+    expect(page.items).toHaveLength(1)
+    expect(P.MESSAGE_DIRECTIONS).toEqual(["in", "out"])
+  })
+})
+
+describe("session.inbox.delivered origin", () => {
+  test("the event keeps its type; origin is user or hub", () => {
+    expect(P.INBOX_ORIGINS).toEqual(["user", "hub"])
+    expect(protocol.FORWARDED_EVENTS.has("session.inbox.delivered")).toBe(true)
+    const ev = (data: Record<string, unknown>) => protocol.parseSpokeMessage(j({ t: "event", event: { type: "session.inbox.delivered", data } }))
+    expect(ev({ sessionID: "ses_1", inboxID: "inb_1", origin: "hub" })).toBeDefined()
+    expect(ev({ sessionID: "ses_1", inboxID: "inb_1" })).toBeDefined()
+    const data: protocol.InboxDeliveredData = { sessionID: "ses_1", inboxID: "inb_1", origin: "user" }
+    expect(data.origin).toBe("user")
+  })
+})
