@@ -10,15 +10,21 @@ export interface Pattern {
 const ACTION = /^[A-Za-z0-9_.*?-]{1,80}$/
 export const RESOURCE_MAX = 1000
 
+/** What a wildcard may consume: any character, or (for shell allow rules) anything but `$(`, backticks and redirections. */
+const ANY = "."
+const SHELL_SAFE = "(?:[^`<>$(]|\\$(?!\\()|(?<!\\$)\\()"
+
+function globRegex(pattern: string, any: string): RegExp {
+  const glob = pattern.replaceAll("\\", "/")
+  const optionalTail = glob.endsWith(" *")
+  const body = optionalTail ? glob.slice(0, -2) : glob
+  const source = [...body].map((c) => (c === "*" ? `${any}*` : c === "?" ? any : c.replace(/[.+^${}()|[\]\\/]/g, "\\$&"))).join("")
+  return new RegExp(`^${source}${optionalTail ? `( ${any}*)?` : ""}$`, "s")
+}
+
 /** OpenCode's Wildcard.match: `*` any run (slashes and newlines too), `?` one character, a trailing ` *` optional. */
 export function wildcard(input: string, pattern: string): boolean {
-  let escaped = pattern
-    .replaceAll("\\", "/")
-    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*/g, ".*")
-    .replace(/\?/g, ".")
-  if (escaped.endsWith(" .*")) escaped = `${escaped.slice(0, -3)}( .*)?`
-  return new RegExp(`^${escaped}$`, "s").test(input.replaceAll("\\", "/"))
+  return globRegex(pattern, ANY).test(input.replaceAll("\\", "/"))
 }
 
 /** OpenCode v2 calls the shell tool `shell`; `bash` is accepted as its old name. */
@@ -32,4 +38,19 @@ export function parsePattern(text: string): Pattern | undefined {
   const resource = colon < 0 ? "*" : text.slice(colon + 1)
   if (!ACTION.test(action) || resource === "" || resource.length > RESOURCE_MAX) return undefined
   return { action: normaliseAction(action), resource }
+}
+
+/** True when the shell resource matches the glob with every `$(`, backtick and redirection written literally. */
+const shellWildcard = (input: string, pattern: string): boolean => globRegex(pattern, SHELL_SAFE).test(input.replaceAll("\\", "/"))
+
+/** An allow rule covers this request resource (shell metacharacters are never a wildcard's). */
+export function allowsResource(pattern: Pattern, action: string, resource: string): boolean {
+  const normalised = normaliseAction(action)
+  if (!wildcard(normalised, pattern.action)) return false
+  return normalised === "shell" ? shellWildcard(resource, pattern.resource) : wildcard(resource, pattern.resource)
+}
+
+/** A never rule hits this request resource (plain wildcards: nothing escapes a never). */
+export function forbidsResource(pattern: Pattern, action: string, resource: string): boolean {
+  return wildcard(normaliseAction(action), pattern.action) && wildcard(resource, pattern.resource)
 }
