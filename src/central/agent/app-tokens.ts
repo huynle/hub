@@ -16,9 +16,10 @@ import type { AgentRoute } from "./routes"
 
 /**
  * Scopes an app token may hold: reading sessions; sending (msg, ask, reply, decline, mute) and reading messages;
- * acting on sessions (approve, deny, answer, prompt, stop), which still needs a grant held by the token.
+ * acting on sessions (approve, deny, answer, prompt, stop) and launching sessions (phase 4), each of which still
+ * needs a grant held by the token (with the act verb, or `launch` covering the repo).
  */
-export const APP_SCOPES: readonly string[] = ["sessions:read", "messages:send", "messages:read", "sessions:act"]
+export const APP_SCOPES: readonly string[] = ["sessions:read", "messages:send", "messages:read", "sessions:act", "sessions:launch"]
 export const DEFAULT_APP_SCOPES: readonly string[] = ["sessions:read"]
 export const MAX_APP_TOKENS = 50
 export const MAX_APP_TOKEN_LABEL = 100
