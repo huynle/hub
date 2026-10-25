@@ -35,6 +35,32 @@ describe("start", () => {
     expect(fake.calls().some((c) => c.argv.join(" ").includes(TOKEN))).toBe(false)
   })
 
+  test("runs the image's start script after the ready file, so the harness starts", async () => {
+    const rt = setup()
+    const ws = await rt.prepare(input())
+    await rt.start(ws, start())
+    expect(existsSync(file(".hub/started"))).toBe(true)
+    const execs = fake.calls().filter((c) => c.command === "sandbox exec").map((c) => c.argv.join(" "))
+    const touch = execs.findIndex((a) => a.includes(`touch ${READY_FILE}`))
+    const run = execs.findIndex((a) => a.includes("touch .hub/started"))
+    expect(touch).toBeGreaterThanOrEqual(0)
+    expect(run).toBeGreaterThan(touch)
+  })
+
+  test("a failing start script fails start", async () => {
+    const rt = setup({}, { startCommand: ["false"] })
+    const ws = await rt.prepare(input())
+    expect(await rejection(rt.start(ws, start()))).toBeInstanceOf(RuntimeError)
+  })
+
+  test("the default start command and image are the image's", async () => {
+    const { startCommand, imageTag } = await import("../image/image.ts")
+    const { DEFAULT_START_COMMAND, DEFAULT_SANDBOX_IMAGE } = await import("../src/runtime.ts")
+    expect(DEFAULT_START_COMMAND).toEqual(startCommand())
+    const { version } = await import("../package.json")
+    expect(DEFAULT_SANDBOX_IMAGE).toBe(imageTag(version))
+  })
+
   test("a non-loopback hub URL is kept as is", async () => {
     const rt = setup({}, { hubURL: "https://hub.example.com" })
     const ws = await rt.prepare(input())
