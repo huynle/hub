@@ -60,6 +60,8 @@
     "Dockerfile",
     "scripts/hub-local.sh",
     "scripts/io.github.huynle.hub.plist",
+    "scripts/io.github.huynle.hub-node.plist",
+    "scripts/hub-node.service",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"

@@ -1,0 +1,30 @@
+# Template: keep `hub node` running on Linux (systemd user unit). Not installed by anything.
+# The node prepares launch workspaces for the hub. It needs an enrolled machine (the plugin's /hub dialog writes the
+# machine token to ~/.config/hub/config.json, which the node only reads) and ~/.config/hub/node.json with at least
+# {"workspaceRoots": ["/home/you/projects"]} (optional: "labels", "slots", "memoryMB").
+# Install (replace __REPO__ and __HOME__ first):
+#   mkdir -p ~/.config/systemd/user
+#   sed -e "s|__REPO__|$PWD|g" -e "s|__HOME__|$HOME|g" scripts/hub-node.service > ~/.config/systemd/user/hub-node.service
+#   systemctl --user daemon-reload && systemctl --user enable --now hub-node
+#   loginctl enable-linger "$USER"   # keep it running while you are logged out
+# Logs: journalctl --user -u hub-node
+# Remove: systemctl --user disable --now hub-node && rm ~/.config/systemd/user/hub-node.service
+# Exit 78 means node.json gives the node nothing to do (no workspaceRoots): fix it, then restart the unit.
+[Unit]
+Description=Hub node (prepares launch workspaces for the hub)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=__HOME__/.bun/bin/bun __REPO__/packages/node/src/main.ts
+Environment=PATH=__HOME__/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=30
+RestartPreventExitStatus=78
+KillSignal=SIGTERM
+TimeoutStopSec=20
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
