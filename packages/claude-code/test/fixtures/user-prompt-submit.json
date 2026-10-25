@@ -1,0 +1,9 @@
+{
+  "session_id": "fdcdc49e-c7ea-4b8a-886d-7c5d3dbde164",
+  "transcript_path": "/cfg/projects/-work/fdcdc49e-c7ea-4b8a-886d-7c5d3dbde164.jsonl",
+  "cwd": "/work",
+  "prompt_id": "53091e89-c478-4187-ac33-c5a395bdc751",
+  "permission_mode": "default",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "BASH:echo hi-from-bash; echo ENVV=$SPIKEVAR"
+}

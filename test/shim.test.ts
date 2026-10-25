@@ -42,6 +42,8 @@ describe("main package", () => {
       "packages/runtime-openshell/image",
       "packages/spoke-sdk/src",
       "packages/spoke-sdk/package.json",
+      "packages/claude-code/src",
+      "packages/claude-code/package.json",
     ])
     expect(main.files.some((f: string) => f.includes("opencode-voice-shim"))).toBe(false)
     expect(main.workspaces).not.toContain("packages/opencode-voice-shim")

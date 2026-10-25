@@ -59,6 +59,8 @@
     "packages/runtime-openshell/image",
     "packages/spoke-sdk/src",
     "packages/spoke-sdk/package.json",
+    "packages/claude-code/src",
+    "packages/claude-code/package.json",
     "bin",
     "web/dist",
     "docker",
@@ -79,7 +81,8 @@
     "packages/node",
     "packages/runtime-openshell",
     "packages/spoke-sdk",
-    "packages/testkit"
+    "packages/testkit",
+    "packages/claude-code"
   ],
   "engines": {
     "bun": ">=1.3"
