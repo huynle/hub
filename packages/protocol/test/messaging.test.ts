@@ -18,7 +18,7 @@ describe("deliver op", () => {
   })
 
   test("every message kind is accepted; reply and decline name the message they answer", () => {
-    expect(P.MESSAGE_KINDS).toEqual(["msg", "ask", "reply", "decline", "primer", "decision"])
+    expect(P.MESSAGE_KINDS).toEqual(["msg", "ask", "reply", "decline", "primer", "decision", "prompt"])
     for (const kind of ["msg", "ask", "primer", "decision"]) expect(parses(deliver({ meta: { ...meta, kind } }))).toBe(true)
     for (const kind of ["reply", "decline"]) {
       expect(parses(deliver({ meta: { ...meta, kind, replyTo: "msg_1" } }))).toBe(true)

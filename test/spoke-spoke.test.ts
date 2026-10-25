@@ -1711,3 +1711,82 @@ describe("deliver", () => {
     expect(forwarded(server).find((e) => e.type === "session.inbox.delivered")?.data).toEqual({ sessionID: "ses_a", inboxID: "msg_typed" })
   })
 })
+
+describe("acting: hub prompts and permission messages", () => {
+  const prompt = (extra: Record<string, unknown> = {}, meta: Record<string, unknown> = {}) => ({
+    op: "deliver",
+    sessionID: "ses_a",
+    messageID: "msg_p1",
+    text: "run the tests",
+    wake: true,
+    ...extra,
+    meta: { kind: "prompt", from: "@orchestrator", to: "@api", grant: "g_12", ...meta },
+  })
+
+  test("the hello announces hubPrompt and permissionMessage; hubPrompt only with synthetic messages", async () => {
+    const { spoke, server } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    expect((server.frames[0] as { features?: string[] }).features).toEqual(expect.arrayContaining(["hubPrompt", "permissionMessage"]))
+    const old = setup({ mode: "always", token: "tok" }, { synthetic: false })
+    await until(() => old.spoke.status().connection === "connected")
+    const features = (old.server.frames[0] as { features?: string[] }).features
+    expect(features).not.toContain("hubPrompt")
+    expect(features).toContain("permissionMessage")
+  })
+
+  test("a hub prompt reaches the session in its provenance envelope as a synthetic hub message, never through the prompt API", async () => {
+    const { spoke, server, host, calls } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    await until(() => lastSessions(server)?.sessions.length === 1)
+    const res = await server.request(prompt())
+    expect(res).toMatchObject({ ok: true, result: { delivered: "turn", inboxID: "msg_p1" } })
+    expect(calls.synthetic).toEqual([
+      {
+        sessionID: "ses_a",
+        id: "msg_p1",
+        text: "[hub] prompt from @orchestrator · grant g_12 · msg_p1\n----- msg_p1 -----\nrun the tests\n----- msg_p1 -----",
+        metadata: { source: "hub", messageID: "msg_p1", kind: "prompt", from: "@orchestrator", to: "@api", grant: "g_12" },
+        delivery: "queue",
+        resume: true,
+      },
+    ])
+    expect(calls.prompt).toHaveLength(0)
+    expect(calls.switch).toHaveLength(0)
+    expect(calls.model).toHaveLength(0)
+  })
+
+  test("a hub prompt's delivery is the hub's, never the user's (no human turn, so no hop reset)", async () => {
+    const { spoke, server, host } = setup({ mode: "always", token: "tok" }, { server: fakeCentral({ hubFeatures: ["harness", "messaging"] }) })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    await until(() => lastSessions(server)?.sessions.length === 1)
+    await server.request(prompt())
+    // OpenCode may list the item as a user item; the hub metadata still makes it the hub's.
+    host.push({ type: "session.inbox.enqueued", data: { sessionID: "ses_a", inboxID: "msg_p1", item: { type: "user", payload: { text: "x", metadata: { source: "hub", messageID: "msg_p1", kind: "prompt" } }, delivery: "queue" } } })
+    host.push({ type: "session.inbox.delivered", data: { sessionID: "ses_a", inboxID: "msg_p1" } })
+    await until(() => forwarded(server).some((e) => e.type === "session.inbox.delivered"))
+    expect(forwarded(server).find((e) => e.type === "session.inbox.delivered")?.data).toEqual({ sessionID: "ses_a", inboxID: "msg_p1", origin: "hub" })
+  })
+
+  test("a duplicate hub prompt is admitted once", async () => {
+    const { spoke, server, host, calls } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    await until(() => lastSessions(server)?.sessions.length === 1)
+    await Promise.all([server.request(prompt()), server.request(prompt())])
+    expect(calls.synthetic).toHaveLength(1)
+  })
+
+  test("a reject's message (deny reason) goes to OpenCode with the reply; replies without one are unchanged", async () => {
+    const { spoke, server, calls } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    const denied = await server.request({ op: "permission", sessionID: "ses_a", requestID: "per_1", decision: "reject", message: "Only tests may run here" })
+    expect(denied).toMatchObject({ ok: true, result: {} })
+    await server.request({ op: "permission", sessionID: "ses_a", requestID: "per_2", decision: "reject" })
+    expect(calls.permission).toEqual([
+      { sessionID: "ses_a", requestID: "per_1", decision: "reject", message: "Only tests may run here" },
+      { sessionID: "ses_a", requestID: "per_2", decision: "reject" },
+    ])
+  })
+})

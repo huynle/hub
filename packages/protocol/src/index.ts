@@ -301,10 +301,12 @@ export const IMPLIED_OPENCODE_FEATURES = [
  * Features a spoke announces in its hello, so the hub can refuse an op an older spoke would ignore.
  * "sessionTokens": the spoke stores the session tokens the hub sends (sessionTokens op) for its sessions' shells.
  * "deliver": the spoke admits hub messages into its sessions (deliver op).
+ * "hubPrompt": it admits deliver kind "prompt" (an agent's prompt under a grant) with a provenance header it renders.
+ * "permissionMessage": it passes a permission reply's `message` (a deny reason) on to the harness.
  */
-export const KNOWN_SPOKE_FEATURES = [...IMPLIED_OPENCODE_FEATURES, "autoName", "sessionTokens", "deliver"] as const
+export const KNOWN_SPOKE_FEATURES = [...IMPLIED_OPENCODE_FEATURES, "autoName", "sessionTokens", "deliver", "hubPrompt", "permissionMessage"] as const
 export type SpokeFeature = (typeof KNOWN_SPOKE_FEATURES)[number]
-/** What this package's OpenCode spoke announces (without "deliver" when its OpenCode has no synthetic messages). */
+/** What this package's OpenCode spoke announces (without "deliver" and "hubPrompt" when its OpenCode has no synthetic messages). */
 export const SPOKE_FEATURES: readonly SpokeFeature[] = KNOWN_SPOKE_FEATURES
 
 /**
@@ -381,8 +383,11 @@ export type SessionTokenSkipReason = "unknown" | "expired"
 
 // ---------- messaging (deliver) ----------
 
-/** What a hub message is: a tell, an ask, its reply or decline, the identity primer, or a Decision answer. */
-export const MESSAGE_KINDS = ["msg", "ask", "reply", "decline", "primer", "decision"] as const
+/**
+ * What a hub message is: a tell, an ask, its reply or decline, the identity primer, a Decision answer, or a prompt
+ * an agent sends under a grant (feature "hubPrompt"; `meta.grant` names the grant).
+ */
+export const MESSAGE_KINDS = ["msg", "ask", "reply", "decline", "primer", "decision", "prompt"] as const
 export type MessageKind = (typeof MESSAGE_KINDS)[number]
 
 /** How OpenCode admits a message into a busy session: after the running turn (queue) or into it (steer). */
@@ -412,6 +417,8 @@ export interface DeliverMeta {
   readonly replyTo?: string
   /** How to admit the message into a busy session; the spoke picks when absent. */
   readonly delivery?: DeliveryMode
+  /** The grant a prompt acts under (required for kind "prompt", refused for the others). */
+  readonly grant?: string
 }
 
 export type DeliverRequest = Extract<ServerRequest, { op: "deliver" }>
@@ -425,7 +432,11 @@ export interface DeliverResult {
 export type ServerRequest =
   /** `text` may be empty when `images` are attached. */
   | { readonly op: "turn"; readonly sessionID: string; readonly text: string; readonly voiceStyle: boolean; readonly images?: readonly PromptImage[] }
-  | { readonly op: "permission"; readonly sessionID: string; readonly requestID: string; readonly decision: PermissionDecision }
+  /**
+   * `message` (reject only, feature "permissionMessage"): why, passed to the harness (OpenCode's reply message, which
+   * the model sees as the rejection's feedback).
+   */
+  | { readonly op: "permission"; readonly sessionID: string; readonly requestID: string; readonly decision: PermissionDecision; readonly message?: string }
   /** Answer (or cancel) a pending form (question) in the session that asked it. */
   | { readonly op: "form"; readonly sessionID: string; readonly formID: string; readonly answer: FormAnswer }
   | { readonly op: "form"; readonly sessionID: string; readonly formID: string; readonly cancel: true }
@@ -472,6 +483,8 @@ export type ServerRequest =
   /**
    * Admit a hub message into a session (feature "deliver"). `text` is the envelope the hub rendered; `messageID`
    * is the idempotency key (spokes apply a message once). `wake: false` admits it without starting a turn.
+   * Kind "prompt" (feature "hubPrompt"): `text` is the prompt's body; the spoke renders the provenance header from
+   * `meta.from` and `meta.grant` around it, so the session never sees it as the user's prompt.
    */
   | { readonly op: "deliver"; readonly sessionID: string; readonly messageID: string; readonly text: string; readonly wake: boolean; readonly meta: DeliverMeta }
 
@@ -491,6 +504,18 @@ export function featureForOp(op: ServerRequest["op"]): SpokeFeature | undefined 
       return op
   }
 }
+
+/** Every feature a spoke must announce for the hub to send `req`: its op's (featureForOp) and its options'. */
+export function requestFeatures(req: ServerRequest): SpokeFeature[] {
+  const op = featureForOp(req.op)
+  const out: SpokeFeature[] = op ? [op] : []
+  if (req.op === "deliver" && req.meta.kind === "prompt") out.push("hubPrompt")
+  if (req.op === "permission" && req.message !== undefined) out.push("permissionMessage")
+  return out
+}
+
+/** Longest permission reply message (deny reason). */
+export const PERMISSION_MESSAGE_MAX = 1000
 
 export interface ContextUsage {
   /** Tokens of the latest assistant message (input + output + reasoning + cache). */
@@ -715,6 +740,9 @@ function isHerdrInfo(v: unknown): boolean {
 /** Control (C0, C1), format (bidi, zero-width, BOM) and line/paragraph separator characters. */
 const UNSAFE_CHARS = /[\p{Cc}\p{Cf}\u2028\u2029]/u
 
+/** A permission reply message: 1–PERMISSION_MESSAGE_MAX characters, newlines and tabs but no other unsafe characters. */
+const permissionMessage = (v: unknown): v is string => nonEmpty(v) && v.length <= PERMISSION_MESSAGE_MAX && !UNSAFE_CHARS.test(v.replace(/[\n\t]/g, ""))
+
 /** A non-empty address of at most DELIVER_ID_MAX characters without characters that could fake a header. */
 const address = (v: unknown): v is string => nonEmpty(v) && v.length <= DELIVER_ID_MAX && !UNSAFE_CHARS.test(v)
 const deliverID = (v: unknown): v is string => typeof v === "string" && v.length <= DELIVER_ID_MAX && ID.test(v)
@@ -734,6 +762,9 @@ export function deliverProblem(v: unknown): string | undefined {
   if (meta.replyTo !== undefined && !deliverID(meta.replyTo)) return `meta.replyTo must be 1–${DELIVER_ID_MAX} id characters`
   if ((meta.kind === "reply" || meta.kind === "decline") && meta.replyTo === undefined) return `meta.replyTo is required for a ${meta.kind}`
   if (meta.delivery !== undefined && !(DELIVERY_MODES as readonly unknown[]).includes(meta.delivery)) return `meta.delivery must be one of ${DELIVERY_MODES.join(", ")}`
+  if (meta.kind === "prompt" && meta.grant === undefined) return "meta.grant is required for a prompt"
+  if (meta.kind !== "prompt" && meta.grant !== undefined) return "meta.grant is only for a prompt"
+  if (meta.grant !== undefined && !deliverID(meta.grant)) return `meta.grant must be 1–${DELIVER_ID_MAX} id characters`
   return undefined
 }
 
@@ -815,7 +846,12 @@ function isServerRequest(v: unknown): v is ServerRequest {
     case "turn":
       return nonEmpty(v.sessionID) && promptBody(v) && typeof v.voiceStyle === "boolean"
     case "permission":
-      return nonEmpty(v.sessionID) && nonEmpty(v.requestID) && ["once", "always", "reject"].includes(v.decision as string)
+      return (
+        nonEmpty(v.sessionID) &&
+        nonEmpty(v.requestID) &&
+        ["once", "always", "reject"].includes(v.decision as string) &&
+        (v.message === undefined || (v.decision === "reject" && permissionMessage(v.message)))
+      )
     case "form":
       if (!nonEmpty(v.sessionID) || !nonEmpty(v.formID) || v.formID.length > 300) return false
       return v.cancel === true ? v.answer === undefined : v.cancel === undefined && formAnswerProblem(v.answer) === undefined
