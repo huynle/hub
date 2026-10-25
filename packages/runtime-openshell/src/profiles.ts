@@ -63,7 +63,7 @@ const show = (v: unknown) => JSON.stringify(v)?.slice(0, 80) ?? String(v)
 const builtinDefault = (): OpenShellProfile => ({ name: DEFAULT_PROFILE, providers: [], endpoints: [], allowGitRemote: false })
 
 /** A hostname (lowercase), or a wildcard host OpenShell accepts: `*` or `**` as the first of at least three labels. */
-function egressHost(v: string): string | undefined {
+export function egressHost(v: string): string | undefined {
   const host = v.toLowerCase()
   if (host.length > 253) return undefined
   const labels = host.split(".")
