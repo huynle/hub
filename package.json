@@ -54,6 +54,8 @@
     "packages/runtime-sdk/package.json",
     "packages/node/src",
     "packages/node/package.json",
+    "packages/runtime-openshell/src",
+    "packages/runtime-openshell/package.json",
     "bin",
     "web/dist",
     "docker",
@@ -71,7 +73,8 @@
     "packages/sdk",
     "packages/cli",
     "packages/runtime-sdk",
-    "packages/node"
+    "packages/node",
+    "packages/runtime-openshell"
   ],
   "engines": {
     "bun": ">=1.3"

@@ -15,6 +15,7 @@ COPY packages/sdk/package.json ./packages/sdk/
 COPY packages/cli/package.json ./packages/cli/
 COPY packages/runtime-sdk/package.json ./packages/runtime-sdk/
 COPY packages/node/package.json ./packages/node/
+COPY packages/runtime-openshell/package.json ./packages/runtime-openshell/
 RUN npm ci --no-audit --no-fund --ignore-scripts
 COPY web ./web
 RUN npx vite build --config web/vite.config.ts
@@ -27,6 +28,7 @@ COPY packages/sdk/package.json ./packages/sdk/
 COPY packages/cli/package.json ./packages/cli/
 COPY packages/runtime-sdk/package.json ./packages/runtime-sdk/
 COPY packages/node/package.json ./packages/node/
+COPY packages/runtime-openshell/package.json ./packages/runtime-openshell/
 # Bun migrates package-lock.json; --frozen-lockfile keeps the pinned versions.
 RUN bun install --production --frozen-lockfile --ignore-scripts
 COPY docker/hub-deps.ts ./
