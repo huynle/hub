@@ -221,6 +221,25 @@ describe("ValkeyBus request/reply", () => {
     expect(await a.request<string>("self", "hi", { timeoutMs: 1000 })).toBe("hi")
   })
 
+  test("closing a pod while its reply is on the way is not an error", async () => {
+    const errors: unknown[] = []
+    const { buses } = pods(2, { timers: fakeTimers().timers, onError: (error) => void errors.push(error) })
+    const [a, b] = buses as [ValkeyBus, ValkeyBus]
+    let replying!: () => void
+    const replied = new Promise<void>((resolve) => (replying = resolve))
+    await b.serve("t", () => {
+      setTimeout(replying, 0)
+      return "ok"
+    })
+    const reply = a.request("t", {}, { timeoutMs: 1000 }).catch((e) => e)
+    await replied
+    b.close()
+    a.close()
+    await reply
+    await Bun.sleep(5)
+    expect(errors).toEqual([])
+  })
+
   test("close() rejects pending requests and clears their timeouts", async () => {
     const clock = fakeTimers()
     const { buses } = pods(2, { timers: clock.timers })

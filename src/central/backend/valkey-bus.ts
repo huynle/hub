@@ -250,7 +250,8 @@ export class ValkeyBus implements Bus {
       try {
         await this.connection().publish(request.replyTo, reply)
       } catch (error) {
-        this.onError(error, topic)
+        // Closing this instance cancels replies on the way; that is not a responder failure.
+        if (!this.closed) this.onError(error, topic)
       }
     })()
     this.track(run)

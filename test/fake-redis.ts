@@ -2,7 +2,8 @@
 //
 // Like the real thing, PUBLISH counts subscribed connections (not listeners) and its reply can reach the
 // publisher before the message reaches the subscribers: deliveries run on a later macrotask, in publish order.
-// Each FakeRedis is one connection; duplicate() opens another on the same server.
+// Replies also come a macrotask later, and a command still waiting for its reply when its connection closes
+// rejects (as Bun's client does). Each FakeRedis is one connection; duplicate() opens another on the same server.
 import type { BusRedis } from "../src/central/backend/valkey-bus"
 
 type Listener = (message: string, channel: string) => void
@@ -50,7 +51,7 @@ export class FakeRedis implements BusRedis {
       receivers++
       setTimeout(() => connection.receive(channel, message), 0)
     }
-    return receivers
+    return this.reply(receivers)
   }
 
   async subscribe(channel: string, listener: Listener): Promise<number> {
@@ -79,6 +80,13 @@ export class FakeRedis implements BusRedis {
     this.closed = true
     this.listeners.clear()
     this.server.connections.delete(this)
+  }
+
+  /** The server's reply, a macrotask later; rejects when the connection closed meanwhile. */
+  private reply<T>(value: T): Promise<T> {
+    return new Promise((resolve, reject) =>
+      setTimeout(() => (this.closed ? reject(new Error("Connection closed")) : resolve(value)), 0),
+    )
   }
 
   private receive(channel: string, message: string): void {
