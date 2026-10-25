@@ -70,14 +70,6 @@ export interface ClusterBackendsOptions extends MemoryBackendsOptions {
   readonly valkeyClient?: (url: string) => RedisClient
 }
 
-/** Cluster mode configured in a build that cannot run it. No longer thrown (kept for main.ts until P6-T14). */
-export class ClusterUnavailableError extends Error {
-  constructor() {
-    super("Cluster mode (HUB_DATABASE_URL and HUB_VALKEY_URL) is not available in this build; unset both to run a single-process hub")
-    this.name = "ClusterUnavailableError"
-  }
-}
-
 /**
  * State in Postgres, everything else in Valkey (design §9). Built synchronously, nothing connects until first
  * use: the Postgres pool checks the schema then (it never migrates: `hub-server migrate` does), and one Valkey
