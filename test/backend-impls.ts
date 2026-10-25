@@ -7,7 +7,7 @@
 //
 // A contract suite loops over implementations(kind), builds each instance with `await impl.make(options)`, and
 // skips the tests an implementation cannot run with `test.skipIf(!impl.supports(...))`. Instances are disposed
-// after every test; the containers are removed after the file.
+// after every test; the containers are removed after each file (see implementations()).
 import { afterAll, afterEach } from "bun:test"
 import { existsSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -183,13 +183,17 @@ export const cluster: ItCluster | undefined = await (async () => {
   return it
 })()
 
-afterEach(() => registry.disposeAll())
-afterAll(async () => {
-  await registry.disposeAll()
-  await cluster?.stop()
-})
-
-/** The implementations of a backend kind, standard first. */
+/**
+ * The implementations of a backend kind, standard first. Call it at the top level of a test file: it registers
+ * that file's hooks (dispose instances after each test; remove the containers after the file). The hooks go
+ * with every call, not once per module, because one `bun test` process may run several files on one module
+ * instance; disposing and stopping twice is harmless, and a later file starts the containers again.
+ */
 export function implementations<K extends BackendKind>(kind: K): BackendImpl<K>[] {
+  afterEach(() => registry.disposeAll())
+  afterAll(async () => {
+    await registry.disposeAll()
+    await cluster?.stop()
+  })
   return registry.list(kind)
 }
