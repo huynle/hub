@@ -1,8 +1,31 @@
 // ValkeyBus against an in-process fake of Valkey pub/sub (test/fake-redis.ts): two bus instances stand for two
 // pods. The shared Bus contract runs against real Valkey with HUB_IT_CLUSTER=1 (test/cluster-impls/valkey-bus.ts).
 import { describe, expect, test } from "bun:test"
+import { BusNoResponderError, BusRemoteError, BusTimeoutError, type Timers } from "../src/central/backend/types"
 import { ValkeyBus, type ValkeyBusOptions } from "../src/central/backend/valkey-bus"
 import { FakeRedisServer } from "./fake-redis"
+
+/** Timers that fire only when the test says so. */
+function fakeTimers() {
+  const pending = new Map<number, { fn: () => void; ms: number }>()
+  let next = 0
+  const timers: Timers = {
+    set: (fn, ms) => {
+      pending.set(++next, { fn, ms })
+      return next
+    },
+    clear: (handle) => void pending.delete(handle as number),
+  }
+  return {
+    timers,
+    pending: () => [...pending.values()].map((p) => p.ms),
+    fireAll: () => {
+      const due = [...pending.values()]
+      pending.clear()
+      for (const p of due) p.fn()
+    },
+  }
+}
 
 function pods(count = 2, options: Omit<ValkeyBusOptions, "client"> = {}) {
   const server = new FakeRedisServer()
@@ -104,5 +127,110 @@ describe("ValkeyBus close", () => {
     a.close()
     expect(await subscribing).toBeInstanceOf(Error)
     expect(server.connections.size).toBe(0)
+  })
+})
+
+describe("ValkeyBus request/reply", () => {
+  test("a request from one pod gets the reply of the responder on another; replies go to the asking pod only", async () => {
+    const clock = fakeTimers()
+    const { server, buses } = pods(3, { timers: clock.timers })
+    const [a, b, c] = buses as [ValkeyBus, ValkeyBus, ValkeyBus]
+    await b.serve("pod.b.rpc", async (message, topic) => ({ echo: message, topic }))
+    const replies = await Promise.all([
+      a.request("pod.b.rpc", { n: 1 }, { timeoutMs: 1000 }),
+      a.request("pod.b.rpc", { n: 2 }, { timeoutMs: 1000 }),
+      c.request("pod.b.rpc", { n: 3 }, { timeoutMs: 1000 }),
+    ])
+    expect(replies).toEqual([
+      { echo: { n: 1 }, topic: "pod.b.rpc" },
+      { echo: { n: 2 }, topic: "pod.b.rpc" },
+      { echo: { n: 3 }, topic: "pod.b.rpc" },
+    ])
+    expect(clock.pending()).toEqual([])
+    expect(server.numsub("hub:bus:reply:pod1")).toBe(1)
+    expect(server.numsub("hub:bus:reply:pod3")).toBe(1)
+    expect(server.numsub("hub:bus:rpc:pod.b.rpc")).toBe(1)
+  })
+
+  test("a responder may return nothing", async () => {
+    const { buses } = pods(2, { timers: fakeTimers().timers })
+    const [a, b] = buses as [ValkeyBus, ValkeyBus]
+    await b.serve("void", () => undefined)
+    expect(await a.request("void", {}, { timeoutMs: 1000 })).toBeUndefined()
+  })
+
+  test("no responder anywhere: BusNoResponderError, and its timeout is cleared", async () => {
+    const clock = fakeTimers()
+    const { buses } = pods(2, { timers: clock.timers })
+    const [a] = buses as [ValkeyBus]
+    const error = await a.request("pod.gone.rpc", {}, { timeoutMs: 1000 }).catch((e) => e)
+    expect(error).toBeInstanceOf(BusNoResponderError)
+    expect((error as BusNoResponderError).topic).toBe("pod.gone.rpc")
+    expect(clock.pending()).toEqual([])
+  })
+
+  test("a responder that never answers: BusTimeoutError when the timeout fires (set at once); a late reply is ignored", async () => {
+    const clock = fakeTimers()
+    const { buses } = pods(2, { timers: clock.timers })
+    const [a, b] = buses as [ValkeyBus, ValkeyBus]
+    let answer: (value: unknown) => void = () => {}
+    let asked!: () => void
+    const wasAsked = new Promise<void>((resolve) => (asked = resolve))
+    await b.serve("slow", () => {
+      asked()
+      return new Promise((resolve) => (answer = resolve))
+    })
+    const reply = a.request("slow", {}, { timeoutMs: 2500 }).catch((e) => e)
+    expect(clock.pending()).toEqual([2500])
+    await wasAsked
+    clock.fireAll()
+    const error = await reply
+    expect(error).toBeInstanceOf(BusTimeoutError)
+    expect((error as BusTimeoutError).timeoutMs).toBe(2500)
+    answer("late")
+    await a.sync()
+  })
+
+  test("a responder that throws: BusRemoteError with its message", async () => {
+    const { buses } = pods(2, { timers: fakeTimers().timers })
+    const [a, b] = buses as [ValkeyBus, ValkeyBus]
+    await b.serve("bad", async () => {
+      throw new Error("no such session")
+    })
+    const error = await a.request("bad", {}, { timeoutMs: 1000 }).catch((e) => e)
+    expect(error).toBeInstanceOf(BusRemoteError)
+    expect((error as Error).message).toBe("no such session")
+  })
+
+  test("one responder per topic on a pod; after it stops serving the topic has none", async () => {
+    const { buses } = pods(2, { timers: fakeTimers().timers })
+    const [a, b] = buses as [ValkeyBus, ValkeyBus]
+    const stop = await b.serve("t", () => 1)
+    expect(await b.serve("t", () => 2).catch((e) => e)).toBeInstanceOf(Error)
+    await stop()
+    await stop()
+    expect(await a.request("t", {}, { timeoutMs: 1000 }).catch((e) => e)).toBeInstanceOf(BusNoResponderError)
+    await b.serve("t", () => 3)
+    expect(await a.request<number>("t", {}, { timeoutMs: 1000 })).toBe(3)
+  })
+
+  test("a request to a responder on the same pod works", async () => {
+    const { buses } = pods(1, { timers: fakeTimers().timers })
+    const [a] = buses as [ValkeyBus]
+    await a.serve("self", (m) => m)
+    expect(await a.request<string>("self", "hi", { timeoutMs: 1000 })).toBe("hi")
+  })
+
+  test("close() rejects pending requests and clears their timeouts", async () => {
+    const clock = fakeTimers()
+    const { buses } = pods(2, { timers: clock.timers })
+    const [a, b] = buses as [ValkeyBus, ValkeyBus]
+    await b.serve("slow", () => new Promise(() => {}))
+    const reply = a.request("slow", {}, { timeoutMs: 1000 }).catch((e) => e)
+    a.close()
+    const error = await reply
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toBe("bus closed")
+    expect(clock.pending()).toEqual([])
   })
 })

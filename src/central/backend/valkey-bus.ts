@@ -1,9 +1,33 @@
+// Bus over Valkey/Redis pub/sub (decision vkxkqiuf §1, §5): the cluster's implementation of ./types Bus.
+//
+// Connections (Bun.RedisClient, opened lazily on first use, never in the constructor):
+// - one command connection for PUBLISH;
+// - subscriber connections made with duplicate() (a subscribed connection takes no other commands). A topic's
+//   k-th local subscription goes on the k-th subscriber connection, so each connection listens to a topic at most
+//   once and PUBLISH's count (subscribed connections) is exactly the number of subscriptions in the cluster.
+//   Usually that is one subscriber connection per instance; connection 0 also carries rpc and reply channels.
+//
+// Channels, under `prefix` (default "hub:bus:"): t:<topic> for publish/subscribe, rpc:<topic> for requests,
+// reply:<instanceID> for this instance's replies, sync:<instanceID>:<n> for sync() markers. Payloads are JSON
+// envelopes, so every subscriber decodes its own copy.
+//
+// Request/reply: request() publishes {id, replyTo, m} on rpc:<topic>; 0 receivers is BusNoResponderError at once.
+// The responder publishes {id, ok, v | e} to replyTo; ok:false becomes BusRemoteError. The timeout starts before
+// anything is sent. One responder per topic per instance (not enforced across instances: the first reply wins;
+// pod-scoped topics such as pod.<id>.rpc have one server by construction).
+//
+// Delivery is at most once and publish resolves on send, before subscribers ran. sync() waits until everything
+// published before it has reached this instance's subscribers and their handlers settled (a marker through each
+// subscriber connection: Redis keeps per-connection order). Do not await sync() inside a handler.
+//
+// A dropped connection is not resubscribed here: Bun's autoReconnect reopens it (see open questions in P6-T5).
 import { randomUUID } from "node:crypto"
 import { realTimers } from "./memory-bus"
-import type { Bus, BusHandler, BusResponder, Data, RequestOptions, Timers, Unsubscribe } from "./types"
+import { BusNoResponderError, BusRemoteError, BusTimeoutError, type Bus, type BusHandler, type BusResponder, type Data, type RequestOptions, type Timers, type Unsubscribe } from "./types"
 
 type Listener = (message: string, channel: string) => void
 
+/** The part of Bun.RedisClient the bus uses (a fake in unit tests). */
 export interface BusRedis {
   publish(channel: string, message: string): Promise<number>
   subscribe(channel: string, listener: Listener): Promise<number>
@@ -13,11 +37,17 @@ export interface BusRedis {
 }
 
 export interface ValkeyBusOptions {
+  /** Opens the command connection (default: new Bun.RedisClient(url)); subscriber connections are its duplicates. */
   readonly client?: () => BusRedis
+  /** Names this instance's reply and sync channels (default: a random UUID; unique per process). */
   readonly instanceID?: string
+  /** Request timeouts (injectable for tests). */
   readonly timers?: Timers
+  /** Called with a subscriber's or responder's error (default: logged). */
   readonly onError?: (error: unknown, topic: string) => void
+  /** Channel name prefix (default "hub:bus:"). */
   readonly prefix?: string
+  /** How long sync() waits for a marker to come back (default 5000 ms). */
   readonly syncTimeoutMs?: number
 }
 
@@ -29,12 +59,40 @@ interface SubscriberConnection {
   open?: BusRedis
 }
 
+interface PendingRequest {
+  readonly topic: string
+  readonly resolve: (reply: Data) => void
+  readonly reject: (error: unknown) => void
+  readonly timer: unknown
+}
+
+/** On an rpc channel. */
+interface RequestEnvelope {
+  readonly id: string
+  readonly replyTo: string
+  readonly m?: Data
+}
+
+/** On a reply channel: the reply (`v`) or the responder's error message (`e`). */
+interface ReplyEnvelope {
+  readonly id: string
+  readonly ok: boolean
+  readonly v?: Data
+  readonly e?: string
+}
+
 export class ValkeyBus implements Bus {
   private readonly makeClient: () => BusRedis
   private readonly instanceID: string
   private readonly prefix: string
   private readonly onError: (error: unknown, topic: string) => void
   private readonly syncTimeoutMs: number
+  private readonly timers: Timers
+  private readonly replyChannel: string
+  private readonly responders = new Map<string, BusResponder>()
+  private readonly pending = new Map<string, PendingRequest>()
+  private nextRequest = 0
+  private replies?: Promise<void>
   private main?: BusRedis
   private readonly subscribers = new Map<number, SubscriberConnection>()
   private readonly inFlight = new Set<Promise<void>>()
@@ -47,6 +105,8 @@ export class ValkeyBus implements Bus {
     this.prefix = options.prefix ?? "hub:bus:"
     this.onError = options.onError ?? ((error, topic) => console.error(`hub: bus subscriber on ${topic} failed:`, error))
     this.syncTimeoutMs = options.syncTimeoutMs ?? 5000
+    this.timers = options.timers ?? realTimers
+    this.replyChannel = `${this.prefix}reply:${this.instanceID}`
   }
 
   async publish(topic: string, message: Data): Promise<number> {
@@ -74,18 +134,50 @@ export class ValkeyBus implements Bus {
       if (done) return
       done = true
       subscriber.topics.delete(topic)
-      await client.unsubscribe(channel, listener)
+      if (!this.closed) await client.unsubscribe(channel, listener)
     }
   }
 
-  serve(_topic: string, _responder: BusResponder): Promise<Unsubscribe> {
-    throw new Error("not implemented")
+  async serve(topic: string, responder: BusResponder): Promise<Unsubscribe> {
+    this.assertOpen()
+    if (this.responders.has(topic)) throw new Error(`already serving ${topic}`)
+    this.responders.set(topic, responder)
+    const channel = this.rpcChannel(topic)
+    const listener: Listener = (raw) => this.answer(topic, raw, responder)
+    let client: BusRedis
+    try {
+      client = await this.subscriber(0).client
+      await client.subscribe(channel, listener)
+    } catch (error) {
+      if (this.responders.get(topic) === responder) this.responders.delete(topic)
+      throw error
+    }
+    let done = false
+    return async () => {
+      if (done) return
+      done = true
+      if (this.responders.get(topic) === responder) this.responders.delete(topic)
+      if (!this.closed) await client.unsubscribe(channel, listener)
+    }
   }
 
-  request<T = Data>(_topic: string, _message: Data, _options: RequestOptions): Promise<T> {
-    throw new Error("not implemented")
+  request<T = Data>(topic: string, message: Data, options: RequestOptions): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      if (this.closed) return reject(new Error("bus closed"))
+      const id = String(++this.nextRequest)
+      // Set before anything is sent, so the timeout covers connecting too.
+      const timer = this.timers.set(() => this.settle(id, (p) => p.reject(new BusTimeoutError(topic, options.timeoutMs))), options.timeoutMs)
+      this.pending.set(id, { topic, resolve: resolve as (reply: Data) => void, reject, timer })
+      const envelope: RequestEnvelope = { id, replyTo: this.replyChannel, m: message }
+      void (async () => {
+        await this.listenForReplies()
+        const receivers = await this.connection().publish(this.rpcChannel(topic), JSON.stringify(envelope))
+        if (receivers === 0) this.settle(id, (p) => p.reject(new BusNoResponderError(topic)))
+      })().catch((error) => this.settle(id, (p) => p.reject(error)))
+    })
   }
 
+  /** Resolves once every message published before the call reached this instance's handlers and they settled. */
   async sync(): Promise<void> {
     await Promise.all([...this.subscribers.values()].map((subscriber) => this.syncSubscriber(subscriber)))
     await Promise.allSettled([...this.inFlight])
@@ -123,18 +215,82 @@ export class ValkeyBus implements Bus {
         this.onError(error, topic)
       }
     })()
-    this.inFlight.add(run)
-    void run.finally(() => this.inFlight.delete(run))
+    this.track(run)
   }
 
-  /** Closes every connection; later calls reject. */
+  /** Closes every connection and rejects pending requests; later calls reject. */
   close(): void {
     if (this.closed) return
     this.closed = true
+    for (const id of [...this.pending.keys()]) this.settle(id, (p) => p.reject(new Error("bus closed")))
     this.main?.close()
     // A connection still opening closes itself when it arrives (see subscriber()).
     for (const subscriber of this.subscribers.values()) subscriber.open?.close()
     this.subscribers.clear()
+  }
+
+  /** Answers one request on a served topic: the responder's reply or error goes to the asker's reply channel. */
+  private answer(topic: string, raw: string, responder: BusResponder): void {
+    let request: RequestEnvelope
+    try {
+      request = JSON.parse(raw) as RequestEnvelope
+      if (typeof request?.id !== "string" || typeof request.replyTo !== "string") throw new Error("malformed request")
+    } catch (error) {
+      this.onError(error, topic)
+      return
+    }
+    const run = (async () => {
+      let reply: string
+      try {
+        reply = JSON.stringify({ id: request.id, ok: true, v: await responder(request.m, topic) } satisfies ReplyEnvelope)
+      } catch (error) {
+        reply = JSON.stringify({ id: request.id, ok: false, e: error instanceof Error ? error.message : String(error) } satisfies ReplyEnvelope)
+      }
+      if (this.closed) return
+      try {
+        await this.connection().publish(request.replyTo, reply)
+      } catch (error) {
+        this.onError(error, topic)
+      }
+    })()
+    this.track(run)
+  }
+
+  /** Subscribes this instance's reply channel (once). */
+  private listenForReplies(): Promise<void> {
+    this.replies ??= (async () => {
+      const client = await this.subscriber(0).client
+      await client.subscribe(this.replyChannel, (raw) => this.receiveReply(raw))
+    })().catch((error) => {
+      this.replies = undefined
+      throw error
+    })
+    return this.replies
+  }
+
+  private receiveReply(raw: string): void {
+    let reply: ReplyEnvelope
+    try {
+      reply = JSON.parse(raw) as ReplyEnvelope
+    } catch (error) {
+      this.onError(error, this.replyChannel)
+      return
+    }
+    this.settle(String(reply?.id), (p) => (reply.ok ? p.resolve(reply.v) : p.reject(new BusRemoteError(p.topic, String(reply.e)))))
+  }
+
+  /** Ends a pending request once (later replies, timeouts and errors are ignored). */
+  private settle(id: string, fn: (pending: PendingRequest) => void): void {
+    const pending = this.pending.get(id)
+    if (!pending) return
+    this.pending.delete(id)
+    this.timers.clear(pending.timer)
+    fn(pending)
+  }
+
+  private track(run: Promise<void>): void {
+    this.inFlight.add(run)
+    void run.finally(() => this.inFlight.delete(run))
   }
 
   private assertOpen(): void {
@@ -171,5 +327,9 @@ export class ValkeyBus implements Bus {
 
   private topicChannel(topic: string): string {
     return `${this.prefix}t:${topic}`
+  }
+
+  private rpcChannel(topic: string): string {
+    return `${this.prefix}rpc:${topic}`
   }
 }
