@@ -1,5 +1,5 @@
-// The hub CLI (`hub` / `hubctl`, design §2.2, §3, §4, §8): reads, names and messages sessions through the hub's
-// /api/agent, with the hub SDK (packages/sdk) as its client.
+// The hub CLI (`hub` / `hubctl`, design §2.2, §3, §4, §5, §8): reads, names, messages and acts on sessions through
+// the hub's /api/agent, with the hub SDK (packages/sdk) as its client.
 // `run(argv, io)` is the whole program (main.ts wires it to the process); it returns the exit code.
 import type { Asked, HubClient, Sent, SentAll } from "../../sdk/src/index.ts"
 import pkg from "../package.json" with { type: "json" }
@@ -11,6 +11,7 @@ import { serveMcp } from "./mcp"
 import { ASK_EXPIRES_DEFAULT_S, askOutcome, declinedText, durationArg, inboxText, mutedText, repliedText, sentText, textArg } from "./messaging"
 import { watch } from "./watch"
 import { DECISION_FLAGS, decisionOptions, decisionsText, openedText, stateArg } from "./decisions"
+import { answeredText, approvedText, deliveryArg, deniedText, formAnswerArg, needsUserLines, promptedText, stoppedText } from "./acting"
 
 export { EXIT } from "./http"
 
@@ -60,6 +61,14 @@ Messaging (text "-" reads it from stdin)
   hub inbox                           asks to answer, your open asks, recent messages, mutes
   hub mute <addr> · hub unmute <addr>    refuse (or accept again) messages from a session
 
+Acting (users; agents under a grant, else exit 4 needs user with the evaluation)
+  hub approve <addr> <requestID> [--always] [--why "…"]   answer a permission request (once, or always)
+  hub deny <addr> <requestID> [--why "…"]                 reject it; the reason reaches the harness
+  hub answer <addr> <formID> key=value… | --json '{…}' | --json - | --cancel [--why "…"]
+                                      answer a form (a repeated key is a list); --cancel dismisses it
+  hub prompt <addr> "text" [--delivery queue|steer] [--why "…"]   prompt a session (text "-" reads stdin)
+  hub stop <addr> [--why "…"]         stop its running turn
+
 MCP
   hub mcp                             an MCP server on stdio: these verbs as tools, with this CLI's credential
 
@@ -100,6 +109,12 @@ function crossCheck(io: Io, actor: Actor | undefined) {
 
 /** Prints the raw answer with --json, else its text. */
 const answer = (context: Context, body: unknown, text: (body: any) => string) => (context.json ? printJSON(context.io, body) : out(context.io, text(body)))
+
+/** --why as SDK act options. */
+const whyOf = (flags: Parsed["flags"]) => {
+  const why = str(flags, "why")
+  return why !== undefined ? { why } : {}
+}
 
 /** --no-wake and --urgent as SDK send options. */
 const sendFlags = (flags: Parsed["flags"]) => ({ ...(flags["no-wake"] === true ? { wake: false } : {}), ...(flags.urgent === true ? { urgent: true } : {}) })
@@ -274,6 +289,56 @@ const COMMANDS: Record<string, Command> = {
       answer(context, body, (b) => mutedText(b.muted))
     },
   },
+  approve: {
+    args: ["<addr>", "<requestID>"],
+    flags: { always: "bool", why: "string" },
+    async handle(context) {
+      const { flags, args } = context.parsed
+      const body = await context.hub((hub) => hub.approve(args[0]!, args[1]!, { ...(flags.always === true ? { always: true } : {}), ...whyOf(flags) }))
+      answer(context, body, approvedText)
+    },
+  },
+  deny: {
+    args: ["<addr>", "<requestID>"],
+    flags: { why: "string" },
+    async handle(context) {
+      const { flags, args } = context.parsed
+      const body = await context.hub((hub) => hub.deny(args[0]!, args[1]!, whyOf(flags)))
+      answer(context, body, deniedText)
+    },
+  },
+  answer: {
+    args: ["<addr>", "<formID>", "key=value..."],
+    flags: { json: "json", cancel: "bool", why: "string" },
+    async handle(context) {
+      const { flags, args } = context.parsed
+      const [addr, formID, ...pairs] = args as [string, string, ...string[]]
+      const given = await formAnswerArg(pairs, flags, context.io.stdin)
+      const options = whyOf(flags)
+      const body = await context.hub((hub) => (given === "cancel" ? hub.cancelForm(addr, formID, options) : hub.answer(addr, formID, given, options)))
+      answer(context, body, (b) => answeredText(b, given === "cancel"))
+    },
+  },
+  prompt: {
+    args: ["<addr>", "<text>"],
+    flags: { delivery: "string", why: "string" },
+    async handle(context) {
+      const { flags, args } = context.parsed
+      const delivery = deliveryArg(str(flags, "delivery"))
+      const text = await textArg(args[1]!, context.io.stdin)
+      const body = await context.hub((hub) => hub.prompt(args[0]!, text, { ...(delivery ? { delivery } : {}), ...whyOf(flags) }))
+      answer(context, body, promptedText)
+    },
+  },
+  stop: {
+    args: ["<addr>"],
+    flags: { why: "string" },
+    async handle(context) {
+      const { flags, args } = context.parsed
+      const body = await context.hub((hub) => hub.stop(args[0]!, whyOf(flags)))
+      answer(context, body, stoppedText)
+    },
+  },
   mcp: {
     async handle({ io, credentials }) {
       if (!io.input) throw new UsageError("needs stdin")
@@ -318,6 +383,7 @@ function reportError(io: Io, error: CliError, json: boolean) {
     }
   }
   if (typeof envelope?.feature === "string") io.stderr(`missing feature: ${envelope.feature}${typeof envelope.harness === "string" ? ` (${envelope.harness})` : ""}\n`)
+  if (envelope?.code === "needs_user") for (const line of needsUserLines(envelope)) io.stderr(`${line}\n`)
   if (typeof envelope?.retryAfter === "number") io.stderr(`retry after ${Math.ceil(envelope.retryAfter)} s\n`)
   if (error.hint) io.stderr(`hint: ${error.hint}\n`)
 }

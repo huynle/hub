@@ -1,12 +1,16 @@
 // Command-line parsing: `--flag`, `--flag value`, `--flag=value` and short aliases (-n, -h, -V). Unknown flags
 // and wrong positional counts are usage errors (exit 2).
 
-/** optional: a value only when given with `=` or when the next token starts with a digit (`--wait`, `--wait 30`). */
-export type FlagKind = "bool" | "string" | "multi" | "optional"
+/**
+ * optional: a value only when given with `=` or when the next token starts with a digit (`--wait`, `--wait 30`).
+ * json: a value only when given with `=`, or when the next token looks like JSON (`{`, `[`) or is `-` (stdin):
+ * `hub answer … --json '{…}'` takes the answer while a bare `--json` keeps its usual meaning (raw output).
+ */
+export type FlagKind = "bool" | "string" | "multi" | "optional" | "json"
 
 export interface CommandSpec {
   readonly flags?: Readonly<Record<string, FlagKind>>
-  /** Positional arguments: required names, then optional ones (suffixed `?`). */
+  /** Positional arguments: required names, then optional ones (suffixed `?`), then any number (suffixed `...`). */
   readonly args?: readonly string[]
 }
 
@@ -47,7 +51,8 @@ export function parse(argv: readonly string[], spec: CommandSpec): Parsed {
       continue
     }
     let value = long?.[2]
-    if (kind === "optional" && value === undefined && !/^\d/.test(argv[i + 1] ?? "")) {
+    const next = argv[i + 1] ?? ""
+    if (value === undefined && ((kind === "optional" && !/^\d/.test(next)) || (kind === "json" && !/^[{[]/.test(next) && next !== "-"))) {
       flags[name] = true
       continue
     }
@@ -60,9 +65,9 @@ export function parse(argv: readonly string[], spec: CommandSpec): Parsed {
   }
   if (flags.help) return { flags, args }
   const names = spec.args ?? []
-  const required = names.filter((n) => !n.endsWith("?")).length
+  const required = names.filter((n) => !n.endsWith("?") && !n.endsWith("...")).length
   if (args.length < required) throw new UsageError(`missing ${names.slice(args.length, required).join(" ")}`)
-  if (args.length > names.length) throw new UsageError(`unexpected argument ${args[names.length]}`)
+  if (args.length > names.length && !names.at(-1)?.endsWith("...")) throw new UsageError(`unexpected argument ${args[names.length]}`)
   return { flags, args }
 }
 
