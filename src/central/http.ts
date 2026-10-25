@@ -101,7 +101,7 @@ export interface Central {
   readonly spokes: SpokeHub
   readonly push: Push
   readonly speechSettings: SpeechService
-  /** Backends for new code (state, bus, event log, counters, locks, catalog). */
+  /** Backends for new code (state, bus, event log, counters, locks, catalog, kv). */
   readonly backends: Backends
   /** Agent messages: store and delivery to sessions (the message routes use it). */
   readonly delivery: Delivery

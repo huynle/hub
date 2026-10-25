@@ -11,6 +11,7 @@ import { MemoryBus } from "../src/central/backend/memory-bus"
 import { MemoryCatalog } from "../src/central/backend/memory-catalog"
 import { MemoryCounters, MemoryLocks } from "../src/central/backend/memory-counters"
 import { MemoryEventLog } from "../src/central/backend/memory-events"
+import { MemoryKv } from "../src/central/backend/memory-kv"
 import { MemoryStateStore } from "../src/central/backend/memory-state"
 import { harness, type Harness } from "./central-harness"
 
@@ -23,6 +24,7 @@ describe("memoryBackends", () => {
     expect(backends.counters).toBeInstanceOf(MemoryCounters)
     expect(backends.locks).toBeInstanceOf(MemoryLocks)
     expect(backends.catalog).toBeInstanceOf(MemoryCatalog)
+    expect(backends.kv).toBeInstanceOf(MemoryKv)
   })
 
   test("every backend uses the injected clock", async () => {
@@ -31,11 +33,13 @@ describe("memoryBackends", () => {
     await backends.counters.incr("k", 100)
     await backends.locks.acquire("l", "o", 100)
     await backends.catalog.set("u", "s", "c", {}, { ttlMs: 100 })
+    await backends.kv.set("kv", "v", { px: 100 })
     expect((await backends.state.claim("ns", "k", "o")).ok && (await backends.state.claimOf("ns", "k"))!.at).toBe(0)
     t = 100
     expect(await backends.counters.get("k")).toBe(0)
     expect(await backends.locks.holder("l")).toBeUndefined()
     expect(await backends.catalog.list("u")).toEqual([])
+    expect(await backends.kv.get("kv")).toBeUndefined()
     await backends.events.append("u", { type: "x" })
     expect(await backends.events.since("u", (await backends.events.latest("u")).replace(/\.\d+$/, ".0"))).toMatchObject({ events: [{ at: 100 }] })
   })
@@ -52,6 +56,7 @@ describe("fileBackends", () => {
       expect(backends.counters).toBeInstanceOf(MemoryCounters)
       expect(backends.locks).toBeInstanceOf(MemoryLocks)
       expect(backends.catalog).toBeInstanceOf(MemoryCatalog)
+      expect(backends.kv).toBeInstanceOf(MemoryKv)
       await backends.state.claim("ns", "k", "o")
       await backends.state.flush?.()
       expect(await new FileStateStore({ stateDir }).claimOf("ns", "k")).toEqual({ namespace: "ns", key: "k", owner: "o", at: 7 })

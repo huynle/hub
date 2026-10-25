@@ -6,6 +6,7 @@ import { MemoryBus } from "./memory-bus"
 import { MemoryCatalog } from "./memory-catalog"
 import { MemoryCounters, MemoryLocks } from "./memory-counters"
 import { MemoryEventLog } from "./memory-events"
+import { MemoryKv } from "./memory-kv"
 import { MemoryStateStore } from "./memory-state"
 import type { Backends, Clock, Timers } from "./types"
 
@@ -28,6 +29,7 @@ export function memoryBackends(options: MemoryBackendsOptions = {}): Backends {
     counters: new MemoryCounters({ now }),
     locks: new MemoryLocks({ now }),
     catalog: new MemoryCatalog({ now }),
+    kv: new MemoryKv({ now }),
   }
 }
 

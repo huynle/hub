@@ -234,4 +234,5 @@ export interface Backends {
   readonly counters: Counters
   readonly locks: Locks
   readonly catalog: Catalog
+  readonly kv: Kv
 }
