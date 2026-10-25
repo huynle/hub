@@ -398,3 +398,27 @@ describe("Store agent data and token epochs", () => {
     expect(again.machineEpoch(machine.id)).toBe(1)
   })
 })
+
+describe("Store hub-wide agent acting switch (design §5, §7)", () => {
+  test("off by default; set persists across reopen; saves only on change", () => {
+    const dir = tmp()
+    const store = Store.open(dir)
+    expect(store.actingPaused()).toBe(false)
+    expect(store.setActingPaused(true)).toBe(true)
+    expect(store.setActingPaused(true)).toBe(false)
+    expect(store.actingPaused()).toBe(true)
+    expect(Store.open(dir).actingPaused()).toBe(true)
+    expect(Store.open(dir).setActingPaused(false)).toBe(true)
+    const reopened = Store.open(dir)
+    expect(reopened.actingPaused()).toBe(false)
+    expect("agentsActingPaused" in JSON.parse(readFileSync(path.join(dir, "state.json"), "utf8"))).toBe(false)
+  })
+
+  test("a stored value other than true reads as off and is dropped", () => {
+    const dir = tmp()
+    writeFileSync(path.join(dir, "state.json"), JSON.stringify({ agentsActingPaused: "yes" }))
+    expect(Store.open(dir).actingPaused()).toBe(false)
+    writeFileSync(path.join(dir, "state.json"), JSON.stringify({ agentsActingPaused: true }))
+    expect(Store.open(dir).actingPaused()).toBe(true)
+  })
+})

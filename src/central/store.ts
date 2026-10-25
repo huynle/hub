@@ -267,6 +267,8 @@ export interface StateData {
   users: UserRecord[]
   /** Newest last, at most AUDIT_LIMIT. */
   audit: AuditEntry[]
+  /** The admin's hub-wide kill switch: every agent action is paused for every user (reading and messaging still work). */
+  agentsActingPaused?: true
 }
 
 export interface StoreOptions {
@@ -355,6 +357,7 @@ export class Store {
           ...(isRecord(raw.speech) ? { speech: raw.speech } : {}),
           users: Array.isArray(raw.users) ? raw.users : [],
           audit: Array.isArray(raw.audit) ? raw.audit : [],
+          ...(raw.agentsActingPaused === true ? { agentsActingPaused: true as const } : {}),
         }
       } catch (cause) {
         throw new Error(`Cannot read ${file}: ${cause instanceof Error ? cause.message : cause}. Fix or move it away.`)
@@ -670,6 +673,22 @@ export class Store {
     record.tokenEpoch = (record.tokenEpoch ?? 0) + 1
     this.save()
     return record.tokenEpoch
+  }
+
+  // ---------- hub-wide agent acting switch ----------
+
+  /** True while the admin has paused agent actions hub-wide. */
+  actingPaused(): boolean {
+    return this.state.agentsActingPaused === true
+  }
+
+  /** Pauses or resumes agent actions hub-wide; true when that changed something (saved only then). */
+  setActingPaused(paused: boolean): boolean {
+    if (paused === this.actingPaused()) return false
+    if (paused) this.state.agentsActingPaused = true
+    else delete this.state.agentsActingPaused
+    this.save()
+    return true
   }
 
   // ---------- audit ----------
