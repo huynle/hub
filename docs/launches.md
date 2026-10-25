@@ -236,7 +236,7 @@ workspace, `hub`; it never touches sandboxes outside it.
 How a sandboxed launch runs:
 
 1. **Prepare.** The node clones `remote` on the host (under a workspace root, with its own git credentials), then
-   creates the sandbox `hub-<20 hex of sha256(launchID)>` labelled `hub.launch`, `hub.machine` and `hub.owner`,
+   creates the sandbox `hub-<15 hex of sha256(launchID)>` (OpenShell allows at most 19 characters) labelled `hub.launch`, `hub.machine` and `hub.owner`,
    with the profile's image, policy and providers, waits until it is Ready, uploads a git bundle and clones it inside
    at `/sandbox/work`. No git credentials ever enter the sandbox.
 2. **Start.** The hub mints a launch-bound token (`hlt1…`) that is valid only for this launch, on this machine, while

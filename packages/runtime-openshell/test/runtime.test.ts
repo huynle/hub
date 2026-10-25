@@ -16,12 +16,14 @@ import { base, fake, gitIn, inside, input, rejection, root, setup } from "./runt
 setDefaultTimeout(60_000)
 
 describe("names", () => {
-  test("sandbox names are hub-<20 hex of sha256(launchID)>: deterministic DNS labels", () => {
+  test("sandbox names are hub-<15 hex of sha256(launchID)>: deterministic DNS labels within OpenShell's 19 characters", () => {
     const a = sandboxName("l1")
-    expect(a).toMatch(/^hub-[0-9a-f]{20}$/)
+    expect(a).toMatch(/^hub-[0-9a-f]{15}$/)
+    // OpenShell 0.1.x refuses longer sandbox names (MAX_ROUTABLE_NAME_LEN 19: "name exceeds maximum length").
+    expect(a.length).toBeLessThanOrEqual(19)
     expect(sandboxName("l1")).toBe(a)
     expect(sandboxName("l2")).not.toBe(a)
-    expect(sandboxName("user/launch:with@odd+chars~" + "x".repeat(250))).toMatch(/^hub-[0-9a-f]{20}$/)
+    expect(sandboxName("user/launch:with@odd+chars~" + "x".repeat(250))).toMatch(/^hub-[0-9a-f]{15}$/)
   })
 
   test("launch labels keep a label-safe ID and hash any other", () => {
