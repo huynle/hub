@@ -55,6 +55,18 @@ export interface CleanupResult {
   readonly reason?: string
 }
 
+/** What start did: `started: false` with a reason when the harness had been started already (a repeated start). */
+export interface StartResult extends RunHandle {
+  readonly started: boolean
+  readonly reason?: string
+}
+
+/** What stop did: `stopped: false` with a reason when nothing was running. */
+export interface StopResult {
+  readonly stopped: boolean
+  readonly reason?: string
+}
+
 export type StopMode = "graceful" | "kill"
 
 export interface Runtime {
@@ -62,8 +74,8 @@ export interface Runtime {
   /** What the node's hello reports for this runtime (kind, harnesses, profiles, backends). */
   info(): NodeRuntimeInfo
   prepare(input: PrepareInput, ctx?: RuntimeContext): Promise<Workspace>
-  start?(workspace: Workspace, input: StartInput, ctx?: RuntimeContext): Promise<RunHandle>
-  stop?(handle: RunHandle, mode: StopMode): Promise<void>
+  start?(workspace: Workspace, input: StartInput, ctx?: RuntimeContext): Promise<StartResult>
+  stop?(handle: RunHandle, mode: StopMode): Promise<StopResult>
   collect(handle: RunHandle, ctx?: RuntimeContext): Promise<Artifacts>
   /** Keep, or remove without force: uncommitted or unpushed work, a reused workspace or another launch's keeps it. */
   cleanup(handle: RunHandle, policy: CleanupPolicy, ctx?: RuntimeContext): Promise<CleanupResult>

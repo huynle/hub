@@ -6,18 +6,36 @@
 //          labels hub.launch/hub.machine/hub.owner), waits for Ready, uploads a git bundle of the clone and clones it
 //          inside at /sandbox/work. No git credentials ever enter the sandbox.
 //
+// start    writes the harness's hub config into the sandbox (.hub/config.json: the hub URL as the sandbox reaches it,
+//          the launch-bound token and the launch ID; .hub/node.json: the workspace root; .hub/env.json: extra env),
+//          uploaded as files so the token is never in an argv, then touches .hub/ready, which the image's entry
+//          script waits for before it runs the harness.
+// stop     writes .hub/stop holding the mode (graceful or kill) for the entry script; the sandbox keeps running,
+//          so collect can still read it.
+//
 // Names are deterministic (hub-<20 hex of sha256(launchID)>) and every op checks the sandbox's hub.launch label,
 // so a restarted node finds its own sandboxes again and never touches anyone else's.
 import { createHash } from "node:crypto"
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { launchWorkspaceProblem, type LaunchArtifacts, type NodeRuntimeInfo, type PreparedWorkspace } from "../../protocol/src/index.ts"
-import { RuntimeError, type CleanupResult, type PrepareInput, type Runtime, type RuntimeContext } from "../../runtime-sdk/src/index.ts"
+import { launchWorkspaceProblem, preparedWorkspaceProblem, type LaunchArtifacts, type NodeRuntimeInfo, type PreparedWorkspace } from "../../protocol/src/index.ts"
+import {
+  RuntimeError,
+  type CleanupResult,
+  type PrepareInput,
+  type RunHandle,
+  type Runtime,
+  type RuntimeContext,
+  type StartInput,
+  type StartResult,
+  type StopMode,
+  type StopResult,
+} from "../../runtime-sdk/src/index.ts"
 import { GitError, runGit, type GitOptions } from "../../node/src/git.ts"
 import { HostRuntime, LAUNCH_MARKER, resolveUnderRoots } from "../../node/src/host.ts"
-import { OpenShellError, type ExecResult, type OpenShellClient, type Sandbox } from "./cli.ts"
-import { compilePolicy } from "./policy.ts"
+import { OpenShellError, redact, type ExecResult, type OpenShellClient, type Sandbox } from "./cli.ts"
+import { compilePolicy, sandboxHubEndpoint } from "./policy.ts"
 import { normalizeOpenShellProfiles, profileNames, selectProfile, type OpenShellProfiles } from "./profiles.ts"
 
 /** The sandbox's home: its working directory, where `.hub/` and the workspace live. */
@@ -27,6 +45,16 @@ export const SANDBOX_WORKDIR = "/sandbox/work"
 /** Hub files inside the sandbox, relative to SANDBOX_HOME. */
 export const HUB_DIR = ".hub"
 export const SEED_BUNDLE = `${HUB_DIR}/seed.bundle`
+/** The spoke's config inside: { server, launchToken, launchID, machineName, autoStartLocalHub: false }. */
+export const HUB_CONFIG_FILE = `${HUB_DIR}/config.json`
+/** node.json next to it: { workspaceRoots: [SANDBOX_WORKDIR] }. */
+export const HUB_NODE_FILE = `${HUB_DIR}/node.json`
+/** The start op's extra environment for the harness, as a JSON object. */
+export const HUB_ENV_FILE = `${HUB_DIR}/env.json`
+/** Touched last by start: the entry script runs the harness once it exists. */
+export const READY_FILE = `${HUB_DIR}/ready`
+/** Written by stop with the mode ("graceful" or "kill"). */
+export const STOP_FILE = `${HUB_DIR}/stop`
 /** The image a profile without `image` gets (built by packages/runtime-openshell/image). */
 export const DEFAULT_SANDBOX_IMAGE = "hub-sandbox:latest"
 /** Non-secret environment every sandbox gets: the harness stays offline but for the hub and its providers. */
@@ -195,6 +223,63 @@ export class OpenShellRuntime implements Runtime {
     if (head !== host.head) throw new RuntimeError(`the sandbox clone is at ${head}, not ${host.head}`)
   }
 
+  // ---------- start / stop ----------
+
+  async start(workspace: PreparedWorkspace, input: StartInput, ctx: RuntimeContext = {}): Promise<StartResult> {
+    if (ctx.signal?.aborted) throw new RuntimeError("start cancelled")
+    if (!this.harnesses.includes(input.harness)) throw new RuntimeError(`harness ${input.harness} does not run in this node's sandboxes (they have ${this.harnesses.join(", ")})`)
+    const handle = { launchID: input.launchID, workspace }
+    const name = this.sandboxOf(handle)
+    const sandbox = await this.owned(name, input.launchID, ctx)
+    if (!sandbox) throw new RuntimeError(`sandbox ${name} is gone`)
+    if (sandbox.phase !== "Ready") throw new RuntimeError(`sandbox ${name} is ${sandbox.phase}, not Ready`)
+    if (await this.exists(name, READY_FILE, ctx)) return { ...handle, started: false, reason: "the harness is already started" }
+    const hide = [input.hub.token]
+    const config = { server: sandboxHubEndpoint(input.hub.url).url, launchToken: input.hub.token, launchID: input.launchID, machineName: name, autoStartLocalHub: false }
+    ctx.progress?.("starting the harness")
+    await this.upload(name, { [HUB_CONFIG_FILE]: config, [HUB_NODE_FILE]: { workspaceRoots: [SANDBOX_WORKDIR] }, [HUB_ENV_FILE]: input.env ?? {} }, ctx, hide)
+    await this.mustExec(name, ["touch", READY_FILE], ctx, hide)
+    return { ...handle, started: true }
+  }
+
+  async stop(handle: RunHandle, mode: StopMode = "graceful"): Promise<StopResult> {
+    const name = this.sandboxOf(handle)
+    const sandbox = await this.owned(name, handle.launchID, {})
+    if (!sandbox) return { stopped: false, reason: "the sandbox is gone" }
+    if (sandbox.phase !== "Ready") return { stopped: false, reason: `the sandbox is ${sandbox.phase}` }
+    if (!(await this.exists(name, READY_FILE, {}))) return { stopped: false, reason: "the harness was never started" }
+    await this.upload(name, { [STOP_FILE]: `${mode}\n` }, {})
+    return { stopped: true }
+  }
+
+  /** The handle's sandbox name, after checking the handle (it comes from the hub) names this launch's sandbox. */
+  private sandboxOf(handle: RunHandle): string {
+    const problem = preparedWorkspaceProblem(handle?.workspace)
+    if (problem) throw new RuntimeError(problem)
+    const runtime = handle.workspace.runtime
+    if (runtime?.kind !== this.kind || !runtime.sandbox) throw new RuntimeError("the workspace is not in an openshell sandbox")
+    const name = sandboxName(handle.launchID)
+    if (runtime.sandbox !== name) throw new RuntimeError(`sandbox ${runtime.sandbox} is not this launch's`)
+    return name
+  }
+
+  /** Whether a path (relative to the sandbox home) exists in the sandbox. */
+  private async exists(name: string, rel: string, ctx: RuntimeContext): Promise<boolean> {
+    return (await this.exec(name, ["test", "-e", rel], ctx)).exitCode === 0
+  }
+
+  /** Writes files (path under .hub → JSON value or text) into the sandbox's .hub directory. */
+  private async upload(name: string, files: Readonly<Record<string, unknown>>, ctx: RuntimeContext, hide: readonly string[] = []): Promise<void> {
+    await this.mustExec(name, ["mkdir", "-p", HUB_DIR], ctx, hide)
+    await this.withTemp(async (dir) => {
+      for (const [rel, value] of Object.entries(files)) {
+        const local = path.join(dir, path.posix.basename(rel))
+        writeFileSync(local, typeof value === "string" ? value : JSON.stringify(value, null, 2) + "\n", { mode: 0o600 })
+        await this.call(() => this.client.upload(name, local, `${SANDBOX_HOME}/${HUB_DIR}/`, this.signal(ctx)), hide)
+      }
+    })
+  }
+
   // ---------- collect / cleanup ----------
 
   async collect(): Promise<LaunchArtifacts> {
@@ -211,24 +296,27 @@ export class OpenShellRuntime implements Runtime {
     return ctx.signal ? { signal: ctx.signal } : {}
   }
 
-  /** Runs an OpenShell call; its OpenShellError (already redacted) becomes a RuntimeError. */
-  private async call<T>(fn: () => Promise<T>): Promise<T> {
+  /** Runs an OpenShell call; its OpenShellError (already redacted, and without `hide`) becomes a RuntimeError. */
+  private async call<T>(fn: () => Promise<T>, hide: readonly string[] = []): Promise<T> {
     try {
       return await fn()
     } catch (error) {
-      if (error instanceof OpenShellError) throw new RuntimeError(error.message)
+      if (error instanceof OpenShellError) throw new RuntimeError(redact(error.message, hide))
       throw error
     }
   }
 
   /** A command in the sandbox, in its home directory (no shell: argv as given). */
-  private exec(name: string, command: readonly string[], ctx: RuntimeContext): Promise<ExecResult> {
-    return this.call(() => this.client.exec(name, command, { workdir: SANDBOX_HOME, ...this.signal(ctx) }))
+  private exec(name: string, command: readonly string[], ctx: RuntimeContext, hide: readonly string[] = []): Promise<ExecResult> {
+    return this.call(() => this.client.exec(name, command, { workdir: SANDBOX_HOME, ...this.signal(ctx) }), hide)
   }
 
-  private async mustExec(name: string, command: readonly string[], ctx: RuntimeContext): Promise<ExecResult> {
-    const result = await this.exec(name, command, ctx)
-    if (result.exitCode !== 0) throw new RuntimeError(cut(`in sandbox ${name}: ${command.slice(0, 2).join(" ")} failed (exit ${result.exitCode}): ${result.stderr.trim() || "no error output"}`))
+  private async mustExec(name: string, command: readonly string[], ctx: RuntimeContext, hide: readonly string[] = []): Promise<ExecResult> {
+    const result = await this.exec(name, command, ctx, hide)
+    if (result.exitCode !== 0) {
+      const why = redact(result.stderr.trim(), hide) || "no error output"
+      throw new RuntimeError(cut(`in sandbox ${name}: ${command.slice(0, 2).join(" ")} failed (exit ${result.exitCode}): ${why}`))
+    }
     return result
   }
 

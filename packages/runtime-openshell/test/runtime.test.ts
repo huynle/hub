@@ -1,104 +1,19 @@
 // The openshell runtime (design §6.4) against the fake openshell CLI (test/fake-openshell.ts) and real temporary git
-// repositories: the node clones on the host under its roots, creates a sandbox (policy, providers, labels), waits
-// for Ready, uploads a seed bundle and clones it inside; start hands the harness its hub config; collect brings a
-// bundle back and fast-forwards the host clone; cleanup deletes (or only stops) the sandbox and removes the host
-// clone per policy. No real sandboxes: `sandbox exec` runs locally in the fake's directory for the sandbox.
-import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test"
-import { execFileSync } from "node:child_process"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
+// repositories: prepare clones on the host under the node's roots, creates a sandbox (policy, providers, labels),
+// waits for Ready, uploads a seed bundle and clones it inside. No real sandboxes: `sandbox exec` runs locally in the
+// fake's directory for the sandbox.
+import { describe, expect, setDefaultTimeout, test } from "bun:test"
+import { existsSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import type { PreparedWorkspace } from "../../protocol/src/index.ts"
-import { RuntimeError, type PrepareInput } from "../../runtime-sdk/src/index.ts"
+import { RuntimeError } from "../../runtime-sdk/src/index.ts"
 import { OpenShellCli } from "../src/cli.ts"
 import { normalizeOpenShellProfiles, ProfileError } from "../src/profiles.ts"
-import { launchLabel, OpenShellRuntime, SANDBOX_WORKDIR, sandboxName, type OpenShellRuntimeOptions } from "../src/runtime.ts"
-import { createFakeOpenShell, type FakeOpenShell, type FakeOpenShellOptions } from "./fake-openshell.ts"
+import { launchLabel, SANDBOX_WORKDIR, sandboxName } from "../src/runtime.ts"
+import { base, fake, gitIn, inside, input, rejection, root, setup } from "./runtime-helpers.ts"
 
 // Every fake call starts a process: a whole launch takes a few seconds.
 setDefaultTimeout(60_000)
-
-const base = { PATH: process.env.PATH ?? "", HOME: tmpdir(), GIT_CONFIG_NOSYSTEM: "1" }
-const ident = { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" }
-
-/** Git in a temporary directory only (never in this checkout). */
-function gitIn(cwd: string, ...args: string[]): string {
-  if (!cwd || (!cwd.startsWith(realpathSync(tmpdir())) && !cwd.startsWith(tmpdir()))) throw new Error(`gitIn: refusing to run git outside the temporary directory (cwd ${cwd})`)
-  return execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd, env: base, encoding: "utf8" }).trim()
-}
-
-function commit(dir: string, file: string, text: string): string {
-  writeFileSync(path.join(dir, file), text)
-  gitIn(dir, "add", file)
-  gitIn(dir, "commit", "-q", "-m", `edit ${file}`)
-  return gitIn(dir, "rev-parse", "HEAD")
-}
-
-let root: string
-let remotes: string
-let fake: FakeOpenShell
-const fakes: FakeOpenShell[] = []
-
-beforeEach(() => {
-  root = mkdtempSync(path.join(tmpdir(), "hub-os-root-"))
-  remotes = mkdtempSync(path.join(tmpdir(), "hub-os-remotes-"))
-  const origin = path.join(remotes, "proj")
-  mkdirSync(origin)
-  gitIn(origin, "init", "-q", "-b", "main")
-  commit(origin, "a.txt", "a\n")
-})
-
-afterEach(() => {
-  for (const f of fakes.splice(0)) f.cleanup()
-})
-
-/** A runtime over a new fake (or, with `keep`, the current one: a restarted node against the same gateway). */
-function setup(fakeOptions: FakeOpenShellOptions = {}, options: Partial<OpenShellRuntimeOptions> = {}, keep = false) {
-  if (!keep) {
-    fake = createFakeOpenShell(fakeOptions)
-    fakes.push(fake)
-  }
-  const client = new OpenShellCli({ binary: fake.binary, env: { ...base, ...ident } })
-  // The file transport stands in for https: https://example.invalid/<name> is rewritten to a local repository.
-  const env = {
-    ...ident,
-    GIT_ALLOW_PROTOCOL: "https:ssh:file",
-    GIT_CONFIG_COUNT: "1",
-    GIT_CONFIG_KEY_0: `url.file://${remotes}/.insteadOf`,
-    GIT_CONFIG_VALUE_0: "https://example.invalid/",
-  }
-  const rt = new OpenShellRuntime({
-    client,
-    roots: [root],
-    hubURL: "http://127.0.0.1:4096",
-    machineID: "m1",
-    owner: "u1",
-    git: { baseEnv: base, env },
-    pollMs: 1,
-    ...options,
-  })
-  return rt
-}
-
-const input = (over: Partial<PrepareInput> = {}, ws: Partial<PrepareInput["workspace"]> = {}): PrepareInput => ({
-  launchID: "l1",
-  harness: "opencode",
-  runtime: { kind: "openshell" },
-  workspace: { repo: path.join(root, "proj"), mode: "clone", remote: "https://example.invalid/proj", branch: "feat", ...ws },
-  ...over,
-})
-
-async function rejection(promise: Promise<unknown>): Promise<Error> {
-  try {
-    await promise
-  } catch (error) {
-    return error as Error
-  }
-  throw new Error("expected a rejection")
-}
-
-/** The sandbox's /sandbox/work directory in the fake. */
-const inside = (launchID = "l1") => path.join(fake.sandboxRoot(sandboxName(launchID)), "sandbox", "work")
 
 describe("names", () => {
   test("sandbox names are hub-<20 hex of sha256(launchID)>: deterministic DNS labels", () => {
