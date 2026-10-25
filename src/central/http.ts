@@ -366,7 +366,7 @@ export function startCentral(options: CentralOptions): Central {
 
   auth = new Auth({ store, publicURL, now, mode: config.auth.mode, kv: backends.kv, counters: backends.counters })
   // options.fetch is for speech providers only; sign-in always talks to the real issuer.
-  const oidc = config.auth.mode === "oidc" ? new OidcClient({ config: config.auth, publicURL, now }) : undefined
+  const oidc = config.auth.mode === "oidc" ? new OidcClient({ config: config.auth, publicURL, now, kv: backends.kv, counters: backends.counters }) : undefined
   /** Speech settings scope of a user: "local" (pairing mode) uses the server default directly. */
   const speechScope = (userID: string) => (userID === LOCAL_USER ? undefined : userID)
   const speechFor = (userID: string): Speech => options.speech ?? speechSettings.forUser(speechScope(userID))

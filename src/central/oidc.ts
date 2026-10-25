@@ -1,8 +1,12 @@
 // OpenID Connect sign-in (authorization code flow with PKCE S256, state and nonce) for multi-user hubs.
 // The ID token comes straight from the token endpoint over TLS (confidential client, client_secret_post),
-// so its signature is not checked (OIDC Core 3.1.3.7, item 6); its claims are. Pending sign-ins live in
-// memory only (a restart invalidates them) and are single use.
+// so its signature is not checked (OIDC Core 3.1.3.7, item 6); its claims are. Pending sign-ins live in the Kv
+// backend (process memory by default, so a restart invalidates them; Valkey in a cluster, so the callback may land
+// on any pod) and are single use (GETDEL).
 import { createHash, randomBytes } from "node:crypto"
+import { MemoryCounters } from "./backend/memory-counters"
+import { MemoryKv } from "./backend/memory-kv"
+import type { Counters, Kv } from "./backend/types"
 import type { OidcConfig } from "./config"
 
 export const OIDC_COOKIE = "voice_oidc"
@@ -11,8 +15,10 @@ export const OIDC_PENDING_TTL_MS = 10 * 60_000
 export const DISCOVERY_CACHE_MS = 60 * 60_000
 /** Clock skew tolerated on `exp`. */
 const SKEW_SECONDS = 60
-/** Most pending sign-ins kept (the oldest are dropped): /auth/login is public. */
-const MAX_PENDING = 1000
+/** Most sign-ins started per pending lifetime (every pod together); /auth/login is public. */
+const MAX_PENDING = 10_000
+const PENDING_KEY = (state: string) => `oidc:pending:${state}`
+const STARTED_KEY = "oidc:started"
 const FETCH_TIMEOUT_MS = 10_000
 const MAX_NEXT_CHARS = 1024
 
@@ -56,6 +62,10 @@ export interface OidcClientOptions {
   readonly publicURL: string
   readonly fetch?: typeof globalThis.fetch
   readonly now?: () => number
+  /** Pending sign-ins (default: in this process, on `now`). */
+  readonly kv?: Kv
+  /** The cap on sign-ins started (default: in this process, on `now`). */
+  readonly counters?: Counters
 }
 
 const random = () => randomBytes(32).toString("base64url")
@@ -129,7 +139,8 @@ export class OidcClient {
   private readonly config: OidcConfig
   private readonly fetch: typeof globalThis.fetch
   private readonly now: () => number
-  private readonly pending = new Map<string, Pending>()
+  private readonly kv: Kv
+  private readonly counters: Counters
   private discovery?: { at: number; doc: Discovery }
   readonly redirectURI: string
 
@@ -137,18 +148,22 @@ export class OidcClient {
     this.config = options.config
     this.fetch = options.fetch ?? globalThis.fetch
     this.now = options.now ?? Date.now
+    this.kv = options.kv ?? new MemoryKv({ now: this.now })
+    this.counters = options.counters ?? new MemoryCounters({ now: this.now })
     this.redirectURI = `${options.publicURL}/auth/callback`
   }
 
   /** Starts a sign-in: the provider URL to redirect to and the state for the voice_oidc cookie. */
   async login(next: string | null): Promise<{ location: string; state: string }> {
     const doc = await this.discover()
-    this.sweep()
+    if ((await this.counters.incr(STARTED_KEY, OIDC_PENDING_TTL_MS)) > MAX_PENDING) {
+      throw new OidcError(429, "Too many sign-ins are in progress. Please try again in a few minutes.", "too many pending sign-ins")
+    }
     const state = random()
     const nonce = random()
     const verifier = random()
-    while (this.pending.size >= MAX_PENDING) this.pending.delete(this.pending.keys().next().value!)
-    this.pending.set(state, { nonce, verifier, next: safeNext(next), expiresAt: this.now() + OIDC_PENDING_TTL_MS })
+    const pending: Pending = { nonce, verifier, next: safeNext(next), expiresAt: this.now() + OIDC_PENDING_TTL_MS }
+    await this.kv.set(PENDING_KEY(state), JSON.stringify(pending), { px: OIDC_PENDING_TTL_MS })
     const url = new URL(doc.authorization_endpoint)
     url.searchParams.set("response_type", "code")
     url.searchParams.set("client_id", this.config.clientId)
@@ -166,13 +181,11 @@ export class OidcClient {
    * pending entry is consumed whatever the outcome once the state matches the cookie.
    */
   async callback(params: URLSearchParams, cookieState: string | undefined): Promise<{ identity: OidcIdentity; next: string }> {
-    this.sweep()
     const state = params.get("state") ?? ""
-    const pending = state && cookieState === state ? this.pending.get(state) : undefined
+    const pending = state && cookieState === state ? await this.consume(state) : undefined
     if (!pending) {
       throw new OidcError(400, "This sign-in has expired or was already used. Please sign in again.", "state invalid")
     }
-    this.pending.delete(state)
     const providerError = params.get("error")
     if (providerError) {
       const description = params.get("error_description")
@@ -270,9 +283,16 @@ export class OidcClient {
     }
   }
 
-  private sweep(): void {
-    const t = this.now()
-    for (const [state, entry] of this.pending) if (entry.expiresAt <= t) this.pending.delete(state)
+  /** Takes a pending sign-in out of the Kv (GETDEL: one callback wins, on any pod); undefined when unknown or expired. */
+  private async consume(state: string): Promise<Pending | undefined> {
+    const raw = await this.kv.getdel(PENDING_KEY(state))
+    if (raw === undefined) return undefined
+    try {
+      const pending = JSON.parse(raw) as Pending
+      return pending.expiresAt > this.now() ? pending : undefined
+    } catch {
+      return undefined
+    }
   }
 }
 
