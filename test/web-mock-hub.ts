@@ -73,6 +73,12 @@
 // Control: POST /mock/agent-entry {…entry fields} records an audit entry (seq, at filled in; default @orchestrator
 // approved per_1 in ses_mock under g_mock) and emits it as SSE {type:"agent", entry}; POST /mock/agent-entries
 // {count} records that many filler entries (paging); GET /mock/log lists `grants` and `agentAudit`.
+// Harness controls (P7-T10): POST /mock/harness {on} lists two non-OpenCode processes on "laptop": a Claude Code service
+// (evidence hooks, announcing only permission + stop) with "Claude refactor" (CC_SESSION: blocked on a permission and a
+// question form), and an aider preset (evidence screen, announcing only turn) with "Aider fixes" (PRESET_SESSION, idle).
+// Their console routes answer like the hub: 409 {code: "unsupported"} for an op their process does not announce (a turn
+// to a running tree needs steer); a preset turn is 202 {mode: "turn"} (never confirmed). POST /mock/unsupported
+// {features} makes those features unsupported for them too (a spoke that reconnected with fewer features).
 // MOCK_WEB_DIST serves another built console instead of web/dist (to measure an older build).
 import { existsSync, readFileSync, statSync } from "node:fs"
 import path from "node:path"
@@ -129,6 +135,8 @@ type Fixture = {
   terminal?: { source: "herdr" | "tui"; workspaceID?: string; workspace?: string; title?: string; status?: string }
   /** Its status tree (root first), when it has subagents. */
   tree?: Status[]
+  /** The non-OpenCode process reporting it (HARNESS_PROCS id; P7-T10). */
+  proc?: string
 }
 const HOME = "/home/user/projects"
 const WORKSPACES: Array<[string, string]> = [
@@ -232,6 +240,37 @@ let fail = { expose: false, create: false, models: false, prefs: false, modelPre
 let serviceConnected = true
 const defaultAutoName = () => ({ mode: "rename" as "rename" | "same" | "pending" | "outdated" | "fail", title: "Named by OpenCode" })
 let autoName = defaultAutoName()
+/** Non-OpenCode processes on "laptop" (P7-T10); POST /mock/harness {on}. */
+let harnessSpokes = false
+let forcedUnsupported = new Set<string>()
+const CC_SESSION = "ses_cc0123456789abcdef0123456789abcdef"
+const PRESET_SESSION = "ses_preset_aider"
+const HARNESS_PROCS = [
+  { id: "proc_cc", kind: "service", directory: "/home/user", pid: 6161, harness: "claude-code", harnessVersion: "2.1.296", evidence: "hooks", features: ["permission", "stop"] },
+  { id: "proc_preset", kind: "standalone", directory: `${HOME}/webshop`, pid: 6262, harness: "aider", harnessVersion: "0.86.1", evidence: "screen", features: ["turn"] },
+]
+const harnessFixtures = (): Fixture[] => [
+  {
+    machine: "mac_1",
+    proc: "proc_cc",
+    id: CC_SESSION,
+    title: "Claude refactor",
+    directory: `${HOME}/opencode-voice`,
+    project: `${HOME}/opencode-voice`,
+    projectName: "opencode-voice",
+    updated: Date.now() - 60_000,
+    exposed: true,
+    state: "blocked",
+    blockers: [{ id: "per_cc", kind: "permission", summary: "shell: npm publish" }, { ...QUESTION_FORM, id: "q_cc" }],
+  },
+  { machine: "mac_1", proc: "proc_preset", id: PRESET_SESSION, title: "Aider fixes", directory: `${HOME}/webshop`, project: `${HOME}/webshop`, projectName: "webshop", updated: Date.now() - 5 * 60_000, exposed: true, state: "idle", blockers: [] },
+]
+/** The console route's feature (the hub's core op or optional feature) for a harness session; undefined: always served. */
+function routeFeature(route: string, id: string): string | undefined {
+  if (route === "turn") return treeState(id) !== "idle" ? "steer" : "turn"
+  return ({ timeline: "timeline", "model-prefs": "modelPrefs", models: "models", summary: "summary", diff: "diff", stop: "stop", permission: "permission", form: "form" } as Record<string, string>)[route]
+}
+
 /** A second online machine ("workstation", mac_5) with its own service and one session; POST /mock/workstation {on}. */
 let workstation = false
 const WORKSTATION_DIR = "/home/user/work/ml-lab"
@@ -495,6 +534,7 @@ const mainMachines = () => [
             ...sessions.filter((s) => s.id === "ses_05").map(catalogSession),
           ],
         },
+        ...(harnessSpokes ? HARNESS_PROCS.map((proc) => ({ ...proc, sessions: sessions.filter((s) => s.proc === proc.id).map(catalogSession) })) : []),
       ],
     },
     { id: "mac_2", name: "desktop", created: Date.now() - 86_400_000, lastSeen: Date.now() - 3 * 3_600_000, online: false, processes: [] },
@@ -1063,6 +1103,12 @@ async function consoleRoute(request: Request, url: URL, user: MockUser): Promise
   const fixture = id === SESSION ? { title: "Mock session", directory: `${HOME}/opencode-voice` } : child ? { title: child.title, directory: `${HOME}/opencode-voice` } : id === BOB_SESSION ? bobSession() : sessions.find((x) => x.id === id) ?? (id === "ses_scratch" ? { title: "Scratch experiment", directory: "/tmp/scratch" } : undefined)
   if (!fixture) return Response.json({ error: "Not found" }, { status: 404 })
   const body = async () => (await request.json().catch(() => ({}))) as Record<string, any>
+  // A non-OpenCode session's spoke serves only what it announced: the hub's 409 code unsupported otherwise.
+  const proc = HARNESS_PROCS.find((x) => x.id === (fixture as Partial<Fixture>).proc)
+  const feature = proc && routeFeature(match[2]!, id)
+  if (proc && feature && (!proc.features.includes(feature) || forcedUnsupported.has(feature))) {
+    return Response.json({ error: `The ${proc.harness} spoke does not support ${feature}`, code: "unsupported" }, { status: 409 })
+  }
   switch (match[2]) {
     case "timeline":
       if (match[5] !== undefined) {
@@ -1145,6 +1191,8 @@ async function consoleRoute(request: Request, url: URL, user: MockUser): Promise
       log[log.length - 1]!.body = { text, ...(images?.length ? { images: images.map((i: any) => ({ mime: i.mime, name: i.name, length: i.data.length })) } : {}) }
       if (text.includes("fail")) return Response.json({ error: "No OpenCode process for this session is connected" }, { status: 409 })
       if (treeState(id) !== "idle") return Response.json({ mode: "steer", inboxID: `inb_${++inbox}` }, { status: 202 })
+      // A preset pastes the prompt into the terminal: the hub accepts it, nothing ever confirms the turn.
+      if (proc) return Response.json({ mode: "turn" }, { status: 202 })
       if (id === SESSION) {
         const turn = mockTurn(text)
         if (!/respond-async/i.test(request.headers.get("prefer") ?? "")) return Response.json(await turn)
@@ -1351,6 +1399,8 @@ const server = Bun.serve({
       pushTests = 0
       pushTestKinds = []
       workstation = false
+      harnessSpokes = false
+      forcedUnsupported = new Set()
       emitCatalog()
       return Response.json({ ok: true })
     }
@@ -1363,6 +1413,18 @@ const server = Bun.serve({
       devices.push(device)
       record(grant.ownerID, "device.pair", device.id, "app link")
       return Response.json({ device, token: "mock-device-token" })
+    }
+    if (p === "/mock/harness" && m === "POST") {
+      harnessSpokes = (await json()).on !== false
+      sessions = sessions.filter((s) => !s.proc)
+      if (harnessSpokes) sessions.push(...harnessFixtures())
+      emitCatalog()
+      return Response.json({ ok: true, sessions: [CC_SESSION, PRESET_SESSION] })
+    }
+    if (p === "/mock/unsupported" && m === "POST") {
+      const features = (await json()).features
+      forcedUnsupported = new Set(Array.isArray(features) ? features.filter((f: unknown): f is string => typeof f === "string") : [])
+      return Response.json({ ok: true })
     }
     if (p === "/mock/workstation" && m === "POST") {
       workstation = (await json()).on !== false
