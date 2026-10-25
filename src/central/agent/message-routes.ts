@@ -25,6 +25,7 @@
 //   user, who owns every party); others get not_found.
 // - Messaging off (UserRecord.agent.messagingPaused): msg, ask, reply and decline answer paused; reading works.
 // - Every stored message is published on the MessageFeed (GET /api/agent/watch 'message' events, waiters).
+import { Feed } from "../cluster/feed"
 import type { Store } from "../store"
 import type { AgentActor } from "./actor"
 import { type AskInput, DECISION_STATES, type DecisionState, type Decisions, type Tier, type Urgency } from "./decisions"
@@ -40,23 +41,13 @@ export const WAIT_MAX_S = 60
 /** How often a waiting request looks at the message besides the feed (expiry, other hub processes). */
 export const WAIT_POLL_MS = 1_000
 
-/** Stored messages of every user, as they are sent (in-process). */
-export class MessageFeed {
-  private readonly listeners = new Set<(userID: string, message: Message) => void>()
+/** Message events' Bus topic (cluster mode). */
+export const MESSAGES_TOPIC = "feed.messages"
 
-  subscribe(listener: (userID: string, message: Message) => void): () => void {
-    this.listeners.add(listener)
-    return () => void this.listeners.delete(listener)
-  }
-
-  publish(userID: string, message: Message): void {
-    for (const listener of [...this.listeners]) {
-      try {
-        listener(userID, message)
-      } catch (cause) {
-        console.error("[hub] message listener failed:", cause)
-      }
-    }
+/** Stored messages of every user, as they are sent (shared with the other pods once attached; see ../cluster/feed). */
+export class MessageFeed extends Feed<Message> {
+  constructor() {
+    super(MESSAGES_TOPIC, (cause) => console.error("[hub] message listener failed:", cause))
   }
 }
 
