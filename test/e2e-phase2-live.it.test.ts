@@ -163,7 +163,8 @@ describe.skipIf(!run)("live: a session messages another through a real hub", () 
       // Session 2's model is handed the envelope (a turn started by the delivery).
       await until(() => model.users.some((u) => u.includes(BODY) && u.includes(messageID)), 90_000)
       const handed = model.users.find((u) => u.includes(BODY) && u.includes(messageID))!
-      expect(handed).toContain(`[hub] msg from ${one}`)
+      // From session one: by its ID, or by the name derived from its title when the stub model titled it first.
+      expect(handed).toMatch(new RegExp(`\\[hub\\] msg from (${one}|@[a-z0-9-]+) \\(it-box\\) to you`))
       expect(handed).toContain(`----- ${messageID} -----`)
       expect(handed).toContain(`↩ hub reply ${messageID}`)
       // The primer came along once (without a turn of its own) and says hub messages are not the user's.
