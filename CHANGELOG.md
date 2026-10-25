@@ -146,6 +146,19 @@ the protocol up:
   when the tool call is aborted, naming the still-open ask. Readable errors when the session has no token yet
   or the hub lacks `messaging` (messaging verbs only). Opt-in check: `HUB_IT_OPENCODE=1 bun test
   test/spoke-hub-tool.it.test.ts`.
+- **Decisions and `@me`**: `@me` addresses the user. `msg @me` is stored in the user's inbox; `ask @me` opens a
+  Decision (`dec_…`: question, `options [{id, label, safe?}]`, `recommendation {option, why?}`, `urgency`,
+  `tier` confirm|tap, `deadline` seconds, `onTimeout`, `about` addresses), answered only by the user on the console:
+  `GET /api/decisions?state=`, `GET /api/decisions/:id`, `POST /api/decisions/:id/answer {option, text?}`
+  (`tap`: the console cookie only). The first answer wins (later: `409 gone`) and goes back to the asker as the
+  user's reply; at the deadline only a `safe` `onTimeout` answers it (`answeredBy: "timeout"`), otherwise it stays
+  open and is pushed once more. Agents read their own with `GET /api/agent/decisions[/:id]`; a Decision's ask
+  cannot be replied to through `/api/agent/reply`. SDK `ask` takes the Decision fields, plus `decisions`,
+  `decision`, `answerDecision`; CLI `hub ask @me --option id=label[:safe] --recommend id --why … --urgency …
+  --deadline 2h --on-timeout id --tier … --about @x` and `hub decisions list [--state S]`.
+- **Push kinds `decision` and `message`** (both on by default, high urgency, sent even while a device shows the
+  session, generic bodies): a Decision opened or escalated; a `msg` to `@me`, an unanswered ask after every
+  re-wake, or a message loop (these two were `question` before).
 
 ### Other changes
 

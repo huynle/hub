@@ -33,8 +33,10 @@ fires at most once per settled run: about 32 times for this session.
 
 | Kind (pref key) | Label in the title | Trigger | Default |
 |---|---|---|---|
-| `question` | Question | `form.created` anywhere in the tree (once per form); also agent messaging: an ask an idle session left unanswered after every re-wake ("Unanswered ask"), or sessions messaging each other past the hop cap ("Message loop") | on |
+| `question` | Question | `form.created` anywhere in the tree (once per form) | on |
 | `permission` | Needs permission | `permission.asked` anywhere in the tree (once per request; Allow/Reject from the notification) | on |
+| `decision` | Decision | a session or app asked you (`hub ask @me`): a Decision opened, or passed its deadline without a safe `onTimeout` (once more); body generic ("A decision waits for you. Tap to answer."), opens the session it is about | on |
+| `message` | Message | agent messaging needs you: a `msg` to `@me`, an ask an idle session left unanswered after every re-wake, or sessions messaging each other past the hop cap; body generic ("Tap to see it.") | on |
 | `done` | All done | the root's last turn succeeded and the whole tree stayed settled for 15 s (see below); once per run | on |
 | `failed` | Failed | `session.execution.failed` of the root; body: the error message | on |
 | `turn` | Turn finished | every `session.execution.succeeded` of the root (0.7's "finished"), except turns the hub runs for the page | off |
@@ -60,18 +62,20 @@ Titles read "*session* · *label*" (e.g. "KVM Rewrite · All done", "KVM Rewrite
 replaces the older one. Progress kinds (`turn`, `retry`, `subagentDone`, `jobDone`, `longTool`, `activity`) replace
 quietly; the others alert again.
 
-Delivery: `question`, `permission`, `failed` are high urgency with a one-hour TTL; `done`, `stopped`,
+Delivery: `question`, `permission`, `failed`, `decision`, `message` are high urgency with a one-hour TTL; `done`, `stopped`,
 `subagentFailed`, `jobFailed` normal urgency, one hour; the progress kinds normal urgency, 5 minutes; `say` and
 `handoff` high urgency, 5 minutes. At most one notification per session and kind every 30 s (`say`: 10 s);
 subagent, script and long-tool notifications count per subagent / job / tool call.
 
-Nothing but questions, permissions, hand-offs and spoken replies is sent while a device shows the session's
-tree (presence, 45 s), and a subagent finishing never counts as the root finishing.
+Nothing but questions, permissions, hand-offs, spoken replies, decisions and messages is sent while a device shows
+the session's tree (presence, 45 s), and a subagent finishing never counts as the root finishing. Decisions and
+messages are sent to the user's devices directly (titled by the session, or "Hub" without one), never with the
+agent-written text.
 
 ### Migration
 
 Stored prefs are rewritten on start: 0.7's `finished` becomes `done` (all done, not every turn); `failed`,
-`activity` and the rest are kept; the new kinds start off. 0.5.0's `blocked` still becomes `question` +
+`activity` and the rest are kept; the new kinds start off (except `decision` and `message`, on by default). 0.5.0's `blocked` still becomes `question` +
 `permission`. The API keeps accepting `finished` (→ `done`) and `blocked` from older clients.
 
 ## Inventory: OpenCode events and hub sources
