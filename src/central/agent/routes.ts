@@ -54,6 +54,8 @@ export interface AgentDeps {
   readonly spokes?: SpokeRequester
   /** Agent messages (P2-T5): the message routes are added when given with the directory. */
   readonly delivery?: Delivery
+  /** Stored messages as they are sent (the hub also streams them to the console); a new feed when absent. */
+  readonly feed?: MessageFeed
   /** Heartbeat of GET /api/agent/watch. */
   readonly heartbeatMs?: number
   readonly now?: () => number
@@ -76,7 +78,7 @@ const userView = (user: UserRecord) => ({
 
 /** The built-in /api/agent routes. */
 export function agentRoutes(deps: AgentDeps): AgentRoute[] {
-  const feed = new MessageFeed()
+  const feed = deps.feed ?? new MessageFeed()
   return [
     ...(deps.directory ? directoryRoutes(deps.directory) : []),
     ...(deps.directory && deps.delivery ? messageRoutes({ delivery: deps.delivery, directory: deps.directory, store: deps.store, feed }) : []),

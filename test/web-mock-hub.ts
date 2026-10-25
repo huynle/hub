@@ -39,6 +39,7 @@
 // Console (0.5): every session is inspectable and controllable with Voice off (only conversation and utterance
 // answer 403 not_exposed); GET …/timeline (+ parts), …/model-prefs (GET/PUT), …/models, …/summary, …/diff?file=,
 // GET …/timeline/messages/:message/files/:index (a 1×1 PNG; ses_mock's first user message lists one image),
+// GET …/messages (hub messages: ses_mock sent an ask to @@reviewer; its history has a primer and a message from @web-work),
 // POST …/read (GET /api/reads), …/stop, …/permission, …/form {formID, answer|cancel} (409 gone when not pending); POST …/turn {text, images?} (up to 4 PNG/JPEG/WebP/GIF images;
 // text may be empty with images; the log keeps each image's mime, name and base64 length) answers 202 {mode:"steer"} while the tree runs,
 // else runs the turn (ses_mock: working → streamed reply → idle; text containing "fail" → 409). With
@@ -772,8 +773,40 @@ function timelineOf(id: string, title: string) {
     ...(title === "Benchmark harness" ? [{ key: `${m(2)}:5`, messageID: m(2), partID: "5", sessionID: id, kind: "assistant", text: RICH_MARKDOWN, at: t0 + 30_500 }] : []),
     // Claude-style reasoning: only an encrypted signature is stored, no readable text.
     { key: `${m(3)}:0`, messageID: m(3), partID: "0", sessionID: id, kind: "reasoning", text: "", state: "done", at: t0 + 31_000, completed: t0 + 33_000 },
+    ...(id === SESSION ? hubMessageRows(id, t0) : []),
   ]
 }
+
+/**
+ * ses_mock's hub messages: the identity primer and a message from @web-work in its history (the spoke's rows of
+ * the synthetic messages), and one it sent to @@reviewer (GET …/messages, the hub's store).
+ */
+function hubMessageRows(id: string, t0: number) {
+  const synthetic = (n: number, messageID: string, text: string, kind: string, from: string, to: string) => ({
+    id: `msg_${id}_hub${n}`,
+    type: "synthetic",
+    time: { created: t0 + 31_100 + n * 100 },
+    metadata: { source: "hub", messageID, kind, from, to },
+    text,
+  })
+  return timelineItems(id, [
+    synthetic(1, "hm_primer", "[hub] You are @mock. Message others with `hub msg @name`; see `hub who`.", "primer", "hub", "@mock"),
+    synthetic(2, "hm_in1", "[hub] msg from @web-work to you · 10-24 12:00Z · hm_in1\n----- hm_in1 -----\nThe API types changed; please rebase.\n----- hm_in1 -----\n↩ hub reply hm_in1 \"…\"", "msg", "@web-work", "@mock"),
+  ]) as unknown as Array<Record<string, unknown>>
+}
+const sentMessages = () => [
+  {
+    id: "hm_out1",
+    kind: "ask",
+    from: { kind: "session", sessionID: SESSION, name: "mock" },
+    to: "@@reviewer",
+    recipient: { kind: "session", sessionID: "ses_rev", name: "rev" },
+    text: "Can you review the picker fix?",
+    state: "open",
+    at: Date.now() - 20 * 60_000 + 31_500,
+    hop: 0,
+  },
+]
 
 /** The long history of ses_big (POST /mock/big). */
 const BIG = "ses_big"
@@ -916,7 +949,7 @@ async function consoleRoute(request: Request, url: URL, user: MockUser): Promise
   const p = url.pathname
   const m = request.method
   if (p === "/api/reads" && m === "GET") return Response.json({ reads: reads[user.id] ?? {} })
-  const match = /^\/api\/sessions\/([^/]+)\/(timeline|model-prefs|models|summary|diff|read|stop|turn|permission|form)(?:\/messages\/([^/]+)\/(?:parts\/([^/]+)|files\/(\d+)))?$/.exec(p)
+  const match = /^\/api\/sessions\/([^/]+)\/(timeline|messages|model-prefs|models|summary|diff|read|stop|turn|permission|form)(?:\/messages\/([^/]+)\/(?:parts\/([^/]+)|files\/(\d+)))?$/.exec(p)
   if (!match) return undefined
   const id = decodeURIComponent(match[1]!)
   const child = status.find((x) => x.id === id && x.parentID)
@@ -933,6 +966,8 @@ async function consoleRoute(request: Request, url: URL, user: MockUser): Promise
       if (id === BIG) return timelinePage(big.rows, url, { delayMs: big.delayMs, fail: big.failOlder })
       if (id === ORDER) return timelinePage(orderRows(), url)
       return timelinePage(timelineOf(id, fixture.title), url)
+    case "messages":
+      return Response.json({ messages: id === SESSION ? sentMessages() : [] })
     case "model-prefs":
       if (m === "PUT") {
         const change = await body()
