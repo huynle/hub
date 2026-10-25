@@ -5,6 +5,11 @@
 //   POST   /api/agent/grants       create (201)          GET /api/agent/grants      list, newest first
 //   GET    /api/agent/grants/:id   one grant             PUT /api/agent/grants/:id  replace (holder fixed)
 //   DELETE /api/agent/grants/:id   revoke (gone when already ended)
+//
+// Agents only request one (grant-requests.ts): POST /api/agent/grants/requests {grant, why} from a session (any of
+// its tokens) or an app token with messages:send → 201 {message, decision} (a tap Decision for the user); the user
+// gets invalid (create it directly).
+import type { GrantRequests } from "./grant-requests"
 import { type Grant, type Grants, grantState } from "./grants"
 import type { AgentRoute } from "./routes"
 
@@ -18,9 +23,19 @@ export function grantView(grant: Grant, at: number) {
   return { ...rest, state: grantState(grant, at) }
 }
 
-export function grantRoutes(grants: Grants, now: () => number = Date.now): AgentRoute[] {
+export function grantRoutes(grants: Grants, now: () => number = Date.now, requests?: GrantRequests): AgentRoute[] {
   const one = (grant: Grant, status = 200) => Response.json({ grant: grantView(grant, now()) }, { status, headers: NO_STORE })
   return [
+    ...(requests
+      ? [
+          {
+            method: "POST",
+            path: `${PREFIX}/requests`,
+            allow: { session: true, scope: "messages:send" },
+            handle: async ({ request, actor, user }) => Response.json(await requests.request(user.id, actor, await request.json()), { status: 201, headers: NO_STORE }),
+          } satisfies AgentRoute,
+        ]
+      : []),
     {
       method: "POST",
       path: PREFIX,

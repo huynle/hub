@@ -16,13 +16,14 @@ import { authPage, cookieValue, deviceName, OIDC_COOKIE, OidcClient, OidcError }
 import { isNotificationKind, Push, type PushSender } from "./push"
 import { pushEndpointProblem, resolveHost as systemResolveHost, type ResolveHost } from "./push-target"
 import { fileBackends, type Backends } from "./backend"
-import { createResolver, type BearerVerifier, type CredentialMode } from "./agent/actor"
+import { createResolver, type AgentActor, type BearerVerifier, type CredentialMode } from "./agent/actor"
 import { ActingSwitch } from "./agent/acting-switch"
 import { AgentAudit } from "./agent/audit"
 import { Grants } from "./agent/grants"
 import { Decisions, type Decision } from "./agent/decisions"
 import type { Escalate } from "./agent/acting"
 import { Escalations } from "./agent/escalation"
+import { GrantRequests } from "./agent/grant-requests"
 import { partyFromActor } from "./agent/envelope"
 import { Delivery } from "./agent/delivery"
 import { AgentError } from "./agent/errors"
@@ -541,8 +542,9 @@ export function startCentral(options: CentralOptions): Central {
     notify: (userID, decision, reason) => pushUser("decision", userID, decision.sessionID ?? "", `${decision.id}:${reason}`, decision.id),
     // The console's live Decision cards: opened, answered (here, by timeout), escalated, expired.
     changed: (userID, decision) => broadcast({ type: "decision", decision }, { tenant: userID }),
-    // Escalations' Decisions reply to the permission as the user (escalations is set up below).
-    act: (...args): Promise<"done" | "gone"> => escalations.act(...args),
+    // Escalations' Decisions reply to the permission as the user; grant requests' create the grant as the user
+    // (both are set up below).
+    act: (userID, decision, choice, by) => (decision.action?.kind === "grant" ? grantRequests.act(userID, decision, choice, by) : escalations.act(userID, decision, choice, by)),
   })
   decisions.start()
   /** The user prompted the session: its message hop chain starts over (never fails the prompt). */
@@ -563,6 +565,16 @@ export function startCentral(options: CentralOptions): Central {
   const audit = new AgentAudit({ state: backends.state, now, admin: store, recorded: (userID, entry) => broadcast({ type: "agent", entry }, { tenant: userID }) })
   const grants = new Grants({ state: backends.state, counters: backends.counters, directory, store, admin: store, now })
   const acting = new ActingSwitch({ store, never: config.agentsNever, audit })
+  /** An agent as envelopes name it (a session by its directory name). */
+  const describeActor = (userID: string, actor: AgentActor) => {
+    if (actor.kind !== "session") return partyFromActor(actor)
+    try {
+      const name = directory.resolve(userID, actor.sessionID).sessions[0]?.name
+      return partyFromActor(actor, name ? { name } : {})
+    } catch {
+      return partyFromActor(actor)
+    }
+  }
   // needs_user escalations (P3-T8): one Decision per (holder, request); answered as the user; closed when the
   // request goes elsewhere.
   const escalations: Escalations = new Escalations({
@@ -573,22 +585,26 @@ export function startCentral(options: CentralOptions): Central {
     actions,
     audit,
     now,
-    describe: (userID, actor) => {
-      if (actor.kind !== "session") return partyFromActor(actor)
-      try {
-        const name = directory.resolve(userID, actor.sessionID).sessions[0]?.name
-        return partyFromActor(actor, name ? { name } : {})
-      } catch {
-        return partyFromActor(actor)
-      }
-    },
+    describe: describeActor,
+    published: (userID, message) => feed.publish(userID, message),
+  })
+  // Grant requests (P3-T9): an agent asks; the user's tap creates the grant as the user.
+  const grantRequests: GrantRequests = new GrantRequests({
+    state: backends.state,
+    counters: backends.counters,
+    decisions,
+    grants,
+    directory,
+    audit,
+    now,
+    describe: describeActor,
     published: (userID, message) => feed.publish(userID, message),
   })
   registry.onPermissionClosed((requestID, _sessionID, tenant) => {
     void escalations.closed(tenant, requestID).catch((cause) => console.error(`[hub] escalation close failed: ${(cause as Error).message}`))
   })
   const escalate: Escalate = (escalation) => escalations.escalate(escalation)
-  const agentDeps = { store, sessionTokens, directory, registry, spokes, delivery, decisions, feed, heartbeatMs, now, audit, grants, acting, actions, escalate, maxPromptChars: MAX_PROMPT_CHARS }
+  const agentDeps = { store, sessionTokens, directory, registry, spokes, delivery, decisions, feed, heartbeatMs, now, audit, grants, grantRequests, acting, actions, escalate, maxPromptChars: MAX_PROMPT_CHARS }
   const resolveActor = createResolver({
     cookieName: COOKIE,
     findDevice: (token) => store.findDevice(token),
