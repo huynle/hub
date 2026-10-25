@@ -2,7 +2,7 @@
 // token into an AgentActor. Cookie and device token resolve through the device lookup; session and app
 // tokens through pluggable verifiers (P1-T5, P1-T7).
 import { describe, expect, test } from "bun:test"
-import { agentAllows, createResolver, readCredentials, type BearerVerifier } from "../src/central/agent/actor"
+import { agentAllows, canActAsSession, createResolver, readCredentials, type BearerVerifier } from "../src/central/agent/actor"
 import type { DeviceRecord, UserRecord } from "../src/central/store"
 
 const alice: UserRecord = { id: "usr_alice", email: "alice@example.com", role: "user", created: 1 } as UserRecord
@@ -149,5 +149,29 @@ describe("agentAllows (route classes on /api/agent)", () => {
   test("routes open to any app token (whoami)", () => {
     expect(agentAllows({ app: true }, app)).toBe(true)
     expect(agentAllows({ app: true }, session)).toBe(false)
+  })
+
+  test("act routes admit a session only through its act token: a shell token can never act", () => {
+    const shell = { ...session, via: "shell" } as const
+    const act = { ...session, via: "act" } as const
+    expect(agentAllows({ act: true }, act)).toBe(true)
+    expect(agentAllows({ act: true }, shell)).toBe(false)
+    // A session actor without via (fakes, older code) counts as shell.
+    expect(agentAllows({ act: true }, session)).toBe(false)
+    // act wins over session: true.
+    expect(agentAllows({ act: true, session: true }, shell)).toBe(false)
+    expect(agentAllows({ act: true }, user)).toBe(true)
+    expect(agentAllows({ act: true }, app)).toBe(false)
+    expect(agentAllows({ act: true, scope: "sessions:act" }, { ...app, scopes: ["sessions:act"] })).toBe(true)
+    // An act token still reaches the routes sessions may use.
+    expect(agentAllows({ session: true }, act)).toBe(true)
+  })
+
+  test("canActAsSession: only a session actor via act", () => {
+    expect(canActAsSession({ ...session, via: "act" })).toBe(true)
+    expect(canActAsSession({ ...session, via: "shell" })).toBe(false)
+    expect(canActAsSession(session)).toBe(false)
+    expect(canActAsSession(user)).toBe(false)
+    expect(canActAsSession(app)).toBe(false)
   })
 })
