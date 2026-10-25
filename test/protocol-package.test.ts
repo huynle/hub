@@ -20,8 +20,8 @@ describe("protocol workspace package", () => {
     expect(pkg.exports).toEqual({ ".": "./src/index.ts", "./package.json": "./package.json" })
   })
 
-  test("is a workspace of the hub, next to the SDK, the CLI, the runtime SDK and the node (the shim stays outside)", () => {
-    expect(main.workspaces).toEqual(["packages/protocol", "packages/sdk", "packages/cli", "packages/runtime-sdk", "packages/node"])
+  test("is a workspace of the hub, next to the SDK, the CLI, the runtime SDK, the node and the OpenShell runtime (the shim stays outside)", () => {
+    expect(main.workspaces).toEqual(["packages/protocol", "packages/sdk", "packages/cli", "packages/runtime-sdk", "packages/node", "packages/runtime-openshell"])
   })
 
   test("is shipped in the hub's npm package", () => {
