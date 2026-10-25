@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test"
-import { isPrivateAddress, pushEndpointProblem } from "../src/central/push-target"
+import { afterEach, describe, expect, test } from "bun:test"
+import { isPrivateAddress, publicFetch, PublicURLError, publicURLProblem, pushEndpointProblem } from "../src/central/push-target"
 
 const resolver = (table: Record<string, string[] | Error>) => async (host: string) => {
   const entry = table[host]
@@ -80,5 +80,80 @@ describe("pushEndpointProblem", () => {
     expect(await pushEndpointProblem("https://inside.example.com/x", publicDNS)).toMatch(/private|local/i)
     expect(await pushEndpointProblem("https://nxdomain.example.com/x", publicDNS)).toMatch(/resolve/i)
     expect(await pushEndpointProblem("https://empty.example.com/x", resolver({ "empty.example.com": [] }))).toMatch(/resolve/i)
+  })
+})
+
+describe("publicURLProblem (generic, P4-T10)", () => {
+  const publicDNS = resolver({ "hooks.example.com": ["93.184.215.14"], "inside.example.com": ["10.0.0.5"] })
+
+  test("labels its problems; push wording is unchanged", async () => {
+    expect(await publicURLProblem("http://hooks.example.com/x", { resolve: publicDNS, label: "Webhook URL" })).toBe("Webhook URL must be https")
+    expect(await publicURLProblem("nope", { resolve: publicDNS, label: "Webhook URL" })).toBe("Webhook URL is not a URL")
+    expect(await pushEndpointProblem("http://fcm.googleapis.com/x", publicDNS)).toBe("Push endpoint must be https")
+    expect(await publicURLProblem("https://hooks.example.com/x", { resolve: publicDNS })).toBeUndefined()
+    expect(await publicURLProblem("https://inside.example.com/x", { resolve: publicDNS })).toMatch(/private or local/)
+  })
+
+  test("allowPrivate admits http, loopback, private and local names without a lookup; never other schemes or credentials", async () => {
+    const lookups: string[] = []
+    const spy = async (host: string) => (lookups.push(host), ["10.0.0.5"])
+    for (const url of ["http://127.0.0.1:8080/hook", "https://10.0.0.1/x", "http://printer.local/x", "http://intranet/x", "https://inside.example.com/x"]) {
+      expect({ url, problem: await publicURLProblem(url, { resolve: spy, allowPrivate: true }) }).toEqual({ url, problem: undefined })
+    }
+    expect(lookups).toEqual([])
+    expect(await publicURLProblem("ftp://127.0.0.1/x", { resolve: spy, allowPrivate: true })).toMatch(/http/)
+    expect(await publicURLProblem("http://u:p@127.0.0.1/x", { resolve: spy, allowPrivate: true })).toMatch(/credentials/)
+  })
+})
+
+describe("publicFetch (send-time SSRF checks, P4-T10)", () => {
+  let server: ReturnType<typeof Bun.serve> | undefined
+  afterEach(() => void server?.stop(true))
+  const serve = (handler: (request: Request) => Response | Promise<Response>) => {
+    server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: handler })
+    return `http://127.0.0.1:${server.port}`
+  }
+  const local = { resolve: resolver({}), allowPrivate: true, timeoutMs: 2000, maxBytes: 1024 }
+
+  test("posts and returns the status and the body", async () => {
+    const seen: string[] = []
+    const base = serve(async (request) => (seen.push(`${request.method} ${new URL(request.url).pathname} ${await request.text()}`), new Response("ok", { status: 202 })))
+    expect(await publicFetch(`${base}/hook`, { method: "POST", body: "hi" }, local)).toEqual({ status: 202, body: "ok", truncated: false })
+    expect(seen).toEqual(["POST /hook hi"])
+  })
+
+  test("never follows a redirect", async () => {
+    let followed = false
+    const base = serve((request) => (new URL(request.url).pathname === "/elsewhere" ? ((followed = true), new Response("x")) : Response.redirect("/elsewhere", 302)))
+    const result = await publicFetch(`${base}/hook`, { method: "POST", body: "" }, local)
+    expect(result.status).toBe(302)
+    expect(followed).toBe(false)
+  })
+
+  test("caps the response body it reads", async () => {
+    const base = serve(() => new Response("x".repeat(100_000)))
+    const result = await publicFetch(`${base}/`, { method: "POST", body: "" }, { ...local, maxBytes: 10 })
+    expect(result).toEqual({ status: 200, body: "x".repeat(10), truncated: true })
+  })
+
+  test("times out a slow receiver", async () => {
+    const base = serve(async () => (await Bun.sleep(1000), new Response("late")))
+    await expect(publicFetch(`${base}/`, { method: "POST", body: "" }, { ...local, timeoutMs: 50 })).rejects.toThrow(/timed out/i)
+  })
+
+  test("re-resolves the host on every send and refuses before connecting", async () => {
+    const table: Record<string, string[]> = { "hooks.example.com": ["93.184.215.14"] }
+    let lookups = 0
+    const resolve = async (host: string) => (lookups++, table[host] ?? [])
+    const calls: string[] = []
+    const fakeFetch = (async (url: string) => (calls.push(String(url)), new Response("ok"))) as unknown as typeof fetch
+    const options = { resolve, timeoutMs: 1000, maxBytes: 1024, fetch: fakeFetch, label: "Webhook URL" }
+    expect((await publicFetch("https://hooks.example.com/x", { method: "POST", body: "" }, options)).status).toBe(200)
+    table["hooks.example.com"] = ["127.0.0.1"] // DNS rebinding after registration
+    const blocked = publicFetch("https://hooks.example.com/x", { method: "POST", body: "" }, options)
+    await expect(blocked).rejects.toBeInstanceOf(PublicURLError)
+    await expect(blocked).rejects.toThrow(/Webhook URL resolves to a private or local address/)
+    expect(lookups).toBe(2)
+    expect(calls).toEqual(["https://hooks.example.com/x"])
   })
 })
