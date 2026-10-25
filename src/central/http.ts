@@ -7,7 +7,7 @@ import { diskAssets, type WebAssets } from "./assets"
 import path from "node:path"
 import { promisify } from "node:util"
 import { brotliCompress, constants as zlib, gzip } from "node:zlib"
-import { formAnswerProblem, PROMPT_IMAGE_MIMES, promptImagesProblem, type AvailableModel, type EnrollStart, type FormAnswer, type ModelSelection, type PermissionDecision, type PromptImage, type TurnResult } from "../protocol"
+import { formAnswerProblem, PROMPT_IMAGE_MIMES, promptImagesProblem, type AvailableModel, type EnrollStart, type FormAnswer, type ModelSelection, type PermissionDecision, type PromptImage } from "../protocol"
 import { isLoopbackAddress, isLoopbackHost, isLoopbackURL, loopbackOrigins } from "../loopback"
 import { speakable } from "../speakable"
 import { Auth, RateLimitError, ValidationError } from "./auth"
@@ -28,6 +28,7 @@ import { SessionTokenPush } from "./session-token-push"
 import { TokenKeys } from "./token-keys"
 import { EventLog } from "./events-log"
 import { BusyError, Registry } from "./registry"
+import { createActions } from "./actions"
 import { audioFormat, SpeechError } from "./speech/provider"
 import { SpeechService } from "./speech/service"
 import { RequestTimeoutError, RequestTooLargeError, SpokeError, SpokeHub, type Notifier, type SpokeSocketData } from "./spoke-ws"
@@ -542,6 +543,8 @@ export function startCentral(options: CentralOptions): Central {
   }
   registry.onSessions((connID) => void delivery.onSessions(connID).catch((cause) => console.error(`[hub] message flush failed: ${(cause as Error).message}`)))
   registry.onHumanTurn((sessionID) => void humanTurn(sessionID))
+  /** Permission, form, prompt and stop execution, shared by the console routes and the agent act verbs. */
+  const actions = createActions({ registry, spokes, humanTurn })
   delivery.start()
 
   // One credential resolver for every /api request: device cookie, device token, session and app tokens.
@@ -840,9 +843,9 @@ export function startCentral(options: CentralOptions): Central {
       },
     ),
     route("POST", "/api/sessions/:session/stop", "session", async ({ params }) => {
-      const result = await spokes.request(ownerOf(params.session!), { op: "stop", sessionID: params.session! })
-      registry.cancelTurns(params.session!)
-      return Response.json(result, { headers: NO_STORE })
+      const stopped = await actions.stop(params.session!)
+      if (stopped.outcome === "offline") throw new HttpError(409, NO_OWNER)
+      return Response.json(stopped.result, { headers: NO_STORE })
     }),
     route("POST", "/api/sessions/:session/rename", "session", ({ request, params }) => rename(request, params.session!)),
     route("POST", "/api/sessions/:session/conversation", "session", ({ request, params }) => conversation(request, params.session!), true),
@@ -1120,31 +1123,12 @@ export function startCentral(options: CentralOptions): Central {
       : undefined
     if (!text && !images) return error(400, "Empty prompt")
     if (text.length > MAX_PROMPT_CHARS) return error(400, `Prompt longer than ${MAX_PROMPT_CHARS} characters`)
-    const attached = images ? { images } : {}
-    const connID = ownerOf(sessionID)
-    await humanTurn(sessionID)
-    // While anything in the tree runs, typed input redirects the current work instead of queueing.
-    if (registry.running(sessionID)) {
-      const { inboxID } = await spokes.request(connID, { op: "steer", sessionID, text, ...attached })
-      return Response.json({ mode: "steer", inboxID }, { status: 202 })
-    }
-    // A stop or interrupt releases the lock and answers this request at once, even if the spoke never does.
-    let cancel = () => {}
-    const stopped = new Promise<TurnResult>((resolve) => {
-      cancel = () => resolve({ outcome: "interrupted", message: "Stopped", reply: "" })
-    })
-    const release = registry.beginTurn(sessionID, () => cancel())
+    // A turn may run for minutes: this request never times out (a stop or interrupt still answers it at once).
     server.timeout(request, 0)
-    const voiceStyle = registry.exposed(sessionID) === true
-    let result: Promise<TurnResult>
-    try {
-      result = Promise.race([spokes.request(connID, { op: "turn", sessionID, text, voiceStyle, ...attached }), stopped])
-    } catch (cause) {
-      release()
-      throw cause
-    }
-    // The lock is held until the turn ends, whether this request waits for it or not.
-    void result.then(release, release)
+    const started = await actions.prompt({ sessionID, text, ...(images ? { images } : {}), resetHops: true })
+    if (started.outcome === "offline") throw new HttpError(409, NO_OWNER)
+    if (started.mode === "steer") return Response.json({ mode: "steer", inboxID: started.inboxID }, { status: 202 })
+    const result = started.result
     if (!/(^|[\s,])respond-async\b/i.test(request.headers.get("prefer") ?? "")) return Response.json(await result)
     // Asynchronous: answer quick results (and refusals) as usual; a turn still running is accepted (202) and its
     // result goes to the owner's consoles as an SSE `turn` event (the reply itself streams as deltas meanwhile).
@@ -1331,22 +1315,8 @@ export function startCentral(options: CentralOptions): Central {
     const input = await body(request)
     const decision = input.decision as PermissionDecision
     if (typeof input.requestID !== "string" || !DECISIONS.has(decision)) return error(400, "Invalid decision")
-    const targets = registry.permissionTargets(rootID, input.requestID)
-    if (!targets.length) return error(409, PERMISSION_GONE, "gone")
-    // Try every process that saw the request: only the one (and the location) running the session holds it.
-    let failure: unknown
-    for (const target of targets) {
-      try {
-        const result = await spokes.request(target.connID, { op: "permission", sessionID: target.sessionID, requestID: input.requestID, decision })
-        if (!result?.gone) return new Response(null, { status: 204 })
-      } catch (cause) {
-        // Older spokes pass OpenCode's "Permission request not found" through as an error.
-        if (!/not found/i.test(cause instanceof Error ? cause.message : String(cause))) failure ??= cause
-      }
-    }
-    if (failure) throw failure
-    registry.dropPermission(input.requestID)
-    return error(409, PERMISSION_GONE, "gone")
+    const answered = await actions.answerPermission({ rootID, requestID: input.requestID, decision })
+    return answered.outcome === "done" ? new Response(null, { status: 204 }) : error(409, PERMISSION_GONE, "gone")
   }
 
   /** Answers or cancels a pending form (question) in the session's tree, through a process that holds it. */
@@ -1359,23 +1329,10 @@ export function startCentral(options: CentralOptions): Central {
       const problem = formAnswerProblem(input.answer)
       if (problem) return error(400, problem)
     }
-    const targets = registry.formTargets(rootID, input.formID)
-    if (!targets.length) return error(409, PERMISSION_GONE, "gone")
-    let failure: unknown
-    for (const target of targets) {
-      const req = cancel
-        ? { op: "form" as const, sessionID: target.sessionID, formID: input.formID, cancel: true as const }
-        : { op: "form" as const, sessionID: target.sessionID, formID: input.formID, answer: input.answer as FormAnswer }
-      try {
-        const result = await spokes.request(target.connID, req)
-        if (!result?.gone) return new Response(null, { status: 204 })
-      } catch (cause) {
-        failure ??= cause
-      }
-    }
-    if (failure) throw failure
-    registry.dropForm(input.formID)
-    return error(409, PERMISSION_GONE, "gone")
+    const answered = await actions.answerForm(
+      cancel ? { rootID, formID: input.formID, cancel: true } : { rootID, formID: input.formID, answer: input.answer as FormAnswer },
+    )
+    return answered.outcome === "done" ? new Response(null, { status: 204 }) : error(409, PERMISSION_GONE, "gone")
   }
 
   async function transcribe(request: Request, speech: Speech): Promise<Response> {
