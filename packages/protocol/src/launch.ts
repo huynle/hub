@@ -3,6 +3,7 @@
 //
 // Git hardening starts here: refs that `git check-ref-format` would accept and that never read as an option,
 // https/ssh remotes only, absolute normal repo paths. Nodes and the hub still run git with execFile argv and `--`.
+import { isObj, UNSAFE_CHARS } from "./wire.ts"
 
 /** A launch's state; each change carries a reason. */
 export const LAUNCH_STATES = ["queued", "placing", "provisioning", "running", "ended"] as const
@@ -108,9 +109,6 @@ export interface LaunchInfo {
 
 // ---------- checks ----------
 
-const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v)
-/** Control (C0, C1), format (bidi, zero-width, BOM) and line/paragraph separator characters. */
-const UNSAFE_CHARS = /[\p{Cc}\p{Cf}\u2028\u2029]/u
 
 export const PATH_MAX = 4096
 export const REF_MAX = 200

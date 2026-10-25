@@ -8,7 +8,12 @@
 // IMPLIED_OPENCODE_FEATURES. The hub announces its own features in the welcome (HUB_FEATURES), and a spoke
 // sends a newer request only when the hub listed it. Neither side bumps PROTOCOL_VERSION for a new feature.
 
+import { featureList, ID, isByeFrame as isBye, isObj, isResFrame as isRes, isWelcomeFrame, MAX_FRAME, nonEmpty, num, parseFrame as parse, str, token, UNSAFE_CHARS } from "./wire.ts"
+import type { NodeMessage, NodeServerMessage } from "./node.ts"
+
 export * from "./launch.ts"
+export * from "./node.ts"
+export { MAX_FRAME }
 
 export const PROTOCOL_VERSION = 1
 
@@ -318,8 +323,10 @@ export const SPOKE_FEATURES: readonly SpokeFeature[] = KNOWN_SPOKE_FEATURES
 /**
  * Features the hub announces in its welcome. "harness": it reads hello `harness`, `harnessVersion` and `evidence`.
  * "messaging": it routes messages between sessions (it sends deliver to spokes that announce that feature).
+ * "nodes": it accepts a node hello (role "node", see node.ts) and sends node ops; a node backs off from a hub
+ * without it. "launches": it launches sessions (it sends launch creates to spokes that announce "launch").
  */
-export const HUB_FEATURES = ["harness", "messaging"] as const
+export const HUB_FEATURES = ["harness", "messaging", "nodes", "launches"] as const
 export type HubFeature = (typeof HUB_FEATURES)[number]
 
 /** A spoke's harness, version and evidence level; a hello without `harness` is an OpenCode native spoke. */
@@ -666,20 +673,8 @@ export type ServerMessage = Welcome | Req<ServerRequest> | Res | Bye
 
 // ---------- validation ----------
 
-const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v)
-const str = (v: unknown): v is string => typeof v === "string"
-const nonEmpty = (v: unknown): v is string => typeof v === "string" && v.length > 0
-const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v)
-const ID = /^[A-Za-z0-9_.:@/+~-]{1,300}$/
-/** A short lowercase token (harness id, evidence level). */
-const token = (v: unknown, max: number): boolean => typeof v === "string" && v.length <= max && /^[a-z0-9][a-z0-9._-]*$/.test(v)
-/** A feature list: at most 64 names of 1–64 characters. */
-const featureList = (v: unknown): boolean => Array.isArray(v) && v.length <= 64 && v.every((f) => nonEmpty(f) && f.length <= 64)
 const isModelSelection = (v: unknown): v is ModelSelection =>
   isObj(v) && typeof v.providerID === "string" && ID.test(v.providerID) && typeof v.modelID === "string" && ID.test(v.modelID) && (v.variant === undefined || (typeof v.variant === "string" && ID.test(v.variant)))
-
-/** Largest frame (in characters) either side accepts; a larger one is a protocol error. */
-export const MAX_FRAME = 1_000_000
 
 const SESSION_TOKEN_TEXT = new RegExp(`^[\\x21-\\x7e]{1,${SESSION_TOKEN_MAX_CHARS}}$`)
 
@@ -779,9 +774,6 @@ function isHerdrInfo(v: unknown): boolean {
     v.workspaces.every((w) => isObj(w) && nonEmpty(w.id) && str(w.label) && Array.isArray(w.directories) && w.directories.every(str))
   )
 }
-
-/** Control (C0, C1), format (bidi, zero-width, BOM) and line/paragraph separator characters. */
-const UNSAFE_CHARS = /[\p{Cc}\p{Cf}\u2028\u2029]/u
 
 /** A permission reply message: 1–PERMISSION_MESSAGE_MAX characters, newlines and tabs but no other unsafe characters. */
 const permissionMessage = (v: unknown): v is string => nonEmpty(v) && v.length <= PERMISSION_MESSAGE_MAX && !UNSAFE_CHARS.test(v.replace(/[\n\t]/g, ""))
@@ -960,20 +952,6 @@ function isServerRequest(v: unknown): v is ServerRequest {
   }
 }
 
-const isRes = (v: Record<string, unknown>) =>
-  nonEmpty(v.id) && typeof v.ok === "boolean" && (v.error === undefined || str(v.error))
-const isBye = (v: Record<string, unknown>) => str(v.reason)
-
-function parse(raw: string | Buffer): Record<string, unknown> | undefined {
-  const text = typeof raw === "string" ? raw : raw.toString("utf8")
-  if (text.length > MAX_FRAME) return undefined
-  try {
-    const value = JSON.parse(text)
-    return isObj(value) ? value : undefined
-  } catch {
-    return undefined
-  }
-}
 
 /** Parses a frame received by the server. Returns undefined for anything invalid. */
 export function parseSpokeMessage(raw: string | Buffer): SpokeMessage | undefined {
@@ -981,7 +959,9 @@ export function parseSpokeMessage(raw: string | Buffer): SpokeMessage | undefine
   if (!m) return undefined
   switch (m.t) {
     case "hello":
-      return num(m.v) &&
+      // A spoke hello has no role (v1) or role "spoke"; a node hello (role "node") is parsed by parseNodeMessage.
+      return (m.role === undefined || m.role === "spoke") &&
+        num(m.v) &&
         nonEmpty(m.processID) &&
         (m.kind === "service" || m.kind === "standalone") &&
         str(m.directory) &&
@@ -1020,7 +1000,7 @@ export function parseServerMessage(raw: string | Buffer): ServerMessage | undefi
   if (!m) return undefined
   switch (m.t) {
     case "welcome":
-      return num(m.v) && nonEmpty(m.machineID) && str(m.publicURL) && (m.features === undefined || featureList(m.features)) ? (m as unknown as Welcome) : undefined
+      return isWelcomeFrame(m) ? (m as unknown as Welcome) : undefined
     case "req":
       return nonEmpty(m.id) && isServerRequest(m.req) ? (m as unknown as Req<ServerRequest>) : undefined
     case "res":
@@ -1032,7 +1012,7 @@ export function parseServerMessage(raw: string | Buffer): ServerMessage | undefi
   }
 }
 
-export const encode = (message: SpokeMessage | ServerMessage): string => JSON.stringify(message)
+export const encode = (message: SpokeMessage | ServerMessage | NodeMessage | NodeServerMessage): string => JSON.stringify(message)
 
 // ---------- HTTP enrollment (spoke ↔ server, before a machine token exists) ----------
 
