@@ -1,7 +1,8 @@
 // The hub client: bearer requests to the hub's /api/agent with JSON bodies and query strings; failures become
 // HubError (the envelope) or HubTransportError (errors.ts). Typed verbs are added on top of call()/request().
 import { envelopeOf, HubError, HubTransportError } from "./errors.ts"
-import type { AppTokenView, CreatedAppToken, DirectoryEntry, LogRow, Named, RoleClaim, RoleRelease, SessionDetail, SessionView, Status, Whoami } from "./types.ts"
+import { sseEvents } from "./sse.ts"
+import type { AppTokenView, CreatedAppToken, DirectoryEntry, LogRow, Named, RoleClaim, RoleRelease, SessionDetail, SessionView, Status, WatchEvent, Whoami } from "./types.ts"
 
 const AGENT = "/api/agent"
 
@@ -158,6 +159,23 @@ export class HubClient {
   /** Named and role-holding sessions. */
   who(options: CallOptions & { readonly project?: string; readonly role?: string } = {}): Promise<{ sessions: DirectoryEntry[] }> {
     return this.call("GET", `${AGENT}/who`, { query: { project: options.project, role: options.role === undefined ? undefined : bareRole(options.role) }, ...signalOf(options) })
+  }
+
+  /**
+   * GET /api/agent/watch: the events (session.*, blocker.*, …) as they happen, until the hub closes the stream or
+   * `signal` aborts (which ends the iteration quietly). blocked: only blocker events; session: one address.
+   */
+  async *watch(options: CallOptions & { readonly blocked?: boolean; readonly session?: string } = {}): AsyncGenerator<WatchEvent, void, undefined> {
+    const { signal } = options
+    if (signal?.aborted) return
+    let response: Response
+    try {
+      response = await this.request("GET", `${AGENT}/watch`, { query: { blocked: options.blocked ? "1" : undefined, session: options.session }, ...signalOf(options) })
+    } catch (cause) {
+      if (signal?.aborted) return
+      throw cause
+    }
+    yield* sseEvents(response, signal)
   }
 
   // Naming.
