@@ -2,7 +2,7 @@
 // workspace (a worktree or clone `hub node` just prepared) the spoke never reported, but only under a root.
 // node.json is owned by `hub node` (packages/node): {workspaceRoots: string[], labels?, slots?, memoryMB?}. The spoke
 // reads it, read-only and only workspaceRoots, from next to its own config (configPath: ~/.config/hub, or the
-// directory of $HUB_SPOKE_CONFIG).
+// directory of $HUB_SPOKE_CONFIG; a launch-bound spoke: the directory of its launch config).
 import { readFileSync, realpathSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
@@ -13,7 +13,12 @@ export const NODE_CONFIG_FILE = "node.json"
 
 /** node.json next to the spoke config file. */
 export function nodeConfigPath(env: Env = process.env, home: string = homedir()): string {
-  return path.join(path.dirname(configPath(env, home)), NODE_CONFIG_FILE)
+  return nodeConfigPathNextTo(configPath(env, home))
+}
+
+/** node.json in the directory of `configFile` (a launch-bound spoke: next to its launch config). */
+export function nodeConfigPathNextTo(configFile: string): string {
+  return path.join(path.dirname(configFile), NODE_CONFIG_FILE)
 }
 
 /** The absolute workspace roots in a node.json; none when the file is missing or unreadable. */
