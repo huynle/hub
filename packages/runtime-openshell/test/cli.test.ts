@@ -111,6 +111,37 @@ describe("gatewayInfo", () => {
   })
 })
 
+describe("workspaces and providers (read-only listings for `hub node openshell check`)", () => {
+  test("workspaces: the names from `workspace list -o json`, every page", async () => {
+    const { fake } = setup()
+    fake.update((s) => (s.workspaces = ["default", "hub", "lab"]))
+    const small = new OpenShellCli({ binary: fake.binary, env: { PATH: process.env.PATH ?? "" }, pageSize: 2 })
+    expect(await small.workspaces()).toEqual(["default", "hub", "lab"])
+    const lists = fake.calls().filter((c) => c.command === "workspace list")
+    expect(lists).toHaveLength(2)
+    expect(lists[0]!.argv.slice(4)).toEqual(["workspace", "list", "--page-size", "2", "-o", "json"])
+    expect(lists[1]!.argv).toContain("--page-token")
+  })
+
+  test("providers: the names from `provider list -o json` in the hub workspace", async () => {
+    const { fake, cli } = setup()
+    expect(await cli.providers()).toEqual([])
+    fake.update((s) => (s.providers = ["anthropic", "openai"]))
+    expect(await cli.providers()).toEqual(["anthropic", "openai"])
+    const call = fake.calls().find((c) => c.command === "provider list")!
+    expect(call.workspace).toBe("hub")
+    expect(call.argv.slice(4)).toEqual(["provider", "list", "--page-size", "100", "-o", "json"])
+  })
+
+  test("output without the list is bad output", async () => {
+    const { fake, cli } = setup()
+    fake.fail({ command: "workspace list", exitCode: 0, stdout: "{}" })
+    expect((await rejection(cli.workspaces())).code).toBe("bad_output")
+    fake.fail({ command: "provider list", exitCode: 0, stdout: "[]" })
+    expect((await rejection(cli.providers())).code).toBe("bad_output")
+  })
+})
+
 describe("create", () => {
   test("builds the argv: name, image, policy, providers, labels, env, detached, no auto providers, JSON out, then the command", async () => {
     const { fake, cli } = setup()

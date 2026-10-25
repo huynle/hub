@@ -58,6 +58,12 @@ export interface FakeState {
   nextID: number
   /** What `gateway info` lists as compute drivers (default ["vm"]). */
   computeDrivers?: string[]
+  /** What `workspace list` lists (default ["default", "hub"]). */
+  workspaces?: string[]
+  /** Provider names `provider list` lists, in any workspace (default none). */
+  providers?: string[]
+  /** What `status` reports as the gateway's status (default "connected"). */
+  gatewayStatus?: string
 }
 
 export interface FakeCall {
@@ -303,7 +309,7 @@ async function main(dir: string, argv: string[]): Promise<number> {
       out(`openshell ${state.version}\n`)
       return 0
     case "status": {
-      const status = { authentication: { provider: "mTLS transport", status: "authenticated" }, gateway: gateway ?? "openshell", server: "https://localhost:17670", status: "connected", version: state.version }
+      const status = { authentication: { provider: "mTLS transport", status: "authenticated" }, gateway: gateway ?? "openshell", server: "https://localhost:17670", status: state.gatewayStatus ?? "connected", version: state.version }
       out(json ? JSON.stringify(status, null, 2) + "\n" : `Server Status\n\n  Gateway: ${status.gateway}\n  Status: Connected\n`)
       return 0
     }
@@ -311,6 +317,20 @@ async function main(dir: string, argv: string[]): Promise<number> {
       const drivers = state.computeDrivers ?? ["vm"]
       const info = { auth: null, compute_drivers: drivers.map((name) => ({ capabilities: { driver_name: `openshell-driver-${name}`, driver_version: state.version }, name })), extensions: [] }
       out(json ? JSON.stringify(info, null, 2) + "\n" : `Gateway Info\n\n  Compute drivers:\n${drivers.map((d) => `    ${d}\n`).join("")}`)
+      return 0
+    }
+    case "workspace list":
+    case "provider list": {
+      const isWorkspaces = command === "workspace list"
+      const all = isWorkspaces ? (state.workspaces ?? ["default", "hub"]) : (state.providers ?? [])
+      const size = Number(one(p, "--page-size") ?? 100)
+      const start = Number(one(p, "--page-token") || 0)
+      const page = all.slice(start, start + size)
+      const next = start + size < all.length ? String(start + size) : ""
+      const items = isWorkspaces
+        ? page.map((n, i) => ({ created_at: "2026-10-25 09:58:35", id: `ws-${start + i}`, name: n, resource_version: 1, status: "Active" }))
+        : page.map((n, i) => ({ id: `pv-${start + i}`, name: n, type: n }))
+      out(json ? JSON.stringify({ next_page_token: next, [isWorkspaces ? "workspaces" : "providers"]: items }, null, 2) + "\n" : page.join("\n") + "\n")
       return 0
     }
     case "sandbox create": {
