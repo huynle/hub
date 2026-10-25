@@ -73,8 +73,14 @@ export interface AgentData {
   [field: string]: unknown
 }
 
-/** Key of a role and its project scope (for generations and exclusivity). */
-export const roleKey = (role: string, project?: string): string => `${role}\u0000${project ?? ""}`
+/**
+ * Key of a role and its project scope (for generations and exclusivity): `role` or `role.project` (a role never
+ * contains a dot). Never a NUL: a Postgres jsonb string cannot hold one (cluster mode).
+ */
+export const roleKey = (role: string, project?: string): string => (project ? `${role}.${project}` : role)
+
+/** Generation keys of older hubs: role NUL project. */
+const LEGACY_ROLE_KEY = "\u0000"
 
 type Entry = Record<string, unknown>
 
@@ -107,7 +113,12 @@ function normaliseList(key: keyof typeof LISTS, value: readonly unknown[]): Entr
 /** Generation counters: non-negative safe integers only. */
 function normaliseGenerations(value: Entry): Record<string, number> {
   const out: Record<string, number> = {}
-  for (const [key, n] of Object.entries(value)) if (validEpoch(n)) out[key] = n
+  for (const [raw, n] of Object.entries(value)) {
+    if (!validEpoch(n)) continue
+    const legacy = raw.indexOf(LEGACY_ROLE_KEY)
+    const key = legacy < 0 ? raw : roleKey(raw.slice(0, legacy), raw.slice(legacy + 1))
+    out[key] = Math.max(out[key] ?? 0, n)
+  }
   return out
 }
 

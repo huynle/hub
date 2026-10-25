@@ -1,7 +1,7 @@
 // Agent data storage rules beyond the store's own tests: role identity with a project scope, holder
 // generations, and merging the local user's data into the admin (migrateLocal) when names collide.
 import { describe, expect, test } from "bun:test"
-import { mergeAgentData, normaliseAgentData } from "../src/central/agent-data"
+import { mergeAgentData, normaliseAgentData, roleKey } from "../src/central/agent-data"
 
 describe("normaliseAgentData", () => {
   test("a role is unique per (role, project, session): scoped and unscoped claims of one session are both kept", () => {
@@ -19,8 +19,20 @@ describe("normaliseAgentData", () => {
   })
 
   test("generations keep non-negative integer counters only", () => {
-    expect(normaliseAgentData({ generations: { "reviewer\u0000": 2, bad: -1, worse: "3", frac: 1.5 } })?.generations).toEqual({ "reviewer\u0000": 2 })
+    expect(normaliseAgentData({ generations: { reviewer: 2, bad: -1, worse: "3", frac: 1.5 } })?.generations).toEqual({ reviewer: 2 })
     expect(normaliseAgentData({ generations: "junk" })).toEqual({})
+  })
+
+  test("role keys hold no NUL (a Postgres jsonb string cannot): role, or role.project", () => {
+    expect(roleKey("reviewer")).toBe("reviewer")
+    expect(roleKey("reviewer", "hub")).toBe("reviewer.hub")
+    expect(roleKey("reviewer", "")).toBe("reviewer")
+  })
+
+  test("legacy generation keys (role NUL project) become role keys, the higher counter winning", () => {
+    const data = normaliseAgentData({ generations: { "reviewer\u0000": 2, "reviewer\u0000hub": 5, "reviewer.hub": 3, lead: 1 } })
+    expect(data?.generations).toEqual({ reviewer: 2, "reviewer.hub": 5, lead: 1 })
+    expect(JSON.stringify(data)).not.toContain("\\u0000")
   })
 })
 
