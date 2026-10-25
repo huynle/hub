@@ -9,6 +9,14 @@
 //   role is noted, not fatal) → the name (taken meanwhile: failed) → the primer (Delivery.prime, so roles and name
 //   are in it) → the prompt (actions.prompt, resetHops false; marked prompted first, so at most once) → running.
 //   A stop between steps ends it stopped; the node going away ends it lost; anything else ends it failed.
+// - openshell launches (design §6.4, decision lk6gn3u7): after prepare the engine mints the launch's hlt1 token
+//   (launchTokens), has the node start the harness in its sandbox (start op with the hub's public URL, which the
+//   node rewrites for the sandbox, and the token; work record: started) and waits up to LAUNCH_CONNECT_MS for the
+//   harness's launch-bound connection (registry.launchConn; a stop ends the wait at once); the launch create goes
+//   to THAT connection, never the service spoke. Ending stops the harness on the node (graceful for idle and
+//   needs_user, else kill) before collect and cleanup. A gap of the sandbox's spoke is a gap like any other: lost
+//   only after SESSION_LOST_MS. Recovery reuses a still-connected harness or asks start again; a sandbox the node
+//   reports for a launch the hub has no record of is the launch's own: stopped (when up) and removed.
 // - End watcher (running launches): an idle end only after the prompt was seen working (registry status working,
 //   a steer, or the prompt's turn finishing); then idle by real evidence (Registry.idle) with no blockers, none of
 //   the session's own asks open and none of its Decisions open, unchanged for END_SETTLE_MS. end.when asked also
@@ -26,7 +34,7 @@
 // - onLaunchChanged gets every change the engine makes (queued, provisioning, running, ended); placement's own
 //   intermediate steps (placing, re-queued) are not reported.
 import type { NodeListener, NodeView } from "../nodes"
-import type { ModelSelection, NodeLaunchPhase, NodeRequest, NodeResultFor, PreparedWorkspace, ServerRequest } from "../../protocol"
+import type { ModelSelection, NodeLaunchPhase, NodeLaunchReport, NodeRequest, NodeResultFor, PreparedWorkspace, ServerRequest } from "../../protocol"
 import type { Clock, Counters, Locks, StateStore, Timers } from "../backend/types"
 import type { HubLaunches } from "../config"
 import type { Registry } from "../registry"
@@ -141,10 +149,27 @@ export const NODE_RETURN_MS = 5 * 60_000
 /** Node phases after which the node holds nothing for the launch. */
 const RELEASED: ReadonlySet<NodeLaunchPhase> = new Set(["cancelled", "failed", "cleaned"])
 
-/** A workspace the node reports for a launch the hub has no record of: reused, so cleanup never removes it. */
-function leftWorkspace(launch: Launch, directory: string): PreparedWorkspace {
+/** Node phases in which the node runs the launch's harness (openshell): it is stopped before cleanup. */
+const HARNESS_UP: ReadonlySet<NodeLaunchPhase> = new Set(["starting", "running"])
+
+/**
+ * A workspace the node reports for a launch the hub has no record of. On the host it counts as reused, so cleanup
+ * never removes it; an openshell sandbox exists only for its launch, so it is the launch's own (removable).
+ */
+function leftWorkspace(launch: Launch, report: Pick<NodeLaunchReport, "directory" | "sandbox">): PreparedWorkspace | undefined {
+  if (report.directory === undefined) return undefined
   const { repo, mode, branch, base } = launch.spec.workspace
-  return { repo, directory, mode, ...(branch !== undefined ? { branch } : {}), ...(base !== undefined ? { base } : {}), reused: true }
+  const { kind, profile } = launch.spec.runtime
+  const sandboxed = kind === "openshell"
+  return {
+    repo,
+    directory: report.directory,
+    mode,
+    ...(branch !== undefined ? { branch } : {}),
+    ...(base !== undefined ? { base } : {}),
+    reused: !sandboxed,
+    ...(sandboxed ? { runtime: { kind, ...(report.sandbox !== undefined ? { sandbox: report.sandbox } : {}), ...(profile !== undefined ? { profile } : {}) } } : {}),
+  }
 }
 
 /** A running launch being watched for its end. */
@@ -428,7 +453,7 @@ export class LaunchEngine {
         workspace = await this.prepare(userID, launch)
         checkpoint()
       }
-      const connID = await this.harnessConn(userID, launch, workspace)
+      const connID = await this.harnessConn(userID, launch, workspace, work.workspace !== undefined && work.started === true)
       checkpoint()
       const sessionID = await this.create(userID, launch, workspace, connID)
       checkpoint()
@@ -485,7 +510,10 @@ export class LaunchEngine {
     })
   }
 
-  /** Releases what the node still holds for a launch the hub lost track of: cancels a prepare, keeps a workspace. */
+  /**
+   * Releases what the node still holds for a launch the hub lost track of: cancels a prepare, keeps a host
+   * workspace (as reused), stops and removes an openshell sandbox (the launch's own, nothing collected yet).
+   */
   private async releaseOnNode(node: NodeView, launch: Launch): Promise<void> {
     const report = node.launches.find((l) => l.launchID === launch.id)
     if (!report) return
@@ -494,9 +522,12 @@ export class LaunchEngine {
       const released = this.waitForRelease(node.machineID, launch.id)
       await nodeOps.requestNode(node.connID, { op: "cancel", launchID: launch.id })
       await released
-    } else if (report.directory !== undefined) {
-      await nodeOps.requestNode(node.connID, { op: "cleanup", launchID: launch.id, workspace: leftWorkspace(launch, report.directory), policy: "keep" })
+      return
     }
+    const workspace = leftWorkspace(launch, report)
+    if (!workspace) return
+    if (HARNESS_UP.has(report.phase)) await nodeOps.requestNode(node.connID, { op: "stop", launchID: launch.id, workspace, mode: "kill" })
+    await nodeOps.requestNode(node.connID, { op: "cleanup", launchID: launch.id, workspace, policy: workspace.reused ? "keep" : "remove" })
   }
 
   /** Resolves when the node lets the launch go (cancelled, failed or cleaned); LostError when the node goes. */
@@ -538,9 +569,10 @@ export class LaunchEngine {
           continue
         }
         const work = await this.work(userID, report.launchID)
-        const workspace = work?.workspace ?? (launch && report.directory !== undefined ? leftWorkspace(launch, report.directory) : undefined)
+        const workspace = work?.workspace ?? (launch ? leftWorkspace(launch, report) : undefined)
         if (!workspace) continue
-        await nodeOps.requestNode(node.connID, { op: "cleanup", launchID: report.launchID, workspace, policy: work?.cleanup ?? "keep" })
+        if (HARNESS_UP.has(report.phase)) await nodeOps.requestNode(node.connID, { op: "stop", launchID: report.launchID, workspace, mode: "kill" })
+        await nodeOps.requestNode(node.connID, { op: "cleanup", launchID: report.launchID, workspace, policy: work?.cleanup ?? (workspace.reused ? "keep" : "remove") })
       } catch (cause) {
         console.error(`[hub] launch ${report.launchID}: cleanup on the node failed: ${errorText(cause)}`)
       }
@@ -566,9 +598,14 @@ export class LaunchEngine {
    * The connection that creates the launch's session: the machine's service spoke (host), or for openshell the
    * launch-bound connection of the harness the node starts in its sandbox.
    */
-  private async harnessConn(userID: string, launch: Launch, workspace: PreparedWorkspace): Promise<string> {
+  private async harnessConn(userID: string, launch: Launch, workspace: PreparedWorkspace, started = false): Promise<string> {
     const { registry } = this.deps
-    if (launch.spec.runtime.kind === "openshell") return this.startHarness(userID, launch, workspace)
+    if (launch.spec.runtime.kind === "openshell") {
+      // A harness started before a hub restart may still be connected; else it is (re)started (a node already
+      // running it answers started false, and the harness reconnects with its own token).
+      const connected = started ? registry.launchConn(launch.id) : undefined
+      return connected ?? this.startHarness(userID, launch, workspace)
+    }
     const connID = registry.serviceFor(launch.machineID!)
     if (connID === undefined || !registry.supports(connID, "launch")) throw new Error("The machine has no connected service spoke with launch")
     return connID
@@ -578,8 +615,7 @@ export class LaunchEngine {
   private async startHarness(userID: string, launch: Launch, workspace: PreparedWorkspace): Promise<string> {
     const { launchTokens, hubURL, nodeOps, nodes } = this.deps
     if (!launchTokens || hubURL === undefined) throw new Error("This hub cannot start sandboxed launches")
-    const node = nodes.forMachine(launch.machineID!)
-    if (!node) throw new Error("The node is not connected")
+    const node = nodes.forMachine(launch.machineID!) ?? (await this.waitForNode(launch.machineID!))
     const minted = await launchTokens.mint(launch.machineID!, launch.id)
     if (!minted) throw new Error("The hub could not mint the launch token")
     await this.updateWork(userID, launch.id, { started: true })

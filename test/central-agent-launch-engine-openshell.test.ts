@@ -475,3 +475,80 @@ describe("openshell end", () => {
     w.engine.shutdown()
   })
 })
+
+/** The hub restarts: a new engine over the same state and world. */
+async function restart(w: World): Promise<LaunchEngine> {
+  w.engine.shutdown()
+  const engine = new LaunchEngine(w.deps)
+  await engine.start()
+  await settle()
+  return engine
+}
+
+/** A launch left provisioning on the machine by a hub that stopped, with the engine's work record. */
+async function leftProvisioning(w: World, work: Record<string, unknown>): Promise<Launch> {
+  const store = new LaunchStore({ state: w.state, now: w.clock.now })
+  const { launch } = await store.create(U, validateLaunchSpec(body()), { by: "user" })
+  await store.transition(U, launch.id, "placing", { reason: "Placing on box" })
+  const provisioning = await store.transition(U, launch.id, "provisioning", { reason: "Placed on box", machineID: MACHINE })
+  await w.state.put(U, LAUNCH_WORK, launch.id, work)
+  return provisioning
+}
+
+describe("openshell restart recovery", () => {
+  test("started, its spoke still connected: the session is created on it; nothing is started again", async () => {
+    const w = world()
+    w.connectNode()
+    const launch = await leftProvisioning(w, { workspace: sandboxWorkspace, started: true })
+    w.connectLaunch(launch.id)
+    const engine = await restart(w)
+    expect(await w.launch(launch.id)).toMatchObject({ state: "running", sessionID: "ses_1" })
+    expect(w.ops()).toEqual([])
+    expect(w.mints).toEqual([])
+    expect(w.spokeCalls.map((c) => c.connID)).toEqual(["conn-launch-1"])
+    engine.shutdown()
+  })
+
+  test("started, its spoke not connected: once the node is back, start is asked again with a fresh token", async () => {
+    const w = world()
+    const launch = await leftProvisioning(w, { workspace: sandboxWorkspace, started: true })
+    const engine = await restart(w)
+    await w.clock.advance(60_000)
+    expect((await w.launch(launch.id))!.state).toBe("provisioning")
+    w.connectNode({ launches: [{ launchID: launch.id, phase: "running", directory: "/sandbox/work", sandbox: SANDBOX }] })
+    await settle()
+    expect(w.ops()).toEqual(["start"])
+    expect(await w.launch(launch.id)).toMatchObject({ state: "running", sessionID: "ses_1" })
+    engine.shutdown()
+  })
+
+  test("no work record, the node holds a sandbox for it: stopped and removed (it is the launch's own), then prepared again", async () => {
+    const w = world()
+    const launch = await leftProvisioning(w, {})
+    w.connectNode({ launches: [{ launchID: launch.id, phase: "running", directory: "/sandbox/work", sandbox: SANDBOX }] })
+    const engine = await restart(w)
+    expect(w.ops()).toEqual(["stop", "cleanup", "prepare", "start"])
+    const left: PreparedWorkspace = { ...sandboxWorkspace }
+    expect(w.nodeCalls[0]).toEqual({ op: "stop", launchID: launch.id, workspace: left, mode: "kill" })
+    expect(w.nodeCalls[1]).toEqual({ op: "cleanup", launchID: launch.id, workspace: left, policy: "remove" })
+    expect(await w.launch(launch.id)).toMatchObject({ state: "running" })
+    engine.shutdown()
+  })
+})
+
+describe("openshell reconcile", () => {
+  test("a launch that ended while its node was away: the harness is stopped and the workspace cleaned up when the node is back", async () => {
+    const { w, launch } = await running({ end: { cleanup: "remove" } })
+    w.disconnectNode()
+    const stopped = await w.engine.stop(U, launch.id)
+    expect(stopped.reason).toContain("waits for the node")
+    const before = w.nodeCalls.length
+    w.connectNode({ launches: [{ launchID: launch.id, phase: "running", directory: "/sandbox/work", sandbox: SANDBOX }] })
+    await settle()
+    expect(w.nodeCalls.slice(before)).toEqual([
+      { op: "stop", launchID: launch.id, workspace: sandboxWorkspace, mode: "kill" },
+      { op: "cleanup", launchID: launch.id, workspace: sandboxWorkspace, policy: "remove" },
+    ])
+    w.engine.shutdown()
+  })
+})
