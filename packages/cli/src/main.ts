@@ -37,6 +37,7 @@ process.exitCode = await run(argv, {
   stdin,
   signal: controller.signal,
   input: process.stdin,
+  cwd: process.cwd(),
 })
 // A signal ends `hub mcp` with its stdin still open; let go of it so the process can exit.
 if (argv[0] === "mcp") process.stdin.destroy()

@@ -1,7 +1,7 @@
 // The hub CLI (`hub` / `hubctl`, design §2.2, §3, §4, §5, §8): reads, names, messages and acts on sessions through
 // the hub's /api/agent, with the hub SDK (packages/sdk) as its client.
 // `run(argv, io)` is the whole program (main.ts wires it to the process); it returns the exit code.
-import type { Asked, HubClient, Sent, SentAll } from "../../sdk/src/index.ts"
+import type { Asked, HubClient, LaunchState, Sent, SentAll } from "../../sdk/src/index.ts"
 import pkg from "../package.json" with { type: "json" }
 import { parse, str, UsageError, type CommandSpec, type Parsed } from "./args"
 import { loginFile, readLogin, removeLogin, resolveCredentials, writeLogin, type Credentials, type Env } from "./credentials"
@@ -13,6 +13,7 @@ import { watch } from "./watch"
 import { DECISION_FLAGS, decisionOptions, decisionsText, openedText, stateArg } from "./decisions"
 import { GRANT_FLAGS, GRANT_REQUEST_FLAGS, grantError, grantRequestArg, grantSpecArg, grantsText, grantText, requestedText, userOnly } from "./grants"
 import { answeredText, approvedText, deliveryArg, deniedText, formAnswerArg, needsUserLines, promptedText, stoppedText } from "./acting"
+import { LAUNCH_FLAGS, launchedText, launchesText, launchSpecArg, launchText, stoppedLaunchText } from "./launches"
 
 export { EXIT } from "./http"
 
@@ -29,6 +30,8 @@ export interface Io {
   signal?: AbortSignal
   /** stdin as a stream (`hub mcp` reads JSON-RPC lines from it). */
   input?: AsyncIterable<Uint8Array | string>
+  /** The working directory (`hub launch` defaults --repo to it); default process.cwd(). */
+  cwd?: string
 }
 
 export const USAGE = `Usage: hub <command> [options]     (also installed as hubctl)
@@ -80,6 +83,17 @@ Grants (the user only: the console, or \`hub login\` with a device token; exit 5
          [--expires 8h] [--max-per-hour N] [--allow-always] [--holder <@@role you hold>] --why "…"
                                       (agents) ask the user for a grant: opens a tap Decision; the answer comes
                                       back as a reply (with the grant id when approved)
+
+Launching (users; agents and app tokens with sessions:launch under a grant with verb launch)
+  hub launch [--repo <path, default .>] [--mode worktree|checkout|clone] [--branch B] [--base B] [--remote URL]
+         [--name <@name>] [--role R]... [--harness H] [--agent A] [--model provider/model]
+         [--runtime host|openshell [--profile P]] [--machine M] [--node-label k=v]... [--prefer]
+         [--label k=v]... [--prompt "text" | --prompt -] [--end idle|asked|never] [--timeout 4h]
+         [--cleanup keep|remove] [--key K]
+                                      start a session; the same --key again answers the same launch;
+                                      --label tags it for apps, --node-label picks nodes (--prefer: not required)
+  hub launches list [--state S[,S]] [--label k=v]...   your launches (agents: the ones they started)
+  hub launches show <launchID> · hub launches stop <launchID>   (stop: exit 8 when it already ended)
 
 MCP
   hub mcp                             an MCP server on stdio: these verbs as tools, with this CLI's credential
@@ -397,6 +411,38 @@ const COMMANDS: Record<string, Command> = {
       answer(context, body, (b) => `revoked ${b.grant.id} (${b.grant.holder})`)
     },
   },
+  launch: {
+    flags: LAUNCH_FLAGS,
+    async handle(context) {
+      const spec = await launchSpecArg(context.parsed.flags, { cwd: context.io.cwd ?? process.cwd(), ...(context.io.stdin ? { stdin: context.io.stdin } : {}) })
+      const body = await context.hub((hub) => hub.launches.create(spec))
+      if (context.json) printJSON(context.io, { launch: body.launch })
+      else out(context.io, launchedText(body.launch, body.created, spec.key))
+    },
+  },
+  "launches list": {
+    flags: { state: "string", label: "multi" },
+    async handle(context) {
+      const { flags } = context.parsed
+      const state = str(flags, "state")?.split(",").filter(Boolean) as LaunchState[] | undefined
+      const body = await context.hub((hub) => hub.launches.list({ ...(state?.length ? { state } : {}), ...(flags.label ? { label: flags.label as string[] } : {}) }))
+      answer(context, body, (b) => launchesText(b.launches ?? []))
+    },
+  },
+  "launches show": {
+    args: ["<launchID>"],
+    async handle(context) {
+      const body = await context.hub((hub) => hub.launches.get(context.parsed.args[0]!))
+      answer(context, body, (b) => launchText(b.launch))
+    },
+  },
+  "launches stop": {
+    args: ["<launchID>"],
+    async handle(context) {
+      const body = await context.hub((hub) => hub.launches.stop(context.parsed.args[0]!))
+      answer(context, body, (b) => stoppedLaunchText(b.launch))
+    },
+  },
   mcp: {
     async handle({ io, credentials }) {
       if (!io.input) throw new UsageError("needs stdin")
@@ -427,7 +473,7 @@ const COMMANDS: Record<string, Command> = {
 }
 
 /** Commands with sub-verbs (`hub role claim`). */
-const GROUPS: Record<string, string[]> = { role: ["claim", "release"], decisions: ["list"], grant: ["list", "show", "create", "revoke", "request"] }
+const GROUPS: Record<string, string[]> = { role: ["claim", "release"], decisions: ["list"], grant: ["list", "show", "create", "revoke", "request"], launches: ["list", "show", "stop"] }
 
 function reportError(io: Io, error: CliError, json: boolean) {
   if (json && error.envelope) printJSON(io, { error: error.envelope })
