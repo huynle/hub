@@ -8,7 +8,8 @@
 // - Modes: plain msg → delivery "queue" (after the running turn), ask/reply/decline/urgent → "steer"; wake
 //   unless wake:false, a subagent recipient, the hop cap (alerted once when crossed) or a spent wake budget.
 // - Roles: one holder, the idle one (by real evidence) else the most recently active, else (all offline) the
-//   one seen last; the message records the holder generation. sendAll: every holder, a message each.
+//   one seen last; the message records the holder generation. sendAll: every holder, a message each. A session
+//   never messages itself: it is left out of a role it holds, and an address naming only it is invalid.
 // - Pending: no deliver-capable connection reports the recipient (offline) or every one failed → kept for
 //   PENDING_MS in the StateStore and delivered oldest first on the user's next sessions frame (onSessions).
 //   OpenCode holds admitted messages itself across forms, interrupts and restarts (P2-T0), so there is no
@@ -182,19 +183,20 @@ export class Delivery {
 
   /**
    * Stores a msg or ask from the actor to the session `addr` names and delivers it. A role goes to one holder:
-   * an idle one, else the most recently active, else (all offline) the one seen last. Throws invalid, not_found,
+   * an idle one, else the most recently active, else (all offline) the one seen last; never the sending session
+   * itself (only itself: invalid). Throws invalid, not_found,
    * ambiguous, unsupported {feature: "deliver"}, rate_limited or forbidden (muted) before anything is stored.
    */
   async send(userID: string, actor: AgentActor, addr: string, kind: "msg" | "ask", text: string, options: SendOptions = {}): Promise<Sent> {
     const from = this.party(userID, actor)
-    const resolved = this.deps.directory.resolve(userID, addr)
+    const resolved = this.others(actor, this.deps.directory.resolve(userID, addr))
     return this.sendTo(userID, from, addr, resolved, this.pick(resolved), kind, text, options)
   }
 
   /** Like send, to every session the address names (each role holder gets its own message). */
   async sendAll(userID: string, actor: AgentActor, addr: string, kind: "msg" | "ask", text: string, options: SendOptions = {}): Promise<Sent[]> {
     const from = this.party(userID, actor)
-    const resolved = this.deps.directory.resolve(userID, addr)
+    const resolved = this.others(actor, this.deps.directory.resolve(userID, addr))
     const sent: Sent[] = []
     for (const entry of resolved.sessions) sent.push(await this.sendTo(userID, from, addr, resolved, entry, kind, text, options))
     return sent
@@ -346,6 +348,14 @@ export class Delivery {
       meta: { kind: "ask", from: wireAddress(ask.from), to: ask.to, delivery: "steer" },
     }
     return (await this.request(userID, sessionID, req)) !== undefined
+  }
+
+  /** The resolved sessions without the sending session itself; invalid when only it is left (no self-messages). */
+  private others(actor: AgentActor, resolved: Resolved): Resolved {
+    if (actor.kind !== "session") return resolved
+    const sessions = resolved.sessions.filter((s) => s.sessionID !== actor.sessionID)
+    if (!sessions.length) throw new AgentError("invalid", "A session cannot message itself")
+    return { ...resolved, sessions }
   }
 
   /** One session of a resolved address (see send). */

@@ -170,6 +170,33 @@ describe("send to a session", () => {
   })
 })
 
+describe("self-messages", () => {
+  test("a session cannot message or ask itself (invalid), nothing stored or sent", async () => {
+    const s = setup()
+    s.connect("c1", ["ses_a", "ses_b"])
+    for (const kind of ["msg", "ask"] as const) {
+      expect(await s.delivery.send(U, asSession("ses_a"), "@alpha", kind, "me?").catch((cause) => cause.code)).toBe("invalid")
+      expect(await s.delivery.sendAll(U, asSession("ses_a"), "ses_a", kind, "me?").catch((cause) => cause.code)).toBe("invalid")
+    }
+    expect(s.sent).toEqual([])
+    expect(await s.delivery.messages.list(U, { kind: "session", sessionID: "ses_a" })).toEqual([])
+  })
+
+  test("a role the sender holds goes to another holder; sendAll skips the sender; only itself: invalid", async () => {
+    const s = setup()
+    s.addSession("ses_c", { roles: [{ role: "reviewer", generation: 1 }] })
+    s.addSession("ses_d", { roles: [{ role: "reviewer", generation: 2 }] })
+    s.connect("c1", ["ses_c", "ses_d"])
+    s.idle.add("ses_c")
+    const one = await s.delivery.send(U, asSession("ses_c"), "@@reviewer", "msg", "hi")
+    expect(one.message.recipient).toMatchObject({ sessionID: "ses_d" })
+    const all = await s.delivery.sendAll(U, asSession("ses_c"), "@@reviewer", "msg", "all")
+    expect(all.map((x) => x.message.recipient.kind === "session" && x.message.recipient.sessionID)).toEqual(["ses_d"])
+    s.entries.delete("ses_d")
+    expect(await s.delivery.send(U, asSession("ses_c"), "@@reviewer", "msg", "hi").catch((cause) => cause.code)).toBe("invalid")
+  })
+})
+
 describe("delivery modes", () => {
   test("asks and urgent messages steer, plain messages queue behind a running turn", async () => {
     const s = setup()
