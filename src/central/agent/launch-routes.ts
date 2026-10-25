@@ -14,6 +14,7 @@
 // launch, like another user's, is 404 not_found. The engine applies the per-user launch caps (rate_limited).
 // Every outcome once the body is valid is in the agent audit (verb launch, or launch.stop for DELETE).
 import type { LaunchInfo, LaunchSpec as WireSpec } from "../../protocol"
+import { Feed } from "../cluster/feed"
 import type { ActingSwitch } from "./acting-switch"
 import { auditOf } from "./acting"
 import type { AgentActor } from "./actor"
@@ -47,26 +48,17 @@ export interface LaunchRoutesDeps {
 /** A launch change for its user (the engine's onLaunchChanged). */
 export type LaunchListener = (userID: string, launch: Launch) => void
 
+/** Launch changes' Bus topic (cluster mode). */
+export const LAUNCHES_TOPIC = "feed.launches"
+
 /**
  * Every launch change, per user: the hub's SSE 'launch' events, GET /api/agent/watch and webhooks (P4-T10)
- * subscribe. A throwing listener is logged and never stops the others.
+ * subscribe. A throwing listener is logged and never stops the others. Shared with the other pods once attached
+ * (see ../cluster/feed).
  */
-export class LaunchFeed {
-  private readonly listeners = new Set<LaunchListener>()
-
-  subscribe(listener: LaunchListener): () => void {
-    this.listeners.add(listener)
-    return () => void this.listeners.delete(listener)
-  }
-
-  publish(userID: string, launch: Launch): void {
-    for (const listener of [...this.listeners]) {
-      try {
-        listener(userID, launch)
-      } catch (cause) {
-        console.error(`[hub] launch listener failed: ${cause instanceof Error ? cause.message : String(cause)}`)
-      }
-    }
+export class LaunchFeed extends Feed<Launch> {
+  constructor() {
+    super(LAUNCHES_TOPIC, (cause) => console.error(`[hub] launch listener failed: ${cause instanceof Error ? cause.message : String(cause)}`))
   }
 }
 

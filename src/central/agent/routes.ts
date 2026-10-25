@@ -97,6 +97,8 @@ export interface AgentDeps {
   readonly feed?: MessageFeed
   /** Heartbeat of GET /api/agent/watch. */
   readonly heartbeatMs?: number
+  /** What GET /api/agent/watch reads per user (cluster mode); the registry when absent. */
+  readonly watchRegistry?: ReadDeps["watchRegistry"]
   readonly now?: () => number
 }
 
@@ -121,7 +123,7 @@ export function agentRoutes(deps: AgentDeps): AgentRoute[] {
   return [
     ...(deps.directory ? directoryRoutes(deps.directory) : []),
     ...(deps.directory && deps.delivery ? messageRoutes({ delivery: deps.delivery, directory: deps.directory, store: deps.store, feed, ...(deps.decisions ? { decisions: deps.decisions } : {}) }) : []),
-    ...(deps.directory && deps.registry ? readRoutes({ store: deps.store, directory: deps.directory, registry: deps.registry, ...(deps.delivery ? { feed } : {}), ...(deps.spokes ? { spokes: deps.spokes } : {}), ...launchReads(deps), ...(deps.heartbeatMs !== undefined ? { heartbeatMs: deps.heartbeatMs } : {}), ...(deps.now ? { now: deps.now } : {}) }) : []),
+    ...(deps.directory && deps.registry ? readRoutes({ store: deps.store, directory: deps.directory, registry: deps.registry, ...(deps.delivery ? { feed } : {}), ...(deps.spokes ? { spokes: deps.spokes } : {}), ...launchReads(deps), ...(deps.watchRegistry ? { watchRegistry: deps.watchRegistry } : {}), ...(deps.heartbeatMs !== undefined ? { heartbeatMs: deps.heartbeatMs } : {}), ...(deps.now ? { now: deps.now } : {}) }) : []),
     {
       method: "GET",
       path: `${AGENT_PREFIX}/whoami`,
