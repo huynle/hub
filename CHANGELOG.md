@@ -126,6 +126,18 @@ the protocol up:
   with `messaging`, `session.inbox.delivered` carries `origin: "user"` (typed or phone prompts) or `"hub"` (a
   delivered message) when the spoke saw the item enqueued. Opt-in check against a real `opencode serve`:
   `HUB_IT_OPENCODE=1 bun test test/spoke-deliver.it.test.ts`.
+- **Message routes on `/api/agent`**: `POST msg {to, text, wake?, urgent?, all?}`, `POST ask {…, expiresIn?,
+  wait?}` (seconds; `wait` ≤ 60 long-polls for the answer), `POST reply {replyTo, text, wake?}`, `POST decline
+  {replyTo, why}`, `GET inbox` (`{asks, waiting, messages, muted}`), `GET messages/:id?wait=`, `POST mute` /
+  `unmute {session}`, and the per-user switch `GET`/`PUT messaging {enabled}` (users only; off: sends answer
+  `423 paused`). The sender is always the credential (body fields are ignored); a session cannot message
+  itself (`400 invalid`, also left out of a role it holds); only a message's recipient may answer it, anyone
+  else and foreign ids get `404 not_found`. The user and apps have a stored-only inbox. New app token scopes
+  `messages:send` and `messages:read`. `GET /api/agent/watch` adds `message` events (no text; users see all,
+  sessions and apps only their own). Console: `GET /api/sessions/:session/messages?limit=` lists a session's
+  sent and received messages, newest first.
+- **SDK messaging verbs**: `msg`, `ask` (with `wait` looping over polls of at most 60 s), `message`, `reply`,
+  `decline`, `inbox`, `mute`, `unmute`.
 
 ### Other changes
 

@@ -225,7 +225,7 @@ from the console's routes. Every request resolves to exactly one **actor**:
 |---|---|---|
 | user | the device cookie (browsers) or the same secret as `Authorization: Bearer <device token>` (apps, CLIs; [linked with a code](#multi-user-sign-in-with-google)) | you, on one of your devices |
 | session | a **session token** `hst1.…` the hub mints for each session a spoke reports | that session's shells (`HUB_SESSION_TOKEN`) |
-| app | an **app token** `hat_…` you create (scope `sessions:read`) | a script or tool outside a session (`hub login`) |
+| app | an **app token** `hat_…` you create (scopes `sessions:read`, `messages:send`, `messages:read`) | a script or tool outside a session (`hub login`) |
 
 **Session tokens in shells.** The hub mints a 24 h token for every session (subagents included) its spokes report
 for you and pushes it to the spoke, which keeps it in memory only. Every shell an agent starts through OpenCode's
@@ -262,15 +262,21 @@ cookie and a hub bearer token (400).
 | `GET /api/agent/sessions?project=&state=&machine=&label=k=v` | ✓ | ✓ | ✓ | the same sessions as a flat list |
 | `GET /api/agent/sessions/:addr` | ✓ | ✓ | ✓ | one session with full blockers and the spoke's summary (`unsupported` when its harness lacks it) |
 | `GET /api/agent/sessions/:addr/log?n=20` | ✓ | ✓ | ✓ | newest timeline rows (1–200); `422 unsupported {feature, harness}` when the spoke has no timeline, `503 offline` |
-| `GET /api/agent/watch?blocked=1&session=<addr>` | ✓ | ✓ | ✓ | SSE of compact events (`ready`, `state`, `blocker.opened/closed`, `session.added/removed`; no text) |
+| `GET /api/agent/watch?blocked=1&session=<addr>` | ✓ | ✓ | ✓ | SSE of compact events (`ready`, `state`, `blocker.opened/closed`, `session.added/removed`, `message`; no text) |
 | `GET /api/agent/who?project=&role=` | ✓ | ✓ | ✓ | named, role-holding and online sessions |
 | `POST /api/agent/name {name, session?}` | ✓ | own session | – | names a session (`409 name_taken`) |
 | `POST /api/agent/roles/claim {role, exclusive?, project?, session?}` · `…/roles/release` | ✓ | own session | – | claims (with a new `generation`) or releases a role |
+| `POST /api/agent/msg {to, text, wake?, urgent?, all?}` | ✓ | ✓ | `messages:send` | tells a session (`all`: every holder of a role); never yourself |
+| `POST /api/agent/ask {to, text, expiresIn?, wait?}` | ✓ | ✓ | `messages:send` | an ask, open until answered, declined or expired; `wait` (≤ 60 s) returns the `answer` |
+| `POST /api/agent/reply {replyTo, text}` · `…/decline {replyTo, why}` | ✓ | ✓ | `messages:send` | answers a message you received (to its real sender) |
+| `GET /api/agent/inbox` · `GET /api/agent/messages/:id?wait=` | ✓ | ✓ | `messages:read` | open asks, your waiting asks, recent messages, mutes · one message and its answer |
+| `POST /api/agent/mute {session}` · `…/unmute` | ✓ | ✓ | `messages:send` | refuses (or allows again) messages from a session |
+| `GET` · `PUT /api/agent/messaging {enabled}` | ✓ | – | – | the per-user messaging switch (off: `423 paused`) |
 | `POST /api/agent/app-tokens {label?, scopes?}` · `GET` · `DELETE …/:id` | ✓ | – | – | creates (token shown once), lists, revokes app tokens |
 
 Reads come from the hub's catalog; only `show` (summary) and `log` (timeline) ask the session's spoke, so they
 depend on what its harness supports. A session token reads all of its user's sessions but names and claims roles
-only for itself; an app token only reads. `GET /.well-known/hub` (public) answers `{publicURL, version,
+only for itself; an app token reads, and messages only with the `messages:*` scopes. `GET /.well-known/hub` (public) answers `{publicURL, version,
 minClientVersion, auth, features}` for apps and CLIs.
 
 **Apps.** A native app links with a code from Settings → Devices → **Add app** (`POST /api/devices/link`, then
