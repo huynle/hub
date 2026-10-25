@@ -5,6 +5,7 @@ import { HubRpc } from "./rpc"
 import { localServerFor, modeFor, needsSetup, parseServerInput, setupOptions, type SetupChoice } from "./setup"
 import { hubCommands } from "./tui-commands"
 import { FormRelay } from "./tui-forms"
+import { runMsg, runWho, type MessagingDeps } from "./tui-messaging"
 import { PresenceReporter, shownSessions } from "./tui-presence"
 import { startVoice } from "./voice-command"
 
@@ -15,6 +16,8 @@ import { startVoice } from "./voice-command"
 // /voice: no menu — connect (setting up first when needed), share this session, and open it in the browser
 // with Voice mode starting (src/voice-command.ts). Links are shown here, never posted into the session, so
 // they do not reach the model. Decisions live in src/setup.ts and src/voice-command.ts (tested).
+// /who [project | @@role] and /msg @name text: other sessions on the hub, as the current session
+// (src/tui-messaging.ts; server side src/spoke/hub-rpc.ts).
 
 type Mode = "off" | "always" | "session"
 interface Status {
@@ -408,6 +411,16 @@ export default Plugin.define({
         toast,
       })
 
+    // /who and /msg: the server sends as this TUI's current session, with that session's own hub token.
+    const messaging: MessagingDeps = {
+      sessionID: currentSession,
+      who: (input) => call("hubWho", input),
+      msg: (input) => call("hubMsg", input),
+      prompt: (options) => context.ui.dialog.prompt(options),
+      alert: (options) => context.ui.dialog.alert(options),
+      toast: (message, variant) => toast(message, variant),
+    }
+
     // Presence: tell the server-side spoke which sessions this TUI shows, so the phone lists them as open.
     const reporter = `tui_${Math.random().toString(36).slice(2, 12)}`
     const presence = new PresenceReporter({
@@ -436,6 +449,8 @@ export default Plugin.define({
       [
         { id: "open", slash: "hub", title: "server, connection, sharing and phones", run: open },
         { id: "voice", slash: "voice", title: "talk to this session (Voice mode in the browser)", run: voice },
+        { id: "who", slash: "who", title: "who is on the hub (names and roles)", arguments: true, run: (input) => runWho(messaging, input) },
+        { id: "msg", slash: "msg", title: "message a session as this session (/msg @name text)", arguments: true, run: (input) => runMsg(messaging, input) },
       ],
       (cause) => toast(errorMessage(cause), "error"),
     )
