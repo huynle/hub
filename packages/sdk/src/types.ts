@@ -4,7 +4,14 @@
 /** The caller, as whoami and status (`you`) report it. */
 export type Actor =
   | { readonly kind: "user"; readonly userID: string; readonly deviceID: string; readonly via: "cookie" | "device-token" }
-  | { readonly kind: "session"; readonly userID: string; readonly machineID: string; readonly sessionID: string }
+  | {
+      readonly kind: "session"
+      readonly userID: string
+      readonly machineID: string
+      readonly sessionID: string
+      /** Which of the session's tokens: its shell token, or the act token only the hub tool has (missing: shell). */
+      readonly via?: "shell" | "act"
+    }
   | { readonly kind: "app"; readonly userID: string; readonly tokenID: string; readonly scopes: readonly string[]; readonly label?: string }
 
 export interface UserView {
@@ -261,4 +268,94 @@ export interface Inbox {
 export interface WatchEvent {
   readonly event: string
   readonly data: string
+}
+
+// Acting (POST /api/agent/sessions/:addr/{approve,deny,answer,prompt,stop}; src/central/agent/acting.ts).
+
+/** OpenCode's reply to a permission request. */
+export type PermissionDecision = "once" | "always" | "reject"
+
+/** How an agent's prompt enters a busy session (the spoke picks when unset). */
+export type PromptDelivery = "queue" | "steer"
+
+/** An answer to a form (question): field key → value. */
+export type FormAnswer = Readonly<Record<string, string | number | boolean | readonly string[]>>
+
+/** Why an act verb needs the user (the needs_user envelope's `evaluation`). */
+export interface Evaluation {
+  readonly verdict: "outside"
+  readonly reason: string
+  /** Set by the hub: confirm (any of the user's devices) or tap (the signed-in console). */
+  readonly tier: DecisionTier
+  /** The usable grants it was evaluated against. */
+  readonly grants: readonly string[]
+}
+
+export interface Approved {
+  readonly sessionID: string
+  readonly requestID: string
+  readonly decision: PermissionDecision
+  /** The grant it acted under (agents). */
+  readonly grant?: string
+}
+
+export interface Denied {
+  readonly sessionID: string
+  readonly requestID: string
+  readonly grant?: string
+  /** With a why: whether the harness got the reason. */
+  readonly reasonSent?: boolean
+}
+
+export interface FormAnswered {
+  readonly sessionID: string
+  readonly formID: string
+  readonly grant?: string
+}
+
+export interface Stopped {
+  readonly sessionID: string
+  readonly grant?: string
+  /** The spoke's answer. */
+  readonly result: unknown
+}
+
+/** An agent's prompt (delivered under its provenance), or the user's (steered into the tree, or a new turn). */
+export type Prompted =
+  | { readonly sessionID: string; readonly messageID: string; readonly delivered: string; readonly inboxID?: string; readonly grant: string }
+  | { readonly sessionID: string; readonly mode: "steer"; readonly inboxID: string }
+  | { readonly sessionID: string; readonly mode: "turn" }
+
+// Grants (/api/agent/grants; src/central/agent/grants.ts): created, edited and revoked only by the user.
+
+export type GrantVerb = "approve" | "deny" | "answer" | "prompt" | "stop" | "roles"
+export type GrantState = "active" | "expired" | "revoked"
+
+/** What the user grants (create and update bodies). */
+export interface GrantSpec {
+  /** A session (ses_… or @name, pinned at creation), a reserved role (@@orchestrator…), or app:<token id>. */
+  readonly holder: string
+  readonly scope: { readonly projects: readonly string[] }
+  readonly allow: readonly GrantVerb[]
+  readonly permissions?: { readonly allow?: readonly string[]; readonly never?: readonly string[] }
+  readonly allowAlways?: boolean
+  /** Seconds, or 30m, 8h, 2d (1 minute to 30 days). */
+  readonly expires?: number | string
+  readonly maxActionsPerHour?: number
+}
+
+export interface Grant {
+  readonly id: string
+  readonly holder: string
+  readonly holderSessionID?: string
+  readonly scope: { readonly projects: readonly string[] }
+  readonly allow: readonly GrantVerb[]
+  readonly permissions: { readonly allow: readonly string[]; readonly never: readonly string[] }
+  readonly allowAlways: boolean
+  readonly maxActionsPerHour: number
+  readonly created: number
+  readonly expiresAt: number
+  readonly updated?: number
+  readonly revokedAt?: number
+  readonly state: GrantState
 }

@@ -1,6 +1,7 @@
 // The hub's error envelope (design §8): every /api/agent failure answers {error: {code, message, hint?, ...extra}}.
 // The SDK turns it into a HubError; failures without an envelope (hub unreachable, a proxy's HTML, a body that is not
 // JSON, a broken stream) are HubTransportErrors. Neither ever carries the token.
+import type { Evaluation } from "./types.ts"
 
 /** The codes the hub answers with (src/central/agent/errors.ts); later phases may add more, so any string is kept. */
 export type ErrorCode =
@@ -24,7 +25,10 @@ export interface Envelope {
   readonly code: ErrorCode
   readonly message: string
   readonly hint?: string
-  /** More fields, by code: candidates (ambiguous), retryAfter (rate_limited, seconds), feature/harness (unsupported). */
+  /**
+   * More fields, by code: candidates (ambiguous), retryAfter (rate_limited, seconds), feature/harness (unsupported),
+   * evaluation/decisionID (needs_user; see needsUserOf).
+   */
   readonly [extra: string]: unknown
 }
 
@@ -75,6 +79,22 @@ export class HubTransportError extends Error {
 /** True for a HubError (with one of `codes`, when given). */
 export const isHubError = (error: unknown, ...codes: ErrorCode[]): error is HubError =>
   error instanceof HubError && (codes.length === 0 || codes.includes(error.code))
+
+/** What a needs_user failure carries: why (the evaluation) and the Decision it opened for the user, if any. */
+export interface NeedsUser {
+  readonly evaluation?: Evaluation
+  readonly decisionID?: string
+}
+
+/** The needs_user details of an error (undefined for any other error). */
+export function needsUserOf(error: unknown): NeedsUser | undefined {
+  if (!isHubError(error, "needs_user")) return undefined
+  const { evaluation, decisionID } = error.envelope
+  return {
+    ...(typeof evaluation === "object" && evaluation !== null ? { evaluation: evaluation as Evaluation } : {}),
+    ...(typeof decisionID === "string" ? { decisionID } : {}),
+  }
+}
 
 /** The envelope inside a parsed body, if it is one (also the console routes' {error: message, code, hint?}). */
 export function envelopeOf(body: unknown): Envelope | undefined {
