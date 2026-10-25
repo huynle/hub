@@ -26,6 +26,7 @@ afterEach(async () => {
 function fakeContext(overrides: { hookThrows?: boolean; registerThrows?: boolean; directory?: string; pending?: Record<string, string>; synthetic?: boolean } = {}) {
   const queue = new EventQueue<{ type: string; data: Record<string, unknown> }>()
   const hooks: Array<(event: any) => void> = []
+  const promptHooks: Array<(event: any) => unknown> = []
   const toolHooks: Record<string, (event: any) => void> = {}
   const shellHooks: Record<string, (event: any) => void> = {}
   const transforms: Array<(editor: any) => void> = []
@@ -55,9 +56,10 @@ function fakeContext(overrides: { hookThrows?: boolean; registerThrows?: boolean
       list: async () => ({ location: {}, data: [{ id: "build", mode: "primary", hidden: false }, { id: "voice", mode: "primary", hidden: false }] }),
     },
     session: {
-      hook: async (_name: string, fn: (event: any) => void) => {
+      hook: async (name: string, fn: (event: any) => void) => {
         if (overrides.hookThrows) throw new Error("hook failed")
-        hooks.push(fn)
+        if (name === "prompt") promptHooks.push(fn)
+        else hooks.push(fn)
       },
       prompt: async () => ({ id: "msg_1" }),
       // Wrapped like the HTTP API (the plugin unwraps both shapes).
@@ -121,7 +123,7 @@ function fakeContext(overrides: { hookThrows?: boolean; registerThrows?: boolean
     },
   }
   const rpc = { signal: new AbortController().signal, error: (type: string, message: string, data: unknown) => ({ type, message, data }) }
-  return { ctx, hooks, toolHooks, shellHooks, transforms, tools, interrupts, switches, rpc, registered, replies, synthetics, queue, call: (name: string, input: unknown = {}) => handlers![name]!(input, rpc) }
+  return { ctx, hooks, promptHooks, toolHooks, shellHooks, transforms, tools, interrupts, switches, rpc, registered, replies, synthetics, queue, call: (name: string, input: unknown = {}) => handlers![name]!(input, rpc) }
 }
 
 function tempConfig(config: Partial<ReturnType<typeof defaults>>) {
@@ -401,6 +403,50 @@ describe("plugin setup", () => {
       const { tool } = await connected(["harness"])
       const result = await tool.execute({ verb: "msg", to: "@bob", text: "hi" }, toolContext("ses_a"))
       expect(result.content).toMatch(/does not support messaging/i)
+    })
+  })
+
+  describe("prompt references (design §2.4)", () => {
+    test("a prompt hook is registered", async () => {
+      tempConfig({ mode: "off" })
+      const fake = fakeContext()
+      cleanups.push((await plugin.setup(fake.ctx as any)) as () => void)
+      expect(fake.promptHooks).toHaveLength(1)
+      // Without a hub it fails open: nothing added, the text unchanged.
+      const event = { sessionID: "ses_a", messageID: "msg_1", delivery: "steer", prompt: { text: "ask @bob", files: [], agents: [] } }
+      await fake.promptHooks[0]!(event)
+      expect(event.prompt).toEqual({ text: "ask @bob", files: [], agents: [] })
+    })
+
+    test("a connected session's prompt gets the context file, looked up with its own token", async () => {
+      const auth: Array<string | null> = []
+      const server = fakeCentral({
+        hubFeatures: ["harness", "messaging"],
+        http: (req) => {
+          const { pathname } = new URL(req.url)
+          if (!pathname.startsWith("/api/agent/")) return undefined
+          auth.push(req.headers.get("authorization"))
+          if (pathname === "/api/agent/who") return Response.json({ sessions: [{ sessionID: "ses_bob", name: "bob", project: "hub", online: true, state: "idle", roles: [] }] })
+          if (pathname === "/api/agent/status") return Response.json({ machines: [], attention: [] })
+          if (pathname === "/api/agent/inbox") return Response.json({ asks: [], waiting: [], messages: [], muted: [] })
+          return undefined
+        },
+      })
+      cleanups.push(() => stopServer(server))
+      tempConfig({ server: server.url, mode: "always", token: "tok" })
+      const fake = fakeContext()
+      cleanups.push((await plugin.setup(fake.ctx as any)) as () => void)
+      await until(() => server.frames.some((f) => f.t === "sessions"))
+      fake.queue.push({ type: "session.created", data: { sessionID: "ses_a", title: "A" } })
+      await until(() => server.frames.some((f) => f.t === "sessions" && (f as any).sessions.some((s: any) => s.id === "ses_a")))
+      await server.request({ op: "sessionTokens", tokens: [{ sessionID: "ses_a", token: "hst.a-secret", exp: Date.now() + 60_000 }] })
+      const event: any = { sessionID: "ses_a", messageID: "msg_1", delivery: "steer", prompt: { text: "ask @bob", files: [], agents: [] } }
+      await fake.promptHooks[0]!(event)
+      expect(event.prompt.text).toBe("ask @bob")
+      expect(event.prompt.files).toHaveLength(1)
+      expect(Buffer.from(event.prompt.files[0].uri.split(",")[1], "base64").toString()).toContain("@bob = session ses_bob")
+      expect(auth.every((a) => a === "Bearer hst.a-secret")).toBe(true)
+      expect(JSON.stringify(event)).not.toContain("hst.a-secret")
     })
   })
 
