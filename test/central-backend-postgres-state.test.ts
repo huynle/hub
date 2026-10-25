@@ -30,6 +30,14 @@ describe("PostgresStateStore without a database", () => {
     expect(`${(error as Error).message} ${(error as Error).stack} ${Bun.inspect(error)}`).not.toContain(SECRET)
     await store.close()
   })
+
+  test("ping (readiness) rejects without naming the url", async () => {
+    const store = new PostgresStateStore({ url: UNREACHABLE, connectionTimeoutSeconds: 2 })
+    const error = await store.ping().then(() => undefined, (caught: unknown) => caught)
+    expect(error).toBeInstanceOf(Error)
+    expect(`${(error as Error).message} ${(error as Error).stack}`).not.toContain(SECRET)
+    await store.close()
+  })
 })
 
 const enabled = itClusterEnabled() && (await dockerAvailable())
@@ -62,6 +70,11 @@ async function pods(count: number): Promise<PostgresStateStore[]> {
 }
 
 describe.skipIf(!enabled)("PostgresStateStore schema (HUB_IT_CLUSTER=1)", () => {
+  test("ping (readiness) runs SELECT 1 on a migrated database", async () => {
+    const [store] = await pods(1)
+    await store!.ping()
+  })
+
   test("without migrate, an unmigrated database is refused with a hint and no url", async () => {
     const url = await cluster!.freshDatabase()
     const store = open(url, { migrate: false })

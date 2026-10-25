@@ -38,6 +38,11 @@ export class ValkeyKv implements Kv {
     return Number(await this.valkey.send("DEL", [this.prefix + key])) > 0
   }
 
+  /** Readiness: PING (rejects when the server does not answer). */
+  async ping(): Promise<void> {
+    await this.valkey.send("PING", [])
+  }
+
   /** Closes the connection when it was opened from a url. */
   async close(): Promise<void> {
     this.valkey.close()

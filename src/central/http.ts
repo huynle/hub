@@ -208,6 +208,8 @@ const SSE_HEARTBEAT_MS = 20_000
 /** Draining: the `retry:` an ending SSE stream sends (the browser reconnects, through the load balancer, after it). */
 const SSE_RETRY_MS = 2_000
 const SSE_RETRY = `retry: ${SSE_RETRY_MS}\n\n`
+/** /readyz in cluster mode: how long the database and Valkey get to answer. */
+const READY_CHECK_MS = 2_000
 /** Cluster mode: how much longer than the turn timeout a turn's cluster-wide lease lasts (it is released at its end). */
 const TURN_LEASE_SLACK_MS = 120_000
 /** Cluster mode: how long a stop sent to the launches leader may take (it waits for the node's collect and cleanup). */
@@ -1824,9 +1826,21 @@ export function startCentral(options: CentralOptions): Central {
     })
   }
 
-  /** /readyz: 503 while draining, else 200. */
+  /** /readyz (design §10): 503 while draining or (cluster mode) when the database or Valkey does not answer in time. */
   async function readyz(): Promise<Response> {
     if (draining) return Response.json({ ok: false, draining: true }, { status: 503, headers: NO_STORE })
+    if (config.cluster) {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const late = new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error("timed out")), READY_CHECK_MS)))
+      try {
+        await Promise.race([Promise.all([backends.state.ping?.(), backends.kv.ping?.()]), late])
+      } catch {
+        // A public endpoint: no backend detail (hosts, users) in the answer.
+        return Response.json({ ok: false, error: "database or Valkey not reachable" }, { status: 503, headers: NO_STORE })
+      } finally {
+        clearTimeout(timer)
+      }
+    }
     return Response.json({ ok: true }, { headers: NO_STORE })
   }
 

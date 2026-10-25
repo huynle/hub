@@ -50,6 +50,16 @@ describe("ValkeyConnection", () => {
   })
 })
 
+describe("ValkeyKv.ping (readiness)", () => {
+  test("sends PING and rejects when the server is unreachable", async () => {
+    const client = recordingClient()
+    await new ValkeyKv(client).ping()
+    expect(client.calls).toEqual([["PING", []]])
+    const down = new ValkeyKv({ send: async () => Promise.reject(new Error("Connection closed")), close() {} })
+    await expect(down.ping()).rejects.toThrow(/closed/)
+  })
+})
+
 describe.skipIf(!cluster)("Valkey (real server)", () => {
   const url = () => cluster!.freshValkey()
   /** A plain client on the same server (no flush). */
@@ -69,6 +79,12 @@ describe.skipIf(!cluster)("Valkey (real server)", () => {
     expect(Number(await client.send("PTTL", ["kv:pair:ABC"]))).toBeGreaterThan(50_000)
     const other = new ValkeyKv(client, { prefix: "other:" })
     expect(await other.get("pair:ABC")).toBeUndefined()
+  })
+
+  test("ValkeyKv.ping resolves on a real server", async () => {
+    const kv = new ValkeyKv(await url())
+    open.push(kv)
+    await kv.ping()
   })
 
   test("Bun.RedisClient accepts valkey:// urls", async () => {
