@@ -33,7 +33,7 @@ import { TurnTracker } from "../turns"
 import { TimelineCache, boundedTimelinePart, newestPage, timelineFile, timelineItems } from "./timeline"
 import { SpokeConnection, type Backoff, type ConnectionState } from "./client"
 import { PROMPT_SOURCE, VOICE_AGENT } from "./conversation"
-import { DeliveryLedger, deliverMetadata, harnessMessageID, InboxOrigins, planDelivery } from "./deliver"
+import { DeliveryLedger, deliverMetadata, deliverText, harnessMessageID, InboxOrigins, planDelivery } from "./deliver"
 import { pollEnrollment, startEnrollment } from "./enroll"
 import { HerdrWatcher, openInHerdr, type HerdrRunner } from "./herdr"
 import type { LocalHubResult } from "./localhub"
@@ -102,9 +102,10 @@ export interface SpokeHost {
   getSession(sessionID: string): Promise<HostSession>
   /**
    * Replies to a pending permission; "gone" when it is not pending here any more (answered, expired).
-   * `directory` is the session's directory when known (permissions are pending per location).
+   * `directory` is the session's directory when known (permissions are pending per location). `message`: a
+   * reject's reason, which OpenCode gives the model as the rejection's feedback.
    */
-  replyPermission(input: { sessionID: string; requestID: string; decision: PermissionDecision; directory?: string }): Promise<unknown>
+  replyPermission(input: { sessionID: string; requestID: string; decision: PermissionDecision; message?: string; directory?: string }): Promise<unknown>
   /**
    * Answers or cancels a pending form through OpenCode's API: "gone" when it is not pending any more,
    * "unavailable" when this process cannot reach its own server (then a TUI relays it, see formActions).
@@ -776,7 +777,8 @@ export class Spoke {
         // Hubs that predate `harness` require opencodeVersion; newer ones read harness, harnessVersion, evidence.
         opencodeVersion: this.host.opencodeVersion,
         pluginVersion: this.options.pluginVersion,
-        features: SPOKE_FEATURES.filter((f) => f !== "deliver" || this.host.synthetic !== undefined),
+        // Hub messages and prompts need OpenCode's synthetic messages.
+        features: SPOKE_FEATURES.filter((f) => (f !== "deliver" && f !== "hubPrompt") || this.host.synthetic !== undefined),
         harness: HARNESS_OPENCODE,
         harnessVersion: this.host.opencodeVersion,
         evidence: "native",
@@ -925,7 +927,13 @@ export class Spoke {
         return this.turn(req.sessionID, req.text, req.voiceStyle, req.images)
       case "permission": {
         const directory = this.tracker.directoryOf(req.sessionID)
-        const outcome = await this.host.replyPermission({ sessionID: req.sessionID, requestID: req.requestID, decision: req.decision, ...(directory ? { directory } : {}) })
+        const outcome = await this.host.replyPermission({
+          sessionID: req.sessionID,
+          requestID: req.requestID,
+          decision: req.decision,
+          ...(req.message !== undefined ? { message: req.message } : {}),
+          ...(directory ? { directory } : {}),
+        })
         return outcome === "gone" ? { gone: true } : {}
       }
       case "form":
@@ -1032,7 +1040,7 @@ export class Spoke {
       const id = harnessMessageID(req.messageID)
       // Marked before sending: OpenCode may report it delivered before the call returns.
       this.origins.hub(id)
-      const admitted = await synthetic({ sessionID: req.sessionID, id, text: req.text, metadata: deliverMetadata(req), delivery: plan.delivery, resume: plan.resume })
+      const admitted = await synthetic({ sessionID: req.sessionID, id, text: deliverText(req), metadata: deliverMetadata(req), delivery: plan.delivery, resume: plan.resume })
       this.timelines.invalidate(req.sessionID)
       return { result: { delivered: plan.delivered, inboxID: typeof admitted?.id === "string" && admitted.id ? admitted.id : id }, resumed: plan.resume }
     })

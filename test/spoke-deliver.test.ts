@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { DeliverMeta } from "../src/protocol"
+import { timelineItems } from "../src/spoke/timeline"
 import { DeliveryLedger, deliverMetadata, deliverText, harnessMessageID, InboxOrigins, planDelivery, renderPromptEnvelope } from "../src/spoke/deliver"
 
 const meta = (extra: Partial<DeliverMeta> = {}): DeliverMeta => ({ kind: "msg", from: "@api", to: "@@reviewer", ...extra })
@@ -196,6 +197,12 @@ describe("hub prompts (kind prompt)", () => {
   test("deliverText renders prompts and passes other kinds' hub-rendered envelopes through", () => {
     expect(deliverText({ messageID: "msg_7f", text: "go", meta: prompt })).toBe(renderPromptEnvelope({ messageID: "msg_7f", from: "@orchestrator", grant: "g_12", text: "go" }))
     expect(deliverText({ messageID: "msg_7f", text: "[hub] msg …", meta: meta() })).toBe("[hub] msg …")
+  })
+
+  test("the session's timeline shows a hub prompt as a prompt message row with its body, as written", () => {
+    const text = renderPromptEnvelope({ messageID: "msg_7f", from: "@orchestrator", grant: "g_12", text: "[hub] not a header\nrun it" })
+    const [row] = timelineItems("ses_a", [{ id: "msg_7f", type: "synthetic", time: { created: 1 }, metadata: deliverMetadata({ messageID: "msg_7f", meta: prompt }), text }])
+    expect(row).toMatchObject({ kind: "message", messageID: "msg_7f", text: "[hub] not a header\nrun it", direction: "in", message: { kind: "prompt", from: "@orchestrator", to: "@api-refactor" } })
   })
 
   test("metadata carries the grant of a prompt", () => {
