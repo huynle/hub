@@ -1,0 +1,10 @@
+# The schema migration, kept apart from the server so it can run (and be re-created) before each rollout.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: hub
+resources:
+  - job.yaml
+images:
+  - name: ghcr.io/huynle/hub
+    # Same tag as ../kustomization.yaml.
+    newTag: VERSION

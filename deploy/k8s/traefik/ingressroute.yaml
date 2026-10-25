@@ -1,0 +1,39 @@
+# Optional: Traefik (v3) instead of ingress.yaml. Not in ../kustomization.yaml; add it to your overlay.
+#
+# What the hub needs from Traefik:
+# - No sticky sessions: leave `sticky` out of the service below (any pod serves any request).
+# - No buffering: do not attach the `buffering` middleware to this route. Traefik streams text/event-stream
+#   (SSE on /api/events and /api/agent/watch) and upgraded WebSockets (/spoke/ws) as they come.
+# - Timeouts: they are entryPoint settings, not per route. Traefik v3's default readTimeout is 60 s, the same as
+#   the longest agent long-poll (`wait` ≤ 60 s), so raise it on the websecure entryPoint, e.g. with the Helm chart:
+#
+#     ports:
+#       websecure:
+#         transport:
+#           respondingTimeouts:
+#             readTimeout: 600s
+#             writeTimeout: 0s   # 0 = no limit: SSE responses never "finish"
+#             idleTimeout: 180s
+#
+#   or the static config flags --entryPoints.websecure.transport.respondingTimeouts.readTimeout=600s (and
+#   writeTimeout, idleTimeout). The hub pings WebSockets and SSE streams every 20 s, so idle streams stay open.
+# - On a rollout, a draining pod answers /readyz with 503 and ends its streams; Traefik follows the Service's
+#   endpoints, so clients reconnect to another pod (spokes after a random 0–5 s, browsers after `retry: 2000`).
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: hub
+  labels:
+    app.kubernetes.io/name: hub
+    app.kubernetes.io/component: server
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - kind: Rule
+      match: Host(`hub.example.com`)
+      services:
+        - name: hub
+          port: http
+  tls:
+    secretName: hub-tls

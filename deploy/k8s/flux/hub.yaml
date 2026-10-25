@@ -1,0 +1,121 @@
+# Example: the hub with Flux (GitOps). Put this file in your fleet repository, applied by the Flux Kustomization
+# that manages your apps; edit the tag, host, emails and paths. It is an example, not part of ../kustomization.yaml.
+#
+# Order (dependsOn): hub-secrets → hub-migrate → hub. Each release runs the schema migration before the pods roll.
+#
+# Secrets with SOPS: keep the Secret `hub` (shape: ../secret.example.yaml) encrypted in your fleet repository,
+#   sops --encrypt --encrypted-regex '^(data|stringData)$' --age <your age recipient> --in-place hub-secret.yaml
+# and let kustomize-controller decrypt it with the age key in the flux-system Secret `sops-age`
+# (kubectl -n flux-system create secret generic sops-age --from-file=age.agekey=<key file>). Never commit the
+# plaintext or the age key.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hub
+  labels:
+    app.kubernetes.io/name: hub
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+# The hub's manifests, from its release tag.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: hub
+  namespace: flux-system
+spec:
+  interval: 1h
+  url: https://github.com/huynle/hub
+  ref:
+    tag: vVERSION
+  ignore: |
+    /*
+    !/deploy/k8s/
+---
+# Your encrypted Secret `hub` (and anything else private), from your own fleet repository.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: hub-secrets
+  namespace: flux-system
+spec:
+  interval: 1h
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./apps/hub/secrets
+  prune: true
+  targetNamespace: hub
+  decryption:
+    provider: sops
+    secretRef:
+      name: sops-age
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: hub-migrate
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: hub-secrets
+  interval: 1h
+  retryInterval: 2m
+  timeout: 10m
+  sourceRef:
+    kind: GitRepository
+    name: hub
+  path: ./deploy/k8s/migrate
+  prune: true
+  # A Job's template is immutable: re-create it when the image tag changes.
+  force: true
+  # Wait for the Job to complete, so hub (below) starts only on a migrated schema.
+  wait: true
+  images:
+    - name: ghcr.io/huynle/hub
+      newTag: VERSION
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: hub
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: hub-migrate
+  interval: 1h
+  retryInterval: 2m
+  timeout: 5m
+  sourceRef:
+    kind: GitRepository
+    name: hub
+  path: ./deploy/k8s
+  prune: true
+  wait: true
+  images:
+    - name: ghcr.io/huynle/hub
+      newTag: VERSION
+  patches:
+    - target:
+        kind: Deployment
+        name: hub
+      patch: |
+        - op: replace
+          path: /spec/template/spec/containers/0/env/1/value
+          value: https://hub.example.com
+        - op: replace
+          path: /spec/template/spec/containers/0/env/4/value
+          value: you@example.com,@example.com
+        - op: replace
+          path: /spec/template/spec/containers/0/env/5/value
+          value: you@example.com
+    - target:
+        kind: Ingress
+        name: hub
+      patch: |
+        - op: replace
+          path: /spec/rules/0/host
+          value: hub.example.com
+        - op: replace
+          path: /spec/tls/0/hosts/0
+          value: hub.example.com

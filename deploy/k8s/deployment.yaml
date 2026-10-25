@@ -1,0 +1,142 @@
+# The hub in cluster mode (docs/cluster.md): stateless pods sharing Postgres and Valkey. Any pod serves any request,
+# so the Service and the ingress need no sticky sessions, and no volume is shared between pods.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hub
+  labels:
+    app.kubernetes.io/name: hub
+    app.kubernetes.io/component: server
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hub
+      app.kubernetes.io/component: server
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Start the new pod before draining an old one.
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hub
+        app.kubernetes.io/component: server
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      # SIGTERM drains (≤ 50 s for requests in flight) after the 5 s preStop sleep: 60 s covers both.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000 # the image's `bun` user
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: hub
+              app.kubernetes.io/component: server
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: hub
+              app.kubernetes.io/component: server
+      containers:
+        - name: hub
+          # The tag is set in kustomization.yaml (images:); pin a release that has cluster mode.
+          image: ghcr.io/huynle/hub:VERSION
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 4097
+              protocol: TCP
+          env:
+            # Unique per pod: names the pod's RPC topic, its connections in the directory and its leases.
+            - name: HUB_POD_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: HUB_PUBLIC_URL
+              value: https://hub.example.com
+            - name: HUB_AUTH
+              value: oidc
+            - name: HUB_OIDC_ISSUER
+              value: https://accounts.google.com
+            - name: HUB_OIDC_ALLOWED
+              value: "you@example.com,@example.com"
+            - name: HUB_ADMIN_EMAILS
+              value: you@example.com
+            # Bun's transpiler cache would write under $HOME, which is read-only here.
+            - name: BUN_RUNTIME_TRANSPILER_CACHE_PATH
+              value: "0"
+          envFrom:
+            # HUB_DATABASE_URL, HUB_VALKEY_URL, HUB_TOKEN_KEYS, HUB_OIDC_CLIENT_ID, HUB_OIDC_CLIENT_SECRET
+            # (see secret.example.yaml; create the Secret yourself, never commit its values).
+            - secretRef:
+                name: hub
+          readinessProbe:
+            # 503 while draining or while Postgres or Valkey does not answer within 2 s.
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          livenessProbe:
+            # The process only: a database outage must not restart every pod.
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            timeoutSeconds: 3
+            failureThreshold: 30
+          lifecycle:
+            preStop:
+              # Lets endpoints and the ingress stop sending new requests here before the drain starts.
+              exec:
+                command: ["sleep", "5"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # HUB_STATE_DIR (/data in the image). Cluster mode keeps no state there (state is in Postgres and the
+            # token keys come from HUB_TOKEN_KEYS); it stays writable for anything a release may put there.
+            - name: state
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: state
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
