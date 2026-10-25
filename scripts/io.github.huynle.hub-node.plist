@@ -1,17 +1,21 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Template: keep `hub node` running on macOS (launchd). Not installed by anything.
+  Template: keep `hub node` running on macOS (launchd).
   The node prepares launch workspaces for the hub. It needs an enrolled machine (the plugin's /hub dialog writes
   the machine token to ~/.config/hub/config.json, which the node only reads) and ~/.config/hub/node.json with at
   least {"workspaceRoots": ["/Users/you/projects"]} (optional: "labels", "slots", "memoryMB").
-  Install (replace __REPO__ and __HOME__ first):
-    sed -e "s|__REPO__|$PWD|g" -e "s|__HOME__|$HOME|g" scripts/io.github.huynle.hub-node.plist \
-      > ~/Library/LaunchAgents/io.github.huynle.hub-node.plist
+  Install: `hub node install` writes this file to ~/Library/LaunchAgents with the real paths (the runtime running
+  the CLI and the CLI's entry) and prints the launchctl commands to load it; it never runs them. Add the dry-run
+  flag to only print. By hand (replace __RUNTIME__, __ENTRY__ and __HOME__ first):
+    sed -e "s|__RUNTIME__|$HOME/.bun/bin/bun|" -e "s|__ENTRY__|$PWD/packages/cli/src/main.ts|" -e "s|__HOME__|$HOME|g" \
+      scripts/io.github.huynle.hub-node.plist > ~/Library/LaunchAgents/io.github.huynle.hub-node.plist
+    mkdir -p ~/.local/state/hub
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.github.huynle.hub-node.plist
-  Remove:
+  Remove: `hub node uninstall`, or
     launchctl bootout gui/$(id -u)/io.github.huynle.hub-node && rm ~/Library/LaunchAgents/io.github.huynle.hub-node.plist
   Exit 78 means node.json gives the node nothing to do (no workspaceRoots): fix it, then kickstart the agent.
+  BUN_BE_BUN=1 lets an OpenCode binary act as bun; the CLI removes it from its own environment.
 -->
 <plist version="1.0">
 <dict>
@@ -19,13 +23,17 @@
   <string>io.github.huynle.hub-node</string>
   <key>ProgramArguments</key>
   <array>
-    <string>__HOME__/.bun/bin/bun</string>
-    <string>__REPO__/packages/node/src/main.ts</string>
+    <string>__RUNTIME__</string>
+    <string>__ENTRY__</string>
+    <string>node</string>
+    <string>run</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
     <string>__HOME__/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>BUN_BE_BUN</key>
+    <string>1</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
