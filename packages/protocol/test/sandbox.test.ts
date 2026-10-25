@@ -144,3 +144,19 @@ describe("launch phases and the sandbox feature", () => {
     for (const op of ["prepare", "collect", "cleanup", "cancel"]) expect(P.nodeRequestFeature({ op })).toBeUndefined()
   })
 })
+
+describe("spoke hello launchID", () => {
+  const spokeHello = { t: "hello", v: protocol.PROTOCOL_VERSION, processID: "p1", kind: "service", directory: "/sandbox/work", pid: 42, mode: "always", opencodeVersion: "2.0.25", pluginVersion: "0.1.0", harness: "opencode" }
+
+  test("a spoke started for a launch names it in its hello; a hello without one is unchanged", () => {
+    const hello = { ...spokeHello, launchID: "lch_1" }
+    expect(protocol.parseSpokeMessage(j(hello))).toEqual(hello as any)
+    const typed: protocol.Hello = hello as protocol.Hello
+    expect(typed.launchID).toBe("lch_1")
+    expect(protocol.parseSpokeMessage(j(spokeHello))).toEqual(spokeHello as any)
+  })
+
+  test("launchID is a plain id", () => {
+    for (const launchID of ["", "a b", 5, "x".repeat(301), null]) expect(protocol.parseSpokeMessage(j({ ...spokeHello, launchID }))).toBeUndefined()
+  })
+})

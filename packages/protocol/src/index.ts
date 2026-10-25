@@ -278,6 +278,11 @@ export interface Hello {
   readonly harnessVersion?: string
   /** How the spoke observes activity (EVIDENCE_LEVELS); a level this hub does not know counts as "unknown". */
   readonly evidence?: string
+  /**
+   * The launch this spoke was started for (a harness the node runs in a sandbox, connecting with a launch-bound
+   * token). Absent for ordinary spokes; hubs that predate it ignore it.
+   */
+  readonly launchID?: string
 }
 
 export const HARNESS_OPENCODE = "opencode"
@@ -966,7 +971,8 @@ export function parseSpokeMessage(raw: string | Buffer): SpokeMessage | undefine
         (m.features === undefined || featureList(m.features)) &&
         (m.harness === undefined || token(m.harness, 64)) &&
         (m.harnessVersion === undefined || (str(m.harnessVersion) && m.harnessVersion.length <= 100)) &&
-        (m.evidence === undefined || token(m.evidence, 32))
+        (m.evidence === undefined || token(m.evidence, 32)) &&
+        (m.launchID === undefined || (str(m.launchID) && ID.test(m.launchID)))
         ? (m as unknown as Hello)
         : undefined
     case "sessions":
