@@ -1,6 +1,7 @@
 // The spoke's use of the local hub starter: only for loopback servers with autoStartLocalHub on, the
 // service process at once and standalone processes after a grace delay, a cooldown after failures,
 // and an immediate reconnect once the hub answers. Enrolling against a local server starts it too.
+import { networkInterfaces } from "node:os"
 import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -9,6 +10,16 @@ import { defaults, writeConfig, type VoiceConfig } from "../src/config"
 import type { LocalHubResult } from "../src/spoke/localhub"
 import { Spoke, type SpokeHost, type SpokeOptions } from "../src/spoke/spoke"
 import { EventQueue, fakeCentral, freePort, until, type FakeCentral } from "./spoke-fake"
+
+/**
+ * A server URL that is not loopback and fails fast without DNS: port 1 on this machine's first external IPv4
+ * address (connection refused at once). A .invalid hostname would depend on the resolver, and some (e.g.
+ * Tailscale MagicDNS) take seconds to answer for it.
+ */
+const REMOTE = (() => {
+  const address = Object.values(networkInterfaces()).flat().find((i) => i && i.family === "IPv4" && !i.internal)?.address
+  return `http://${address ?? "192.0.2.1"}:1`
+})()
 
 const cleanups: Array<() => void> = []
 afterEach(() => {
@@ -107,7 +118,7 @@ describe("auto-start on connection failure", () => {
 
   test("never for a server that is not loopback", async () => {
     const s = starter()
-    const { spoke } = setup({ server: "http://voice.invalid:1", mode: "always", token: "tok" }, { localHub: s.fn, backoff: { minMs: 10, maxMs: 20 } })
+    const { spoke } = setup({ server: REMOTE, mode: "always", token: "tok" }, { localHub: s.fn, backoff: { minMs: 10, maxMs: 20 } })
     await until(() => spoke.status().connection === "error")
     await Bun.sleep(150)
     expect(s.calls).toHaveLength(0)
@@ -215,7 +226,7 @@ describe("enroll with a local server", () => {
 
   test("a remote server is never started", async () => {
     const s = starter()
-    const { spoke } = setup({ server: "http://voice.invalid:1" }, { localHub: s.fn })
+    const { spoke } = setup({ server: REMOTE }, { localHub: s.fn })
     await expect(spoke.enroll()).rejects.toMatchObject({ name: "unreachable" })
     expect(s.calls).toHaveLength(0)
   })
