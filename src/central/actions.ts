@@ -3,6 +3,8 @@
 // returns an outcome instead of an HTTP response, so every caller maps it to its own errors (the console answers
 // gone with 409, the agent API with 410) and adds its own checks (grants, audit) around the same execution.
 import type { FormAnswer, PermissionDecision, PromptImage, ResultFor, TurnResult } from "../protocol"
+import { MemoryKv } from "./backend/memory-kv"
+import type { Kv } from "./backend/types"
 import type { Registry } from "./registry"
 import type { SpokeHub } from "./spoke-ws"
 
@@ -18,6 +20,8 @@ export interface ActionDeps {
   readonly spokes: ActionSpokes
   /** The user prompted the session: its message hop chain starts over (never fails). */
   readonly humanTurn: (sessionID: string) => Promise<void>
+  /** Where requests answered through the hub are recorded (default: this process; Valkey in a cluster). */
+  readonly kv?: Kv
 }
 
 /** The action ran. */
@@ -87,36 +91,30 @@ const STOPPED: TurnResult = { outcome: "interrupted", message: "Stopped", reply:
 
 /** How long a request answered through the hub stays answered when its harness never reports the reply. */
 const ANSWERED_MS = 10 * 60_000
-const ANSWERED_MAX = 1000
+const answeredKey = (requestID: string) => `action:answered:${requestID}`
 
-export function createActions({ registry, spokes, humanTurn }: ActionDeps): Actions {
-  // Requests this hub answered, so a second answer is gone even before (or without) permission.replied.
-  const answered = new Map<string, number>()
-  const markAnswered = (requestID: string) => {
-    const now = Date.now()
-    for (const [id, at] of answered) if (now - at > ANSWERED_MS || answered.size >= ANSWERED_MAX) answered.delete(id)
-    answered.set(requestID, now)
-  }
+export function createActions({ registry, spokes, humanTurn, kv = new MemoryKv() }: ActionDeps): Actions {
   return {
     async answerPermission({ rootID, requestID, decision, message }) {
-      const at = answered.get(requestID)
-      if (at !== undefined && Date.now() - at <= ANSWERED_MS) return GONE
+      if ((await kv.get(answeredKey(requestID))) !== undefined) return GONE
       const targets = registry.permissionTargets(rootID, requestID)
       if (!targets.length) return GONE
+      // Requests answered through the hub (on any pod) are gone for a second answer, even before (or without)
+      // permission.replied; claimed before sending, so two pods racing never both send it.
+      if (!(await kv.set(answeredKey(requestID), "1", { px: ANSWERED_MS, nx: true }))) return GONE
       // Try every process that saw the request: only the one (and the location) running the session holds it.
       let failure: unknown
       for (const target of targets) {
         try {
           const result = await spokes.request(target.connID, { op: "permission", sessionID: target.sessionID, requestID, decision, ...(message !== undefined ? { message } : {}) })
-          if (!result?.gone) {
-            markAnswered(requestID)
-            return DONE
-          }
+          if (!result?.gone) return DONE
         } catch (cause) {
           // Older spokes pass OpenCode's "Permission request not found" through as an error.
           if (!/not found/i.test(cause instanceof Error ? cause.message : String(cause))) failure ??= cause
         }
       }
+      // Nobody took it: the claim goes, so a later answer (here or on another pod) is tried again.
+      await kv.del(answeredKey(requestID))
       if (failure) throw failure
       registry.dropPermission(requestID)
       return GONE

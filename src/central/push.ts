@@ -4,6 +4,8 @@
 // transcript beyond one spoken text or a short reason, shortened. Each device picks the kinds it wants, may set quiet
 // hours, and users mute sessions.
 import webpush from "web-push"
+import { MemoryKv } from "./backend/memory-kv"
+import type { Kv } from "./backend/types"
 import { type PushPrefs, type PushTarget, type QuietHours, type Store, type VapidKeys } from "./store"
 
 export { DEFAULT_PUSH_PREFS, type PushPrefs } from "./store"
@@ -99,6 +101,7 @@ export const URGENT_TTL_SECONDS = 3600
 /** One test notification per device in this window. */
 export const TEST_COOLDOWN_MS = 10_000
 const SEND_TIMEOUT_MS = 10_000
+const COOL_KEY = (key: string) => `push:cool:${key}`
 const MAX_NAME = 60
 
 const webPushSender: PushSender = (target, payload, options) =>
@@ -112,6 +115,8 @@ export interface PushOptions {
   readonly now?: () => number
   /** Timers for delayed activity digests (tests). */
   readonly timers?: { set(fn: () => void, ms: number): unknown; clear(handle: unknown): void }
+  /** Cooldowns (default: this process, on `now`; Valkey in a cluster, so pods share them). */
+  readonly kv?: Kv
 }
 
 /** One step of interest in a session tree, for activity updates. */
@@ -267,9 +272,12 @@ export class Push {
   private readonly subject: string
   private readonly sender: PushSender
   private readonly now: () => number
-  /** `session kind` → when it was last sent and how long it cools down. */
-  private readonly lastSent = new Map<string, { at: number; cooldown: number }>()
-  /** `device session` → the activity digest being collected. */
+  /** Cooldowns: `push:cool:<session kind>` / `push:cool:test <device>` → when it was sent, expiring with the cooldown. */
+  private readonly kv: Kv
+  /**
+   * `device session` → the activity digest being collected. Kept in this process: activity is reported by the
+   * pod holding the session's connection.
+   */
   private readonly digests = new Map<string, Digest>()
   private readonly timers: NonNullable<PushOptions["timers"]>
 
@@ -279,6 +287,7 @@ export class Push {
     this.sender = options.sender ?? webPushSender
     this.now = options.now ?? Date.now
     this.timers = options.timers ?? realTimers
+    this.kv = options.kv ?? new MemoryKv({ now: this.now })
   }
 
   /**
@@ -364,7 +373,7 @@ export class Push {
   async notify(kind: NotificationKind, sessionID: string, title: string, body?: string, ownerID?: string, extra?: PushExtra): Promise<number> {
     const precise = kind
     const key = `${sessionID}\n${precise}${extra?.key ? `\n${extra.key}` : ""}`
-    if (!this.cool(key, precise === "say" ? SAY_COOLDOWN_MS : PUSH_COOLDOWN_MS)) return 0
+    if (!(await this.cool(key, precise === "say" ? SAY_COOLDOWN_MS : PUSH_COOLDOWN_MS))) return 0
     const owners = new Map(this.store.devices().map((d) => [d.id, d.ownerID]))
     const at = this.now()
     const muted = new Map<string, boolean>()
@@ -393,11 +402,11 @@ export class Push {
    */
   async test(deviceID: string, kind?: NotificationKind): Promise<PushTestResult> {
     const key = `test\n${deviceID}`
-    const last = this.lastSent.get(key)
-    if (last && this.now() - last.at < last.cooldown) {
-      return { limited: true, retryAfter: Math.ceil((last.cooldown - (this.now() - last.at)) / 1000) }
+    if (!(await this.cool(key, TEST_COOLDOWN_MS))) {
+      const at = Number(await this.kv.get(COOL_KEY(key)))
+      const left = Number.isFinite(at) ? TEST_COOLDOWN_MS - (this.now() - at) : TEST_COOLDOWN_MS
+      return { limited: true, retryAfter: Math.max(1, Math.ceil(left / 1000)) }
     }
-    this.cool(key, TEST_COOLDOWN_MS)
     const targets = this.store.pushSubscriptions().filter((s) => s.deviceID === deviceID)
     const payload: PushPayload = kind
       ? { ...pushPayload(kind, "", "Test session", `Test: this is how “${NOTIFICATION_LABELS[kind]}” looks on this device.`, { subject: TEST_SUBJECT[kind] }), test: true }
@@ -435,13 +444,9 @@ export class Push {
     return { delivered, failed }
   }
 
-  /** True (and records the send) when (session, kind) is outside its cooldown. */
-  private cool(key: string, cooldown: number): boolean {
-    const t = this.now()
-    for (const [k, sent] of this.lastSent) if (t - sent.at >= sent.cooldown) this.lastSent.delete(k)
-    if (this.lastSent.has(key)) return false
-    this.lastSent.set(key, { at: t, cooldown })
-    return true
+  /** True (and records the send, SET NX PX: one pod wins) when `key` is outside its cooldown. */
+  private cool(key: string, cooldown: number): Promise<boolean> {
+    return this.kv.set(COOL_KEY(key), String(this.now()), { px: cooldown, nx: true })
   }
 
   /** The stored keys; the first call generates a pair (when pods race, every pod gets the pair stored first). */
