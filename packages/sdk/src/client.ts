@@ -22,6 +22,10 @@ import type {
   GrantRequestSpec,
   GrantSpec,
   Inbox,
+  LaunchCreated,
+  LaunchSpec,
+  LaunchState,
+  LaunchView,
   LogRow,
   Named,
   PromptDelivery,
@@ -95,6 +99,24 @@ export interface SessionsFilter extends CallOptions {
   readonly machine?: string
   /** `key=value` labels, all of which must match. */
   readonly label?: readonly string[]
+}
+
+export interface LaunchesFilter extends CallOptions {
+  /** One state or several (sent comma-separated). */
+  readonly state?: LaunchState | readonly LaunchState[]
+  /** `key=value` launch labels, all of which must match. */
+  readonly label?: readonly string[]
+}
+
+/** hub.launches: start sessions (users; app tokens with sessions:launch and a launch grant; sessions by act token). */
+export interface Launches {
+  /** Starts a launch; the same key and body again answers the same launch (created false). */
+  create(spec: LaunchSpec, options?: CallOptions): Promise<LaunchCreated>
+  /** The caller's launches, oldest first (apps and sessions: only those they started). */
+  list(filter?: LaunchesFilter): Promise<{ launches: LaunchView[] }>
+  get(id: string, options?: CallOptions): Promise<{ launch: LaunchView }>
+  /** Ends a launch (outcome stopped); one that already ended is gone (HubError). */
+  stop(id: string, options?: CallOptions): Promise<{ launch: LaunchView }>
 }
 
 export interface TargetOptions extends CallOptions {
@@ -172,6 +194,21 @@ export class HubClient {
   readonly #token: string
   readonly #fetch: Fetch
 
+  /** Launches (design §6.1): create, list, get, stop. */
+  readonly launches: Launches = {
+    create: async (spec, options = {}) => {
+      const response = await this.request("POST", `${AGENT}/launches`, { body: spec, ...signalOf(options) })
+      const body = (await this.#json(response, `${AGENT}/launches`)) as { launch: LaunchView }
+      return { launch: body.launch, created: response.status === 201 }
+    },
+    list: (filter = {}) => {
+      const state = typeof filter.state === "string" ? filter.state : filter.state?.join(",")
+      return this.call("GET", `${AGENT}/launches`, { query: { state, label: filter.label }, ...signalOf(filter) })
+    },
+    get: (id, options = {}) => this.call("GET", `${AGENT}/launches/${segment(id)}`, signalOf(options)),
+    stop: (id, options = {}) => this.call("DELETE", `${AGENT}/launches/${segment(id)}`, signalOf(options)),
+  }
+
   constructor(options: HubClientOptions) {
     this.url = options.url
     this.#base = options.url.replace(/\/+$/, "")
@@ -214,10 +251,14 @@ export class HubClient {
   async call<T = unknown>(method: string, pathname: string, options: RequestOptions = {}): Promise<T> {
     const response = await this.request(method, pathname, options)
     if (response.status === 204) return undefined as T
+    return (await this.#json(response, `${pathname}${queryString(options.query)}`)) as T
+  }
+
+  async #json(response: Response, target: string): Promise<unknown> {
     try {
-      return (await response.json()) as T
+      return await response.json()
     } catch (cause) {
-      throw new HubTransportError("bad_response", `the hub at ${this.url} did not answer JSON for ${pathname}${queryString(options.query)}`, { cause })
+      throw new HubTransportError("bad_response", `the hub at ${this.url} did not answer JSON for ${target}`, { cause })
     }
   }
 

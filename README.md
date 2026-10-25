@@ -564,6 +564,14 @@ hub grant create --holder <h> --project <path>... --allow approve,deny,… [--pe
          [--expires 8h] [--max-per-hour N] [--allow-always] | --json '{…}'
 hub grant request --project <path>... --allow approve,deny,… [--permission-allow <pattern>]... [--never <pattern>]...
          [--holder <@@role you hold>] --why "…"     (agents) ask the user for a grant
+hub launch [--repo <path>] [--mode worktree|checkout|clone] [--branch B] [--base B] [--remote URL]
+         [--name <@name>] [--role R]... [--harness H] [--agent A] [--model provider/model]
+         [--runtime host|openshell [--profile P]] [--machine M] [--node-label k=v]... [--prefer]
+         [--label k=v]... [--prompt "text" | --prompt -] [--end idle|asked|never] [--timeout 4h]
+         [--cleanup keep|remove] [--key K]          start a session on a hub node
+hub launches list [--state S[,S]] [--label k=v]... · hub launches show <id> · hub launches stop <id>
+hub node run                              the node daemon on this machine, until Ctrl-C or SIGTERM
+hub node install [--dry-run] · hub node uninstall [--dry-run] · hub node status
 hub mcp                                   an MCP server on stdio (see below)
 hub login [--url URL] [--token APP_TOKEN] · hub logout
 hub help · hub --version
@@ -606,6 +614,37 @@ instead (a session, or an app token with `messages:send`): the same flags, the h
 and a `--why` the user reads; it prints the Decision it opened, and the user's answer comes back as a reply. See
 [Agent actions and grants](#agent-actions-and-grants).
 
+**Launching.** `hub launch` starts a session on a machine running `hub node` (design §6): the flags become the
+body of `POST /api/agent/launches`, with only the given fields (the hub fills in its defaults: harness `opencode`,
+mode `worktree` — which needs `--branch` and uses `<repo>/.worktrees/<branch>` —, runtime `host`, end `idle`,
+cleanup `keep`). `--repo` defaults to the working directory and relative paths resolve against it; the path is the
+repository on the node and must be under that node's workspace roots. `--label k=v` tags the launch for apps
+(`hub launches list --label brain.task=abc` finds it again); `--node-label k=v` and `--machine` pick nodes, required
+unless `--prefer`. `--prompt -` reads the first prompt from stdin. `--key` makes retries safe: the same key and
+flags answer the existing launch (`… was already launched with key …`), the same key with other flags is invalid
+(exit 2). It prints the launch and its state (`queued`, `placing`, `provisioning`, `running` with the session,
+`ended` with an outcome: `idle`, `needs_user`, `failed`, `timeout`, `stopped`, `lost`); `hub launches show` adds the
+workspace, steps and artifacts (branch, head, commits). `hub launches stop` ends a launch (`stopped`); one that
+already ended exits 8 (`gone`). The user may always launch; an app token needs scope `sessions:launch` **and** a
+grant with verb `launch` covering the repo (exit 5 otherwise; the kill switch pauses it); sessions launch only
+through the OpenCode `hub` tool's act token. Apps and sessions see and stop only the launches they started.
+Too many launches exit 6 with the retry time. Apps that register a webhook verify its `Hub-Signature` with the
+SDK's `verifyWebhook({body, headers, secret})` (HMAC-SHA256 of `<t>.<raw body>`, compared in constant time,
+timestamps older than 5 minutes refused).
+
+**hub node.** `hub node run` is the per-machine daemon that prepares launch workspaces: it needs an enrolled
+machine (it only reads the machine token in `~/.config/hub/config.json`) and `~/.config/hub/node.json` with at
+least `{"workspaceRoots": ["/Users/you/projects"]}` (optional `labels`, `slots`, `memoryMB`); it exits 1 when the
+machine is not enrolled, 78 when there are no workspace roots, and 0 on SIGINT/SIGTERM. `hub node install` writes a
+launchd agent (macOS, `~/Library/LaunchAgents/io.github.huynle.hub-node.plist`) or a systemd user unit (Linux,
+`~/.config/systemd/user/hub-node.service`) from the templates in `scripts/`, with the runtime and CLI entry running
+the command (so `hubctl node install` from a hub session runs the bundle with the OpenCode binary) and
+`HUB_SPOKE_CONFIG` / `XDG_CONFIG_HOME` when set, and **prints** the `launchctl` / `systemctl` commands that load it;
+hub never runs them. `--dry-run` prints the file without writing it; a second install says it is up to date (or
+updates it), and warns when the node would not run yet. `hub node uninstall` removes the file and prints the
+commands that stop the service; `hub node status` shows the file (up to date or not), the enrolment (never the
+token), node.json and the commands to inspect the service.
+
 **Credentials.** `HUB_URL` + `HUB_SESSION_TOKEN` (the spoke sets them in each session's shells; the CLI then
 acts as that session) win over the login file. Outside a session, `hub login --url https://hub.example` stores
 an app token in `~/.config/hub/cli.json` (`$XDG_CONFIG_HOME` respected; mode 0600) after checking it with
@@ -637,9 +676,13 @@ transport; protocol revisions `2025-06-18`, `2025-03-26` and `2024-11-05`), and 
 `tools/list` and `tools/call`; notifications (`notifications/initialized`, `notifications/cancelled`, which aborts
 the call) get no answer, other methods answer `-32601`. Its tools are the CLI's verbs: `whoami`, `status`,
 `sessions`, `show`, `log`, `who`, `msg`, `ask`, `reply`, `decline`, `inbox` and the act verbs `approve`, `deny`,
-`answer` (`answer` object or `cancel`), `prompt` (`delivery`) and `stop`, with the same arguments
+`answer` (`answer` object or `cancel`), `prompt` (`delivery`) and `stop`, and the launch tools `launch` (`repo`
+required and absolute; `mode`, `branch`, `base`, `remote`, `key`, `name`, `roles`, `harness`, `agent`, `model`,
+`runtime`, `profile`, `machine`, `nodeLabels` and `labels` objects, `prefer`, `prompt`, `end`, `timeout`,
+`cleanup`), `launches` (`state`, `label`), `launch_show` and `launch_stop` (`id`), with the same arguments
 (`to`, `text`, `addr`, `id`, `requestID`, `formID`, `why`, `n`, `wake`, `urgent`, `all`, `project`, `role`, …). The act
-tools need an app token with scope `sessions:act` and a grant; `needs_user` results include the evaluation. `ask` takes `wait` of at
+tools need an app token with scope `sessions:act` and a grant, the launch tools scope `sessions:launch` and a
+launch grant; `needs_user` results include the evaluation. `ask` takes `wait` of at
 most 60 s (one long poll; a longer wait is cut to 60) and `expires` in seconds or as `2h`. Answers are the CLI's
 short text; messages and answers from other sessions come in the hub's envelope and are marked as not from the
 user. Hub errors are tool results with `isError: true` and the hub's `code: message` (plus candidates and hint),

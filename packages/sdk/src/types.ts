@@ -374,3 +374,85 @@ export interface GrantRequested {
   readonly message: AgentMessage
   readonly decision: Decision
 }
+
+// Launches (design §6.1; packages/protocol/src/launch.ts is the wire source of truth, kept in step by the tests).
+
+export type LaunchState = "queued" | "placing" | "provisioning" | "running" | "ended"
+export type LaunchOutcome = "idle" | "needs_user" | "failed" | "timeout" | "stopped" | "lost"
+export type WorkspaceMode = "worktree" | "checkout" | "clone"
+export type RuntimeKind = "host" | "openshell"
+export type PlacementMode = "require" | "prefer"
+export type LaunchEndWhen = "idle" | "asked" | "never"
+export type CleanupPolicy = "keep" | "remove"
+
+/** POST /api/agent/launches: what to start, where, and when it ends. Unset fields take the hub's defaults. */
+export interface LaunchSpec {
+  /** Idempotency key: the same key and body return the same launch (another body: invalid). */
+  readonly key?: string
+  /** The session's @name (without the @). */
+  readonly name?: string
+  readonly roles?: readonly string[]
+  /** Default opencode. */
+  readonly harness?: string
+  readonly agent?: string
+  /** "provider/model". */
+  readonly model?: string
+  readonly workspace: {
+    /** Absolute path on the node: the repository (worktree, checkout) or where the clone goes. */
+    readonly repo: string
+    /** Default worktree (`<repo>/.worktrees/<branch>`; needs branch). */
+    readonly mode?: WorkspaceMode
+    readonly branch?: string
+    readonly base?: string
+    /** https or ssh; required for clone. */
+    readonly remote?: string
+  }
+  readonly runtime?: { readonly kind: RuntimeKind; readonly profile?: string }
+  readonly placement?: { readonly labels?: Readonly<Record<string, string>>; readonly machine?: string; readonly mode?: PlacementMode }
+  readonly prompt?: string
+  /** Free-form; never interpreted by the hub (find launches and sessions by them). */
+  readonly labels?: Readonly<Record<string, string>>
+  readonly end?: { readonly when?: LaunchEndWhen; readonly timeout?: string; readonly cleanup?: CleanupPolicy }
+}
+
+export interface LaunchStep {
+  readonly state: LaunchState
+  readonly reason: string
+  readonly at: number
+  readonly outcome?: LaunchOutcome
+}
+
+export interface LaunchArtifacts {
+  readonly branch?: string
+  readonly base?: string
+  readonly head?: string
+  readonly commits?: number
+  readonly dirty?: boolean
+}
+
+/** A launch as the hub reports it (the spec with its defaults filled in). */
+export interface LaunchView {
+  readonly id: string
+  readonly state: LaunchState
+  readonly reason: string
+  readonly spec: LaunchSpec
+  /** ms epoch */
+  readonly created: number
+  /** When it entered its state. */
+  readonly updated: number
+  /** Who launched it: `user`, `app:<token id>` or a session ID. */
+  readonly by?: string
+  readonly machineID?: string
+  readonly directory?: string
+  readonly sessionID?: string
+  readonly name?: string
+  readonly outcome?: LaunchOutcome
+  readonly artifacts?: LaunchArtifacts
+  readonly history: readonly LaunchStep[]
+}
+
+/** POST /api/agent/launches: the launch, and whether it is new (false: the same key again). */
+export interface LaunchCreated {
+  readonly launch: LaunchView
+  readonly created: boolean
+}
