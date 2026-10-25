@@ -1,0 +1,115 @@
+# Default deny for the namespace, then only what the hub needs. Adjust the selectors to your cluster:
+# - the ingress controller's namespace (here `ingress-nginx`; `traefik` or `kube-system` for Traefik installs);
+# - where Postgres and Valkey run (here pods in the `databases` namespace; use ipBlock for managed services).
+# Pods never talk to each other directly: cross-pod messages go through Valkey.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  labels:
+    app.kubernetes.io/name: hub
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hub-server
+  labels:
+    app.kubernetes.io/name: hub
+    app.kubernetes.io/component: server
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: hub
+      app.kubernetes.io/component: server
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    # HTTP, SSE and WebSockets through the ingress controller only (kubelet probes are not subject to this on most CNIs).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: 4097
+          protocol: TCP
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: databases
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgresql
+      ports:
+        - port: 5432
+          protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: databases
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: valkey
+      ports:
+        - port: 6379
+          protocol: TCP
+    # HTTPS out: the OIDC issuer, web push services, speech providers, launch webhooks. Private ranges stay closed;
+    # open them if your issuer, speech server or webhook receivers (agents.webhooks.allowPrivate) live there.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+      ports:
+        - port: 443
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hub-migrate
+  labels:
+    app.kubernetes.io/name: hub
+    app.kubernetes.io/component: migrate
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: hub
+      app.kubernetes.io/component: migrate
+  policyTypes: ["Ingress", "Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: databases
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgresql
+      ports:
+        - port: 5432
+          protocol: TCP

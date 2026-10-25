@@ -1,0 +1,19 @@
+# The hub in cluster mode (docs/cluster.md). `kubectl kustomize deploy/k8s` renders it; nothing here is applied for
+# you. Order: namespace.yaml, the Secret `hub` (secret.example.yaml), the migrate Job (migrate/), then this. The
+# Namespace is not listed below so that exactly one owner manages it (the migrate Job needs it first; with Flux,
+# the parent that applies flux/hub.yaml owns it). Replace the example host, emails and selectors first.
+# Optional: traefik/ingressroute.yaml instead of ingress.yaml; flux/hub.yaml for GitOps.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: hub
+resources:
+  - deployment.yaml
+  - service.yaml
+  - pdb.yaml
+  - networkpolicy.yaml
+  - ingress.yaml
+images:
+  - name: ghcr.io/huynle/hub
+    # A released version with cluster mode (release tags are X.Y.Z and X.Y); better, also pin its digest:
+    # digest: sha256:…
+    newTag: VERSION

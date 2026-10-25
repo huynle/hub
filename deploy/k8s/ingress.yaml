@@ -1,0 +1,35 @@
+# Example Ingress (ingress-nginx annotations). The hub needs:
+# - WebSockets on /spoke/ws (spokes and `hub node`) and SSE on /api/events and /api/agent/watch: long read/send
+#   timeouts (the hub pings every 20 s, so anything above 60 s keeps idle streams open) and no response buffering;
+# - plain requests up to about 60 s (agent long-polls `wait` ≤ 60 s): a read timeout of at least 120 s;
+# - no sticky sessions (any pod serves any request; a drained pod's clients reconnect elsewhere).
+# Traefik users: see traefik/ingressroute.yaml instead.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hub
+  labels:
+    app.kubernetes.io/name: hub
+    app.kubernetes.io/component: server
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-body-size: 16m
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: ["hub.example.com"]
+      secretName: hub-tls
+  rules:
+    - host: hub.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: hub
+                port:
+                  name: http

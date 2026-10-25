@@ -1,0 +1,60 @@
+# Applies the Postgres schema (`hub-server migrate`: idempotent, under an advisory lock, safe to run twice). Run it
+# before the pods of a new release start: pods never migrate and refuse an outdated schema. A Job's pod template is
+# immutable, so re-create the Job for each release (Flux: `force: true`, see ../flux/hub.yaml).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: hub-migrate
+  labels:
+    app.kubernetes.io/name: hub
+    app.kubernetes.io/component: migrate
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hub
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: ghcr.io/huynle/hub:VERSION
+          imagePullPolicy: IfNotPresent
+          command: ["bun", "bin/hub.ts", "migrate"]
+          env:
+            - name: HUB_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: hub
+                  key: HUB_DATABASE_URL
+            - name: BUN_RUNTIME_TRANSPILER_CACHE_PATH
+              value: "0"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi
