@@ -2,13 +2,14 @@
 // and the published @huynle/hub ships its sources, so the plugin can import it by relative path (it cannot import
 // packages/cli/src, which is not shipped).
 import { describe, expect, test } from "bun:test"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readdirSync, readFileSync } from "node:fs"
 import path from "node:path"
 
 const root = path.join(import.meta.dir, "..")
 const json = (file: string) => JSON.parse(readFileSync(path.join(root, file), "utf8"))
 const main = json("package.json")
 const pkgFile = path.join(root, "packages", "sdk", "package.json")
+const cliSrc = path.join(root, "packages", "cli", "src")
 
 describe("sdk workspace package", () => {
   test("is private, ESM, at the hub's version, and exports its TypeScript source", () => {
@@ -35,5 +36,16 @@ describe("sdk workspace package", () => {
     const tsconfig = json("tsconfig.json")
     expect(tsconfig.include).toContain("packages/sdk/src")
     expect(tsconfig.include).toContain("packages/sdk/test")
+  })
+
+  test("the CLI talks to the hub only through the SDK, imported by relative path", () => {
+    const all = readdirSync(cliSrc)
+      .filter((f) => f.endsWith(".ts"))
+      .map((f) => readFileSync(path.join(cliSrc, f), "utf8"))
+      .join("\n")
+    expect(all).toContain('from "../../sdk/src/index.ts"')
+    expect(all).not.toContain("@huynle/hub-sdk")
+    expect(all).not.toMatch(/\bfetch\(/)
+    expect(all).not.toContain("class SseParser")
   })
 })
