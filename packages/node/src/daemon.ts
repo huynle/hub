@@ -144,6 +144,10 @@ export class NodeDaemon {
         tracked.abort.abort()
         return { cancelled: true }
       }
+      // Feature "sandbox" (not announced yet): the hub sends start and stop only to nodes that announce it.
+      case "start":
+      case "stop":
+        throw new RuntimeError(`this node does not serve ${req.op} (no "sandbox" feature)`)
     }
   }
 

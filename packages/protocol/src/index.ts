@@ -11,13 +11,13 @@
 // Modules: launch.ts (launch vocabulary and workspace checks), node.ts (the `hub node` hello, frames and ops on the
 // same socket), webhook.ts (webhook signature format), wire.ts (shared frame primitives). All are re-exported here.
 
-import { featureList, ID, isByeFrame as isBye, isObj, isResFrame as isRes, isWelcomeFrame, MAX_FRAME, nonEmpty, num, parseFrame as parse, str, token, UNSAFE_CHARS } from "./wire.ts"
+import { featureList, HUB_URL_MAX_CHARS, ID, isByeFrame as isBye, isHubURL, isObj, isResFrame as isRes, isWelcomeFrame, MAX_FRAME, nonEmpty, num, parseFrame as parse, str, token, UNSAFE_CHARS } from "./wire.ts"
 import type { NodeMessage, NodeServerMessage } from "./node.ts"
 
 export * from "./launch.ts"
 export * from "./node.ts"
 export * from "./webhook.ts"
-export { MAX_FRAME }
+export { HUB_URL_MAX_CHARS, isHubURL, MAX_FRAME }
 
 export const PROTOCOL_VERSION = 1
 
@@ -278,6 +278,11 @@ export interface Hello {
   readonly harnessVersion?: string
   /** How the spoke observes activity (EVIDENCE_LEVELS); a level this hub does not know counts as "unknown". */
   readonly evidence?: string
+  /**
+   * The launch this spoke was started for (a harness the node runs in a sandbox, connecting with a launch-bound
+   * token). Absent for ordinary spokes; hubs that predate it ignore it.
+   */
+  readonly launchID?: string
 }
 
 export const HARNESS_OPENCODE = "opencode"
@@ -394,8 +399,6 @@ export interface SessionToken {
 export const SESSION_TOKENS_MAX = 500
 /** Longest session token: printable ASCII without whitespace. */
 export const SESSION_TOKEN_MAX_CHARS = 4096
-/** Longest hub URL a sessionTokens request carries. */
-export const HUB_URL_MAX_CHARS = 2048
 
 /** Why a spoke did not store a session token: it does not report the session, or the token has expired. */
 export type SessionTokenSkipReason = "unknown" | "expired"
@@ -688,16 +691,6 @@ function isSessionToken(v: unknown): v is SessionToken {
   return isObj(v) && nonEmpty(v.sessionID) && v.sessionID.length <= 300 && str(v.token) && SESSION_TOKEN_TEXT.test(v.token) && num(v.exp)
 }
 
-/** An http(s) URL of at most HUB_URL_MAX_CHARS characters. */
-export function isHubURL(v: unknown): v is string {
-  if (!nonEmpty(v) || v.length > HUB_URL_MAX_CHARS) return false
-  try {
-    const url = new URL(v)
-    return url.protocol === "http:" || url.protocol === "https:"
-  } catch {
-    return false
-  }
-}
 
 /** Characters batchSessionTokens leaves free in a frame for the `{"t":"req","id":…}` envelope around a request. */
 export const SESSION_TOKENS_ENVELOPE_CHARS = 1024
@@ -978,7 +971,8 @@ export function parseSpokeMessage(raw: string | Buffer): SpokeMessage | undefine
         (m.features === undefined || featureList(m.features)) &&
         (m.harness === undefined || token(m.harness, 64)) &&
         (m.harnessVersion === undefined || (str(m.harnessVersion) && m.harnessVersion.length <= 100)) &&
-        (m.evidence === undefined || token(m.evidence, 32))
+        (m.evidence === undefined || token(m.evidence, 32)) &&
+        (m.launchID === undefined || (str(m.launchID) && ID.test(m.launchID)))
         ? (m as unknown as Hello)
         : undefined
     case "sessions":

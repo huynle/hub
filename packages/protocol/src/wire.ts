@@ -22,6 +22,20 @@ export const isByeFrame = (v: Record<string, unknown>): boolean => str(v.reason)
 export const isWelcomeFrame = (v: Record<string, unknown>): boolean =>
   num(v.v) && nonEmpty(v.machineID) && str(v.publicURL) && (v.features === undefined || featureList(v.features))
 
+/** Longest hub URL a sessionTokens request or a start op carries. */
+export const HUB_URL_MAX_CHARS = 2048
+
+/** An http(s) URL of at most HUB_URL_MAX_CHARS characters. */
+export function isHubURL(v: unknown): v is string {
+  if (!nonEmpty(v) || v.length > HUB_URL_MAX_CHARS) return false
+  try {
+    const url = new URL(v)
+    return url.protocol === "http:" || url.protocol === "https:"
+  } catch {
+    return false
+  }
+}
+
 /** A frame's JSON object, or undefined when it is too large, not JSON or not an object. */
 export function parseFrame(raw: string | Buffer): Record<string, unknown> | undefined {
   const text = typeof raw === "string" ? raw : raw.toString("utf8")
