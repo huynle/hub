@@ -1,6 +1,7 @@
 // Transcript layout of a session: timeline rows (history + live) become display blocks — user pills, assistant
 // markdown, "Thought for Ns", consecutive tools folded into "Used N tools", and subagent rows that link to the
 // child session. Rows nested under a subagent (depth 1) stay in the child's own transcript.
+import { messageDeliveryLabel } from "../core/harness-core"
 import type { TimelineRow } from "../core/timeline-core"
 import { acceptsImage } from "./images"
 
@@ -19,7 +20,7 @@ export type Block =
   | { type: "tools"; key: string; items: TimelineRow[]; failed: number; running: number }
   | { type: "subagent"; key: string; sessionID: string; label: string; state: string }
   /** A hub message: `label` "from @y" (in) or "to @@r (→ @x)" (out); the identity primer is a compact note. */
-  | { type: "message"; key: string; direction: "in" | "out"; kind: string; label: string; text: string; primer: boolean; state?: string }
+  | { type: "message"; key: string; direction: "in" | "out"; kind: string; label: string; text: string; primer: boolean; state?: string; delivery?: string }
 
 /** URL of one image of a user message (GET …/timeline/messages/:message/files/:index). */
 export const messageFileURL = (sessionID: string, messageID: string, index: number) =>
@@ -94,9 +95,11 @@ function messageBlock(row: TimelineRow): Extract<Block, { type: "message" }> {
   const direction = row.direction === "out" ? "out" : "in"
   const to = String(meta.to ?? "")
   const recipient = typeof row.recipient === "string" ? row.recipient : undefined
+  /** Not (yet) delivered into a turn: queued, held or pending (honest about hooks and screen spokes). */
+  const delivery = messageDeliveryLabel(row.delivery)
   const label =
     kind === "primer" ? "Hub identity note" : direction === "out" ? `to ${to}${recipient && recipient !== to ? ` (→ ${recipient})` : ""}` : `from ${String(meta.from ?? "?")}`
-  return { type: "message", key: row.key, direction, kind, label, text: row.text ?? "", primer: kind === "primer", ...(typeof row.state === "string" ? { state: row.state } : {}) }
+  return { type: "message", key: row.key, direction, kind, label, text: row.text ?? "", primer: kind === "primer", ...(typeof row.state === "string" ? { state: row.state } : {}), ...(delivery ? { delivery } : {}) }
 }
 
 /** Shown when a thought has no readable text: the provider kept only an encrypted signature. */

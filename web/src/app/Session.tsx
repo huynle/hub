@@ -35,6 +35,7 @@ import { Transcript, type TickState } from "./Transcript"
 import { Icon, IconButton, Menu, STATE_LABEL, StatusIcon, ago, now } from "./ui"
 import { formatElapsed } from "../core/feedback-core"
 import { takeVoiceParam } from "../core/voice-autostart"
+import { deliveryNote, evidenceBadge, promptGate, sessionControls, unsupportedNotice } from "../core/harness-core"
 
 const PRESENCE_MS = 30_000
 /** Timeline rows per history page: the newest page opens the session, older ones load while scrolling up. */
@@ -52,6 +53,11 @@ export function SessionView(props: { id: string }) {
   /** Something in this session's subtree works or waits (typed input steers, Stop applies). */
   const running = () => treeRunning(isChild() ? status()?.filter((s) => tree().has(s.id)) : status())
   const offline = () => !found()
+  /** What the session's spoke serves: OpenCode everything; another harness only what it announced (P7-T10). */
+  const controls = createMemo(() => sessionControls(found()?.process))
+  const badge = () => evidenceBadge(controls())
+  /** Whether the hub can show this session's transcript (a known session whose spoke has no timeline: no). */
+  const noTimeline = () => !!found() && !controls().timeline
   const exposed = () => found()?.session.exposed !== false
   /** The root of the session's tree: itself, or (for a subagent session) the session that spawned the tree. */
   const treeRoot = () => (typeof found()?.session.rootID === "string" ? (found()!.session.rootID as string) : id)
@@ -153,6 +159,7 @@ export function SessionView(props: { id: string }) {
   }
 
   async function loadTimeline() {
+    if (noTimeline()) return setLoaded(true)
     try {
       await pager.first()
       setLoaded(true)
@@ -160,7 +167,9 @@ export function SessionView(props: { id: string }) {
       toEnd()
     } catch (e) {
       if (e instanceof HttpError && e.status === 404 && !found()) setNotFound(true)
-      else note(e instanceof HttpError && e.status === 409 ? "No OpenCode process for this session is connected; history is unavailable until it reconnects." : `Could not load the conversation: ${errorText(e)}`, "err")
+      else if (noTimeline() || unsupportedNotice(e)) {
+        // The spoke keeps no transcript the hub can read: the page says so instead of an error.
+      } else note(e instanceof HttpError && e.status === 409 ? "No OpenCode process for this session is connected; history is unavailable until it reconnects." : `Could not load the conversation: ${errorText(e)}`, "err")
       setLoaded(true)
     }
   }
@@ -264,6 +273,10 @@ export function SessionView(props: { id: string }) {
   let warmups = 0
   async function loadSummary() {
     summaryAt = Date.now()
+    if (found() && !controls().summary) {
+      setSummaryError(`Details aren't available for ${controls().harnessName} sessions.`)
+      return setSummaryLoading(false)
+    }
     try {
       const s = await getJSON<Summary>(`${sessionPath(id)}/summary`)
       setSummary(s)
@@ -302,7 +315,13 @@ export function SessionView(props: { id: string }) {
       if (changed === id && drafts.get(id) !== composer().draft) setComposer((s) => composerReducer(s, { type: "input", text: drafts.get(id) }))
     }),
   )
-  const view = () => composerView(composer(), { running: running(), offline: offline() })
+  /** Typed input by what the spoke serves: no box without turn and steer, Send/Steer only when served. */
+  const gate = () => promptGate(controls(), running())
+  const view = () => {
+    const base = composerView(composer(), { running: running(), offline: offline() })
+    const g = gate()
+    return { ...base, canSubmit: base.canSubmit && g.allowed, showStop: base.showStop && controls().stop, ...(!base.hint && g.hint ? { hint: g.hint } : {}) }
+  }
   let submitSeq = 0
 
   // Images are prepared one at a time, in the order they were added.
@@ -356,9 +375,11 @@ export function SessionView(props: { id: string }) {
       const result = await res.json().catch(() => ({}))
       const answer = turnAnswer(res.status, result)
       act({ type: "accepted", id: sub })
-      setTicks((t) => ({ ...t, [key]: answer === "result" ? "heard" : "sent" }))
-      if (answer === "steered") toast("Steered the running session")
-      else if (answer === "accepted") awaitingTurn = { sub, sentAt }
+      // Honest delivery: a hooks or screen spoke takes it at its next step (queued), never "steered" at once.
+      const delivered = deliveryNote(controls(), answer)
+      setTicks((t) => ({ ...t, [key]: delivered.tick }))
+      if (delivered.toast) toast(delivered.toast)
+      if (answer === "accepted") awaitingTurn = { sub, sentAt }
       else finishTurn(result, sub, sentAt)
     } catch (e) {
       // The connection dropped without an answer (e.g. a proxy cutting the long request): when the session runs,
@@ -369,7 +390,9 @@ export function SessionView(props: { id: string }) {
         note("Lost the connection to the hub after sending; the session is working on your message and its reply will appear here.", "sys")
         return
       }
-      const message = e instanceof HttpError && e.status === 504 ? "OpenCode did not answer in time. The session may still be working." : errorText(e)
+      const unsupported = unsupportedNotice(e)
+      if (unsupported) toast(unsupported, "err")
+      const message = unsupported ?? (e instanceof HttpError && e.status === 504 ? "OpenCode did not answer in time. The session may still be working." : errorText(e))
       batch(() => {
         act({ type: "rejected", id: sub, message })
         timeline.upsert({ key, kind: "user", text: "", images: [] })
@@ -396,7 +419,7 @@ export function SessionView(props: { id: string }) {
       const n = Array.isArray(stopped) ? stopped.length : 0
       toast(n ? `Stopped ${n} session${n === 1 ? "" : "s"}` : "Nothing was running")
     } catch (e) {
-      toast(`Could not stop: ${errorText(e)}`, "err")
+      toast(unsupportedNotice(e) ?? `Could not stop: ${errorText(e)}`, "err")
     } finally {
       act({ type: "stopped" })
     }
@@ -476,14 +499,23 @@ export function SessionView(props: { id: string }) {
       })
       void submit()
     }
-    void loadTimeline().then(loadMessages)
     void loadBacklog()
-    void loadSummary()
-    void models.load()
     void markRead(id)
     void presence(document.visibilityState === "visible")
     presenceTimer = setInterval(() => document.visibilityState === "visible" && void presence(true), PRESENCE_MS)
     document.addEventListener("visibilitychange", onVisibility)
+  })
+  // What the spoke serves is known once the catalog is: only then load the transcript, details and models, so a
+  // session whose spoke has none of them (another harness) never asks for them (P7-T10).
+  let started = false
+  createEffect(() => {
+    if (started || !hub.machines) return
+    started = true
+    untrack(() => {
+      void loadTimeline().then(loadMessages)
+      void loadSummary()
+      if (!found() || controls().models) void models.load()
+    })
   })
   const leave = () => void presence(false, true)
   window.addEventListener("pagehide", leave)
@@ -545,6 +577,8 @@ export function SessionView(props: { id: string }) {
     const s = found()?.session
     if (!s) return "Not connected"
     const pending = blockers().length
+    // Without Voice mode (another harness's spoke), Voice on/off means nothing here.
+    if (!controls().voice) return pending ? `${pending} request${pending === 1 ? "" : "s"} waiting` : `${controls().harnessName} session`
     const agent = voiceHere() && vs().agent ? `${vs().agent} agent` : s.conversation ? "Voice agent" : "Session agent"
     return `${agent} · ${pending ? `${pending} request${pending === 1 ? "" : "s"} waiting` : exposed() ? "Voice on" : "Voice off"}`
   }
@@ -595,6 +629,13 @@ export function SessionView(props: { id: string }) {
               </span>
             )}
           </Show>
+          <Show when={badge()}>
+            {(b) => (
+              <span class={`chip-evidence ${b().level}`} data-evidence={b().level} title={b().detail} aria-label={`${controls().harnessName} · evidence: ${b().label}. ${b().detail}`}>
+                {controls().harnessName} · {b().label}
+              </span>
+            )}
+          </Show>
           <Show when={summary()?.changes?.files.length}>
             <button type="button" class="btn small changes" onClick={() => setDiffFile(changedFiles()[0])} aria-label="Show changes">
               <span class="add">+{summary()!.changes!.additions}</span> <span class="del">−{summary()!.changes!.deletions}</span>
@@ -614,7 +655,12 @@ export function SessionView(props: { id: string }) {
           <div class="column">
             <Show when={!notFound()} fallback={<NotFound />}>
               <Show when={loaded()} fallback={<p class="muted pad">Loading conversation…</p>}>
-                <Show when={blocks().length || notes().length} fallback={<p class="muted pad empty-session">No messages yet. Type below, or start Voice mode.</p>}>
+                <Show when={noTimeline()}>
+                  <p class="muted pad no-timeline" data-unavailable="timeline">
+                    The hub can't show this {controls().harnessName} session's transcript; follow it in its terminal. Hub messages and live activity still appear here.
+                  </p>
+                </Show>
+                <Show when={blocks().length || notes().length} fallback={<Show when={!noTimeline()}><p class="muted pad empty-session">No messages yet. Type below, or start Voice mode.</p></Show>}>
                   <div ref={setSentinel} class="history-sentinel" aria-hidden="true" />
                   <Switch>
                     <Match when={history().state === "loading"}>
@@ -650,7 +696,7 @@ export function SessionView(props: { id: string }) {
               <For each={notes()}>{(n) => <p class={`note ${n.kind}`} role={n.kind === "err" ? "alert" : undefined}>{n.text}</p>}</For>
               {/* Keyed by request ID: catalog updates rebuild the blocker objects, which must not reset half-filled answers. */}
               <DecisionCards decisions={decisionsFor(decisions(), id)} />
-              <For each={blockerIDs()}>{(key) => <Show when={blockerByID().get(key)}>{(b) => <BlockerCard sessionID={id} blocker={b()} rootID={id} />}</Show>}</For>
+              <For each={blockerIDs()}>{(key) => <Show when={blockerByID().get(key)}>{(b) => <BlockerCard sessionID={id} blocker={b()} rootID={id} canAnswer={b().kind === "permission" ? controls().permission : controls().form} harnessName={controls().harnessName} />}</Show>}</For>
               {/* Who answered this tree's requests lately (live 'agent' events), once their cards are gone. */}
               <For each={answeredNotes()}>
                 {(n) => (
@@ -702,6 +748,19 @@ export function SessionView(props: { id: string }) {
                 Voice mode: {voiceError()}
               </p>
             </Show>
+            <Show
+              when={gate().show}
+              fallback={
+                <div class="composer-unavailable" data-no-prompt>
+                  <p class="muted small">{gate().hint}</p>
+                  <Show when={view().showStop}>
+                    <button type="button" class="btn stop" disabled={!view().canStop} onClick={() => void stop()} aria-label="Stop the session and its subagents">
+                      <Icon name="stop" /> Stop
+                    </button>
+                  </Show>
+                </div>
+              }
+            >
             <Composer
               draft={composer().draft}
               images={composer().images}
@@ -727,7 +786,10 @@ export function SessionView(props: { id: string }) {
               onDictate={() => void dictate()}
               onVoice={() => void toggleVoice()}
               onModel={(kind) => setPicker(kind)}
+              showModels={controls().models}
+              showVoice={controls().voice}
             />
+            </Show>
           </div>
         </div>
 

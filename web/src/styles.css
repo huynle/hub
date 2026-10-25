@@ -190,6 +190,9 @@ input[type="text"].rename-field { flex: 1; min-width: 0; width: 100%; min-height
 .naming { display: inline-flex; align-items: center; gap: 4px; flex: none; margin-left: 6px; white-space: nowrap; font-weight: normal; }
 .chip-server { display: inline-flex; align-items: center; gap: 4px; font-size: 0.75rem; color: var(--muted); border: 1px solid var(--line); border-radius: 13px; padding: 2px 10px; max-width: 260px; overflow: hidden; white-space: nowrap; }
 .chip-server .icon { width: 12px; height: 12px; margin-left: 6px; }
+/* Evidence badge of a non-OpenCode session (P7-T10): how the hub observes it; the title explains. */
+.chip-evidence { display: inline-flex; align-items: center; font-size: 0.75rem; color: var(--muted); border: 1px dashed var(--line); border-radius: 13px; padding: 2px 10px; white-space: nowrap; cursor: help; }
+.chip-evidence.screen, .chip-evidence.unknown { color: var(--warn); border-color: #5a4a2a; }
 .btn.changes { font-family: var(--mono); }
 .add { color: var(--add); }
 .del { color: var(--del); }
@@ -263,6 +266,10 @@ input[type="text"].rename-field { flex: 1; min-width: 0; width: 100%; min-height
 .tick { font-size: 0.6875rem; color: var(--faint); }
 .tick.heard { color: var(--ok); }
 .tick.failed { color: var(--err); }
+.tick.queued { color: var(--warn); }
+.hub-msg-delivery { font-size: 0.6875rem; color: var(--warn); }
+.composer-unavailable { display: flex; align-items: center; gap: 10px; padding: 10px 2px; }
+.composer-unavailable p { margin: 0; flex: 1; }
 .msg.assistant { line-height: 1.6; overflow-wrap: anywhere; }
 .msg.assistant.live .md > :is(p, h3, h4, h5, h6):last-child::after, .msg.assistant.live .md > :is(ul, ol):last-child > li:last-child > p:last-child::after { content: "▍"; color: var(--accent); animation: blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
