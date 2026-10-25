@@ -173,8 +173,9 @@ describe("node op results", () => {
 describe("hub features", () => {
   test("the hub announces nodes and launches; hubServesNodes reads a welcome", () => {
     expect(KNOWN_HUB_FEATURES as readonly string[]).toEqual(expect.arrayContaining(["harness", "messaging", "nodes", "launches"]))
-    // Announced only once the hub serves them (P4-T4, P4-T9).
-    expect(HUB_FEATURES as readonly string[]).not.toContain("nodes")
+    // Announced once the hub serves them: nodes (P4-T4); launches with the launch routes (P4-T9).
+    expect(HUB_FEATURES as readonly string[]).toContain("nodes")
+    expect(HUB_FEATURES as readonly string[]).not.toContain("launches")
     expect(P.hubServesNodes({ t: "welcome", v: 1, machineID: "m", publicURL: "", features: ["harness", "nodes"] })).toBe(true)
     expect(P.hubServesNodes({ t: "welcome", v: 1, machineID: "m", publicURL: "", features: ["harness"] })).toBe(false)
     expect(P.hubServesNodes({ t: "welcome", v: 1, machineID: "m", publicURL: "" })).toBe(false)

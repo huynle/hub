@@ -1,12 +1,24 @@
 // Spoke WebSocket endpoint (/spoke/ws): bearer-token authentication, hello/welcome handshake, frame
 // validation, heartbeats, server→spoke request/response correlation, and spoke→server requests.
+// `hub node` daemons share the endpoint and the machine token but say hello with role "node" (design §6.3):
+// they go to the NodeRegistry, never to the spoke Registry, and get node ops (requestNode) instead of spoke ops.
 import type { Server, ServerWebSocket, WebSocketHandler } from "bun"
 import {
   encode,
+  helloRole,
   HUB_FEATURES,
   MAX_FRAME,
+  NODE_ROLE,
+  nodeResultProblem,
+  parseNodeMessage,
   parseSpokeMessage,
   PROTOCOL_VERSION,
+  type HelloRole,
+  type NodeHello,
+  type NodeOp,
+  type NodeRequest,
+  type NodeResultFor,
+  type NodeServerMessage,
   type Req,
   type ResultFor,
   type ServerMessage,
@@ -14,6 +26,7 @@ import {
   type SpokeRequest,
 } from "../protocol"
 import type { Auth } from "./auth"
+import type { NodeRegistry } from "./nodes"
 import type { NotificationKind, PushExtra } from "./push"
 import type { Registry } from "./registry"
 import { newID, type Store } from "./store"
@@ -31,6 +44,14 @@ export class SpokeError extends Error {
   }
 }
 
+/** A node answered with an error or an invalid result, or disconnected before answering. */
+export class NodeError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "NodeError"
+  }
+}
+
 /** A request that would not fit in one protocol frame (the spoke would drop it and never answer). */
 export class RequestTooLargeError extends Error {
   constructor(op: string) {
@@ -40,8 +61,8 @@ export class RequestTooLargeError extends Error {
 }
 
 export class RequestTimeoutError extends Error {
-  constructor(op: string) {
-    super(`OpenCode did not answer the ${op} request in time`)
+  constructor(op: string, who = "OpenCode") {
+    super(`${who} did not answer the ${op} request in time`)
     this.name = "RequestTimeoutError"
   }
 }
@@ -51,6 +72,8 @@ export interface SpokeSocketData {
   readonly machineID: string
   readonly machineName: string
   ready: boolean
+  /** What the hello said this connection is (set with the hello). */
+  role?: HelloRole
   lastSeen: number
   helloTimer?: ReturnType<typeof setTimeout>
 }
@@ -61,6 +84,8 @@ export interface SpokeHubOptions {
   readonly store: Store
   readonly auth: Auth
   readonly registry: Registry
+  /** Connected `hub node` daemons (role "node" hellos); nodes never enter `registry`. */
+  readonly nodes: NodeRegistry
   readonly publicURL: string
   readonly notifier: Notifier
   /** Sends a message to the SSE subscribers of `tenant` (a user ID). */
@@ -72,11 +97,15 @@ export interface SpokeHubOptions {
   readonly helloTimeoutMs?: number
   readonly heartbeatMs?: number
   readonly staleMs?: number
+  /** Per node op request timeouts (defaults: NODE_TIMEOUTS_MS; cancel uses requestTimeoutMs). */
+  readonly nodeTimeoutsMs?: Partial<Record<NodeOp, number>>
 }
 
 interface Pending {
   readonly connID: string
   readonly op: string
+  /** A node request: errors are NodeErrors and the result is checked with nodeResultProblem. */
+  readonly node?: boolean
   readonly resolve: (value: unknown) => void
   readonly reject: (error: Error) => void
   readonly timer: ReturnType<typeof setTimeout>
@@ -89,9 +118,13 @@ export const CREATE_IN_HERDR_TIMEOUT_MS = 45_000
 /** Auto-name: the spoke waits up to 20 s for OpenCode's generated title, then answers "pending". */
 export const AUTO_NAME_TIMEOUT_MS = 30_000
 
+/** Node op timeouts: prepare may clone a repository; collect and cleanup run git in an existing workspace. */
+export const NODE_TIMEOUTS_MS: Readonly<Partial<Record<NodeOp, number>>> = { prepare: 600_000, collect: 60_000, cleanup: 120_000 }
+
 const CLOSE_PROTOCOL = 4000
 const CLOSE_REVOKED = 4001
 const CLOSE_STALE = 4002
+const CLOSE_REPLACED = 4003
 
 export class SpokeHub {
   private readonly sockets = new Map<string, Socket>()
@@ -140,7 +173,7 @@ export class SpokeHub {
   /** Sends a request to a connected spoke and resolves with its result. */
   request<R extends ServerRequest>(connID: string, req: R): Promise<ResultFor[R["op"]]> {
     const ws = this.sockets.get(connID)
-    if (!ws?.data.ready) return Promise.reject(new SpokeError("OpenCode process disconnected"))
+    if (!ws?.data.ready || ws.data.role !== "spoke") return Promise.reject(new SpokeError("OpenCode process disconnected"))
     const id = `r${++this.seq}`
     const frame = encode({ t: "req", id, req })
     if (frame.length > MAX_FRAME) return Promise.reject(new RequestTooLargeError(req.op))
@@ -159,6 +192,24 @@ export class SpokeHub {
         reject(new RequestTimeoutError(req.op))
       }, timeoutMs)
       this.pending.set(id, { connID, op: req.op, resolve: resolve as (v: unknown) => void, reject, timer })
+      ws.send(frame)
+    })
+  }
+
+  /** Sends an op to a connected node and resolves with its result, checked with nodeResultProblem. */
+  requestNode<R extends NodeRequest>(connID: string, req: R): Promise<NodeResultFor[R["op"]]> {
+    const ws = this.sockets.get(connID)
+    if (!ws?.data.ready || ws.data.role !== NODE_ROLE) return Promise.reject(new NodeError("The node disconnected"))
+    const id = `r${++this.seq}`
+    const frame = encode({ t: "req", id, req } satisfies NodeServerMessage)
+    if (frame.length > MAX_FRAME) return Promise.reject(new NodeError(`The ${req.op} request is too large to send to the node`))
+    const timeoutMs = this.options.nodeTimeoutsMs?.[req.op] ?? NODE_TIMEOUTS_MS[req.op] ?? this.options.requestTimeoutMs ?? 15_000
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id)
+        reject(new RequestTimeoutError(req.op, "The node"))
+      }, timeoutMs)
+      this.pending.set(id, { connID, op: req.op, node: true, resolve: resolve as (v: unknown) => void, reject, timer })
       ws.send(frame)
     })
   }
@@ -182,11 +233,14 @@ export class SpokeHub {
 
   private seen(ws: Socket): void {
     ws.data.lastSeen = Date.now()
-    if (ws.data.ready) this.options.registry.touch(ws.data.connID)
+    if (!ws.data.ready) return
+    if (ws.data.role === NODE_ROLE) this.options.nodes.touch(ws.data.connID)
+    else this.options.registry.touch(ws.data.connID)
   }
 
   private message(ws: Socket, raw: string | Buffer): void {
     this.seen(ws)
+    if (ws.data.ready ? ws.data.role === NODE_ROLE : helloRole(raw) === NODE_ROLE) return this.nodeMessage(ws, raw)
     const message = parseSpokeMessage(raw)
     if (!message) return this.bye(ws, "protocol error")
     const { registry } = this.options
@@ -199,6 +253,7 @@ export class SpokeHub {
       }
       clearTimeout(ws.data.helloTimer)
       ws.data.ready = true
+      ws.data.role = "spoke"
       registry.connect(connID, { id: ws.data.machineID, name: ws.data.machineName }, message)
       this.options.store.touchMachine(ws.data.machineID)
       // Older spokes ignore `features`; newer ones send a request a feature adds only when it is listed here.
@@ -219,19 +274,72 @@ export class SpokeHub {
       case "req":
         void this.answer(ws, message)
         return
-      case "res": {
-        const pending = this.pending.get(message.id)
-        if (!pending || pending.connID !== connID) return
-        this.pending.delete(message.id)
-        clearTimeout(pending.timer)
-        if (message.ok) pending.resolve(message.result)
-        else pending.reject(new SpokeError(message.error || `OpenCode ${pending.op} request failed`))
-        return
-      }
+      case "res":
+        return this.settle(connID, message)
       case "bye":
         ws.close(1000, "bye")
         return
     }
+  }
+
+  /** A frame from a node (or a node hello). */
+  private nodeMessage(ws: Socket, raw: string | Buffer): void {
+    const message = parseNodeMessage(raw)
+    if (!message) return this.bye(ws, "protocol error")
+    const { nodes } = this.options
+    const { connID } = ws.data
+    if (!ws.data.ready) {
+      if (message.t !== "hello") return this.bye(ws, "protocol error")
+      return this.nodeHello(ws, message)
+    }
+    switch (message.t) {
+      case "hello":
+        return this.bye(ws, "protocol error")
+      case "capacity":
+        return nodes.setCapacity(connID, message)
+      case "progress":
+        return nodes.progress(connID, message)
+      case "res":
+        return this.settle(connID, message)
+      case "bye":
+        ws.close(1000, "bye")
+        return
+    }
+  }
+
+  private nodeHello(ws: Socket, hello: NodeHello): void {
+    if (hello.v !== PROTOCOL_VERSION) return this.bye(ws, `unsupported protocol version ${hello.v}; server speaks version ${PROTOCOL_VERSION}`)
+    const { nodes } = this.options
+    const existing = nodes.forMachine(ws.data.machineID)
+    if (existing) {
+      // One node per machine. The same daemon run reconnecting (its old socket may be half-open) replaces it.
+      if (existing.instanceID !== hello.instanceID) return this.bye(ws, "another node is already connected for this machine")
+      nodes.disconnect(existing.connID)
+      const old = this.sockets.get(existing.connID)
+      if (old) this.bye(old, "replaced by a new connection of this node", CLOSE_REPLACED)
+    }
+    clearTimeout(ws.data.helloTimer)
+    ws.data.ready = true
+    ws.data.role = NODE_ROLE
+    nodes.connect(ws.data.connID, { id: ws.data.machineID, name: ws.data.machineName }, hello)
+    this.options.store.touchMachine(ws.data.machineID)
+    this.send(ws, { t: "welcome", v: PROTOCOL_VERSION, machineID: ws.data.machineID, publicURL: this.options.publicURL, features: [...HUB_FEATURES] })
+  }
+
+  /** Resolves or rejects the pending request a `res` frame answers. */
+  private settle(connID: string, message: { readonly id: string; readonly ok: boolean; readonly result?: unknown; readonly error?: string }): void {
+    const pending = this.pending.get(message.id)
+    if (!pending || pending.connID !== connID) return
+    this.pending.delete(message.id)
+    clearTimeout(pending.timer)
+    if (pending.node) {
+      if (!message.ok) return pending.reject(new NodeError(message.error || `The node's ${pending.op} request failed`))
+      const problem = nodeResultProblem(pending.op as NodeOp, message.result)
+      if (problem) return pending.reject(new NodeError(`The node sent an invalid ${pending.op} result: ${problem}`))
+      return pending.resolve(message.result)
+    }
+    if (message.ok) pending.resolve(message.result)
+    else pending.reject(new SpokeError(message.error || `OpenCode ${pending.op} request failed`))
   }
 
   private async answer(ws: Socket, frame: Req<SpokeRequest>): Promise<void> {
@@ -290,9 +398,11 @@ export class SpokeHub {
       if (pending.connID !== connID) continue
       this.pending.delete(id)
       clearTimeout(pending.timer)
-      pending.reject(new SpokeError("OpenCode process disconnected"))
+      pending.reject(pending.node ? new NodeError("The node disconnected") : new SpokeError("OpenCode process disconnected"))
     }
-    if (ws.data.ready) this.options.registry.disconnect(connID)
+    if (!ws.data.ready) return
+    if (ws.data.role === NODE_ROLE) this.options.nodes.disconnect(connID)
+    else this.options.registry.disconnect(connID)
   }
 
   private bye(ws: Socket, reason: string, code = CLOSE_PROTOCOL): void {
@@ -300,7 +410,7 @@ export class SpokeHub {
     ws.close(code, reason)
   }
 
-  private send(ws: Socket, message: ServerMessage): void {
+  private send(ws: Socket, message: ServerMessage | NodeServerMessage): void {
     ws.send(encode(message))
   }
 }
