@@ -3,8 +3,9 @@
 A **launch** asks the hub to start an agent session for you on one of your machines: in a fresh git worktree (or
 a checkout or a clone), with a name, roles, labels and a first prompt, and to end it when it is done. You, a
 script or an app say *what* to run; the hub picks a machine, a `hub node` daemon on that machine prepares the
-workspace, and the machine's harness service (the OpenCode background service, `opencode serve --service`) creates
-the session in it.
+workspace, and the machine's service spoke of the launch's harness (the OpenCode background service, `opencode serve
+--service`, by default; the Claude Code daemon or the Codex spoke service for those harnesses, see
+[Harnesses](#harnesses)) creates the session in it.
 
 ```
 hub launch --branch feat/search --name search --role builder --label task=42 --prompt "Add full-text search"
@@ -16,7 +17,7 @@ The parts:
 |---|---|---|
 | hub | your hub | accepts launches, applies grants, caps and the kill switch, places them on nodes, runs each to its end, sends events and webhooks |
 | `hub node` | each machine that runs launches | prepares, inspects and cleans up workspaces under its `workspaceRoots`; starts nothing and runs no commands for the hub |
-| service spoke | the same machine | the OpenCode plugin in the background service: creates the session in the prepared directory (only under the node's roots) |
+| service spoke | the same machine | the spoke of the launch's harness (the OpenCode plugin in the background service, the Claude Code daemon, the Codex spoke service): creates the session in the prepared directory |
 
 ## Starting a launch
 
@@ -79,7 +80,7 @@ Unknown fields are refused (`400 invalid`), as is anything malformed; the hub fi
 | `key` | none | 1–200 visible ASCII characters; makes retries safe (see above) |
 | `name` | none | the session's `@name` without the `@`: `[a-z0-9-]`, 2–40, not reserved; refused with `name_taken` when a session or another live launch holds it |
 | `roles` | `[]` | up to 10 role names (`reviewer`, `reviewer.project`); a role the launcher may not claim is noted in the launch's reason, not fatal |
-| `harness` | `opencode` | the harness the session runs in |
+| `harness` | `opencode` | the harness the session runs in: `opencode`, `claude-code` or `codex` (see [Harnesses](#harnesses)); placement needs a node offering it |
 | `agent` | the harness's default | `[A-Za-z0-9_.-]`, up to 80 |
 | `model` | the harness's default | `provider/model`, up to 200 characters |
 | `workspace.repo` | (required) | absolute path of the repository **on the node**; must resolve (through symlinks) under one of the node's `workspaceRoots` |
@@ -168,6 +169,31 @@ Per-user caps in `hub.json` (`agents.launches`, each a whole number from 1 to 10
 { "agents": { "launches": { "maxActive": 2, "perHour": 20 } } }
 ```
 
+## Harnesses
+
+A launch's `harness` picks which harness the session runs in (default `opencode`). For the `host` runtime the hub
+places it on a node that offers the harness (node.json `harnesses`, over what the node detects) and whose machine
+has that harness's service spoke connected with the `launch` feature; otherwise the launch waits `queued` with the
+reason (`has no claude-code harness`, `has no connected codex service spoke with launch`). Sandboxed launches
+(`openshell`) run OpenCode.
+
+| Harness | Node offers it | Service spoke that creates the session | The launched session |
+|---|---|---|---|
+| `opencode` | always | the OpenCode plugin in the background service | an OpenCode session in the workspace |
+| `claude-code` | when the `claude` CLI is found (`$HUB_CLAUDE_BIN`, else PATH), or `"claude-code": true` | the Claude Code daemon: `hub claude-code install` (a service), or a running `hub claude` | headless `claude -p --input-format stream-json` with the hub plugin, in the workspace; takes the hub's turns and interrupts; `agent` and an Anthropic `model` are passed on |
+| `codex` | only with `"codex": true` in node.json | the Codex spoke service: `hub codex-spoke install`, or a running `hub codex` | a thread on the spoke's own `codex app-server` (`thread/start` in the workspace); `model` is passed on, `agent` is refused (Codex has none) |
+
+```sh
+echo '{"workspaceRoots": ["/Users/you/projects"], "harnesses": {"codex": true}}' > ~/.config/hub/node.json
+hub claude-code install && hub codex-spoke install   # then load them with the printed commands
+hub launch --harness claude-code --branch feat/x --prompt "Fix the flaky test"
+hub launch --harness codex --branch feat/y --model openai/gpt-5 --prompt "Write the migration"
+```
+
+The session's evidence decides how the launch ends: `end: idle` needs idle by real evidence (both Claude Code's
+hooks and Codex's confirmed turn ends count). Stopping the Claude Code daemon or the Codex service ends the sessions
+it launched. What each harness can and cannot do is in [harnesses.md](harnesses.md).
+
 ## hub node
 
 `hub node` runs on each machine that should take launches. It needs:
@@ -186,9 +212,11 @@ Per-user caps in `hub.json` (`agents.launches`, each a whole number from 1 to 10
 | `labels` | `{}` | added to the node's `os` and `arch` labels for placement |
 | `slots` | 4 | launches the node holds at once (from prepare until cleanup), 1–10,000 |
 | `memoryMB` | none | reported to the hub; not matched yet |
+| `harnesses` | detected | `{ "<harness>": true \| false }`: offer or withhold a harness on the `host` runtime, over what the node detects (`opencode` always; `claude-code` when the `claude` CLI is found: `$HUB_CLAUDE_BIN`, else `claude` on PATH). `codex` is never detected: offer it with `"codex": true`. `"claude-code": false` also keeps the Claude Code daemon from taking launches |
 | `openshell` | none | `{ "enabled": true, "gateway"?: name, "image"?: ref, "profiles"?: {…} }`: also offer the `openshell` runtime (sandboxes through the `openshell` CLI, in its workspace `hub`). The node then announces the `sandbox` feature (start/stop), reports its profiles and the gateway's compute drivers (backends), and at startup reports the sandboxes labelled `hub.machine=<this machine>` as launches (`running` or `stopped`) so the hub reconciles them. An unusable CLI is logged and the node offers `host` only |
 
-The OpenCode service spoke reads the same `workspaceRoots` and creates launch sessions only under them.
+The OpenCode service spoke and the Claude Code daemon read the same `workspaceRoots` and create launch sessions only
+under them.
 
 Commands:
 
