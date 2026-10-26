@@ -161,7 +161,7 @@ export function messageRoutes(deps: MessageDeps): AgentRoute[] {
 
   const paused = (userID: string) => deps.store.agentData(userID).messagingPaused === true
   const ensureOn = (userID: string) => {
-    if (paused(userID)) throw new AgentError("paused", "Messaging is off for this user", { hint: "Turn it on in the console (PUT /api/agent/messaging)" })
+    if (paused(userID)) throw new AgentError("paused", "Messaging is off for this user", { hint: "Ask the user to turn messaging back on (it is their switch: PUT /api/agent/messaging {\"enabled\": true}; no console switch yet)" })
   }
 
   /** The message, when the actor may read it (its sender or recipient, or the user). */
@@ -208,7 +208,7 @@ export function messageRoutes(deps: MessageDeps): AgentRoute[] {
   const notADecision = async (userID: string, actor: AgentActor, replyTo: string) => {
     if (actor.kind !== "user" || !deps.decisions) return
     const decision = await deps.decisions.byMessage(userID, replyTo)
-    if (decision) throw new AgentError("invalid", `${replyTo} carries decision ${decision.id}`, { hint: `Answer it in the console (POST /api/decisions/${decision.id}/answer)` })
+    if (decision) throw new AgentError("invalid", `${replyTo} carries decision ${decision.id}`, { hint: "Answer it on the console's Home page (its decision card)" })
   }
 
   /** Decisions the actor may read: the user all, others those they asked. */

@@ -46,9 +46,9 @@ export class ActingSwitch {
 
   /** Throws paused (423) while a kill switch is on for this user. */
   ensureActing(userID: string): void {
-    if (this.hubPaused()) throw new AgentError("paused", "Agent actions are paused by the hub admin", { hint: "Ask the hub admin to resume them" })
+    if (this.hubPaused()) throw new AgentError("paused", "Agent actions are paused by the hub admin", { hint: "Ask the hub admin to turn them back on (Settings → Agents → Agent actions on this hub)" })
     if (this.userPaused(userID)) {
-      throw new AgentError("paused", "Agent actions are off for this user", { hint: "Turn them on in the console (PUT /api/agent/acting)" })
+      throw new AgentError("paused", "Agent actions are off for this user", { hint: "Turn them back on in the console: Settings → Agents → Agent actions" })
     }
   }
 

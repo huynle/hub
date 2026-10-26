@@ -165,7 +165,10 @@ describe("answering on the console", () => {
     for (const [path, body] of [["/api/agent/reply", { replyTo: decision.messageID, text: "yes" }], ["/api/agent/decline", { replyTo: decision.messageID, why: "no" }]] as const) {
       const res = await asUser(path, body)
       expect(res.status).toBe(400)
-      expect((await json(res)).error).toMatchObject({ code: "invalid" })
+      const error = (await json(res)).error
+      expect(error).toMatchObject({ code: "invalid" })
+      // The hint is for the person: where in the console, not the raw answer route.
+      expect(error.hint).toBe("Answer it on the console's Home page (its decision card)")
     }
     expect((await json(await h.api(`/api/decisions/${decision.id}`))).decision.state).toBe("open")
   })

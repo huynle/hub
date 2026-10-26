@@ -367,6 +367,9 @@ describe("the per-user messaging switch", () => {
       expect({ path, status: res.status }).toEqual({ path, status: 423 })
       expect((await json(res)).error.code).toBe("paused")
     }
+    const hint: string = (await json(await as("ses_1", "/api/agent/msg", { to: "@web-work", text: "x" }))).error.hint
+    expect(hint).toMatch(/^Ask the user to turn messaging back on/)
+    expect(hint).not.toMatch(/console \(PUT/)
     expect((await asUser("/api/agent/msg", { to: "@web-work", text: "x" })).status).toBe(423)
     expect((await as("ses_2", "/api/agent/inbox")).status).toBe(200)
     expect(h.store.auditLog()[0]).toMatchObject({ actor: USER, action: "messaging.pause" })
