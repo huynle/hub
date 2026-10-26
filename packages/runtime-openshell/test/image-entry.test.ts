@@ -223,8 +223,8 @@ describe("hub-sandbox-entry", () => {
     const b = await box({ FAKE_SERVICE_PASSWORD: "svc-pw" })
     ready(b)
     entry(b)
-    await until(() => events(b).includes("request /api/agent"), 15_000, "the plugin kick")
-    expect(events(b)).toContain(`request /api/agent Basic ${btoa("opencode:svc-pw")}`)
+    // The first kick may race the service writing its password (401, then a retry with it): wait for that request.
+    await until(() => events(b).includes(`request /api/agent Basic ${btoa("opencode:svc-pw")}`), 15_000, "the plugin kick with the service's password")
   })
 
   test("graceful stop: SIGTERM to the harness, then the entry exits and records the exit code", async () => {
