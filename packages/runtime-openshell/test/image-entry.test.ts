@@ -18,11 +18,20 @@ const path = require("node:path")
 const log = (line: string) => fs.appendFileSync(path.join(out, "events"), line + "\\n")
 const port = Number(process.argv[process.argv.indexOf("--port") + 1])
 fs.mkdirSync(path.join(process.env.XDG_CONFIG_HOME!, "opencode"), { recursive: true })
-if (process.env.FAKE_SERVICE_PASSWORD) fs.writeFileSync(path.join(process.env.XDG_CONFIG_HOME!, "opencode", "service.json"), JSON.stringify({ password: process.env.FAKE_SERVICE_PASSWORD }))
+// Like a --service server: it keeps its own password in service.json (FAKE_PASSWORD_LATE_MS: written only after it
+// listens, as a slow start may), else it uses OPENCODE_PASSWORD.
+const servicePassword = process.env.FAKE_SERVICE_PASSWORD
+const writePassword = () => fs.writeFileSync(path.join(process.env.XDG_CONFIG_HOME!, "opencode", "service.json"), JSON.stringify({ password: servicePassword }))
+if (servicePassword && !process.env.FAKE_PASSWORD_LATE_MS) writePassword()
+if (servicePassword && process.env.FAKE_PASSWORD_LATE_MS) setTimeout(writePassword, Number(process.env.FAKE_PASSWORD_LATE_MS))
 fs.writeFileSync(path.join(out, "serve.json"), JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), env: process.env }))
+// Basic auth like OpenCode: a --service server answers only its own password (never OPENCODE_PASSWORD, even before
+// service.json is written), a plain server OPENCODE_PASSWORD; anything else is 401 and the entry's kick retries.
+const expected = () => servicePassword ?? process.env.OPENCODE_PASSWORD
 Bun.serve({ hostname: "127.0.0.1", port, fetch(req) {
-  log("request " + new URL(req.url).pathname + " " + (req.headers.get("authorization") ?? ""))
-  return new Response("{}")
+  const auth = req.headers.get("authorization") ?? ""
+  log("request " + new URL(req.url).pathname + " " + auth)
+  return auth === "Basic " + btoa("opencode:" + expected()) ? new Response("{}") : new Response("unauthorized", { status: 401 })
 } })
 log("listening")
 process.on("SIGTERM", () => {
@@ -201,6 +210,13 @@ describe("hub-sandbox-entry", () => {
     await until(() => events(b).includes("listening"), 10_000, "the harness")
     const config = JSON.parse(read(path.join(b.home, ".xdg/config/opencode/opencode.jsonc")))
     expect(config.plugins).toEqual([{ package: path.join(b.root, "lib/hub/node_modules/@huynle/hub"), options: {} }])
+  })
+
+  test("a service that writes its password only after it listens is still reached with that password (it retries on 401)", async () => {
+    const b = await box({ FAKE_SERVICE_PASSWORD: "svc-pw", FAKE_PASSWORD_LATE_MS: "600" })
+    ready(b)
+    entry(b)
+    await until(() => events(b).includes(`request /api/agent Basic ${btoa("opencode:svc-pw")}`), 15_000, "the plugin kick with the service's password")
   })
 
   test("starts the plugin with a request, using the service's own password", async () => {
