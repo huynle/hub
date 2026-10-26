@@ -20,6 +20,7 @@ import { claudeCodeMain } from "../../claude-code/src/main.ts"
 import { runClaude } from "../../claude-code/src/wrapper.ts"
 import { presetMain } from "../../preset/src/main.ts"
 import { codexMain } from "../../codex/src/main.ts"
+import { installSpokeService, isServiceVerb, SERVICE_VERBS, spokeServiceStatus, spokeServiceStatusText, uninstallSpokeService, type SpokeServiceName } from "./spoke-services"
 import { runCodex } from "../../codex/src/wrapper.ts"
 
 export { EXIT } from "./http"
@@ -124,6 +125,9 @@ Claude Code (hooks spoke)
                                       changed), starting the per-user daemon when needed (an enrolled machine);
                                       env HUB_CLAUDE_PERMISSION_WAIT=<s> (default 120, 0: report only), HUB_CLAUDE_BIN
   hub claude-code daemon|hook|mcp     the spoke's daemon, hook bridge and MCP pipe (run by hub claude and the plugin)
+  hub claude-code install|uninstall [--dry-run] | status
+                                      the daemon as a launchd agent / systemd user unit (like hub node install:
+                                      load commands printed, never run), so launches need no hub claude run
 
 Presets (harnesses without a spoke, driven through a tmux pane; evidence screen)
   hub preset list                     the official presets
@@ -137,6 +141,8 @@ Codex (app-server spoke)
                                       ~/.codex is never changed), starting the per-user spoke when needed (an
                                       enrolled machine); env HUB_CODEX_BIN, HUB_CODEX_CONFIG (-c lines for the spoke)
   hub codex-spoke serve               the spoke service (run by hub codex); attaches to the daemon's threads
+  hub codex-spoke install|uninstall [--dry-run] | status
+                                      the spoke service as a launchd agent / systemd user unit (printed, never loaded)
 
 MCP
   hub mcp                             an MCP server on stdio: these verbs as tools, with this CLI's credential
@@ -201,6 +207,12 @@ const nodeIo = (io: Io): NodeIo => ({
   uid: io.uid ?? process.getuid?.() ?? 0,
   program: io.program ?? currentProgram(),
 })
+
+const spokeStatusOutput = (context: Context, name: SpokeServiceName) => {
+  const status = spokeServiceStatus(name, nodeIo(context.io))
+  if (context.json) printJSON(context.io, status)
+  else out(context.io, spokeServiceStatusText(name, status))
+}
 
 const nodeOutput = (io: Io, output: { stdout: string; warnings: readonly string[] }) => {
   for (const warning of output.warnings) io.stderr(`hub: warning: ${warning}\n`)
@@ -523,6 +535,40 @@ const COMMANDS: Record<string, Command> = {
       else out(context.io, nodeStatusText(status))
     },
   },
+  "claude-code install": {
+    flags: { "dry-run": "bool" },
+    async handle(context) {
+      nodeOutput(context.io, installSpokeService("claude-code", nodeIo(context.io), { dryRun: context.parsed.flags["dry-run"] === true }))
+    },
+  },
+  "claude-code uninstall": {
+    flags: { "dry-run": "bool" },
+    async handle(context) {
+      nodeOutput(context.io, uninstallSpokeService("claude-code", nodeIo(context.io), { dryRun: context.parsed.flags["dry-run"] === true }))
+    },
+  },
+  "claude-code status": {
+    async handle(context) {
+      spokeStatusOutput(context, "claude-code")
+    },
+  },
+  "codex-spoke install": {
+    flags: { "dry-run": "bool" },
+    async handle(context) {
+      nodeOutput(context.io, installSpokeService("codex-spoke", nodeIo(context.io), { dryRun: context.parsed.flags["dry-run"] === true }))
+    },
+  },
+  "codex-spoke uninstall": {
+    flags: { "dry-run": "bool" },
+    async handle(context) {
+      nodeOutput(context.io, uninstallSpokeService("codex-spoke", nodeIo(context.io), { dryRun: context.parsed.flags["dry-run"] === true }))
+    },
+  },
+  "codex-spoke status": {
+    async handle(context) {
+      spokeStatusOutput(context, "codex-spoke")
+    },
+  },
   "node openshell check": {
     async handle(context) {
       const { io } = context
@@ -562,7 +608,7 @@ const COMMANDS: Record<string, Command> = {
 }
 
 /** Commands with sub-verbs (`hub role claim`). */
-const GROUPS: Record<string, string[]> = { role: ["claim", "release"], decisions: ["list"], grant: ["list", "show", "create", "revoke", "request"], launches: ["list", "show", "stop"], node: ["run", "install", "uninstall", "status", "openshell"], "node openshell": ["check"] }
+const GROUPS: Record<string, string[]> = { "claude-code": [...SERVICE_VERBS], "codex-spoke": [...SERVICE_VERBS], role: ["claim", "release"], decisions: ["list"], grant: ["list", "show", "create", "revoke", "request"], launches: ["list", "show", "stop"], node: ["run", "install", "uninstall", "status", "openshell"], "node openshell": ["check"] }
 
 const groupVerbs = (label: string): string[] | undefined => (Object.hasOwn(GROUPS, label) ? GROUPS[label] : undefined)
 
@@ -599,11 +645,12 @@ export async function run(argv: string[], io: Io): Promise<number> {
   }
   // `hub claude` passes every other argument to Claude Code; `hub claude-code` has its own subcommands.
   if (name === "claude") return runClaude(rest, { env: io.env, home: io.home, stderr: io.stderr, program: io.program ?? currentProgram() })
-  if (name === "claude-code") return claudeCodeMain(rest, io)
+  // Their service verbs (install, uninstall, status) are commands of this CLI, like `hub node install`.
+  if (name === "claude-code" && !isServiceVerb(rest[0])) return claudeCodeMain(rest, io)
   if (name === "preset") return presetMain(rest, io)
   // `hub codex` passes every other argument to Codex; `hub codex-spoke serve` is the spoke service it starts.
   if (name === "codex") return runCodex(rest, { env: io.env, home: io.home, stderr: io.stderr, program: io.program ?? currentProgram() })
-  if (name === "codex-spoke") return codexMain(rest, io)
+  if (name === "codex-spoke" && !isServiceVerb(rest[0])) return codexMain(rest, io)
   let label = name
   // Groups nest (`hub node openshell check`): each level picks one of its sub-verbs.
   for (let verbs = groupVerbs(label); verbs; verbs = groupVerbs(label)) {

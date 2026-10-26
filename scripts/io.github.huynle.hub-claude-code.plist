@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template: keep the Claude Code spoke daemon (`hub claude-code daemon`) running on macOS (launchd).
+  The daemon follows every Claude Code session on this machine for the hub (the hub plugin's hooks reach it over a
+  private Unix socket) and, with the Claude Code CLI found (HUB_CLAUDE_BIN, else claude on the PATH below), starts
+  Claude Code for hub launches under node.json's workspaceRoots. `hub claude` starts it on demand; this agent keeps it
+  running so launches can be placed here without a `hub claude` run first. It needs an enrolled machine (the plugin's
+  /hub dialog writes the machine token to ~/.config/hub/config.json, which the daemon only reads).
+  Install: `hub claude-code install` writes this file to ~/Library/LaunchAgents with the real paths and prints the
+  launchctl commands to load it; it never runs them (add the dry-run flag to only print). By hand (replace
+  __RUNTIME__, __ENTRY__ and __HOME__ first):
+    sed -e "s|__RUNTIME__|$HOME/.bun/bin/bun|" -e "s|__ENTRY__|$PWD/packages/cli/src/main.ts|" -e "s|__HOME__|$HOME|g" \
+      scripts/io.github.huynle.hub-claude-code.plist > ~/Library/LaunchAgents/io.github.huynle.hub-claude-code.plist
+    mkdir -p ~/.local/state/hub
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.github.huynle.hub-claude-code.plist
+  Remove: `hub claude-code uninstall`, or
+    launchctl bootout gui/$(id -u)/io.github.huynle.hub-claude-code && rm ~/Library/LaunchAgents/io.github.huynle.hub-claude-code.plist
+  BUN_BE_BUN=1 lets an OpenCode binary act as bun; the CLI removes it from its own environment.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.github.huynle.hub-claude-code</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__RUNTIME__</string>
+    <string>__ENTRY__</string>
+    <string>claude-code</string>
+    <string>daemon</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__HOME__/.local/bin:__HOME__/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>BUN_BE_BUN</key>
+    <string>1</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>__HOME__/.local/state/hub/claude-code.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.local/state/hub/claude-code.log</string>
+</dict>
+</plist>

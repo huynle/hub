@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template: keep the Codex spoke (`hub codex-spoke serve`) running on macOS (launchd).
+  The spoke attaches to the shared Codex app-server daemon's threads (CODEX_HOME/app-server-control, read only) for
+  the hub and starts its own `codex app-server` (HUB_CODEX_BIN, else codex on the PATH below) for hub launches. `hub
+  codex` starts it on demand; this agent keeps it running so launches can be placed here without a `hub codex` run
+  first. It needs an enrolled machine (the plugin's /hub dialog writes the machine token to
+  ~/.config/hub/config.json, which the spoke only reads). HUB_CODEX_CONFIG is not carried in: add it below by hand.
+  Install: `hub codex-spoke install` writes this file to ~/Library/LaunchAgents with the real paths and prints the
+  launchctl commands to load it; it never runs them (add the dry-run flag to only print). By hand (replace
+  __RUNTIME__, __ENTRY__ and __HOME__ first):
+    sed -e "s|__RUNTIME__|$HOME/.bun/bin/bun|" -e "s|__ENTRY__|$PWD/packages/cli/src/main.ts|" -e "s|__HOME__|$HOME|g" \
+      scripts/io.github.huynle.hub-codex-spoke.plist > ~/Library/LaunchAgents/io.github.huynle.hub-codex-spoke.plist
+    mkdir -p ~/.local/state/hub
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.github.huynle.hub-codex-spoke.plist
+  Remove: `hub codex-spoke uninstall`, or
+    launchctl bootout gui/$(id -u)/io.github.huynle.hub-codex-spoke && rm ~/Library/LaunchAgents/io.github.huynle.hub-codex-spoke.plist
+  BUN_BE_BUN=1 lets an OpenCode binary act as bun; the CLI removes it from its own environment.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.github.huynle.hub-codex-spoke</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__RUNTIME__</string>
+    <string>__ENTRY__</string>
+    <string>codex-spoke</string>
+    <string>serve</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__HOME__/.local/bin:__HOME__/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>BUN_BE_BUN</key>
+    <string>1</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>__HOME__/.local/state/hub/codex-spoke.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.local/state/hub/codex-spoke.log</string>
+</dict>
+</plist>

@@ -28,7 +28,7 @@ export interface ClaudeCodeIo {
   readonly program?: Program
 }
 
-export const CLAUDE_CODE_USAGE = "Usage: hub claude-code daemon | hook [--rewake] [--wait <seconds>] | mcp"
+export const CLAUDE_CODE_USAGE = "Usage: hub claude-code daemon | hook [--rewake] [--wait <seconds>] | mcp | install [--dry-run] | uninstall [--dry-run] | status"
 
 /** `claude --version` → "2.1.296", or "" when it cannot be told. */
 export function claudeVersion(bin: string, env: ClaudeCodeIo["env"]): string {

@@ -24,7 +24,7 @@ export interface CodexMainIo {
   readonly signal?: AbortSignal
 }
 
-export const CODEX_SPOKE_USAGE = "Usage: hub codex-spoke serve"
+export const CODEX_SPOKE_USAGE = "Usage: hub codex-spoke serve | install [--dry-run] | uninstall [--dry-run] | status"
 
 /** `codex --version` → "0.160.0", or "" when it cannot be told. */
 export function codexVersion(bin: string, env: CodexMainIo["env"]): string {
