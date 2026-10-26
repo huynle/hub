@@ -7,7 +7,7 @@
 // - Archive source: the console's Archive (viewPrefs.hiddenSessions). Spokes never report archived OpenCode
 //   sessions (the listing drops them), so SessionInfo.archived never reaches the hub. archivedAt is the first
 //   time the directory sees the session in that list; unarchiving clears it. deletedAt comes from markDeleted.
-// - Names: derived once, from the first non-placeholder title, for root sessions only; a taken derived name
+// - Names: derived once (names.ts deriveName), from the first non-placeholder title, for root sessions only; a taken derived name
 //   gets a suffix, an explicit taken one fails (name_taken). A name is released NAME_RELEASE_MS after its
 //   session was archived or deleted; a rename keeps the old name as an alias for ALIAS_MS.
 // - Roles: see claimRole. A holder offline (not reported) for ROLE_OFFLINE_MS loses the role, except during
@@ -28,7 +28,7 @@
 import { roleKey, type AgentData, type AgentName, type AgentRole, type AgentSession } from "../agent-data"
 import type { Store } from "../store"
 import { AgentError } from "./errors"
-import { isPlaceholderTitle, isReservedName, isReservedRole, parseAddress, slugify, validName, withSuffix, type Address } from "./names"
+import { deriveName, isPlaceholderTitle, isReservedName, isReservedRole, parseAddress, validName, withSuffix, type Address } from "./names"
 
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
@@ -424,7 +424,7 @@ export class Directory {
       const record = draft.byID.get(live.sessionID)!
       if (live.parentID || record.named || isPlaceholderTitle(live.title)) continue
       record.named = true
-      const slug = slugify(live.title)
+      const slug = deriveName(live.title)
       if (!slug || draft.names.some((n) => n.sessionID === live.sessionID && n.expiresAt === undefined)) continue
       const taken = new Set(draft.names.map((n) => n.name))
       draft.names.push({ name: withSuffix(slug, (n) => taken.has(n) || isReservedName(n)), sessionID: live.sessionID, created: t })
