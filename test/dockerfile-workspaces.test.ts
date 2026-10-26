@@ -28,7 +28,7 @@ describe("Dockerfile and workspaces", () => {
 
   // The runtime stage (the last) runs the hub from its sources: every package the server imports by relative
   // path must be there, or the image fails at start.
-  for (const pkg of ["protocol", "sdk"]) {
+  for (const pkg of ["protocol", "sdk", "cli"]) {
     test(`the runtime stage copies packages/${pkg}/src`, () => {
       const runtime = dockerfile.split(/^FROM /m).at(-1) ?? ""
       expect(runtime).toContain(`COPY packages/${pkg}/src ./packages/${pkg}/src`)

@@ -63,6 +63,9 @@ COPY packages/protocol/src ./packages/protocol/src
 # The SDK's pure envelope and address helpers (src/central/agent/envelope.ts and names.ts re-export them).
 COPY packages/sdk/package.json ./packages/sdk/
 COPY packages/sdk/src ./packages/sdk/src
+# The CLI's MCP tool table (POST /mcp serves it; src/central/mcp-http.ts imports packages/cli/src/mcp.ts).
+COPY packages/cli/package.json ./packages/cli/
+COPY packages/cli/src ./packages/cli/src
 COPY --from=web /build/web/dist ./web/dist
 
 ENV HUB_HOST=0.0.0.0 \

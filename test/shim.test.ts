@@ -22,7 +22,8 @@ describe("main package", () => {
 
   test("does not ship the shim", () => {
     // Only the private workspace packages ship inside the hub: the protocol (src/protocol.ts re-exports it), the SDK
-    // sources (the hub's API client, importable by relative path) and the CLI bundle (built by prepack,
+    // sources (the hub's API client, importable by relative path), the CLI sources (POST /mcp serves its MCP tool table)
+    // and the CLI bundle (built by prepack,
     // `npm run build:cli`; the spoke's hub/hubctl launchers run it), and the sources of `hub node`, its runtime SDK and
     // its OpenShell runtime (with its sandbox image sources: the runtime uses the layout and the bootstrap build), and the
     // spoke SDK's sources (the OpenCode spoke's src/spoke files re-export it by relative path).
@@ -32,6 +33,8 @@ describe("main package", () => {
       "packages/protocol/package.json",
       "packages/sdk/src",
       "packages/sdk/package.json",
+      "packages/cli/src",
+      "packages/cli/package.json",
       "packages/cli/dist/hub-cli.js",
       "packages/runtime-sdk/src",
       "packages/runtime-sdk/package.json",
