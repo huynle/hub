@@ -9,14 +9,15 @@
 //   service worker reads it there).
 // - Answering (decisions.ts runs `act` after the answer wins) replies to the permission AS THE USER through the
 //   shared executor: no grant, no kill switch (those bind agents, not the user); tenancy of the tree is checked
-//   again; the reply is in the agent audit as the user's. The request gone → the Decision closes (gone).
+//   again; the reply is in the agent audit as the user's. The request gone → the Decision closes (gone); its spoke
+//   not serving permission → it closes with the unsupported reason (audited unsupported).
 // - The request answered elsewhere, or ended (registry.onPermissionClosed → closed()): every Decision escalating
 //   it closes.
 // - Spam limits: ESCALATIONS_PER_HOLDER_HOUR new Decisions per holder an hour, ESCALATIONS_OPEN_MAX open ones per
 //   user (both rate_limited: the needs_user still stands, without a Decision), and pushes coalesce: a Decision
 //   opened within ESCALATION_PUSH_COALESCE_MS of the user's last escalation push opens quietly (still listed and
 //   live in the console).
-import type { Actions } from "../actions"
+import { type Actions, unsupportedMessage } from "../actions"
 import type { Counters, StateStore } from "../backend/types"
 import type { Registry } from "../registry"
 import type { PermissionDecision } from "../../protocol"
@@ -24,7 +25,7 @@ import type { BlockerRecommendation } from "../../status"
 import type { Escalation } from "./acting"
 import type { AgentActor, UserActor } from "./actor"
 import type { AgentAudit } from "./audit"
-import { type Decision, type DecisionActor, type Decisions, WHY_MAX } from "./decisions"
+import { type ActOutcome, type Decision, type DecisionActor, type Decisions, WHY_MAX } from "./decisions"
 import { type Party, partyFromActor, partyKey, partyLabel } from "./envelope"
 import { AgentError } from "./errors"
 import type { Message } from "./messages"
@@ -103,7 +104,7 @@ export class Escalations {
   }
 
   /** Decisions' action runner: replies to the escalated permission as the answering user. */
-  async act(userID: string, decision: Decision, choice: { readonly option?: string }, by: UserActor): Promise<"done" | "gone"> {
+  async act(userID: string, decision: Decision, choice: { readonly option?: string }, by: UserActor): Promise<ActOutcome> {
     const action = decision.action
     if (!action || action.kind !== "permission") return "gone"
     const reply: PermissionDecision = choice.option === "always" ? "always" : choice.option === "approve" ? "once" : "reject"
@@ -116,9 +117,11 @@ export class Escalations {
       target: { sessionID: action.sessionID, requestID: action.requestID },
       decision: "allow",
       reason: `Decision ${decision.id}`,
-      outcome: answered.outcome === "done" ? "ok" : "gone",
+      outcome: answered.outcome === "done" ? "ok" : answered.outcome,
     })
     await this.forget(userID, action.requestID)
+    // The spoke holding the request cannot answer permissions: the Decision closes saying so (not "answered elsewhere").
+    if (answered.outcome === "unsupported") return { outcome: "gone", reason: unsupportedMessage(answered) }
     return answered.outcome === "done" ? "done" : "gone"
   }
 
