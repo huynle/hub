@@ -8,7 +8,7 @@
 // creates a real OpenCode session in it; the hub primes and prompts it, and the stub model receives the prompt.
 //
 //   HUB_IT_OPENCODE=1 bun test test/e2e-phase4-live.it.test.ts
-import { afterAll, describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -17,6 +17,9 @@ import { NodeDaemon, nodeConfigPath, readNodeConfig, readSpokeCredentials } from
 import { defaults, writeConfig } from "../src/config"
 import { harness, waitFor } from "./central-harness"
 import { until } from "./spoke-fake"
+
+// End to end: real hubs, spokes, nodes and git; give each test room on a loaded machine.
+setDefaultTimeout(30_000)
 
 const enabled = process.env.HUB_IT_OPENCODE === "1"
 const opencode = enabled ? Bun.which("opencode") : null

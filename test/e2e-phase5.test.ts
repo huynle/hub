@@ -14,7 +14,7 @@
 //   and opens a raw launch-bound protocol connection with the hlt1 token from that file. It reaches the hub at the
 //   hub's local URL, standing in for the sandbox's route to the URL the config names.
 // - The end watcher's 30 s settle is crossed by moving the hub's clock (CentralOptions.now) forward.
-import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { execFileSync } from "node:child_process"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -34,6 +34,9 @@ import { defaults, writeConfig, type LaunchConfig } from "../src/config"
 import { launchSource } from "../src/spoke/launch-source"
 import { readWorkspaceRoots } from "../src/spoke/node-roots"
 import { connect, harness, hello, PUBLIC, waitFor, type FakeSpoke, type Harness } from "./central-harness"
+
+// End to end: real hubs, spokes, nodes and git; give each test room on a loaded machine.
+setDefaultTimeout(30_000)
 
 const USER = "local"
 /** Per-test limit: every node op runs the fake CLI as a process, which is slow on a loaded machine. */

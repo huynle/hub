@@ -11,7 +11,7 @@
 //   `rm -rf*` never; the hub never lets an agent approve `git push*`. An app token holds a grant of its own.
 // - Permission requests are permission.asked events from the fake host; like OpenCode it answers each once and
 //   announces the reply (permission.replied), which is how the hub learns a request is no longer pending.
-import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -22,6 +22,9 @@ import { runHubTool } from "../src/spoke/hub-tool"
 import { Spoke, type SpokeHost } from "../src/spoke/spoke"
 import { harness, PUBLIC, session, spoke as rawSpoke, waitFor, type FakeSpoke, type Harness } from "./central-harness"
 import { EventQueue } from "./spoke-fake"
+
+// End to end: real hubs, spokes, nodes and git; give each test room on a loaded machine.
+setDefaultTimeout(30_000)
 
 const USER = "local"
 const LEAD = "ses_lead03"

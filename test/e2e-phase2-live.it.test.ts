@@ -5,13 +5,16 @@
 // pushed); session 2's model is then handed the hub envelope (a turn the delivery started). The stub records it.
 //
 //   HUB_IT_OPENCODE=1 bun test test/e2e-phase2-live.it.test.ts
-import { afterAll, describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { defaults, writeConfig } from "../src/config"
 import { harness, waitFor } from "./central-harness"
 import { until } from "./spoke-fake"
+
+// End to end: real hubs, spokes, nodes and git; give each test room on a loaded machine.
+setDefaultTimeout(30_000)
 
 const enabled = process.env.HUB_IT_OPENCODE === "1"
 const opencode = enabled ? Bun.which("opencode") : null

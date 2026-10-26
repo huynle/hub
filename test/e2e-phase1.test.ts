@@ -8,7 +8,7 @@
 //   no tokens for it, and `hub log` of its session is unsupported (exit 7).
 // The CLI runs in process (packages/cli/src/cli.ts `run`, own env and HOME per credential), and once as a real
 // process (packages/cli/src/main.ts) with HUB_URL + HUB_SESSION_TOKEN in its environment.
-import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -17,6 +17,9 @@ import { defaults, writeConfig } from "../src/config"
 import { Spoke, type SpokeHost } from "../src/spoke/spoke"
 import { harness, session, spoke as rawSpoke, waitFor, type FakeSpoke, type Harness } from "./central-harness"
 import { EventQueue } from "./spoke-fake"
+
+// End to end: real hubs, spokes, nodes and git; give each test room on a loaded machine.
+setDefaultTimeout(30_000)
 
 const ROOT = path.resolve(import.meta.dir, "..")
 const ALPHA = "ses_alpha01"

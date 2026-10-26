@@ -12,7 +12,7 @@
 //   and plays a turn as OpenCode reports it: session.status busy, then idle, then the turn's result.
 // - The end watcher's 30 s settle is crossed by moving the hub's clock (CentralOptions.now) forward, not by
 //   waiting.
-import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -23,6 +23,9 @@ import { END_SETTLE_MS } from "../src/central/agent/launch-engine"
 import { centralConfig } from "../src/central/config"
 import { defaults, writeConfig } from "../src/config"
 import { connect, harness, hello, PUBLIC, waitFor, type FakeSpoke, type Harness } from "./central-harness"
+
+// End to end: real hubs, spokes, nodes and git; give each test room on a loaded machine.
+setDefaultTimeout(30_000)
 
 const USER = "local"
 

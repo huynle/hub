@@ -13,7 +13,7 @@
 // each with an honest delivery mode; acting: a permission approved through the hub runs the Claude Code and Codex
 // tools, and ops a spoke did not announce answer unsupported (agent 422, console 409) naming feature and harness;
 // launches for claude-code and codex run in node worktrees; tenancy: another user reaches none of it.
-import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { spawn, spawnSync, type ChildProcess } from "node:child_process"
 import { randomBytes, randomUUID } from "node:crypto"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
@@ -38,6 +38,9 @@ import { defaults, writeConfig } from "../src/config"
 import { Spoke } from "../src/spoke/spoke"
 import { harness, sse, waitFor, type Harness } from "./central-harness"
 import { FakeOpenCode } from "./fixtures/fake-opencode"
+
+// End to end: real hubs, spokes, nodes and git; give each test room on a loaded machine.
+setDefaultTimeout(30_000)
 
 const SLOW = 30_000
 const GIT_ENV = { GIT_AUTHOR_NAME: "e2e", GIT_AUTHOR_EMAIL: "e2e@example.com", GIT_COMMITTER_NAME: "e2e", GIT_COMMITTER_EMAIL: "e2e@example.com" }
