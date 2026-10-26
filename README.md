@@ -9,7 +9,18 @@ from your phone or any browser.
 
 Hub is harness-agnostic by design: the hub's API, web console and spoke protocol are not tied to one
 agent. [OpenCode](https://opencode.ai) is the first supported harness, through the `@huynle/hub` OpenCode
-plugin. More harnesses can connect by speaking the same spoke protocol (`src/protocol.ts`).
+plugin; Claude Code, Codex and terminal agents described by a preset connect through spokes of their own
+([docs/harnesses.md](docs/harnesses.md)). More harnesses can connect by speaking the same spoke protocol
+(`packages/protocol`), most easily on the spoke SDK ([docs/spoke-sdk.md](docs/spoke-sdk.md)).
+
+| Harness | Connect it with | Evidence | What the hub can do |
+|---|---|---|---|
+| OpenCode | `opencode plugin add @huynle/hub` | native | everything below |
+| Claude Code | `hub claude [claude args…]` | hooks | follow, message, answer permissions, stop; launches |
+| Codex | `hub codex [codex args…]` | rpc | follow, message, turns, steer, interrupt, answer approvals, stop; launches |
+| Presets (Aider, goose, your own) | `hub preset run <name>` | screen | paste prompts and messages, Ctrl-C |
+
+The full per-harness matrix, setup, limits and threat model: [docs/harnesses.md](docs/harnesses.md).
 
 Formerly **opencode-voice** and, briefly, **opencode-hub**
 ([what changed](#migrating-from-opencode-voice-or-opencode-hub)).
@@ -44,6 +55,11 @@ Formerly **opencode-voice** and, briefly, **opencode-hub**
 - **Launches**: you, a script or an app start a session on one of your machines (`hub launch --branch feat/x
   --prompt "…"`): a `hub node` daemon prepares a git worktree, the session gets its name, roles, labels and first
   prompt, and ends by itself when it is done, with signed webhooks for apps ([docs/launches.md](docs/launches.md)).
+- **More harnesses**: Claude Code (`hub claude`, through its hooks), Codex (`hub codex`, through its app-server)
+  and any terminal agent described by a data-only preset (`hub preset run`); the console shows only the controls
+  each harness's spoke serves, with an evidence badge and honest delivery labels
+  ([docs/harnesses.md](docs/harnesses.md)). Write a spoke for another harness on the spoke SDK and check it with the
+  conformance suite ([docs/spoke-sdk.md](docs/spoke-sdk.md)).
 - **Session details**: context usage, todos, MCP status, branch and per-file diffs, on demand; unread
   marks synced per user.
 - **Self-hostable**: a hub on your computer with nothing extra to install, or your own hub for phones
@@ -53,8 +69,9 @@ Formerly **opencode-voice** and, briefly, **opencode-hub**
 In a harness, `/hub` configures the harness's connection to the hub, and each feature is its own
 `/<command>`: today `/voice`, `/who` and `/msg`; more features will be added the same way.
 
-Requires OpenCode v2 (tested with 2.0.25) for the OpenCode harness. The hub runs on OpenCode's own
-runtime, a standalone binary, Docker, or [Bun](https://bun.sh) ≥ 1.3.
+Requires OpenCode v2 (tested with 2.0.25) for the OpenCode harness; the Claude Code spoke is tested with Claude
+Code 2.1.296 and the Codex spoke with Codex 0.160.0. The hub runs on OpenCode's own runtime, a standalone binary,
+Docker, or [Bun](https://bun.sh) ≥ 1.3.
 
 ## Quick start (OpenCode)
 
@@ -548,9 +565,10 @@ The node makes the git worktree `~/projects/app/.worktrees/feat/search`, the mac
 session there as `@search`, the hub primes and prompts it, and once the session has worked and stays idle the
 launch ends `idle` and the worktree is removed (the branch stays; nothing uncommitted is ever removed). Apps launch
 with an app token (scope `sessions:launch`) under a grant with verb `launch`, retry safely with a `key`, tag
-launches with labels and follow them with signed webhooks. Everything, from the spec's fields and limits to
-placement, caps, the node's git rules, webhook signatures and sandboxed launches in OpenShell (`hub node openshell
-check`): [docs/launches.md](docs/launches.md).
+launches with labels and follow them with signed webhooks. `--harness claude-code` or `--harness codex` launches
+those harnesses through their service spokes ([docs/launches.md](docs/launches.md#harnesses)). Everything, from the
+spec's fields and limits to placement, caps, the node's git rules, webhook signatures and sandboxed launches in
+OpenShell (`hub node openshell check`): [docs/launches.md](docs/launches.md).
 
 ## hub CLI
 
@@ -602,6 +620,12 @@ hub launch [--repo <path>] [--mode worktree|checkout|clone] [--branch B] [--base
 hub launches list [--state S[,S]] [--label k=v]... · hub launches show <id> · hub launches stop <id>
 hub node run                              the node daemon on this machine, until Ctrl-C or SIGTERM
 hub node install [--dry-run] · hub node uninstall [--dry-run] · hub node status
+hub claude [claude args…]                 Claude Code with the hub plugin (--plugin-dir; ~/.claude untouched)
+hub claude-code install|uninstall [--dry-run] · hub claude-code status   the Claude Code daemon as a service
+hub codex [codex args…]                   Codex with its shared app-server daemon on (~/.codex untouched)
+hub codex-spoke install|uninstall [--dry-run] · hub codex-spoke status   the Codex spoke as a service
+hub preset list · hub preset check <name|file>
+hub preset run <name|file> [--socket <name> | --current] [--cwd <dir>] [--resume <id>] [--no-hub] [-- args…]
 hub mcp                                   an MCP server on stdio (see below)
 hub login [--url URL] [--token APP_TOKEN] · hub logout
 hub help · hub --version
@@ -676,6 +700,16 @@ updates it), and warns when the node would not run yet. `hub node uninstall` rem
 commands that stop the service; `hub node status` shows the file (up to date or not), the enrolment (never the
 token), node.json and the commands to inspect the service. What the node does to your repositories (worktrees under
 `<repo>/.worktrees/<branch>`, cleanup that never forces) is in [docs/launches.md](docs/launches.md#hub-node).
+
+**Other harnesses.** `hub claude` runs Claude Code with the hub's plugin loaded through `--plugin-dir` and starts the
+per-user Claude Code daemon (`hub claude-code daemon`) when none runs; `hub codex` runs Codex with its shared
+app-server daemon turned on for that run and starts the per-user Codex spoke (`hub codex-spoke serve`). Both pass
+every other argument and the exit code through, never write `~/.claude` or `~/.codex`, and run the harness without
+the hub (saying why) when the machine is not enrolled. `hub claude-code install` and `hub codex-spoke install` write
+a launchd agent or systemd user unit for those processes, like `hub node install` (printed, never loaded), so
+`claude-code` and `codex` launches can be placed without a wrapper run. `hub preset list | check | run` drives a
+harness without a spoke through a pane on a private tmux server. Settings, the op matrix and the limits:
+[docs/harnesses.md](docs/harnesses.md).
 
 **Credentials.** `HUB_URL` + `HUB_SESSION_TOKEN` (the spoke sets them in each session's shells; the CLI then
 acts as that session) win over the login file. Outside a session, `hub login --url https://hub.example` stores
@@ -1733,6 +1767,15 @@ that the hub sees the session's token while the model and the transcript never d
 test/spoke-prompt-refs.it.test.ts` checks that a prompt naming a session reaches the model unchanged with the
 reference note attached, and that hub-sourced prompts get none.
 
+`test/e2e-phase7.test.ts` runs the other harnesses end to end in process (the Claude Code daemon fed fixture hook
+inputs, the Codex spoke on a fake shared app-server daemon, a preset on a private tmux server, and claude-code and
+codex launches in node worktrees), and `test/e2e-phase7-conformance.test.ts` runs the spoke conformance suite against every shipped spoke
+(OpenCode included). The opt-in `HUB_IT_CLAUDE=1 bun test ./packages/claude-code/test/live.it.test.ts` and
+`HUB_IT_CODEX=1 bun test ./packages/codex/test/live.it.test.ts` run the real CLIs against the testkit's stub model
+with a throwaway `HOME`, `CLAUDE_CONFIG_DIR` / `CODEX_HOME` and a deny-all proxy. A new harness spoke starts from
+`bun packages/spoke-sdk/scaffold.ts <name> <dir>`, whose output passes `npx hub-conformance spoke --driver "bun
+<dir>/driver.ts"` as written ([docs/spoke-sdk.md](docs/spoke-sdk.md)).
+
 Point a project's `.opencode/opencode.jsonc` at your checkout to try changes:
 `{ "plugins": [{ "package": "/path/to/hub" }] }`. If the plugin is also installed globally,
 OpenCode keeps the first copy with the same id, so test with `OPENCODE_CONFIG_DIR` pointing at a copy of
@@ -1781,6 +1824,9 @@ publish before trusted publishing can take over (see the comment in `release.yml
   replay buffer is in memory (a hub restart means a full catalog + `resync`).
 - Running shells are seeded from the spoke's own server (`shell.list` for the 20 most recent session
   directories); shells in other directories show up once they emit an event.
+- Claude Code, Codex and presets serve fewer operations than OpenCode (no timeline or summary; Claude Code takes
+  hub turns only in sessions the hub launched, and its permission requests race its own dialog); see
+  [docs/harnesses.md](docs/harnesses.md#known-limits).
 
 ## License
 
