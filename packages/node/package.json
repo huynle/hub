@@ -1,6 +1,6 @@
 {
   "name": "@huynle/hub-node",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "private": true,
   "description": "`hub node`: the per-machine daemon that prepares, collects and cleans up launch workspaces (internal; shipped inside @huynle/hub, not published on its own).",
   "license": "MIT",

@@ -1,6 +1,6 @@
 {
   "name": "@huynle/hub-cli",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "private": true,
   "description": "The hub CLI (`hub` / `hubctl`) for agents and scripts (internal; bundled into @huynle/hub, not published on its own).",
   "license": "MIT",

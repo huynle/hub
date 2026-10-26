@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.7.1
+
+- **Release**: the npm package is published again. 0.7.0's publish step had no Bun for the CLI bundle, so 0.7.0 is
+  on GitHub and ghcr.io but not on npm; 0.7.1 is the same code.
+
 ## 0.7.0
 
 The agent control plane: sessions get addresses and talk to each other, ask you for Decisions, act for you only
