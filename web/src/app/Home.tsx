@@ -159,7 +159,7 @@ export function Home() {
       <Show when={hub.machines && hub.machines.length === 0}>
         <div class="empty">
           <p class="display">No machines yet</p>
-          <p class="muted">In OpenCode run /voice → Connect this machine, then approve it here.</p>
+          <p class="muted">In OpenCode run /hub → Connect to a hub…, then approve it here.</p>
         </div>
       </Show>
       <Show when={isPhone()} fallback={<SessionTable rows={shown()} table={table()} sortBy={sortBy} picked={picked()} pick={pick} pickAll={pickAll} />}>
