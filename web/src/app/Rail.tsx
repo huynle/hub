@@ -74,7 +74,7 @@ export function Rail(props: {
         <IconButton icon="close" label="Close details" onClick={props.onClose} />
       </div>
       <Card id="environment" title="Environment">
-        <Show when={props.found} fallback={<p class="muted small">Not reported by any connected machine.</p>}>
+        <Show when={props.found} fallback={<p class="muted small">{hub.machines ? "Not reported by any connected machine." : "Loading…"}</p>}>
           {(f) => (
             <dl class="kv">
               <dt>Machine</dt>

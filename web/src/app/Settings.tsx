@@ -458,7 +458,7 @@ function MachinesSection() {
   return (
     <Section id="machines" title="Machines">
       <Approvals />
-      <Show when={(hub.machines ?? []).length} fallback={<p class="small muted">None. In OpenCode run /voice → Connect this machine.</p>}>
+      <Show when={(hub.machines ?? []).length} fallback={<p class="small muted">None. In OpenCode run /hub → Connect to a hub….</p>}>
         <ul class="list">
           <For each={hub.machines}>
             {(m) => (

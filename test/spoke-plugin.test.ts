@@ -233,7 +233,7 @@ describe("plugin setup", () => {
     const res = await server.request({ op: "deliver", sessionID: "ses_a", messageID: "msg_abc", text: "[hub] hi", wake: true, meta: { kind: "msg", from: "@x", to: "@y" } })
     expect(res).toMatchObject({ ok: true, result: { delivered: "turn", inboxID: "msg_abc" } })
     expect(fake.synthetics).toEqual([
-      { sessionID: "ses_a", id: "msg_abc", text: "[hub] hi", metadata: { source: "hub", messageID: "msg_abc", kind: "msg", from: "@x", to: "@y" }, delivery: "queue", resume: true },
+      { sessionID: "ses_a", id: "msg_abc", text: "[hub] hi", metadata: { source: "hub", messageID: "msg_abc", kind: "msg", from: "@x", to: "@y" }, delivery: "steer", resume: true },
     ])
   })
 

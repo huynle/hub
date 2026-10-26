@@ -1,12 +1,13 @@
 // The console's live stream policy: pause while hidden, resume with the last event id, reconnect a dead stream.
 import { describe, expect, test } from "bun:test"
-import { HIDDEN_CLOSE_MS, STALE_MS, StreamKeeper, streamURL } from "../web/src/core/stream-core"
+import { HIDDEN_CLOSE_MS, STALE_MS, StreamKeeper, streamOpening, streamURL, type OpenReason } from "../web/src/core/stream-core"
 
 function setup(keepOpen = () => false) {
   let now = 0
   let timers: Array<{ at: number; fn: () => void; id: number }> = []
   let next = 1
   const log: string[] = []
+  const reasons: OpenReason[] = []
   const keeper = new StreamKeeper({
     setTimer: (fn, ms) => {
       const id = next++
@@ -16,7 +17,10 @@ function setup(keepOpen = () => false) {
     clearTimer: (id) => {
       timers = timers.filter((t) => t.id !== id)
     },
-    open: (url) => log.push(`open ${url}`),
+    open: (url, reason) => {
+      log.push(`open ${url}`)
+      reasons.push(reason)
+    },
     close: () => log.push("close"),
     keepOpen,
   })
@@ -31,7 +35,7 @@ function setup(keepOpen = () => false) {
     }
     now = end
   }
-  return { keeper, log, advance }
+  return { keeper, log, reasons, advance }
 }
 
 describe("streamURL", () => {
@@ -129,5 +133,39 @@ describe("StreamKeeper", () => {
     advance(STALE_MS * 2)
     expect(log).toEqual(["open /api/events?lite=1", "close"])
     expect(keeper.state).toBe("stopped")
+  })
+})
+
+describe("why the stream opens", () => {
+  test("the keeper tells open() why: start, scope, resume, stale, reconnect", () => {
+    const { keeper, reasons, advance } = setup()
+    keeper.start({ lite: true })
+    keeper.setScope({ lite: true, session: "ses_1" })
+    keeper.hidden()
+    advance(HIDDEN_CLOSE_MS)
+    keeper.visible()
+    advance(STALE_MS)
+    keeper.reopen()
+    expect(reasons).toEqual(["start", "scope", "resume", "stale", "reconnect"])
+  })
+})
+
+describe("streamOpening", () => {
+  test("a scope switch of a live stream stays live with no reconnecting note (navigation is not a reconnect)", () => {
+    expect(streamOpening("live", "scope")).toEqual({ connection: "live", reconnecting: false })
+  })
+
+  test("the first open is connecting, without a reconnecting note", () => {
+    expect(streamOpening("connecting", "start")).toEqual({ connection: "connecting", reconnecting: false })
+    expect(streamOpening("connecting", "scope")).toEqual({ connection: "connecting", reconnecting: false })
+  })
+
+  test("after a drop, a pause or a dead stream: connecting, with the reconnecting note", () => {
+    for (const reason of ["resume", "stale", "reconnect"] as const) {
+      expect(streamOpening("live", reason)).toEqual({ connection: "connecting", reconnecting: true })
+    }
+    expect(streamOpening("paused", "resume")).toEqual({ connection: "connecting", reconnecting: true })
+    expect(streamOpening("down", "reconnect")).toEqual({ connection: "connecting", reconnecting: true })
+    expect(streamOpening("down", "scope")).toEqual({ connection: "connecting", reconnecting: true })
   })
 })

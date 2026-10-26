@@ -5,7 +5,8 @@
 //   announce "deliver"; one that fails or answers malformed is skipped for the next (same messageID: OpenCode
 //   dedupes it, even across restarts). Only spokes without "deliver" report the session: unsupported
 //   {feature: "deliver"} and nothing is stored. No fallback through steer/turn.
-// - Modes: plain msg → delivery "queue" (after the running turn), ask/reply/decline/urgent → "steer"; wake
+// - Modes: plain msg → delivery "queue" (after the running turn), ask/reply/decline/urgent → "steer" (also the
+//   first msg after a primer to an idle session: the two then share one model call, quirk hzmcqwpj); wake
 //   unless wake:false, a subagent recipient, the hop cap (alerted once when crossed) or a spent wake budget.
 // - Roles: one holder, the idle one (by real evidence) else the most recently active, else (all offline) the
 //   one seen last; the message records the holder generation. sendAll: every holder, a message each. A session
@@ -201,8 +202,8 @@ export class Delivery {
   private readonly newID: () => string
   /** Per user: the flush in progress (flushes run one at a time). */
   private readonly flushing = new Map<string, Promise<void>>()
-  /** Per user and session: the primer in flight (one at a time). */
-  private readonly priming = new Map<string, Promise<void>>()
+  /** Per user and session: the primer in flight (one at a time); true once it was admitted. */
+  private readonly priming = new Map<string, Promise<boolean>>()
   /** Users seen since start (sent a message, or one of their spokes reported sessions): the loop looks at these. */
   private readonly users = new Set<string>()
   private timer: unknown
@@ -224,14 +225,17 @@ export class Delivery {
 
   /**
    * Primes the session once (see the header; `again`: an explicit rename primes once more): no-op when it is primed, unknown, or no deliver-capable spoke of
-   * the user reports it. Never throws.
+   * the user reports it. Resolves true when a primer was admitted now. Never throws.
    */
-  prime(userID: string, sessionID: string, options: { again?: boolean } = {}): Promise<void> {
+  prime(userID: string, sessionID: string, options: { again?: boolean } = {}): Promise<boolean> {
     const key = `${userID}\u0000${sessionID}`
     const running = this.priming.get(key)
     if (running) return running
     const run = this.primeNow(userID, sessionID, options.again === true)
-      .catch((cause) => console.error(`[hub] primer failed: ${cause instanceof Error ? cause.message : String(cause)}`))
+      .catch((cause) => {
+        console.error(`[hub] primer failed: ${cause instanceof Error ? cause.message : String(cause)}`)
+        return false
+      })
       .finally(() => this.priming.delete(key))
     this.priming.set(key, run)
     return run
@@ -327,12 +331,12 @@ export class Delivery {
 
   // ---- internals ----------------------------------------------------------------------------------------
 
-  private async primeNow(userID: string, sessionID: string, again: boolean): Promise<void> {
+  private async primeNow(userID: string, sessionID: string, again: boolean): Promise<boolean> {
     const { directory } = this.deps
-    if (!directory.primed || !directory.markPrimed || (!again && directory.primed(userID, sessionID))) return
-    if (!this.targets(userID, sessionID).length) return
+    if (!directory.primed || !directory.markPrimed || (!again && directory.primed(userID, sessionID))) return false
+    if (!this.targets(userID, sessionID).length) return false
     const entry = directory.resolve(userID, sessionID).sessions[0]
-    if (!entry) return
+    if (!entry) return false
     const roles = entry.roles.map((r) => (r.project === undefined ? r.role : `${r.role}.${r.project}`))
     const req: DeliverRequest = {
       op: "deliver",
@@ -342,7 +346,9 @@ export class Delivery {
       wake: false,
       meta: { kind: "primer", from: "hub", to: entry.name ? `@${entry.name}` : sessionID, delivery: "steer" },
     }
-    if (await this.request(userID, sessionID, req)) await directory.markPrimed(userID, sessionID)
+    if (!(await this.request(userID, sessionID, req))) return false
+    await directory.markPrimed(userID, sessionID)
+    return true
   }
 
   /** A msg or ask to the user (@me): stored only; a msg alerts the user. */
@@ -563,8 +569,11 @@ export class Delivery {
 
   /** Tries each deliver-capable connection in turn (same message id: the harness dedupes it). */
   private async attempt(userID: string, message: Message, sessionID: string, wake: boolean, urgent: boolean): Promise<Sent | undefined> {
-    await this.prime(userID, sessionID)
-    const result = await this.request(userID, sessionID, this.deliverRequest(message, sessionID, wake, urgent))
+    // A primer just admitted waits (steer, no resume) for the next turn. A queued msg waking an idle session would
+    // come after that turn's reply with a model call of its own (quirk hzmcqwpj): steer it too, one call for both.
+    const primed = await this.prime(userID, sessionID)
+    const steer = urgent || (primed && wake && this.deps.registry.idle(sessionID))
+    const result = await this.request(userID, sessionID, this.deliverRequest(message, sessionID, wake, steer))
     if (!result) return undefined
     const updated = (await this.messages.setDelivery(userID, message.id, result.delivered)) ?? message
     return { message: updated, delivery: result.delivered }
@@ -626,8 +635,9 @@ export class Delivery {
     return held
   }
 
-  private deliverRequest(message: Message, sessionID: string, wake: boolean, urgent: boolean): DeliverRequest {
-    const delivery: DeliveryMode = message.kind === "msg" && !urgent ? "queue" : "steer"
+  /** `steer`: urgent, or the first msg after a primer to an idle session (see attempt). */
+  private deliverRequest(message: Message, sessionID: string, wake: boolean, steer: boolean): DeliverRequest {
+    const delivery: DeliveryMode = message.kind === "msg" && !steer ? "queue" : "steer"
     return {
       op: "deliver",
       sessionID,

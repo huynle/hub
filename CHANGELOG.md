@@ -63,7 +63,8 @@ the protocol up:
   revocation are audited (`app-token.create`, `app-token.revoke`).
 - **Session names and roles** (`@name`, `@@role`): the hub keeps a per-user record of every session its spokes
   report (machine, parent, project, lastSeen; at most 2000). Root sessions get a name once, from their first
-  real title (OpenCode's "New session" placeholders are skipped), `[a-z0-9-]` 2–40, with `-2`, `-3` on a clash.
+  real title (OpenCode's "New session" placeholders are skipped): its first few words (at most 4 and 24
+  characters, cut at a word boundary, ID-like tokens such as `ses_…` dropped), with `-2`, `-3` on a clash.
   `POST /api/agent/name {name, session?}` sets one (409 `name_taken` when taken); the old name stays an alias for
   24 h; a name is released 7 days after its session is archived (the console's Archive) or deleted.
   `POST /api/agent/roles/claim {role, exclusive?, project?, session?}` / `roles/release` manage roles

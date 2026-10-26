@@ -57,12 +57,15 @@ describe("ActingSwitch", () => {
     expect(user).toBeInstanceOf(AgentError)
     expect(user.code).toBe("paused")
     expect(user.message).toMatch(/this user/)
+    // Hints reach people (agents relay them): where in the console, never a raw API path.
+    expect(user.options.hint).toBe("Turn them back on in the console: Settings → Agents → Agent actions")
     expect(agentFailure(user).status).toBe(423)
     await acting.setUserActing(LOCAL_USER, USER_ACTOR, true)
     await store.setActingPaused(true)
     const hub = paused(() => acting.ensureActing(LOCAL_USER))
     expect(hub.code).toBe("paused")
     expect(hub.message).toMatch(/hub admin/)
+    expect(hub.options.hint).toBe("Ask the hub admin to turn them back on (Settings → Agents → Agent actions on this hub)")
   })
 
   test("hubNever: the hub.json agents.never patterns, parsed", async () => {

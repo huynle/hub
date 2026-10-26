@@ -270,7 +270,7 @@ own sessions only:
 | Address | Means |
 |---|---|
 | `ses_…` | a session ID, or an unambiguous prefix of one |
-| `@name` | a named root session. Names are `[a-z0-9-]`, 2–40 characters; each root session gets one from its first real title (`-2`, `-3` on a clash) and can be renamed (`hub name @scout`); the old name stays an alias for 24 h. `me` is reserved (`@me` is always the user): a title like "Me" derives `me-2` |
+| `@name` | a named root session. Names are `[a-z0-9-]`, 2–40 characters; each root session gets one from its first real title: its first few words, at most 4 and 24 characters, with ID-like tokens such as `ses_…` dropped (`-2`, `-3` on a clash; later title changes keep it) and can be renamed (`hub name @scout`); the old name stays an alias for 24 h. `me` is reserved (`@me` is always the user): a title like "Me" derives `me-2` |
 | `@me` | the user (messages and Decisions; never a session) |
 | `@@role` | the session(s) holding a role (`hub role claim reviewer`); `--exclusive` claims fail while another live holder exists |
 | `@name.project`, `@@role.project` | scoped to a project (its name, else the folder name) |
@@ -383,7 +383,8 @@ removed from the text and from every interpolated name.
 
 **Primer.** Once per session, the first time it is named explicitly or gets its first message, the hub adds a short
 note without starting a turn: who the session is (`@name`, its roles), how to message others (`hub msg`, `hub who`),
-and that messages headed `[hub]` come from other sessions or apps, not from the user.
+and that messages headed `[hub]` come from other sessions or apps, not from the user. When that first message
+wakes an idle session, the note and the message reach the model together, in one model call.
 
 **Decisions.** `ask @me` from a session or app opens a Decision (question, options, a recommendation, urgency, a
 deadline with an optional safe `onTimeout`). You answer it from the console (cards on Home and in the sessions it

@@ -1,7 +1,7 @@
 // Pure helpers for @name / @@role addressing (design §2): name syntax, title placeholders, slugs, suffixes,
 // reserved roles and address parsing.
 import { describe, expect, test } from "bun:test"
-import { isPlaceholderTitle, isReservedName, isReservedRole, parseAddress, slugify, validName, withSuffix } from "../src/central/agent/names"
+import { deriveName, DERIVED_NAME_MAX, isPlaceholderTitle, isReservedName, isReservedRole, parseAddress, slugify, validName, withSuffix } from "../src/central/agent/names"
 
 describe("validName", () => {
   test("[a-z0-9-], 2–40 characters", () => {
@@ -47,6 +47,41 @@ describe("slugify", () => {
     expect(slug.endsWith("-")).toBe(false)
     expect(slugify("日本語")).toBeUndefined()
     expect(slugify("x")).toBeUndefined()
+  })
+})
+
+describe("deriveName", () => {
+  test("a short title keeps its words (as slugify)", () => {
+    expect(deriveName("Fix the Login Redirect")).toBe("fix-the-login-redirect")
+    expect(deriveName("API refactor")).toBe("api-refactor")
+    expect(deriveName("Me!")).toBe("me")
+  })
+
+  test("drops session-ID-like tokens (ses_…, msg_…, hashes, UUIDs)", () => {
+    expect(deriveName("Send hello to session ses_e881b3f3fffei0")).toBe("send-hello-to-session")
+    expect(deriveName("Reply to msg_hub01234567890abcdefgh now")).toBe("reply-to-now")
+    expect(deriveName("Check 3f2a9c81d0e4b7a6 build")).toBe("check-build")
+    expect(deriveName("Look at 123e4567-e89b-12d3-a456-426614174000")).toBe("look-at")
+    // Ordinary words with digits stay.
+    expect(deriveName("Upgrade to v2 for node20")).toBe("upgrade-to-v2-for")
+  })
+
+  test("at most 4 words and DERIVED_NAME_MAX characters, cut at a word boundary", () => {
+    expect(DERIVED_NAME_MAX).toBe(24)
+    expect(deriveName("Refactor the session list sorting and filtering code")).toBe("refactor-the-session")
+    expect(deriveName("Investigate intermittent websocket disconnects")).toBe("investigate-intermittent")
+    const name = deriveName("one two three four five six")!
+    expect(name).toBe("one-two-three-four")
+    // A single word longer than the cap is cut hard (still a valid name, no trailing dash).
+    const long = deriveName("Supercalifragilisticexpialidocious-word")!
+    expect(long.length).toBeLessThanOrEqual(DERIVED_NAME_MAX)
+    expect(validName(long)).toBe(true)
+  })
+
+  test("undefined when nothing usable remains", () => {
+    expect(deriveName("ses_e881b3f3fffei0")).toBeUndefined()
+    expect(deriveName("日本語")).toBeUndefined()
+    expect(deriveName("x")).toBeUndefined()
   })
 })
 

@@ -51,7 +51,7 @@ export function Pair(props: { next: string; error: string }) {
         <label for="pair-code">Pairing code</label>
         <input id="pair-code" class="pair-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" value={code()} onInput={(e) => setCode(e.currentTarget.value)} />
       </div>
-      <p class="small muted">Open /voice → Pair a phone on a computer connected to this hub to get a 6-digit code. For the very first device, use the code printed in the hub's log.</p>
+      <p class="small muted">In OpenCode run /hub → Pair a phone on a computer connected to this hub to get a 6-digit code. For the very first device, use the code printed in the hub's log.</p>
       <div class="field">
         <label for="pair-name">Device name</label>
         <input id="pair-name" type="text" maxlength="64" value={name()} onInput={(e) => setName(e.currentTarget.value)} />

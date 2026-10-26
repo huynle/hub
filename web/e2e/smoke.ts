@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // Headless smoke test of the built console against the mock hub (test/web-mock-hub.ts), at desktop (1440×900) and
 // phone (390×844) sizes: home loads, a session opens with its timeline, Send → Steer/Stop → Send, image attachments
-// (attach, remove, attach again, send), Dictate → Send (input cleared, also when the turn's connection drops), a slow turn (202, reply later), the right rail and diff viewer render, a Voice-off session is inspectable, rename (table,
+// (attach, remove, attach again, send), Dictate → Send (input cleared, also when the turn's connection drops), a slow turn (202, reply later), the right rail and diff viewer render, navigating between sessions without a Reconnecting…/Connecting flash, a Voice-off session is inspectable, rename (table,
 // sidebar, top bar), Auto-name (menu, ✨, Naming…, errors), archive (menu, Undo, Archived chip, Needs-you exception, bulk, inactive), resizable sidebar/rail, and
 // Voice mode speaking a streamed reply before its text ends (each sentence playing while its MP3 still downloads), with the turn timed (a browser with a silent fake mic), Voice mode with the screen off (the phone muting/ending the mic or suspending audio: paused in the Voice bar and the notification, listening again on unlock),
 // progressive history (newest page first, older pages while scrolling up, anchored, Retry), timeline order (subagents
@@ -983,6 +983,36 @@ async function desktop(browser: Browser): Promise<void> {
     await page.locator('.rail [data-card="environment"] button[aria-expanded="false"]').waitFor()
     await page.locator('.rail [data-card="environment"]').getByRole("button", { name: "Environment" }).click()
     await page.locator('.rail [data-card="environment"]').getByText("laptop").waitFor()
+  })
+
+  await check("desktop: navigating between sessions never shows Reconnecting… or Connecting (a scope switch is no reconnect)", async () => {
+    await page.goto(`${BASE}/`)
+    await page.getByRole("heading", { name: "All sessions" }).waitFor()
+    await page.locator('.sidebar a.side-row-link[href="/s/ses_mock"]').first().waitFor()
+    // Every text the status note, the banner and the rail's machine line ever show, from here on.
+    await page.evaluate(() => {
+      const w = window as unknown as { __flicker: string[] }
+      w.__flicker = []
+      const scan = () => {
+        for (const el of Array.from(document.querySelectorAll('.sync-note, .conn-banner, .rail [data-card="environment"] dd'))) {
+          const text = el.textContent ?? ""
+          if (/Reconnecting|Connecting/.test(text)) w.__flicker.push(text)
+        }
+      }
+      new MutationObserver(scan).observe(document.body, { subtree: true, childList: true, characterData: true })
+    })
+    await page.locator('.sidebar a.side-row-link[href="/s/ses_mock"]').first().click()
+    const card = page.locator('.rail [data-card="environment"]')
+    await card.getByText("online").waitFor()
+    const other = page.locator('.sidebar a.side-row-link:not([href="/s/ses_mock"])').first()
+    await other.click()
+    await page.waitForFunction(() => !location.pathname.endsWith("/ses_mock"))
+    await page.waitForTimeout(300)
+    await page.locator('.sidebar a.side-row-link[href="/s/ses_mock"]').first().click()
+    await card.getByText("online").waitFor()
+    await page.waitForTimeout(300)
+    const seen = await page.evaluate(() => (window as unknown as { __flicker: string[] }).__flicker)
+    assert(seen.length === 0, `flicker: ${[...new Set(seen)].join(" | ")}`)
   })
 
   await check("desktop: speech model pickers filter a big gateway list by provider and name; the pick is saved", async () => {

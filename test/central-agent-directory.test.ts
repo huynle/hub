@@ -134,6 +134,16 @@ describe("derived names", () => {
     expect(nameOf(h, h.alice, "ses_a")).toBe("fix-the-login-redirect")
   })
 
+  test("a long title derives a short name (ID-like tokens dropped), kept when the title changes later", async () => {
+    const h = await setup()
+    h.report(h.alice, root("ses_a", "Send hello to session ses_e881b3f3fffei0 and wait for the reply"))
+    await h.dir.sync(h.alice)
+    expect(nameOf(h, h.alice, "ses_a")).toBe("send-hello-to-session")
+    h.report(h.alice, root("ses_a", "Send hello to session ses_e881b3f3fffei0 (done)"))
+    await h.dir.sync(h.alice)
+    expect(nameOf(h, h.alice, "ses_a")).toBe("send-hello-to-session")
+  })
+
   test("subagent sessions are never named", async () => {
     const h = await setup()
     h.report(h.alice, root("ses_a", "Parent work"), child("ses_c", "ses_a", "Explore the code"))

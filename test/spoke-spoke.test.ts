@@ -1742,7 +1742,7 @@ describe("deliver", () => {
         id: "msg_7fA9bC0dE1fG2hI3jK4lM5",
         text: "[hub] from @api to @@reviewer\n---\nhello\n---",
         metadata: { source: "hub", messageID: "msg_7fA9bC0dE1fG2hI3jK4lM5", kind: "reply", from: "@api", to: "@@reviewer", replyTo: "msg_0" },
-        delivery: "queue",
+        delivery: "steer",
         resume: true,
       },
     ])
@@ -1904,7 +1904,7 @@ describe("acting: hub prompts and permission messages", () => {
         id: "msg_p1",
         text: "[hub] prompt from @orchestrator · grant g_12 · msg_p1\n----- msg_p1 -----\nrun the tests\n----- msg_p1 -----",
         metadata: { source: "hub", messageID: "msg_p1", kind: "prompt", from: "@orchestrator", to: "@api", grant: "g_12" },
-        delivery: "queue",
+        delivery: "steer",
         resume: true,
       },
     ])

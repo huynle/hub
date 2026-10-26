@@ -1,4 +1,4 @@
-// Pure helpers for @name / @@role addressing (design §2.1): OpenCode's placeholder titles, slugs for derived names,
+// Pure helpers for @name / @@role addressing (design §2.1): OpenCode's placeholder titles, slugs, derived names,
 // conflict suffixes, the reserved name and reserved roles. Name syntax and address parsing live in the SDK (packages/sdk/src/address.ts)
 // and are re-exported here.
 
@@ -46,3 +46,41 @@ export const isReservedName = (name: string): boolean => name === "me"
 const RESERVED_ROLES = ["orchestrator", "concierge"]
 
 export const isReservedRole = (role: string): boolean => RESERVED_ROLES.some((prefix) => role.startsWith(prefix))
+
+/** The longest derived name: a few words, short enough to type and read in an address (@send-hello-to-session). */
+export const DERIVED_NAME_MAX = 24
+/** At most this many words of the title make a derived name. */
+const DERIVED_WORDS_MAX = 4
+
+/** Tokens that identify rather than describe (dropped from derived names): ses_…/msg_… IDs, UUIDs, hashes, long letter+digit runs. */
+const ID_LIKE = [
+  /^[a-z]{2,5}_[a-z0-9]{6,}$/i,
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+  /^(?=[a-f]*\d)[0-9a-f]{8,}$/i,
+  /^(?=.*\d)(?=.*[a-z])[a-z0-9]{10,}$/i,
+]
+const isIDLike = (token: string): boolean => ID_LIKE.some((re) => re.test(token))
+
+/**
+ * The name derived from a session title: its first few meaningful words (ID-like tokens dropped), at most
+ * DERIVED_WORDS_MAX words and DERIVED_NAME_MAX characters, cut at a word boundary (a single longer word is cut).
+ * Undefined when fewer than 2 usable characters remain. Derived once per session (see directory.ts), so later
+ * title changes never rename it.
+ */
+export function deriveName(title: string): string | undefined {
+  const words = title
+    .split(/\s+/)
+    .map((token) => token.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ""))
+    .filter((token) => token && !isIDLike(token))
+    .flatMap((token) => slugify(token)?.split("-") ?? (/^[a-z0-9]$/i.test(token) ? [token.toLowerCase()] : []))
+  let name = ""
+  for (const word of words.slice(0, DERIVED_WORDS_MAX)) {
+    const next = name ? `${name}-${word}` : word
+    if (next.length > DERIVED_NAME_MAX) {
+      if (!name) name = word.slice(0, DERIVED_NAME_MAX)
+      break
+    }
+    name = next
+  }
+  return validName(name) ? name : undefined
+}

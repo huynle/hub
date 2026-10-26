@@ -75,7 +75,8 @@ export interface EngineSpokes {
 }
 export type EngineDirectory = Pick<Directory, "sync" | "setName" | "claimRole" | "resolve">
 export interface EngineDelivery {
-  prime: Delivery["prime"]
+  /** Delivery.prime (whether it admitted a primer does not matter here). */
+  prime(userID: string, sessionID: string): Promise<unknown>
   readonly messages: Pick<Delivery["messages"], "inbox">
 }
 export type EngineDecisions = Pick<Decisions, "list">

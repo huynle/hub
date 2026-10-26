@@ -8,8 +8,12 @@ const idle = { busy: false, formOpen: false, subagent: false }
 const busy = { ...idle, busy: true }
 
 describe("planDelivery", () => {
-  test("an idle recipient gets a turn", () => {
-    expect(planDelivery({ wake: true, meta: meta() }, idle)).toEqual({ delivery: "queue", resume: true, delivered: "turn" })
+  // An idle session has no running turn to queue behind. A queued wake would come after the reply to anything
+  // already waiting (a steered primer or wake:false message) with its own model call (quirk hzmcqwpj); steered,
+  // it joins them in one model call.
+  test("an idle recipient gets a turn, steered (also over the hub's queue) so waiting items share its model call", () => {
+    expect(planDelivery({ wake: true, meta: meta() }, idle)).toEqual({ delivery: "steer", resume: true, delivered: "turn" })
+    expect(planDelivery({ wake: true, meta: meta({ delivery: "queue" }) }, idle)).toEqual({ delivery: "steer", resume: true, delivered: "turn" })
   })
 
   test("a plain msg to a busy recipient queues behind the running turn", () => {
@@ -174,8 +178,8 @@ describe("DeliveryLedger", () => {
 describe("hub prompts (kind prompt)", () => {
   const prompt = { kind: "prompt" as const, from: "@orchestrator", to: "@api-refactor", grant: "g_12" }
 
-  test("a prompt is planned like a message: a turn when idle, behind the running turn when busy", () => {
-    expect(planDelivery({ wake: true, meta: prompt }, idle)).toEqual({ delivery: "queue", resume: true, delivered: "turn" })
+  test("a prompt is planned like a message: a (steered) turn when idle, behind the running turn when busy", () => {
+    expect(planDelivery({ wake: true, meta: prompt }, idle)).toEqual({ delivery: "steer", resume: true, delivered: "turn" })
     expect(planDelivery({ wake: true, meta: prompt }, busy)).toEqual({ delivery: "queue", resume: true, delivered: "queued" })
     expect(planDelivery({ wake: true, meta: { ...prompt, delivery: "steer" } }, busy)).toEqual({ delivery: "steer", resume: true, delivered: "steer" })
   })
