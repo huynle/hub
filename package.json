@@ -61,6 +61,9 @@
     "packages/spoke-sdk/package.json",
     "packages/claude-code/src",
     "packages/claude-code/package.json",
+    "packages/preset/src",
+    "packages/preset/presets",
+    "packages/preset/package.json",
     "bin",
     "web/dist",
     "docker",
@@ -83,7 +86,8 @@
     "packages/spoke-sdk",
     "packages/testkit",
     "packages/claude-code",
-    "packages/conformance"
+    "packages/conformance",
+    "packages/preset"
   ],
   "engines": {
     "bun": ">=1.3"
