@@ -390,6 +390,83 @@ webhooks. See [docs/launches.md](docs/launches.md) and [docs/multi-user.md](docs
 - The sandbox image (`packages/runtime-openshell/image/`) with start and entry scripts and an upload fallback.
 - `hub node openshell check [--json]` reports whether a node can run sandboxed launches.
 
+### More harnesses
+
+Claude Code, Codex and terminal agents described by a preset connect to the hub next to OpenCode, each through a
+spoke that announces exactly what it can do ([docs/harnesses.md](docs/harnesses.md)), and new harness spokes have
+an SDK, a test kit, a conformance suite and a scaffold ([docs/spoke-sdk.md](docs/spoke-sdk.md)).
+
+- **Protocol** (still version 1, compatible both ways). Core ops (`turn`, `steer`, `interrupt`, `stop`,
+  `permission`, `form`) are announced features for non-OpenCode hellos; OpenCode hellos keep implying them.
+  `opencodeVersion` is optional for other harnesses. The harness event subset (`HARNESS_EVENTS`,
+  `harnessEventProblem`) fixes which forwarded events another harness's spoke may send and their shapes, including
+  `session.execution.interrupted {inferred: true}` for interruptions the harness never reported and
+  `session.inbox.delivered {origin}`. New feature `turnEvents` (every turn end is the harness's own). The harness
+  preset schema (`HarnessPreset`, `presetProblem`): data only, an argv without shell syntax, delivery `paste`,
+  evidence `screen`, built-in names reserved.
+- **Hub.** One service spoke per machine and harness (`serviceFor(machine, harness)`): a Claude Code or Codex
+  service never hides the OpenCode one. Launches and placement use the service spoke of `spec.harness`. Ops a spoke
+  did not announce are refused before they reach it: agent API `422 unsupported {feature, harness}`, console `409`
+  code `unsupported`, CLI exit 7, a launch fails with the reason; an escalated permission Decision for such a spoke
+  closes as `unsupported`. Events from non-OpenCode spokes are validated against the subset (invalid ones dropped
+  with a rate-limited warning). Idle by real evidence trusts `native` and `hooks`, and `rpc` only with
+  `turnEvents`; after an inferred interruption it waits 5 s.
+- **Console.** Controls follow each process's announced features (OpenCode unchanged); other harnesses' sessions
+  show an evidence badge (Hooks, RPC, Screen, Unknown), and delivery labels never claim more than the spoke can
+  confirm (hooks and screen: queued). A `409 unsupported` answer shows a toast naming what is missing.
+- **Claude Code** (`packages/claude-code`). `hub claude [claude args…]` runs Claude Code with the hub plugin through
+  `--plugin-dir` (never editing `~/.claude`) and starts the per-user daemon (`hub claude-code daemon`, evidence
+  `hooks`) on a Unix socket in a private directory. The hook bridge (`hub claude-code hook`) fails open. Sessions
+  are `ses_cc<uuid hex>`; tool names map to hub actions (Bash → `shell`, Edit/Write → `edit`, Read → `read`,
+  `mcp__s__t` → `s_t`). Permissions wait for the hub in the PermissionRequest hook (`HUB_CLAUDE_PERMISSION_WAIT`,
+  default 120 s; 0 reports only), racing Claude Code's own dialog; deny reasons reach the model. Messages arrive at
+  the next tool boundary or prompt (`queued`), and an idle session is woken through an asyncRewake Stop hook
+  (`turn`, framed as a system notification); `hub claude -p` turns that hook off. Stop ends the running turn at its
+  next tool hook (denying the pending call). Esc interruptions are inferred from the next prompt or notification.
+  Session tokens reach the Bash tool's shells through the SessionStart env file; act verbs go through the plugin's
+  `hub` MCP server, with the act token kept in the daemon. Prompt references are attached as context. With the
+  `claude` CLI found, the daemon also runs hub launches headless (`-p --input-format stream-json`) in node
+  workspaces, taking turns and interrupts there.
+- **Codex** (`packages/codex`). `hub codex [codex args…]` runs Codex with its shared app-server daemon on for that
+  run (`--enable daemon_auto_start`; `~/.codex` is never written) and starts the per-user spoke (`hub codex-spoke
+  serve`, evidence `rpc`, `turnEvents`). The spoke attaches to the daemon's threads (TUI sessions included) as one
+  client among others, and runs its own `codex app-server` over stdio for threads the hub starts. Sessions are
+  `ses_cx<thread uuid hex>`. Turns (`turn/start`), steer (`turn/steer`), interrupt and stop (`turn/interrupt`),
+  approvals (first answer wins; `gone` when the TUI answered first), messages (`turn/steer`, `turn/start`, or
+  `thread/inject_items` without waking; each message once, since Codex's queue does not deduplicate) and launches
+  (`thread/start`). Settings `HUB_CODEX_BIN`, `HUB_CODEX_DAEMON_SOCKET`, `HUB_CODEX_CONFIG`.
+- **Presets** (`packages/preset`). `hub preset list | check | run` with the official presets `aider` and `goose`:
+  the harness runs in a new pane on a private tmux server (`-L hub-preset`; your own only with `--current`), prompts
+  and messages are pasted (answered `timeout` and `queued`: never confirmed), stop and interrupt send Ctrl-C, and
+  nothing but the native session ID and the pane's liveness is read off the screen. Never permission, form or
+  steer; never idle. Sessions are `ses_pr<uuid hex>`.
+- **Services.** `hub claude-code install | uninstall [--dry-run] | status` and `hub codex-spoke install | uninstall
+  [--dry-run] | status` write a launchd agent or systemd user unit for the daemon and the spoke from the templates
+  in `scripts/`, like `hub node install`: the load commands are printed, never run.
+- **Nodes and launches.** The host runtime reports the harnesses it offers: `opencode` always, `claude-code` when
+  the `claude` CLI is found (`HUB_CLAUDE_BIN`, else PATH), others through node.json `harnesses` (`{"codex": true}`,
+  `{"claude-code": false}`). `hub launch --harness claude-code | codex` places launches on such nodes
+  ([docs/launches.md](docs/launches.md#harnesses)).
+- **Spoke SDK** (`packages/spoke-sdk`, shipped inside `@huynle/hub`): the connection, enrollment, session tokens,
+  `DeliveryLedger`, prompt envelopes and references extracted from the OpenCode spoke (its files re-export them);
+  reversible session ID mapping (`hubSessionID`, `nativeSessionID`); `buildHarnessHello`; and `HarnessSpoke`, which
+  announces exactly the ops it has handlers for, refuses the rest and unknown sessions, sends validated events and
+  the sessions frame, keeps tokens apart in memory and admits each message once.
+- **Testkit** (`packages/testkit`, development only): a fake hub and spoke client, a stub model server (OpenAI chat
+  completions, Anthropic Messages, OpenAI Responses; text and tool calls), a deny-all proxy for live harness tests,
+  and the harness driver protocol v1 (`serveDriver`, `spawnDriver`).
+- **Conformance** (`packages/conformance`, development only): `hub-conformance spoke --driver "<command>"` runs a
+  spoke through its driver against a recording hub and checks the hello, feature honesty, events, deliver
+  idempotency and modes, permission replies, token hygiene, reconnect and frame limits (table or `--json`).
+  OpenCode, Claude Code, Codex and preset spokes all pass; a reference spoke has one broken variant per check.
+- **Scaffold**: `bun packages/spoke-sdk/scaffold.ts <name> <dir> [--namespace xy]` writes a minimal `HarnessSpoke`
+  spoke and its conformance driver for a new harness; the output passes the conformance suite as written.
+- **Tests**: `test/e2e-phase7.test.ts` (every spoke on one machine, honest delivery, acting, unsupported answers,
+  claude-code and codex launches, tenancy) and `test/e2e-phase7-conformance.test.ts`; opt-in live tests against the
+  real CLIs with stub models, throwaway config dirs and a deny-all proxy (`HUB_IT_CLAUDE=1`, `HUB_IT_CODEX=1`).
+- **Docs**: [docs/harnesses.md](docs/harnesses.md) (support matrix, evidence levels, setup, known limits, threat
+  model) and [docs/spoke-sdk.md](docs/spoke-sdk.md) (writing a spoke, the event subset, conformance, testkit).
+
 ### Cluster mode
 
 The hub can run as several pods behind one load balancer, sharing Postgres and Valkey (or Redis), with no sticky
