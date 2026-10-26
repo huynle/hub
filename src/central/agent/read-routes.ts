@@ -12,6 +12,7 @@
 import path from "node:path"
 import { featureForOp, type ServerRequest, type SpokeFeature } from "../../protocol"
 import type { CatalogMachine, CatalogSession, LiveStatus, NowActivity, RegistryMessage, SessionView } from "../registry"
+import { unsupportedMessage } from "../actions"
 import { SpokeError } from "../spoke-ws"
 import type { Store } from "../store"
 import type { Directory, DirectoryEntry, RoleView } from "./directory"
@@ -215,7 +216,7 @@ function spokeFor(deps: ReadDeps, sessionID: string, op: ServerRequest["op"], ha
   if (!connID || !deps.spokes) throw new AgentError("offline", "No spoke reports this session now")
   const feature = featureForOp(op)
   if (feature && !deps.registry.supports(connID, feature)) {
-    throw new AgentError("unsupported", `The ${harness} spoke does not support ${feature}`, { extra: { feature, harness } })
+    throw new AgentError("unsupported", unsupportedMessage({ feature, harness }), { extra: { feature, harness } })
   }
   return connID
 }

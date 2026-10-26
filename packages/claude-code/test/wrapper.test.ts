@@ -24,6 +24,8 @@ const pids: number[] = []
 afterEach(async () => {
   for (const d of daemons.splice(0)) await d.stop()
   for (const pid of pids.splice(0)) {
+    // Never a pid ≤ 1 (0 and negative IDs signal process groups or every process: quirk wqnafwvz).
+    if (!Number.isInteger(pid) || pid <= 1) continue
     try {
       process.kill(pid)
     } catch {}
@@ -127,6 +129,20 @@ describe("hub claude", () => {
     expect(await claude(["--resume"])).toBe(7)
     expect(read("args.json")).toEqual(["--resume"])
     expect(err.join("")).toMatch(/not enrolled/)
+  })
+
+  test("a print run without streaming input turns the rewake hook off (it would hold -p until its timeout); others keep it", async () => {
+    const { claude, read } = await setup({ daemon: true })
+    for (const [args, rewake] of [
+      [["-p", "hi"], "off"],
+      [["--print", "hi"], "off"],
+      [["-p", "--input-format", "stream-json", "--output-format", "stream-json"], undefined],
+      [["-p", "--input-format=stream-json"], undefined],
+      [["--resume"], undefined],
+    ] as const) {
+      await claude([...args])
+      expect({ args, rewake: read("env.json").HUB_CLAUDE_REWAKE }).toEqual({ args, rewake })
+    }
   })
 
   test("HUB_CLAUDE_PERMISSION_WAIT sets the PermissionRequest wait (seconds)", async () => {

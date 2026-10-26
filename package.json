@@ -74,6 +74,10 @@
     "scripts/io.github.huynle.hub.plist",
     "scripts/io.github.huynle.hub-node.plist",
     "scripts/hub-node.service",
+    "scripts/io.github.huynle.hub-claude-code.plist",
+    "scripts/hub-claude-code.service",
+    "scripts/io.github.huynle.hub-codex-spoke.plist",
+    "scripts/hub-codex-spoke.service",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"

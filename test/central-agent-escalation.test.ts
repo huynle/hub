@@ -33,7 +33,7 @@ const app: AgentActor = { kind: "app", userID: U, tokenID: "tok_1", scopes: ["se
 const cookieUser: UserActor = { kind: "user", userID: U, deviceID: "d1", via: "cookie" }
 const tokenUser: UserActor = { kind: "user", userID: U, deviceID: "d2", via: "device-token" }
 
-function setup(options: { tenant?: (rootID: string) => string | undefined; outcome?: "done" | "gone" } = {}) {
+function setup(options: { tenant?: (rootID: string) => string | undefined; outcome?: "done" | "gone" | "unsupported" } = {}) {
   let t = T0
   const now = () => t
   const state = new MemoryStateStore({ now })
@@ -80,6 +80,7 @@ function setup(options: { tenant?: (rootID: string) => string | undefined; outco
     actions: {
       answerPermission: async (input) => {
         answered.push(input)
+        if (options.outcome === "unsupported") return { outcome: "unsupported", feature: "permission", harness: "preset" }
         return { outcome: options.outcome ?? "done" }
       },
     },
@@ -237,6 +238,16 @@ describe("answering runs the reply as the user", () => {
     await expect(s.decisions.answer(U, decisionID!, { option: "approve" }, cookieUser)).rejects.toMatchObject({ code: "gone" })
     expect((await s.decisions.get(U, decisionID!))!.state).toBe("closed")
     expect(s.audits.at(-1)).toMatchObject({ verb: "approve", outcome: "gone" })
+  })
+
+  test("the request's spoke cannot answer permissions (unsupported): the Decision closes saying so, audited unsupported", async () => {
+    const s = setup({ outcome: "unsupported" })
+    const { decisionID } = await s.escalations.escalate(escalation())
+    await expect(s.decisions.answer(U, decisionID!, { option: "approve" }, cookieUser)).rejects.toMatchObject({ code: "gone" })
+    const closed = (await s.decisions.get(U, decisionID!))!
+    expect(closed.state).toBe("closed")
+    expect(closed.closed?.reason).toBe("The preset spoke does not support permission")
+    expect(s.audits.at(-1)).toMatchObject({ verb: "approve", outcome: "unsupported" })
   })
 
   test("the request's tree belongs to another user now: gone, nothing runs", async () => {

@@ -1,0 +1,34 @@
+# Template: keep the Claude Code spoke daemon (`hub claude-code daemon`) running on Linux (systemd user unit).
+# The daemon follows every Claude Code session on this machine for the hub (the hub plugin's hooks reach it over a
+# private Unix socket) and, with the Claude Code CLI found (HUB_CLAUDE_BIN, else claude on the PATH below), starts
+# Claude Code for hub launches under node.json's workspaceRoots. `hub claude` starts it on demand; this unit keeps it
+# running so launches can be placed here without a `hub claude` run first. It needs an enrolled machine (the plugin's
+# /hub dialog writes the machine token to ~/.config/hub/config.json, which the daemon only reads).
+# Install: `hub claude-code install` writes this unit to ~/.config/systemd/user with the real paths and prints the
+# systemctl commands to enable it; it never runs them (--dry-run: only print).
+# By hand (replace __RUNTIME__, __ENTRY__ and __HOME__ first):
+#   mkdir -p ~/.config/systemd/user
+#   sed -e "s|__RUNTIME__|$HOME/.bun/bin/bun|" -e "s|__ENTRY__|$PWD/packages/cli/src/main.ts|" -e "s|__HOME__|$HOME|g" \
+#     scripts/hub-claude-code.service > ~/.config/systemd/user/hub-claude-code.service
+#   systemctl --user daemon-reload && systemctl --user enable --now hub-claude-code
+# Logs: journalctl --user -u hub-claude-code
+# Remove: `hub claude-code uninstall`, or systemctl --user disable --now hub-claude-code && rm the unit file
+# BUN_BE_BUN=1 lets an OpenCode binary act as bun; the CLI removes it from its own environment.
+[Unit]
+Description=Hub Claude Code spoke daemon (follows Claude Code sessions, starts hub launches)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=__RUNTIME__ __ENTRY__ claude-code daemon
+Environment=PATH=__HOME__/.local/bin:__HOME__/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=BUN_BE_BUN=1
+Restart=on-failure
+RestartSec=30
+KillSignal=SIGTERM
+TimeoutStopSec=20
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

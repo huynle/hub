@@ -347,9 +347,23 @@ describe("stop", () => {
   test("a running turn stops at its next hook (continue false) and ends interrupted; an idle session has nothing to stop", async () => {
     const { spoke, sessions } = await started()
     expect(sessions.stop({ op: "stop", sessionID: HUB })).toEqual({ stopped: [HUB] })
-    expect(await sessions.hook(fixture("pre-tool-use"), {})).toEqual({ output: { continue: false, stopReason: expect.stringContaining("hub") } })
+    // Claude Code 2.1.296 still runs the tool after a PreToolUse continue:false (live check, P7-T11): the stop also
+    // denies the call.
+    expect(await sessions.hook(fixture("pre-tool-use"), {})).toEqual({
+      output: {
+        continue: false,
+        stopReason: expect.stringContaining("hub"),
+        hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("hub") },
+      },
+    })
     expect(spoke.take()).toContainEqual({ type: "session.execution.interrupted", data: { sessionID: HUB, turnID: "53091e89-c478-4187-ac33-c5a395bdc751" } })
     expect(sessions.stop({ op: "stop", sessionID: HUB })).toEqual({ stopped: [] })
+  })
+
+  test("after a tool ran (PostToolUse) the stop is continue false alone: nothing left to deny", async () => {
+    const { sessions } = await started()
+    sessions.stop({ op: "stop", sessionID: HUB })
+    expect(await sessions.hook(fixture("post-tool-use"), {})).toEqual({ output: { continue: false, stopReason: expect.stringContaining("hub") } })
   })
 
   test("a waiting permission request is denied with an interrupt", async () => {
