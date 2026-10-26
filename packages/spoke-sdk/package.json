@@ -1,6 +1,6 @@
 {
   "name": "@huynle/hub-spoke-sdk",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "private": true,
   "description": "Harness-neutral spoke building blocks: hub connection, enrollment, tokens, idempotent deliver, prompt references, HarnessSpoke (internal; shipped inside @huynle/hub, not published on its own).",
   "license": "MIT",

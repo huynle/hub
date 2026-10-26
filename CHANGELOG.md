@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## 0.7.0
+
+The agent control plane: sessions get addresses and talk to each other, ask you for Decisions, act for you only
+within grants you give, and can be launched on your machines, in sandboxes, or across a cluster of hubs. Hub also
+speaks to Claude Code, Codex and terminal tools, not only OpenCode. Upgrading keeps every paired device and enrolled
+machine; the new data lives in `agent/` next to `state.json`, which 0.6.x ignores if you roll back.
+
+- **Agent identity**: `@name`, `@@role` and `@me` addresses, the `hub` CLI for agents, app tokens, session tokens.
+- **Agent messaging**: `msg`, `ask`, `reply`, `decline`, inboxes and Decisions (`ask @me`), the OpenCode `hub` tool,
+  `/who` and `/msg` in the TUI, `hub mcp`.
+- **Agent actions**: grants, approve/deny/answer/prompt/stop for agents within them, escalation to Decisions, kill
+  switches, the agent audit (Settings → Agents).
+- **Launches**: `hub launch` and `hub node`, worktree/checkout/clone workspaces, placement, signed webhooks.
+- **Sandboxed launches** in OpenShell sandboxes.
+- **More harnesses**: `hub claude` (Claude Code), `hub codex` (Codex), presets for other terminal tools, the spoke SDK
+  and conformance suite.
+- **Cluster mode**: several hubs on Postgres and Valkey, `hub-server migrate` and `import`, draining, `/readyz`,
+  `deploy/k8s`.
+
+The details of each part follow.
+
+
 ### Agent identity
 
 Agents, scripts and apps get their own identity on the hub: every session's shells carry a session token, `hub`

@@ -1,6 +1,6 @@
 {
   "name": "@huynle/opencode-voice",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "Renamed to @huynle/hub. This release re-exports @huynle/hub so existing installs keep working.",
   "license": "MIT",
   "author": "Huy Le",
@@ -42,6 +42,6 @@
     "access": "public"
   },
   "dependencies": {
-    "@huynle/hub": "^0.6.1"
+    "@huynle/hub": "^0.7.0"
   }
 }

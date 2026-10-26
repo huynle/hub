@@ -1,6 +1,6 @@
 {
   "name": "@huynle/hub-runtime-sdk",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "private": true,
   "description": "The Runtime interface `hub node` runtimes implement (internal; shipped inside @huynle/hub, not published on its own).",
   "license": "MIT",
