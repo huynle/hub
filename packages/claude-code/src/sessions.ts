@@ -21,8 +21,9 @@
 // is waiting is woken with it (exit 2: Claude Code starts a turn framed as a system notification, not user input):
 // "turn". Everything else is "queued".
 //
-// Stop: a running turn stops at its next tool hook ({continue: false}), a waiting permission request is denied
-// with an interrupt; an idle session has nothing to stop.
+// Stop: a running turn stops at its next tool hook ({continue: false}; at PreToolUse the call is also denied, since
+// Claude Code runs it despite continue:false, and no Stop hook follows), a waiting permission request is denied with
+// an interrupt; an idle session has nothing to stop.
 //
 // Hub-launched sessions (launched(): the daemon runs their claude headless, launcher.ts) are reported at create,
 // before any hook; a prompt the hub writes to one (hubPrompt) is delivered with origin "hub", and the turn's result
@@ -178,7 +179,7 @@ export class ClaudeSessions {
       case "UserPromptSubmit":
         return this.#prompt(s, input)
       case "PreToolUse":
-        return this.#stopNow(s) ?? this.#preTool(s, input)
+        return this.#stopNow(s, "PreToolUse") ?? this.#preTool(s, input)
       case "PostToolUse":
         return this.#stopNow(s) ?? this.#postTool(s, input, true)
       case "PostToolUseFailure":
@@ -187,7 +188,7 @@ export class ClaudeSessions {
         this.#settle(s, input.tool_use_id)
         return {}
       case "PermissionRequest":
-        return this.#stopNow(s, true) ?? this.#permissionRequest(s, input, ctx)
+        return this.#stopNow(s, "PermissionRequest") ?? this.#permissionRequest(s, input, ctx)
       case "Notification":
         return this.#notification(s, input)
       case "Stop":
@@ -224,7 +225,7 @@ export class ClaudeSessions {
       if (entry.root !== s.hubID || !entry.answer) continue
       this.#permissions.delete(requestID)
       this.#emit({ type: "permission.replied", data: { sessionID: entry.sessionID, requestID, reply: "reject" } })
-      const reply = this.#stopNow(s, true)
+      const reply = this.#stopNow(s, "PermissionRequest")
       entry.answer(reply)
     }
     return { stopped: [s.hubID] }
@@ -489,13 +490,19 @@ export class ClaudeSessions {
   }
 
   /** A pending hub stop, applied at this hook: the reply that stops the turn (undefined when none is pending). */
-  #stopNow(s: Session, permission = false): HookReply | undefined {
+  /**
+   * A requested stop, at this hook: a PermissionRequest is denied with an interrupt; a PreToolUse also denies its call
+   * (Claude Code 2.1.296 runs the tool after a PreToolUse continue:false, then ends the turn without a Stop hook: live
+   * check P7-T11); any other hook ends the turn with continue:false.
+   */
+  #stopNow(s: Session, event?: "PreToolUse" | "PermissionRequest"): HookReply | undefined {
     if (!s.stopRequested) return undefined
     s.stopRequested = false
     if (s.busy) this.#interrupted(s, false)
-    return permission
-      ? { output: { hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "deny", message: STOP_REASON, interrupt: true } } } }
-      : { output: { continue: false, stopReason: STOP_REASON } }
+    if (event === "PermissionRequest") return { output: { hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "deny", message: STOP_REASON, interrupt: true } } } }
+    const stop = { continue: false, stopReason: STOP_REASON }
+    if (event === "PreToolUse") return { output: { ...stop, hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: STOP_REASON } } }
+    return { output: stop }
   }
 
   #end(native: string, s: Session): void {

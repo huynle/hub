@@ -140,7 +140,7 @@ describe("hooks through the bridge", () => {
     await waitFor(() => state(hub)?.state === "working")
     const stopped = await hub.api(`/api/sessions/${HUB}/stop`, { method: "POST" })
     expect(stopped.status).toBeLessThan(300)
-    expect((await hook("pre-tool-use")).json).toEqual({ continue: false, stopReason: expect.any(String) })
+    expect((await hook("pre-tool-use")).json).toMatchObject({ continue: false, stopReason: expect.any(String), hookSpecificOutput: { permissionDecision: "deny" } })
     await waitFor(() => state(hub)?.state === "idle")
   })
 
