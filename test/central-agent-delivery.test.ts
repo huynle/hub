@@ -212,6 +212,41 @@ describe("identity primer", () => {
     expect(kinds(s)).toEqual(["primer", "msg", "ask", "msg"])
   })
 
+  // OpenCode answers a steered primer in the waking turn and gives a queued message its own model call after it
+  // (quirk hzmcqwpj): the first message to an idle session is steered too, so both arrive in one model call.
+  test("the first msg to an idle session follows its primer with steer (one model call); later ones and busy sessions queue", async () => {
+    const s = setup({ primer: true })
+    s.addSession("ses_b", { name: "beta" })
+    s.addSession("ses_c", { name: "gamma" })
+    s.connect("c1", ["ses_a", "ses_b", "ses_c"])
+    s.idle.add("ses_b")
+    await s.delivery.send(U, asSession("ses_a"), "@beta", "msg", "hello")
+    expect(s.sent.map((x) => [x.req.meta.kind, x.req.meta.delivery, x.req.wake])).toEqual([
+      ["primer", "steer", false],
+      ["msg", "steer", true],
+    ])
+    await s.delivery.send(U, asSession("ses_a"), "@beta", "msg", "again")
+    expect(s.sent.at(-1)!.req.meta.delivery).toBe("queue")
+    // Not idle (busy, or no real evidence): the msg keeps queue, so it never cuts into a running turn.
+    await s.delivery.send(U, asSession("ses_a"), "@gamma", "msg", "hi")
+    expect(s.sent.slice(-2).map((x) => [x.req.meta.kind, x.req.meta.delivery])).toEqual([
+      ["primer", "steer"],
+      ["msg", "queue"],
+    ])
+  })
+
+  test("a msg with wake:false after the primer keeps its plain mode (no turn to join)", async () => {
+    const s = setup({ primer: true })
+    s.addSession("ses_b", { name: "beta" })
+    s.connect("c1", ["ses_a", "ses_b"])
+    s.idle.add("ses_b")
+    await s.delivery.send(U, asSession("ses_a"), "@beta", "msg", "fyi", { wake: false })
+    expect(s.sent.map((x) => [x.req.meta.kind, x.req.meta.delivery, x.req.wake])).toEqual([
+      ["primer", "steer", false],
+      ["msg", "queue", false],
+    ])
+  })
+
   test("a primed session (persisted by the directory) gets no primer after a restart", async () => {
     const s = setup({ primer: true })
     s.connect("c1", ["ses_b"])

@@ -29,8 +29,10 @@ export interface RecipientState {
 
 /**
  * How to admit a message. Busy recipients get plain messages after the running turn and asks into it, unless
- * the hub chose (`meta.delivery`, e.g. urgent: steer). Idle recipients get a turn. With a form open OpenCode
- * holds the message until the form is answered ("retained").
+ * the hub chose (`meta.delivery`, e.g. urgent: steer). Idle recipients get a turn, always steered: a queued wake
+ * would come after the reply to items already waiting (a primer, wake:false messages) with a model call of its own
+ * (quirk hzmcqwpj), a steered one joins them in one call. With a form open OpenCode holds the message until the
+ * form is answered ("retained").
  *
  * `wake:false` and subagent sessions are admitted without starting a turn ("queued"). They default to steer: a
  * queued item gets its own model call when a turn ends (that would wake the session), while a steered one
@@ -38,7 +40,9 @@ export interface RecipientState {
  */
 export function planDelivery(req: { readonly wake: boolean; readonly meta: DeliverMeta }, state: RecipientState): DeliveryPlan {
   const resume = req.wake && !state.subagent
-  const delivery = req.meta.delivery ?? (!resume || req.meta.kind === "ask" ? "steer" : "queue")
+  const chosen = req.meta.delivery ?? (!resume || req.meta.kind === "ask" ? "steer" : "queue")
+  // Idle: no running turn to queue behind; steered, the wake shares its model call with what already waits.
+  const delivery = resume && !state.busy && !state.formOpen ? "steer" : chosen
   return { delivery, resume, delivered: deliveredAs(delivery, resume, state) }
 }
 

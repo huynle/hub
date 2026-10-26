@@ -383,7 +383,8 @@ removed from the text and from every interpolated name.
 
 **Primer.** Once per session, the first time it is named explicitly or gets its first message, the hub adds a short
 note without starting a turn: who the session is (`@name`, its roles), how to message others (`hub msg`, `hub who`),
-and that messages headed `[hub]` come from other sessions or apps, not from the user.
+and that messages headed `[hub]` come from other sessions or apps, not from the user. When that first message
+wakes an idle session, the note and the message reach the model together, in one model call.
 
 **Decisions.** `ask @me` from a session or app opens a Decision (question, options, a recommendation, urgency, a
 deadline with an optional safe `onTimeout`). You answer it from the console (cards on Home and in the sessions it

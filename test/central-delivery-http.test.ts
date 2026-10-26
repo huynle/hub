@@ -43,7 +43,8 @@ describe("delivery in the hub", () => {
     const sent = await h.delivery.send(USER, asSession("ses_1"), "@web-work", "msg", "hello")
     expect(sent.delivery).toBe("turn")
     const req = requests.find((r) => r.op === "deliver" && r.meta.kind !== "primer")
-    expect(req).toMatchObject({ sessionID: "ses_2", messageID: sent.message.id, wake: true, meta: { kind: "msg", from: "@api-refactor", to: "@web-work", delivery: "queue" } })
+    // The first message after the primer to an idle session is steered, so both arrive in one model call.
+    expect(req).toMatchObject({ sessionID: "ses_2", messageID: sent.message.id, wake: true, meta: { kind: "msg", from: "@api-refactor", to: "@web-work", delivery: "steer" } })
     expect(req.text).toContain("[hub] msg from @api-refactor (laptop) to you")
   })
 
