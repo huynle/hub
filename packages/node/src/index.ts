@@ -8,6 +8,8 @@ export type { NodeConnectionOptions, NodeConnectionState } from "./connection.ts
 export { NODE_VERSION, NodeDaemon, progressText } from "./daemon.ts"
 export type { NodeDaemonOptions } from "./daemon.ts"
 export { ALLOWED_PROTOCOLS, GitError, gitEnv, runGit } from "./git.ts"
+export { detectHarnesses, findExecutable } from "./harnesses.ts"
+export type { DetectHarnessesOptions } from "./harnesses.ts"
 export { HostRuntime, LAUNCH_MARKER, launchBranch, resolveUnderRoots } from "./host.ts"
 export type { HostRuntimeOptions } from "./host.ts"
 export { EXIT_CONFIG, runNode } from "./run.ts"

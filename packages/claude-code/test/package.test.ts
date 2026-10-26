@@ -1,6 +1,6 @@
 // The Claude Code spoke (@huynle/hub-claude-code): a private workspace package shipped inside @huynle/hub, built on
 // the spoke SDK. It imports the protocol, SDK and spoke SDK packages, the hub CLI's MCP tools, the node's read-only
-// spoke credentials, and the hub's env and config path helpers; never the hub (src/central) or the OpenCode spoke.
+// spoke credentials, node.json and executable lookup, and the hub's env and config path helpers; never the hub (src/central) or the OpenCode spoke.
 import { describe, expect, test } from "bun:test"
 import { readdirSync, readFileSync } from "node:fs"
 import path from "node:path"
@@ -15,7 +15,7 @@ const ALLOWED = [
   /^\.\.\/package\.json$/,
   /^\.\.\/\.\.\/(protocol|sdk|spoke-sdk)\/src\//,
   /^\.\.\/\.\.\/cli\/src\/(mcp|http|credentials)\.ts$/,
-  /^\.\.\/\.\.\/node\/src\/config\.ts$/,
+  /^\.\.\/\.\.\/node\/src\/(config|harnesses)\.ts$/,
   /^\.\.\/\.\.\/\.\.\/src\/(env|migrate|config)\.ts$/,
 ]
 

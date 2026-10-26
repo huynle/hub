@@ -2,7 +2,8 @@
 // settings from node.json, then run the daemon until the signal aborts. With node.json `openshell.enabled` the node
 // also offers the openshell runtime (sandboxes through the openshell CLI): it checks the CLI, asks the gateway for
 // its backends and sweeps this machine's sandboxes from an earlier run into the hello; an unusable CLI is logged and
-// the node runs with the host runtime only. Exit codes: 0 after a clean stop, 1 when
+// the node runs with the host runtime only. The host runtime offers the harnesses found on this machine
+// (harnesses.ts: opencode, claude-code with its CLI, node.json `harnesses` overriding). Exit codes: 0 after a clean stop, 1 when
 // the machine is not enrolled, EXIT_CONFIG (78, EX_CONFIG) when node.json gives the node nothing to do; the
 // service units do not restart on 78.
 import { homedir } from "node:os"
@@ -11,6 +12,7 @@ import { OpenShellCli } from "../../runtime-openshell/src/cli.ts"
 import type { Runtime } from "../../runtime-sdk/src/index.ts"
 import { nodeConfigPath, readNodeConfig, readSpokeCredentials, type NodeConfig, type SpokeCredentials } from "./config.ts"
 import { NodeDaemon, NODE_VERSION } from "./daemon.ts"
+import { detectHarnesses } from "./harnesses.ts"
 import { HostRuntime } from "./host.ts"
 import { createOpenShellRuntime, openshellBackends, PROBE_TIMEOUT_MS, sweepSandboxes } from "./openshell.ts"
 
@@ -77,7 +79,8 @@ export async function runNode(options: RunNodeOptions): Promise<number> {
 
   if (options.signal.aborted) return 0
   const openshell = config.openshell?.enabled ? await setupOpenShell(config, credentials, options, env, log) : undefined
-  const runtimes: Runtime[] = [new HostRuntime({ roots: config.workspaceRoots }), ...(openshell ? [openshell.runtime] : [])]
+  const harnesses = detectHarnesses({ env, ...(config.harnesses ? { overrides: config.harnesses } : {}) })
+  const runtimes: Runtime[] = [new HostRuntime({ roots: config.workspaceRoots, harnesses }), ...(openshell ? [openshell.runtime] : [])]
 
   const daemon = new NodeDaemon({
     config,
@@ -91,7 +94,7 @@ export async function runNode(options: RunNodeOptions): Promise<number> {
       else if (state === "error" && error) log(`not connected: ${error}`)
     },
   })
-  log(`hub node ${NODE_VERSION}: ${config.slots} slots, roots ${config.workspaceRoots.join(", ")}`)
+  log(`hub node ${NODE_VERSION}: ${config.slots} slots, roots ${config.workspaceRoots.join(", ")}; host harnesses ${harnesses.join(", ") || "none"}`)
   daemon.start()
   await new Promise<void>((resolve) => {
     if (options.signal.aborted) return resolve()

@@ -2,7 +2,7 @@
 // (credentials, read-only) and node.json, refuses to run unenrolled or without workspace roots, connects, and
 // stops cleanly on a signal.
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtempSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { sandboxName } from "../../runtime-openshell/src/runtime.ts"
@@ -88,6 +88,24 @@ describe("runNode", () => {
     expect(lines.join("\n")).not.toContain("mt_run")
   })
 
+  test("the host runtime offers the harnesses found here: claude-code with `claude` on PATH, node.json overriding", async () => {
+    const bin = mkdtempSync(path.join(tmpdir(), "hub-node-bin-"))
+    writeFileSync(path.join(bin, "claude"), "#!/bin/sh\nexit 0\n")
+    chmodSync(path.join(bin, "claude"), 0o755)
+    const hostHarnesses = async (node: Record<string, unknown>) => {
+      const hub = fakeHub()
+      const controller = new AbortController()
+      const env = { ...configDir({ server: hub.url, token: "mt" }, { workspaceRoots: [tmpdir()], ...node }), PATH: bin }
+      const done = runNode({ env, home: "/nowhere", log: () => {}, signal: controller.signal })
+      await until(() => hub.hellos.length > 0)
+      controller.abort()
+      expect(await done).toBe(0)
+      return (hub.hellos[0]!.runtimes as { kind: string; harnesses: string[] }[]).find((r) => r.kind === "host")?.harnesses
+    }
+    expect(await hostHarnesses({})).toEqual(["opencode", "claude-code"])
+    expect(await hostHarnesses({ harnesses: { "claude-code": false } })).toEqual(["opencode"])
+  })
+
   test("logs when the hub does not serve nodes", async () => {
     const hub = fakeHub(["harness", "messaging"])
     const controller = new AbortController()
@@ -117,7 +135,7 @@ describe("runNode with openshell", () => {
     const { fake, name } = openshellFake()
     const controller = new AbortController()
     const lines: string[] = []
-    const env = { ...configDir({ server: hub.url, token: "mt", machineID: "m1" }, { workspaceRoots: [tmpdir()], openshell: { enabled: true, gateway: "lab", profiles: { web: {} } } }), PATH: process.env.PATH }
+    const env = { ...configDir({ server: hub.url, token: "mt", machineID: "m1" }, { workspaceRoots: [tmpdir()], openshell: { enabled: true, gateway: "lab", profiles: { web: {} } } }), PATH: process.env.PATH, HUB_CLAUDE_BIN: "/nonexistent/claude" }
     const done = runNode({ env, home: "/nowhere", log: (l) => lines.push(l), signal: controller.signal, openshellBinary: fake.binary })
     await until(() => hub.hellos.length > 0)
     const hello = hub.hellos[0]!
