@@ -19,6 +19,9 @@ import {
   parseAuditPage,
   parseGrant,
   parseGrants,
+  parseAppToken,
+  parseAppTokens,
+  appTokenBody,
   recommendationText,
   type AuditEntryView,
   type GrantView,
@@ -28,6 +31,26 @@ import type { DecisionView } from "../web/src/core/decision-core"
 const T0 = 1_700_000_000_000
 const MIN = 60_000
 const HOUR = 60 * MIN
+
+describe("app tokens", () => {
+  test("parses list entries without inventing or retaining token secrets", () => {
+    expect(parseAppToken({ id: "0123456789abcdef", label: "Gateway", scopes: ["sessions:read"], created: T0, token: "hat_secret" })).toEqual({
+      id: "0123456789abcdef",
+      label: "Gateway",
+      scopes: ["sessions:read"],
+      created: T0,
+    })
+    expect(parseAppToken({ id: "bad", scopes: [] })).toBeUndefined()
+    expect(parseAppTokens({ tokens: [{ id: "0123456789abcdef", scopes: [] }, null] })).toHaveLength(1)
+  })
+
+  test("requires a label and at least one known scope", () => {
+    expect(appTokenBody(" MCP Gateway ", ["sessions:read", "messages:send"])).toEqual({ ok: true, body: { label: "MCP Gateway", scopes: ["sessions:read", "messages:send"] } })
+    expect(appTokenBody("", ["sessions:read"])).toEqual({ ok: false, error: "Give the token a label" })
+    expect(appTokenBody("Gateway", [])).toEqual({ ok: false, error: "Pick at least one scope" })
+    expect(appTokenBody("Gateway", ["unknown"])).toEqual({ ok: false, error: "Unknown scope: unknown" })
+  })
+})
 
 const grant = (patch: Partial<GrantView> = {}): GrantView => ({
   id: "g_0123456789abcdef",
