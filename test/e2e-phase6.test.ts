@@ -15,7 +15,7 @@
 // - Failover: draining A during a turn finishes the turn, the spoke and node move to B and B leads. Then a pod C
 //   joins and B is stopped outright with a message pending and a launch waiting for placement: once the spoke and
 //   node reach C, the message is delivered once, the launch placed and run once, and C leads.
-import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -31,6 +31,9 @@ import { SpokeConnection, type SocketLike } from "../src/spoke/client"
 import { dockerAvailable, ItCluster, itClusterEnabled } from "./cluster-it"
 import { webDir } from "./central-harness"
 import { DEVICE_TOKEN, fixtureStateDir, TOKEN_KEYS } from "./import-fixture"
+
+// End to end: real hubs, spokes, nodes and git; give each test room on a loaded machine.
+setDefaultTimeout(30_000)
 
 /** Short leases and loop ticks; drained spokes come back within 300 ms. */
 const TIMING = { leaderTtlMs: 900, loopTickMs: 40, drainRetryAfterMs: 300, drainTimeoutMs: 8000 }

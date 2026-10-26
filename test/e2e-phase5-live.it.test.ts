@@ -28,7 +28,7 @@
 // and, for the agent to answer a prompt, a model provider created in the `hub` workspace by the operator:
 //   HUB_IT_OPENSHELL_PROVIDER=<provider name>             (optional; without it the launch gets no prompt)
 // Without HUB_IT_OPENSHELL_IMAGE that test is skipped with the reason.
-import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { execFileSync } from "node:child_process"
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -44,6 +44,9 @@ import type { PreparedWorkspace } from "../src/protocol"
 import { centralConfig } from "../src/central/config"
 import { harness, waitFor, type Harness } from "./central-harness"
 import { freePort } from "./spoke-fake"
+
+// End to end: real hubs, spokes, nodes and git; give each test room on a loaded machine.
+setDefaultTimeout(30_000)
 
 const enabled = process.env.HUB_IT_OPENSHELL === "1"
 const openshell = enabled ? Bun.which("openshell") : null

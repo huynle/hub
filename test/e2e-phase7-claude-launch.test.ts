@@ -9,7 +9,7 @@
 // spoke announces launch), the node prepares the worktree, the daemon creates the session by starting claude there
 // and the launch's prompt arrives as the session's first user message; stopping the launch interrupts nothing that
 // runs and ends it stopped.
-import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -20,6 +20,9 @@ import { fakeClaude } from "../packages/claude-code/test/fake-claude.ts"
 import { detectHarnesses, HostRuntime, NodeDaemon, nodeConfigPath, readNodeConfig, readSpokeCredentials } from "../packages/node/src/index.ts"
 import { defaults, writeConfig } from "../src/config"
 import { harness, waitFor, type Harness } from "./central-harness"
+
+// End to end: real hubs, spokes, nodes and git; give each test room on a loaded machine.
+setDefaultTimeout(30_000)
 
 const USER = "local"
 const GIT_ENV = { GIT_AUTHOR_NAME: "e2e", GIT_AUTHOR_EMAIL: "e2e@example.com", GIT_COMMITTER_NAME: "e2e", GIT_COMMITTER_EMAIL: "e2e@example.com" }

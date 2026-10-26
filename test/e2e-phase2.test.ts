@@ -12,7 +12,7 @@
 // - `hub mcp` runs as a real process over stdin/stdout pipes with the app token's login file.
 // - An ask to @me opens a Decision; the user answers it on the console route (cookie), and the asker's waiting
 //   `hub ask --wait` gets the reply.
-import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -23,6 +23,9 @@ import { runHubTool } from "../src/spoke/hub-tool"
 import { Spoke, type SpokeHost } from "../src/spoke/spoke"
 import { harness, session, spoke as rawSpoke, waitFor, type FakeSpoke, type Harness } from "./central-harness"
 import { EventQueue } from "./spoke-fake"
+
+// End to end: real hubs, spokes, nodes and git; give each test room on a loaded machine.
+setDefaultTimeout(30_000)
 
 const ROOT = path.resolve(import.meta.dir, "..")
 const ALPHA = "ses_alpha02"

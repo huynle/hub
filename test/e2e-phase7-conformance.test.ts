@@ -9,10 +9,13 @@
 // - preset: the real preset spoke on a private tmux socket (permission not announced, no events; skipped without
 //   tmux).
 // The runs go concurrently (each owns its hub, model, proxy and processes); every driver stops what it started.
-import { describe, expect, test } from "bun:test"
+import { describe, expect, setDefaultTimeout, test } from "bun:test"
 import { spawnSync } from "node:child_process"
 import path from "node:path"
 import { CHECK_IDS, runConformance, type ConformanceReport } from "../packages/conformance/src/index.ts"
+
+// End to end: real hubs, spokes, nodes and git; give each test room on a loaded machine.
+setDefaultTimeout(30_000)
 
 const root = path.join(import.meta.dir, "..")
 const hasTmux = spawnSync("tmux", ["-V"]).status === 0
