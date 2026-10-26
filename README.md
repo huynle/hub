@@ -198,7 +198,8 @@ foreground with `hub.json`; `scripts/io.github.huynle.hub.plist` is a launchd te
 paired device or a signed-in user; spokes need machine tokens; nothing trusts the client IP. For a public
 hostname, consider [sign-in with Google](#multi-user-sign-in-with-google) or an authenticating proxy in
 front of the web app, and leave `/spoke/*`, `/auth/*`, `/healthz`, `/.well-known/hub`, the manifest and
-icons reachable for spokes, sign-in, app discovery and the PWA.
+icons reachable for spokes, sign-in, app discovery and the PWA (and `/mcp`, bearer-authenticated, if MCP clients
+or gateways use [MCP over HTTP](#over-http-mcp)).
 
 ## Configuration
 
@@ -396,7 +397,8 @@ sessions or apps; see [Decisions and `@me`](#agent-identity-agent-api) for the r
 - The model itself: the plugin's `hub` tool (verbs `msg`, `ask`, `reply`, `decline`, `inbox`, `who`, `status`,
   `whoami`, and the [act verbs](#agent-actions-and-grants)), as the calling session ([Spoke](#spoke-opencode-plugin)).
 - You, in the OpenCode TUI: `/msg @name text` (as the session on screen) and `/who`.
-- Other agents and tools: [`hub mcp`](#hub-mcp-mcp-server), as the app token you logged in with.
+- Other agents and tools: [`hub mcp`](#hub-mcp-mcp-server), as the app token you logged in with, or the hub's
+  [`POST /mcp`](#over-http-mcp) as the bearer token sent.
 - Scripts: `hub login` with an app token that has the `messages:send` (and `messages:read`) scopes.
 
 **Limits.** Per 10 minutes: 20 messages per sender→recipient pair and 300 per user (`rate_limited`, exit 6, with
@@ -768,6 +770,32 @@ it acts as the **app token** you logged in with (needs `sessions:read`, `message
 as an OpenCode session: messages are sent from the app, and replies to them land in its inbox (the `inbox` tool),
 not in a session. Naming and roles stay out (app tokens cannot use them). Inside OpenCode, agents use the plugin's
 `hub` tool instead, which acts as the calling session.
+
+#### Over HTTP (/mcp)
+
+The hub serves the same tools at **`POST /mcp`** ([Streamable HTTP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#streamable-http)),
+for MCP clients and gateways that take a remote server URL. It is stateless: one JSON-RPC message per POST, answered
+as `application/json` (no SSE stream, no `Mcp-Session-Id`); notifications and responses get `202` with no body;
+batches answer `-32600`; `GET`/`DELETE` answer `405` (`Allow: POST`). `initialize` also returns short
+`instructions`. Requests need `Content-Type: application/json`, an `Accept` that allows `application/json` (or
+none), a body of at most 1 MiB (else `413`) and, when sent, a supported `MCP-Protocol-Version` (else `400`). A
+browser `Origin` other than the hub's own is refused (`403`); requests without one (servers, gateways) are fine.
+
+**Auth.** `Authorization: Bearer <token>`: any credential the agent API takes, in practice an **app token**
+(Settings → Agents, or `POST /api/agent/app-tokens`) with the scopes the tools need: `sessions:read` (reading),
+`messages:send` and `messages:read` (messaging), `sessions:act` plus a grant (act tools), `sessions:launch` plus a
+launch grant (launch tools). Device, session and act tokens work too. No or a bad token answers `401` with
+`WWW-Authenticate: Bearer realm="hub"` (no OAuth discovery). The tools call `/api/agent` as that token, inside the
+hub process: scopes, grants, tenancy, kill switches and the agent audit apply as on the HTTP API, and a scope the
+token lacks is an `isError` tool result. Cookies never authenticate `/mcp`.
+
+Add it to an MCP client or gateway as a remote (HTTP) server with bearer auth, one token per user:
+
+```json
+{ "mcpServers": { "hub": { "type": "http", "url": "https://hub.example.com/mcp", "headers": { "Authorization": "Bearer hat_…" } } } }
+```
+
+(an MCP gateway: URL `https://<hub>/mcp`, auth kind bearer, per-user credential: each user pastes their own app token).
 
 ## Spoke (OpenCode plugin)
 
