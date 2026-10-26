@@ -306,6 +306,8 @@ describe("status", () => {
     expect(line).toContain("permission: bash: git push origin main")
     expect(lines.some((l) => l.includes("ses_def") && l.includes("idle"))).toBe(true)
     expect(r.stdout).toContain("attention")
+    // The attention line names the request ID that hub approve/deny/answer take.
+    expect(lines.some((l) => l.includes("permission per_1:"))).toBe(true)
     expect(r.stderr).toBe("")
   })
 

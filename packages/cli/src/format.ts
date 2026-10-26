@@ -42,7 +42,7 @@ interface Snapshot {
     harnesses?: readonly string[]
     projects: readonly { root: string; name: string; sessions: readonly SessionView[] }[]
   }[]
-  readonly attention: readonly { kind: string; sessionID: string; name?: string; summary: string }[]
+  readonly attention: readonly { kind: string; sessionID: string; name?: string; id?: string; summary: string }[]
 }
 
 export function statusText(snapshot: Snapshot): string {
@@ -57,7 +57,7 @@ export function statusText(snapshot: Snapshot): string {
   if (lines.length === 0) lines.push("no machines")
   if (snapshot.attention.length) {
     lines.push("attention:")
-    for (const a of snapshot.attention) lines.push(`  ${[a.name ? at(a.name) : undefined, a.sessionID].filter(Boolean).join(" ")}  ${a.kind}: ${oneLine(a.summary, 100)}`)
+    for (const a of snapshot.attention) lines.push(`  ${[a.name ? at(a.name) : undefined, a.sessionID].filter(Boolean).join(" ")}  ${a.kind}${a.id ? ` ${a.id}` : ""}: ${oneLine(a.summary, 100)}`)
   }
   return lines.join("\n")
 }
