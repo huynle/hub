@@ -2,7 +2,7 @@
 // [--wait <seconds>]`, an absolute path in hooks.json). It reads the hook's stdin JSON, sends it to the per-user
 // daemon over its Unix socket, and does what the daemon answers: print the hook output JSON, write the session's
 // env file (SessionStart's CLAUDE_ENV_FILE, mode 0600), print stderr and exit 2 (the asyncRewake Stop hook only:
-// exit 2 from any other hook would block Claude Code). It fails open: no daemon, a bad or late reply, any error →
+// exit 2 from any other hook would block Claude Code; HUB_CLAUDE_REWAKE=off turns that hook into a no-op). It fails open: no daemon, a bad or late reply, any error →
 // exit 0 without output, as if the hook were not there.
 import { chmodSync, writeFileSync } from "node:fs"
 import path from "node:path"
@@ -60,6 +60,8 @@ export async function runHook(io: HookIo): Promise<number> {
     const sent: Record<string, unknown> = { ...input }
     for (const key of DROPPED) delete sent[key]
     const { rewake, waitMs } = flags(io.argv)
+    // A print run without streaming input (`hub claude -p`) waits on an asyncRewake hook until it ends: nothing to wake.
+    if (rewake && io.env.HUB_CLAUDE_REWAKE === "off") return 0
     const launch = io.env.HUB_CLAUDE_LAUNCH
     const req: BridgeRequest = { v: WIRE_VERSION, kind: "hook", input: sent, ...(launch ? { launch } : {}), ...(rewake ? { rewake: true as const } : {}), ...(waitMs !== undefined ? { waitMs } : {}) }
     const reply = await ask(io.socketPath, req, io.timeoutMs !== undefined ? { timeoutMs: io.timeoutMs } : {})

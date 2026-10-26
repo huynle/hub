@@ -103,6 +103,17 @@ describe("talking to the daemon", () => {
     expect(d.seen[1]).toMatchObject({ rewake: true })
   })
 
+  test("HUB_CLAUDE_REWAKE=off: the rewake hook exits 0 at once without asking the daemon (a -p run would wait on it)", async () => {
+    const d = await daemon(() => JSON.stringify({ exit: 2, stderr: "hub message" }))
+    const rewake = io(d.socketPath, fixture("stop"), { argv: ["--rewake"], env: { HUB_CLAUDE_REWAKE: "off" } })
+    expect(await rewake.run()).toBe(0)
+    expect(rewake.out).toEqual({ stdout: "", stderr: "" })
+    expect(d.seen).toEqual([])
+    // Only the rewake hook: the Stop report still goes to the daemon.
+    await io(d.socketPath, fixture("stop"), { env: { HUB_CLAUDE_REWAKE: "off" } }).run()
+    expect(d.seen).toHaveLength(1)
+  })
+
   test("exit 2 with stderr only for the rewake hook (a normal hook's exit 2 would block Claude Code)", async () => {
     const d = await daemon(() => JSON.stringify({ exit: 2, stderr: "hub message" }))
     const rewake = io(d.socketPath, fixture("stop"), { argv: ["--rewake"] })

@@ -3,7 +3,8 @@
 // (starting `hub claude-code daemon` in the background when none does), writes the plugin directory for the
 // current settings, registers the run with the daemon (a launch: its pid, so the daemon ends the run's sessions if it
 // dies) and runs `claude` with the user's arguments, its exit code passed through. Claude Code and its hooks get
-// HUB_CLAUDE_LAUNCH and HUB_CLAUDE_SOCKET. On a machine that is not enrolled (no machine token) or when the daemon
+// HUB_CLAUDE_LAUNCH and HUB_CLAUDE_SOCKET (and HUB_CLAUDE_REWAKE=off for a -p run without streaming input, where the
+// asyncRewake Stop hook would hold the run until its timeout). On a machine that is not enrolled (no machine token) or when the daemon
 // cannot be started, Claude Code runs without the hub, and the command says why.
 //
 // Settings (environment): HUB_CLAUDE_BIN (default `claude` on PATH), HUB_CLAUDE_PERMISSION_WAIT (seconds a
@@ -120,6 +121,16 @@ function spawnClaude(bin: string, args: readonly string[], env: Env, stderr: (s:
 const SIGNALS: Record<string, number> = { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGKILL: 9, SIGTERM: 15 }
 const signalNumber = (signal: string) => SIGNALS[signal]
 
+/**
+ * A print run (-p/--print) without streaming input: Claude Code runs the asyncRewake Stop hook in the foreground
+ * there and exits only when it does (live check P7-T11), so `hub claude -p` would wait out HUB_CLAUDE_REWAKE_TIMEOUT.
+ */
+export function printWithoutStreamingInput(args: readonly string[]): boolean {
+  if (!args.includes("-p") && !args.includes("--print")) return false
+  const at = args.indexOf("--input-format")
+  return !(args.includes("--input-format=stream-json") || (at >= 0 && args[at + 1] === "stream-json"))
+}
+
 export async function runClaude(args: readonly string[], io: ClaudeIo): Promise<number> {
   const socket = socketPath(io.env, io.home)
   let plugin: string | undefined
@@ -135,6 +146,7 @@ export async function runClaude(args: readonly string[], io: ClaudeIo): Promise<
   if (plugin) {
     env.HUB_CLAUDE_LAUNCH = launch
     env.HUB_CLAUDE_SOCKET = socket
+    if (printWithoutStreamingInput(args)) env.HUB_CLAUDE_REWAKE = "off"
     await ask(socket, { v: WIRE_VERSION, kind: "launch", launch, pid: process.pid }, { timeoutMs: ASK_MS })
   }
   const code = await spawnClaude(io.env.HUB_CLAUDE_BIN || "claude", plugin ? ["--plugin-dir", plugin, ...args] : [...args], env, io.stderr)
