@@ -52,7 +52,9 @@ export const exitOf = (code: string): number => EXIT_OF[code] ?? EXIT.other
 /** The hub's hint, plus what to do about a credential error from here. */
 function hintFor(envelope: Envelope, credentials: Credentials): string | undefined {
   const own =
-    envelope.code === "token_expired"
+    credentials.source === "http"
+      ? undefined // a POST /mcp caller has no CLI login or shell to fix
+      : envelope.code === "token_expired"
       ? credentials.source === "env"
         ? "session tokens are renewed for new shells: start a new shell"
         : "run `hub login` with a new app token"
@@ -71,7 +73,8 @@ export function cliError(error: unknown, credentials: Credentials): unknown {
   return error
 }
 
-export const clientFor = (credentials: Credentials): HubClient => new HubClient({ url: credentials.url, token: credentials.token })
+export const clientFor = (credentials: Credentials): HubClient =>
+  new HubClient({ url: credentials.url, token: credentials.token, ...(credentials.fetch ? { fetch: credentials.fetch } : {}) })
 
 /** Runs `use` with a client for `credentials`; SDK errors become CliErrors. */
 export async function withHub<T>(credentials: Credentials, use: (hub: HubClient) => Promise<T>): Promise<T> {
