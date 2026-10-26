@@ -64,7 +64,7 @@ function start(hub: FakeHub, options: Partial<CodexSpokeOptions> = {}): CodexSpo
     env: { ...process.env },
     pollMs: 50,
     threadDefaults: { approvalPolicy: "untrusted" },
-    backoff: { baseMs: 20, maxMs: 50 },
+    backoff: { minMs: 20, maxMs: 50 },
     ...options,
   } as CodexSpokeOptions)
   cleanup.push(() => spoke.stop())
