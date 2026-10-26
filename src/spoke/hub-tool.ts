@@ -28,7 +28,7 @@ export const HUB_TOOL = "hub"
 /** Verbs that act on a session and so need the session's act token (never its shell token). */
 export const HUB_TOOL_ACT_VERBS = ["approve", "deny", "answer", "prompt", "stop"] as const
 
-export const HUB_TOOL_VERBS = ["msg", "ask", "reply", "decline", "inbox", "who", "status", "whoami", ...HUB_TOOL_ACT_VERBS] as const
+export const HUB_TOOL_VERBS = ["msg", "ask", "reply", "decline", "inbox", "who", "status", "show", "whoami", ...HUB_TOOL_ACT_VERBS] as const
 export type HubToolVerb = (typeof HUB_TOOL_VERBS)[number]
 
 /** Which of the session's tokens a verb uses: "act" for act verbs, "shell" for every other verb. */
@@ -53,7 +53,7 @@ export const HUB_TOOL_DESCRIPTION =
   "ask (ask a question: to, text; wait = seconds to block for the answer, at most 600; without wait the answer arrives later as a hub message), " +
   "reply (answer a message: id, text), decline (decline an ask: id, text = the reason), " +
   "inbox (open asks to you, your open asks, recent messages), who (named and role-holding sessions; project, role), " +
-  "status (machines, projects, sessions and what needs attention), whoami (this session's hub identity). " +
+  "status (machines, projects, sessions and what needs attention, with request IDs), show (one session: session; its state and blockers with the request and form IDs approve, deny and answer take), whoami (this session's hub identity). " +
   "Acting on another session, only under a grant the user gave: approve (a permission request: session, id; always), " +
   "deny (session, id, why = the reason the harness sees), answer (a form: session, id, answer = {field: value} or cancel), " +
   "prompt (session, text; delivery queue|steer), stop (session); give why for each. Outside the grant the hub answers " +
@@ -74,7 +74,7 @@ export const HUB_TOOL_INPUT = {
     urgent: { type: "boolean", description: "msg/ask: steer into the recipient's running turn." },
     wake: { type: "boolean", description: "msg/ask/reply: false admits the message without starting a turn." },
     all: { type: "boolean", description: "msg/ask: send to every holder of a role address (no wait)." },
-    session: { type: "string", description: "approve/deny/answer/prompt/stop: the session to act on (@name, @@role, ses_…)." },
+    session: { type: "string", description: "show: the session to look at; approve/deny/answer/prompt/stop: the session to act on (@name, @@role, ses_…)." },
     always: { type: "boolean", description: "approve: approve for good (needs a grant that allows it)." },
     why: { type: "string", description: "approve/deny/answer/prompt/stop: why (audited; deny passes it to the harness)." },
     answer: { type: "object", description: "answer: the form's answer, field key → value (text, number, true/false or a list of texts)." },
@@ -223,6 +223,19 @@ async function dispatch(client: HubClient, verb: HubToolVerb, input: Input, cont
       })
       return { content: lines.length ? lines.join("\n") : "No named or role-holding sessions.", metadata: { verb, sessions: sessions.length } }
     }
+    case "show": {
+      const addr = typeof input.session === "string" ? input.session.trim() : ""
+      if (!addr) return failure('hub: show needs "session" (@name, @@role or ses_…)', "invalid")
+      const s = await client.show(addr, signal)
+      const head = [s.name ? `@${sanitizeLabel(s.name)}` : s.id, s.id, s.state, s.title ? sanitizeLabel(s.title) : "", s.project ? sanitizeLabel(s.project) : ""].filter(Boolean).join(" · ")
+      const lines = [head]
+      const blockers = s.blockers ?? []
+      if (blockers.length) {
+        lines.push("Waiting on (use these IDs with approve, deny or answer):")
+        for (const b of blockers) lines.push(`  ${b.kind}${b.id ? ` ${b.id}` : ""}: ${sanitizeLabel(b.summary)}${b.sessionID && b.sessionID !== s.id ? ` (in ${b.sessionID})` : ""}`)
+      } else lines.push("Nothing waiting.")
+      return { content: lines.join("\n"), metadata: { verb, session: s.id, blockers: blockers.length } }
+    }
     case "status": {
       const status = await client.status(signal)
       const lines: string[] = []
@@ -237,7 +250,7 @@ async function dispatch(client: HubClient, verb: HubToolVerb, input: Input, cont
       }
       if (status.attention.length) {
         lines.push("Needs attention:")
-        for (const a of status.attention) lines.push(`  ${a.name ? `@${sanitizeLabel(a.name)}` : a.sessionID} · ${a.kind} · ${sanitizeLabel(a.summary)}`)
+        for (const a of status.attention) lines.push(`  ${a.name ? `@${sanitizeLabel(a.name)}` : a.sessionID} · ${a.kind}${a.id ? ` ${a.id}` : ""} · ${sanitizeLabel(a.summary)}`)
       }
       return { content: lines.length ? lines.join("\n") : "No machines.", metadata: { verb, machines: status.machines.length, attention: status.attention.length } }
     }

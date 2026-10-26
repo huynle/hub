@@ -68,7 +68,7 @@ const everything = (result: unknown) => JSON.stringify(result)
 describe("hub tool definition", () => {
   test("one tool named hub with a verb parameter and a JSON Schema input", () => {
     expect(HUB_TOOL).toBe("hub")
-    expect([...HUB_TOOL_VERBS].sort()).toEqual(["answer", "approve", "ask", "decline", "deny", "inbox", "msg", "prompt", "reply", "status", "stop", "who", "whoami"])
+    expect([...HUB_TOOL_VERBS].sort()).toEqual(["answer", "approve", "ask", "decline", "deny", "inbox", "msg", "prompt", "reply", "show", "status", "stop", "who", "whoami"])
     expect(HUB_TOOL_INPUT).toMatchObject({ type: "object", required: ["verb"], additionalProperties: false })
     expect((HUB_TOOL_INPUT as any).properties.verb.enum).toEqual([...HUB_TOOL_VERBS])
   })
@@ -246,7 +246,7 @@ describe("hub tool verbs", () => {
       "GET /api/agent/status": () =>
         Response.json({
           machines: [{ id: "m_1", name: "box", online: true, projects: [{ root: "/w/hub", name: "hub", sessions: [{ id: "ses_bob", name: "bob", state: "busy", title: "Review PR" }] }] }],
-          attention: [{ kind: "permission", sessionID: "ses_bob", name: "bob", summary: "wants to run rm" }],
+          attention: [{ kind: "permission", sessionID: "ses_bob", name: "bob", id: "per_42", summary: "wants to run rm" }],
         }),
     })
     const spoke = () => spokeFor(hub.url)
@@ -258,6 +258,29 @@ describe("hub tool verbs", () => {
     expect(status.content).toContain("box")
     expect(status.content).toContain("Review PR")
     expect(status.content).toContain("wants to run rm")
+    // The request ID an approve/deny/answer needs is shown, not only the summary.
+    expect(status.content).toContain("per_42")
+  })
+
+  test("show: one session with its blockers and their IDs (what approve, deny and answer take)", async () => {
+    const hub = fakeHub({
+      "GET /api/agent/sessions/*": () =>
+        Response.json({
+          id: "ses_bob", name: "bob", state: "blocked", title: "Run echo", project: "hub", online: true,
+          blockers: [
+            { kind: "permission", id: "per_42", summary: "shell: echo hi", action: "shell", resources: ["echo hi"] },
+            { kind: "form", id: "frm_7", summary: "Which branch?", sessionID: "ses_child" },
+          ],
+        }),
+    })
+    const shown = await runHubTool(() => spokeFor(hub.url), { verb: "show", session: "@bob" }, ctx())
+    expect(hub.seen[0]!.path).toBe("/api/agent/sessions/@bob")
+    expect(shown.content).toContain("@bob")
+    expect(shown.content).toMatch(/permission per_42.*shell: echo hi/)
+    expect(shown.content).toMatch(/form frm_7.*Which branch\?/)
+    expect(shown.content).toContain("ses_child")
+    expect(shown.metadata).toMatchObject({ verb: "show", blockers: 2 })
+    expect((await runHubTool(() => spokeFor(hub.url), { verb: "show" }, ctx())).content).toMatch(/session/)
   })
 })
 
@@ -270,7 +293,7 @@ describe("act tokens (identity per verb)", () => {
 
   test("act verbs use the act token, every other verb the shell token", () => {
     for (const verb of HUB_TOOL_VERBS) expect(verbCredential(verb)).toBe((HUB_TOOL_ACT_VERBS as readonly string[]).includes(verb) ? "act" : "shell")
-    for (const verb of ["msg", "ask", "reply", "decline", "inbox", "who", "status", "whoami"]) expect(verbCredential(verb)).toBe("shell")
+    for (const verb of ["msg", "ask", "reply", "decline", "inbox", "who", "status", "show", "whoami"]) expect(verbCredential(verb)).toBe("shell")
   })
 
   test("toolIdentity act: the act identity only, never the shell token as a fallback", () => {
