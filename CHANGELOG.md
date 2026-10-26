@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add App token management to Settings → Agents: create scoped tokens, copy the one-time bearer secret and grant-holder ID, list existing tokens and revoke them.
+
 - **MCP over HTTP**: the hub serves `hub mcp`'s tools at `POST /mcp` (MCP Streamable HTTP, stateless JSON
   responses) for MCP clients and gateways. Auth is `Authorization: Bearer <token>` (an app token with the tools'
   scopes; device, session and act tokens too); a missing or bad token answers `401` with `WWW-Authenticate: Bearer`.

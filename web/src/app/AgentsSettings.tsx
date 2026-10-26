@@ -6,6 +6,8 @@ import { For, Show, createResource, createSignal, onCleanup, type JSX } from "so
 import { isAdmin } from "../core/account-core"
 import {
   GRANT_VERBS,
+  APP_TOKEN_SCOPES,
+  appTokenBody,
   actingView,
   auditLine,
   draftOf,
@@ -15,6 +17,9 @@ import {
   parseAuditPage,
   parseGrant,
   parseGrants,
+  parseAppToken,
+  parseAppTokens,
+  type AppTokenView,
   type AuditEntryView,
   type GrantDraft,
   type GrantField,
@@ -27,6 +32,7 @@ import { Dialog, ago, now } from "./ui"
 
 const AUDIT_PAGE = 50
 const GRANTS = "/api/agent/grants"
+const APP_TOKENS = "/api/agent/app-tokens"
 
 export function AgentsSection() {
   const [tab, setTab] = createSignal<"grants" | "activity">("grants")
@@ -38,6 +44,7 @@ export function AgentsSection() {
         Decision.
       </p>
       <ActingSwitches />
+      <AppTokens />
       <div class="chips" role="group" aria-label="Agents sections">
         <button type="button" class="chip" aria-pressed={tab() === "grants"} onClick={() => setTab("grants")}>
           Grants
@@ -53,6 +60,105 @@ export function AgentsSection() {
         <Activity />
       </Show>
     </section>
+  )
+}
+
+// ---------- app tokens ----------
+
+function AppTokens() {
+  const [tokens, { mutate, refetch }] = createResource(() => getJSON(APP_TOKENS).then(parseAppTokens))
+  const [creating, setCreating] = createSignal(false)
+  const revoke = async (token: AppTokenView) => {
+    if (!confirm(`Revoke ${token.label || token.id}? Apps using it will stop working immediately.`)) return
+    try {
+      await api(`${APP_TOKENS}/${enc(token.id)}`, { method: "DELETE" })
+      mutate((list) => (list ?? []).filter((item) => item.id !== token.id))
+      toast("App token revoked")
+    } catch (e) {
+      toast(errorText(e), "err")
+      void refetch()
+    }
+  }
+  return (
+    <div class="stack app-tokens">
+      <div class="row">
+        <div class="grow">
+          <h3>App tokens</h3>
+          <p class="small muted">For MCP gateways, CLIs and other apps. The secret is shown once; grants use the non-secret token ID.</p>
+        </div>
+        <button type="button" class="btn small primary" onClick={() => setCreating(true)}>New token</button>
+      </div>
+      <Show when={creating()}>
+        <AppTokenDialog
+          onClose={() => setCreating(false)}
+          onCreated={(token) => mutate((list) => [token, ...(list ?? []).filter((item) => item.id !== token.id)])}
+        />
+      </Show>
+      <Show when={tokens()} fallback={<p class="small muted">{tokens.error ? `Could not load: ${errorText(tokens.error)}` : "Loading…"}</p>}>
+        <Show when={tokens()!.length} fallback={<p class="small muted">No app tokens yet.</p>}>
+          <ul class="list">
+            <For each={tokens()}>{(token) => (
+              <li class="row" data-app-token={token.id}>
+                <div class="grow">
+                  <div class="name">{token.label || "Unnamed app"}</div>
+                  <div class="small muted mono">app:{token.id}</div>
+                  <div class="small muted">{token.scopes.join(", ") || "No scopes"}{token.created ? ` · created ${ago(token.created, now())}` : ""}</div>
+                </div>
+                <button type="button" class="btn small danger" onClick={() => void revoke(token)}>Revoke</button>
+              </li>
+            )}</For>
+          </ul>
+        </Show>
+      </Show>
+    </div>
+  )
+}
+
+function AppTokenDialog(props: { onCreated: (token: AppTokenView) => void; onClose: () => void }) {
+  const [label, setLabel] = createSignal("MCP Gateway")
+  const [scopes, setScopes] = createSignal<string[]>(["sessions:read", "messages:send", "messages:read"])
+  const [secret, setSecret] = createSignal("")
+  const [holder, setHolder] = createSignal("")
+  const [problem, setProblem] = createSignal("")
+  const [busy, setBusy] = createSignal(false)
+  const create = async (event: Event) => {
+    event.preventDefault()
+    const body = appTokenBody(label(), scopes())
+    if (!body.ok) return setProblem(body.error)
+    setBusy(true); setProblem("")
+    try {
+      const raw = await (await api(APP_TOKENS, { method: "POST", json: body.body })).json()
+      const token = parseAppToken(raw)
+      if (!token || typeof raw?.token !== "string") throw new Error("The hub did not return the new token")
+      props.onCreated(token); setSecret(raw.token); setHolder(`app:${token.id}`)
+    } catch (e) { setProblem(errorText(e)) } finally { setBusy(false) }
+  }
+  const copy = async (text: string, what: string) => {
+    try { await navigator.clipboard.writeText(text); toast(`${what} copied`) } catch { toast(`Could not copy ${what.toLowerCase()}`, "err") }
+  }
+  return (
+    <Dialog open title={secret() ? "Save your app token" : "New app token"} onClose={props.onClose} class="app-token-dialog">
+      <Show when={secret()} fallback={
+        <form class="grant-form" onSubmit={(e) => void create(e)} novalidate>
+          <label class="text-field"><span class="field-title">Label</span><span class="field-desc muted small">Where this token will be used.</span><input value={label()} maxlength={100} onInput={(e) => setLabel(e.currentTarget.value)} /></label>
+          <fieldset class="grant-verbs"><legend class="field-title">Scopes</legend>
+            <For each={APP_TOKEN_SCOPES}>{(scope) => <label class="check"><input type="checkbox" checked={scopes().includes(scope)} onChange={(e) => setScopes(e.currentTarget.checked ? [...scopes(), scope] : scopes().filter((x) => x !== scope))} /><span>{scope}</span></label>}</For>
+          </fieldset>
+          <p class="small muted">Act and launch scopes still require grants. Start with read and message scopes unless the app needs more.</p>
+          <Show when={problem()}><p class="error" role="alert">{problem()}</p></Show>
+          <div class="row"><button type="submit" class="btn small primary" disabled={busy()}>Create token</button><button type="button" class="btn small" onClick={props.onClose}>Cancel</button></div>
+        </form>
+      }>
+        <div class="stack">
+          <p class="warn"><strong>Copy this token now.</strong> It will not be shown again.</p>
+          <label class="text-field"><span class="field-title">Bearer token</span><textarea class="mono" readonly rows={3} value={secret()} /></label>
+          <button type="button" class="btn primary" onClick={() => void copy(secret(), "Token")}>Copy token</button>
+          <label class="text-field"><span class="field-title">Grant holder</span><span class="field-desc muted small">Use this non-secret value if you later create an acting or launch grant.</span><input class="mono" readonly value={holder()} /></label>
+          <button type="button" class="btn small" onClick={() => void copy(holder(), "Holder")}>Copy holder</button>
+          <button type="button" class="btn small" onClick={props.onClose}>Done</button>
+        </div>
+      </Show>
+    </Dialog>
   )
 }
 

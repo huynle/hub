@@ -34,6 +34,41 @@ const STATES = new Set<string>(["active", "expired", "revoked"])
 const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v)
 const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every((s) => typeof s === "string")
 
+// ---------- app tokens ----------
+
+export const APP_TOKEN_SCOPES = ["sessions:read", "messages:send", "messages:read", "sessions:act", "sessions:launch"] as const
+
+export interface AppTokenView {
+  readonly id: string
+  readonly label?: string
+  readonly scopes: readonly string[]
+  readonly created?: number
+}
+
+export function parseAppToken(raw: unknown): AppTokenView | undefined {
+  if (!isObject(raw) || typeof raw.id !== "string" || !/^[0-9a-f]{16}$/.test(raw.id) || !strings(raw.scopes)) return undefined
+  return {
+    id: raw.id,
+    ...(typeof raw.label === "string" ? { label: raw.label } : {}),
+    scopes: raw.scopes.filter((scope) => APP_TOKEN_SCOPES.includes(scope as (typeof APP_TOKEN_SCOPES)[number])),
+    ...(typeof raw.created === "number" ? { created: raw.created } : {}),
+  }
+}
+
+export function parseAppTokens(raw: unknown): AppTokenView[] {
+  const list = isObject(raw) && Array.isArray(raw.tokens) ? raw.tokens : []
+  return list.map(parseAppToken).filter((token): token is AppTokenView => !!token)
+}
+
+export function appTokenBody(label: string, scopes: readonly string[]): { ok: true; body: { label: string; scopes: string[] } } | { ok: false; error: string } {
+  const clean = label.trim()
+  if (!clean) return { ok: false, error: "Give the token a label" }
+  if (!scopes.length) return { ok: false, error: "Pick at least one scope" }
+  const unknown = scopes.find((scope) => !APP_TOKEN_SCOPES.includes(scope as (typeof APP_TOKEN_SCOPES)[number]))
+  if (unknown) return { ok: false, error: `Unknown scope: ${unknown}` }
+  return { ok: true, body: { label: clean, scopes: [...new Set(scopes)] } }
+}
+
 /** A grant from the hub; undefined when it is not one. */
 export function parseGrant(raw: unknown): GrantView | undefined {
   if (!isObject(raw)) return undefined
