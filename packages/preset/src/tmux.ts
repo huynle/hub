@@ -83,7 +83,12 @@ export interface TmuxBackendOptions {
 
 const SOCKET = /^[A-Za-z0-9_.-]{1,64}$/
 const PLAIN_PROGRAM = /^[A-Za-z0-9_.\/+:@%,-]+$/
-const FORMAT = "#{session_name}\t#{window_id}\t#{pane_id}"
+/**
+ * The new pane as "<session> <window> <pane>". Spaces, not tabs: tmux before 3.3 prints a tab in -F output as "_".
+ * The window (@n) and pane (%n) IDs are read from the end, so a session name with spaces stays whole.
+ */
+const FORMAT = "#{session_name} #{window_id} #{pane_id}"
+const NEW_PANE = /^(.+) (@\d+) (%\d+)$/
 
 /**
  * tmux reads an argument ending in ";" as a command separator, and one ending in "\;" as that argument ending in ";".
@@ -119,7 +124,7 @@ export function tmuxBackend(options: TmuxBackendOptions): TerminalBackend {
         ? ["new-window", "-d", "-P", "-F", FORMAT, "-n", req.name, "-c", req.cwd]
         : [...(options.config ? ["-f", options.config] : []), "new-session", "-d", "-P", "-F", FORMAT, "-s", req.name, "-c", req.cwd, "-x", String(options.width ?? 200), "-y", String(options.height ?? 50)]
       const r = await must(current ? "new-window" : "new-session", [...where, ...env, "--", ...req.argv])
-      const [session, window, target] = r.stdout.trim().split("\t")
+      const [, session, window, target] = NEW_PANE.exec(r.stdout.trim()) ?? []
       if (!session || !window || !target) throw new Error(`tmux did not report the new pane (got ${JSON.stringify(r.stdout.trim().slice(0, 100))})`)
       return { session, window, target }
     },

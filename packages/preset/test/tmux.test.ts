@@ -18,17 +18,23 @@ const PANE = { session: "hub-cat-1", window: "@1", target: "%1" }
 
 describe("tmux backend on a private socket", () => {
   test("launch: a detached new session on -L <socket>, the argv after --, never through a shell", async () => {
-    const tmux = fakeTmux({ "new-session": { stdout: "hub-cat-1\t@1\t%1\n" } })
+    const tmux = fakeTmux({ "new-session": { stdout: "hub-cat-1 @1 %1\n" } })
     const backend = tmuxBackend({ socket: "hub-x", config: "/dev/null", run: tmux.run })
     const pane = await backend.launch({ argv: ["goose", "session", "--name", "a b"], cwd: "/work", name: "hub-cat-1", env: { HUB_PRESET: "goose" } })
     expect(pane).toEqual(PANE)
     expect(tmux.calls).toEqual([
-      ["-L", "hub-x", "-f", "/dev/null", "new-session", "-d", "-P", "-F", "#{session_name}\t#{window_id}\t#{pane_id}", "-s", "hub-cat-1", "-c", "/work", "-x", "200", "-y", "50", "-e", "HUB_PRESET=goose", "--", "goose", "session", "--name", "a b"],
+      ["-L", "hub-x", "-f", "/dev/null", "new-session", "-d", "-P", "-F", "#{session_name} #{window_id} #{pane_id}", "-s", "hub-cat-1", "-c", "/work", "-x", "200", "-y", "50", "-e", "HUB_PRESET=goose", "--", "goose", "session", "--name", "a b"],
     ])
   })
 
+  test("the pane is read with a separator every tmux prints as is (3.2 shows a tab as _); session names may have spaces", async () => {
+    const tmux = fakeTmux({ "new-window": { stdout: "my work @3 %7\n" } })
+    const backend = tmuxBackend({ current: true, env: { TMUX: "/tmp/tmux-1000/default,1,0" }, run: tmux.run })
+    expect(await backend.launch({ argv: ["goose", "session"], cwd: "/", name: "w" })).toEqual({ session: "my work", window: "@3", target: "%7" })
+  })
+
   test("a one-element argv is run by tmux through the shell, so only a plain program name is accepted alone", async () => {
-    const tmux = fakeTmux({ "new-session": { stdout: "s\t@1\t%1\n" } })
+    const tmux = fakeTmux({ "new-session": { stdout: "s @1 %1\n" } })
     const backend = tmuxBackend({ socket: "hub-x", run: tmux.run })
     await backend.launch({ argv: ["cat"], cwd: "/", name: "s" })
     await expect(backend.launch({ argv: ["c*t"], cwd: "/", name: "s" })).rejects.toThrow(/plain program name/)
@@ -91,7 +97,7 @@ describe("tmux backend on a private socket", () => {
 
   test("arguments ending in ; are escaped so tmux does not split its command line there", async () => {
     expect([";", "a;", "a\\;", "a;b", "x"].map(tmuxArg)).toEqual(["\\;", "a\\;", "a\\\\;", "a;b", "x"])
-    const tmux = fakeTmux({ "new-session": { stdout: "s\t@1\t%1\n" } })
+    const tmux = fakeTmux({ "new-session": { stdout: "s @1 %1\n" } })
     await tmuxBackend({ socket: "hub-x", run: tmux.run }).launch({ argv: ["echo", "a", ";", "b"], cwd: "/", name: "s" })
     expect(tmux.calls[0]!.slice(-4)).toEqual(["echo", "a", "\\;", "b"])
   })
@@ -107,10 +113,10 @@ describe("tmux backend in the user's current session (explicit)", () => {
   })
 
   test("launch: a new window in the current session (no -L), detached", async () => {
-    const tmux = fakeTmux({ "new-window": { stdout: "work\t@7\t%9\n" } })
+    const tmux = fakeTmux({ "new-window": { stdout: "work @7 %9\n" } })
     const backend = tmuxBackend({ current: true, env: { TMUX: "/tmp/tmux-501/default,1,0" }, run: tmux.run })
     expect(await backend.launch({ argv: ["aider", "--yes"], cwd: "/w", name: "aider" })).toEqual({ session: "work", window: "@7", target: "%9" })
-    expect(tmux.calls).toEqual([["new-window", "-d", "-P", "-F", "#{session_name}\t#{window_id}\t#{pane_id}", "-n", "aider", "-c", "/w", "--", "aider", "--yes"]])
+    expect(tmux.calls).toEqual([["new-window", "-d", "-P", "-F", "#{session_name} #{window_id} #{pane_id}", "-n", "aider", "-c", "/w", "--", "aider", "--yes"]])
     expect(backend.attachHint({ session: "work", window: "@7", target: "%9" })).toBe("tmux select-window -t @7")
   })
 })
