@@ -994,7 +994,7 @@ async function desktop(browser: Browser): Promise<void> {
       const w = window as unknown as { __flicker: string[] }
       w.__flicker = []
       const scan = () => {
-        for (const el of document.querySelectorAll('.sync-note, .conn-banner, .rail [data-card="environment"] dd')) {
+        for (const el of Array.from(document.querySelectorAll('.sync-note, .conn-banner, .rail [data-card="environment"] dd'))) {
           const text = el.textContent ?? ""
           if (/Reconnecting|Connecting/.test(text)) w.__flicker.push(text)
         }
