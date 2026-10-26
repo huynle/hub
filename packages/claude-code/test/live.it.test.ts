@@ -11,8 +11,8 @@
 // session's hub URL and token from the env file), a hub message reaches the model at PostToolUse, the turn ends with
 // Stop; the plugin's MCP server (`hub claude-code mcp`) serves hub tools as the session (it sees HUB_CLAUDE_LAUNCH)
 // including an act verb with the act token; a hub stop ends the turn with continue:false (and whether Stop fires
-// then); and how long the asyncRewake Stop hook holds a -p run (HUB_CLAUDE_REWAKE_TIMEOUT). Every process started
-// is stopped; the throwaway directory is removed (HUB_IT_KEEP=1 keeps it).
+// then); and that the asyncRewake Stop hook no longer holds a -p run for HUB_CLAUDE_REWAKE_TIMEOUT. Every process
+// started is stopped; the throwaway directory is removed (HUB_IT_KEEP=1 keeps it).
 //
 //   HUB_IT_CLAUDE=1 bun test ./packages/claude-code/test/live.it.test.ts
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
@@ -184,8 +184,11 @@ describe.skipIf(!run)("Claude Code spoke against the real claude", () => {
       expect(order).toEqual(expect.arrayContaining(["SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop"]))
       expect(order.indexOf("PermissionRequest")).toBeLessThan(order.indexOf("PostToolUse"))
       expect(recorded().every((e) => e.launch)).toBe(true)
-      // T6 open question: the asyncRewake Stop hook holds a plain -p run until HUB_CLAUDE_REWAKE_TIMEOUT.
-      if (stop) expect(result.endedAt - stop.at).toBeGreaterThanOrEqual(REWAKE_S * 1000 - 1500)
+      // T6 open question: Claude Code runs the asyncRewake Stop hook in the foreground of a plain -p run (it held the
+      // run for the whole HUB_CLAUDE_REWAKE_TIMEOUT before the fix); `hub claude -p` turns that hook off, so the run
+      // ends right after Stop.
+      expect(stop).toBeDefined()
+      expect(result.endedAt - stop!.at).toBeLessThan(REWAKE_S * 1000 - 1500)
       // Every model request went to the stub (none to Anthropic); the deny proxy refused what else claude tried.
       expect(after.every((r) => r.path.endsWith("/v1/messages"))).toBe(true)
       console.error(`[it] proxy refused: ${proxy.hosts().join(", ") || "nothing"}`)
