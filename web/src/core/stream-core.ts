@@ -9,6 +9,9 @@ export const HIDDEN_CLOSE_MS = 30_000
 /** The hub sends a heartbeat every 20 s: nothing for this long means the stream is dead. */
 export const STALE_MS = 45_000
 
+/** Why the stream (re)opens: start(), a scope change, resuming a paused page, a dead stream, or any other reopen. */
+export type OpenReason = "start" | "scope" | "resume" | "stale" | "reconnect"
+
 export interface StreamScope {
   /** Leave out streamed text and reasoning (except of `session`'s tree). */
   readonly lite: boolean
@@ -29,8 +32,8 @@ export function streamURL(scope: StreamScope, last?: string): string {
 export interface KeeperDeps {
   setTimer(fn: () => void, ms: number): unknown
   clearTimer(handle: unknown): void
-  /** Opens the stream at `url` (closing any other first is the keeper's job). */
-  open(url: string): void
+  /** Opens the stream at `url` (closing any other first is the keeper's job), for `reason`. */
+  open(url: string, reason: OpenReason): void
   close(): void
   /** Voice mode runs: never pause. */
   keepOpen(): boolean
@@ -50,7 +53,7 @@ export class StreamKeeper {
 
   start(scope: StreamScope): void {
     this.scope = scope
-    this.reopen()
+    this.reopen("start")
   }
 
   /** A message or heartbeat arrived (`id`: its event id, if any). */
@@ -62,7 +65,7 @@ export class StreamKeeper {
   setScope(scope: StreamScope): void {
     const same = scope.lite === this.scope.lite && scope.session === this.scope.session
     this.scope = scope
-    if (!same && this.state === "open") this.reopen()
+    if (!same && this.state === "open") this.reopen("scope")
   }
 
   hidden(): void {
@@ -81,15 +84,15 @@ export class StreamKeeper {
       this.deps.clearTimer(this.hideTimer)
       this.hideTimer = undefined
     }
-    if (this.state === "paused") this.reopen()
+    if (this.state === "paused") this.reopen("resume")
   }
 
   /** Opens (or reopens) the stream now, resuming after the last id. */
-  reopen(): void {
+  reopen(reason: OpenReason = "reconnect"): void {
     if (this.state === "open") this.deps.close()
     this.clear()
     this.state = "open"
-    this.deps.open(streamURL(this.scope, this.lastID))
+    this.deps.open(streamURL(this.scope, this.lastID), reason)
     this.watch()
   }
 
@@ -105,7 +108,7 @@ export class StreamKeeper {
     if (this.staleTimer !== undefined) this.deps.clearTimer(this.staleTimer)
     this.staleTimer = this.deps.setTimer(() => {
       this.staleTimer = undefined
-      if (this.state === "open") this.reopen()
+      if (this.state === "open") this.reopen("stale")
     }, this.deps.staleMs ?? STALE_MS)
   }
 
@@ -113,4 +116,17 @@ export class StreamKeeper {
     for (const handle of [this.hideTimer, this.staleTimer]) if (handle !== undefined) this.deps.clearTimer(handle)
     this.hideTimer = this.staleTimer = undefined
   }
+}
+
+/** The console's stream connection (lib/store Connection). */
+export type StreamConnection = "connecting" | "live" | "down" | "paused"
+
+/**
+ * What the console shows when the stream (re)opens: switching the scope of a live stream (navigating to or from
+ * a session) is no reconnect, so it stays live without the "Reconnecting…" note; the first open is plain
+ * connecting; anything else (a drop, a pause, a dead stream) is a reconnect.
+ */
+export function streamOpening(current: StreamConnection, reason: OpenReason): { connection: StreamConnection; reconnecting: boolean } {
+  if (reason === "scope" && current === "live") return { connection: "live", reconnecting: false }
+  return { connection: "connecting", reconnecting: current !== "connecting" }
 }

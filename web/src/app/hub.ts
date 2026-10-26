@@ -9,7 +9,7 @@ import type { SpeechReadyView } from "../core/feedback-core"
 import { migratePins, normalizePrefs, PendingTitles, renameTitle, retitle, setPrefs, type PrefList, type ViewPrefs } from "../core/view-core"
 import { sessionRows, stableRows, type SessionRow } from "../lib/sessions"
 import { LiveFeeds, applyMessage, findSession, initialHub, type HubState } from "../lib/store"
-import { StreamKeeper, type StreamScope } from "../core/stream-core"
+import { StreamKeeper, streamOpening, type OpenReason, type StreamScope } from "../core/stream-core"
 import { applyDecision, openDecisions, parseDecision, type DecisionView } from "../core/decision-core"
 import { applyAgentEntry, parseAuditEntry, type AuditEntryView } from "../core/agents-core"
 import { api, enc, errorText, getJSON, HttpError, sessionPath, setUnauthorized } from "./api"
@@ -101,7 +101,7 @@ let resuming = false
 const keeper = new StreamKeeper({
   setTimer: (fn, ms) => setTimeout(fn, ms),
   clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
-  open: (url) => openSource(url),
+  open: (url, reason) => openSource(url, reason),
   close: () => closeSource(),
   keepOpen: () => keepOpen(),
 })
@@ -142,13 +142,14 @@ function closeSource(): void {
   if (keeper.state === "paused") setHub("connection", "paused")
 }
 
-function openSource(url: string): void {
+function openSource(url: string, reason: OpenReason): void {
   clearTimeout(retry)
   source?.close()
-  const wasLive = hub.connection === "live" || hub.connection === "paused" || hub.connection === "down"
-  resuming = wasLive
-  if (wasLive) showNote("reconnecting")
-  setHub("connection", "connecting")
+  // Navigating switches the scope of a live stream: no "Reconnecting…", the machines stay online.
+  const opening = streamOpening(hub.connection, reason)
+  resuming = opening.reconnecting
+  if (opening.reconnecting) showNote("reconnecting")
+  setHub("connection", opening.connection)
   const es = new EventSource(url, { withCredentials: true })
   source = es
   es.onopen = () => {
