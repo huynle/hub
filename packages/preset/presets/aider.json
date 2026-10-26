@@ -1,0 +1,8 @@
+{
+  "name": "aider",
+  "description": "Aider, the terminal pair programmer. No session IDs: it cannot be resumed by ID.",
+  "command": ["aider"],
+  "nativeID": { "source": "none" },
+  "delivery": "paste",
+  "evidence": "screen"
+}

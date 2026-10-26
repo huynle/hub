@@ -44,6 +44,9 @@ describe("main package", () => {
       "packages/spoke-sdk/package.json",
       "packages/claude-code/src",
       "packages/claude-code/package.json",
+      "packages/preset/src",
+      "packages/preset/presets",
+      "packages/preset/package.json",
       "packages/codex/src",
       "packages/codex/package.json",
     ])

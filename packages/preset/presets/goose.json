@@ -1,0 +1,8 @@
+{
+  "name": "goose",
+  "description": "goose, the open-source agent (interactive session). The hub names the session with --name; resuming needs --resume and --name together, which a preset cannot express yet.",
+  "command": ["goose", "session"],
+  "nativeID": { "source": "argv", "flag": "--name" },
+  "delivery": "paste",
+  "evidence": "screen"
+}

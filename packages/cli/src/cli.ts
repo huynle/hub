@@ -18,6 +18,7 @@ import { checkOpenShell, openShellCheckText } from "./openshell"
 import { LAUNCH_FLAGS, launchedText, launchesText, launchSpecArg, launchText, stoppedLaunchText } from "./launches"
 import { claudeCodeMain } from "../../claude-code/src/main.ts"
 import { runClaude } from "../../claude-code/src/wrapper.ts"
+import { presetMain } from "../../preset/src/main.ts"
 import { codexMain } from "../../codex/src/main.ts"
 import { runCodex } from "../../codex/src/wrapper.ts"
 
@@ -124,6 +125,13 @@ Claude Code (hooks spoke)
                                       env HUB_CLAUDE_PERMISSION_WAIT=<s> (default 120, 0: report only), HUB_CLAUDE_BIN
   hub claude-code daemon|hook|mcp     the spoke's daemon, hook bridge and MCP pipe (run by hub claude and the plugin)
 
+Presets (harnesses without a spoke, driven through a tmux pane; evidence screen)
+  hub preset list                     the official presets
+  hub preset check <name|file>        validate a preset (data only: an argv, never run through a shell)
+  hub preset run <name|file> [--socket <name> | --current] [--cwd <dir>] [--resume <id>] [--no-hub] [-- args…]
+                                      start it in a new pane on a private tmux server (-L hub-preset; your own
+                                      tmux only with --current) and connect it to the hub until the pane ends;
+                                      hub messages are pasted (never confirmed), Ctrl-C for stop/interrupt
 Codex (app-server spoke)
   hub codex [codex args…]             run Codex with the shared app-server daemon on (--enable daemon_auto_start;
                                       ~/.codex is never changed), starting the per-user spoke when needed (an
@@ -592,6 +600,7 @@ export async function run(argv: string[], io: Io): Promise<number> {
   // `hub claude` passes every other argument to Claude Code; `hub claude-code` has its own subcommands.
   if (name === "claude") return runClaude(rest, { env: io.env, home: io.home, stderr: io.stderr, program: io.program ?? currentProgram() })
   if (name === "claude-code") return claudeCodeMain(rest, io)
+  if (name === "preset") return presetMain(rest, io)
   // `hub codex` passes every other argument to Codex; `hub codex-spoke serve` is the spoke service it starts.
   if (name === "codex") return runCodex(rest, { env: io.env, home: io.home, stderr: io.stderr, program: io.program ?? currentProgram() })
   if (name === "codex-spoke") return codexMain(rest, io)

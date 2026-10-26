@@ -31,10 +31,11 @@ const nodeRun = argv[0] === "node" && argv[1] === "run"
 // `hub claude-code daemon` and `hub claude-code mcp` (the Claude Code spoke) run until interrupted too.
 const claudeDaemon = argv[0] === "claude-code" && argv[1] === "daemon"
 const claudeMcp = argv[0] === "claude-code" && argv[1] === "mcp"
-// `hub codex-spoke serve` (the Codex spoke service) too.
+// `hub codex-spoke serve` (the Codex spoke service) and `hub preset run` (until its pane ends) too.
 const codexServe = argv[0] === "codex-spoke" && argv[1] === "serve"
+const presetRun = argv[0] === "preset" && argv[1] === "run"
 const controller = new AbortController()
-if (argv[0] === "watch" || argv[0] === "mcp" || nodeRun || claudeDaemon || claudeMcp || codexServe) for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => controller.abort())
+if (argv[0] === "watch" || argv[0] === "mcp" || nodeRun || claudeDaemon || claudeMcp || codexServe || presetRun) for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => controller.abort())
 
 process.exitCode = await run(argv, {
   env: process.env,
@@ -49,5 +50,5 @@ process.exitCode = await run(argv, {
 // A signal ends `hub mcp` with its stdin still open; let go of it so the process can exit.
 if (argv[0] === "mcp" || claudeMcp) process.stdin.destroy()
 // Nothing else (sockets, timers) may keep a stopped node, Claude Code daemon or Codex spoke alive, nor `hub claude` /
-// `hub codex` once the harness exited.
-if (nodeRun || claudeDaemon || codexServe || argv[0] === "claude" || argv[0] === "codex") process.exit()
+// `hub codex` once the harness exited, nor a stopped `hub preset run`.
+if (nodeRun || claudeDaemon || codexServe || argv[0] === "claude" || argv[0] === "codex" || presetRun) process.exit()

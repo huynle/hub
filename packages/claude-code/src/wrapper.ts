@@ -63,6 +63,16 @@ function spawnDaemon(io: ClaudeIo): void {
   }
 }
 
+/** Writes (once) the hub plugin for these settings and returns its directory (`hub claude` and hub launches load it). */
+export function hubPlugin(env: Env, home: string, program: Program): string {
+  return writePlugin(path.join(claudeStateDir(env, home), "plugins"), {
+    program,
+    permissionWaitS: seconds(env.HUB_CLAUDE_PERMISSION_WAIT, DEFAULT_PERMISSION_WAIT_S),
+    rewakeTimeoutS: seconds(env.HUB_CLAUDE_REWAKE_TIMEOUT, DEFAULT_REWAKE_TIMEOUT_S) || DEFAULT_REWAKE_TIMEOUT_S,
+    version: VERSION,
+  })
+}
+
 /** The plugin directory when the hub can be used, else undefined (with the reason on stderr). */
 async function prepare(io: ClaudeIo, socket: string): Promise<string | undefined> {
   if (!readSpokeCredentials(io.env, io.home)) {
@@ -82,12 +92,7 @@ async function prepare(io: ClaudeIo, socket: string): Promise<string | undefined
       return undefined
     }
   }
-  return writePlugin(path.join(claudeStateDir(io.env, io.home), "plugins"), {
-    program: io.program,
-    permissionWaitS: seconds(io.env.HUB_CLAUDE_PERMISSION_WAIT, DEFAULT_PERMISSION_WAIT_S),
-    rewakeTimeoutS: seconds(io.env.HUB_CLAUDE_REWAKE_TIMEOUT, DEFAULT_REWAKE_TIMEOUT_S) || DEFAULT_REWAKE_TIMEOUT_S,
-    version: VERSION,
-  })
+  return hubPlugin(io.env, io.home, io.program)
 }
 
 /** Runs `bin` with the terminal; resolves with its exit code (128 + signal number when a signal ended it). */

@@ -5,7 +5,9 @@
 //
 // node.json: { "workspaceRoots": ["/Users/huy/projects"], "labels": {"gpu": "no"}, "slots": 6, "memoryMB": 49152,
 //   "openshell": { "enabled": true, "gateway": "openshell", "image": "ghcr.io/huynle/hub-sandbox:0.1",
-//                  "profiles": { "untrusted-code": { "providers": ["anthropic"] } } } }
+//                  "profiles": { "untrusted-code": { "providers": ["anthropic"] } } },
+//   "harnesses": { "claude-code": false } }
+// `harnesses` overrides what the host runtime detects (harnesses.ts): true offers a harness, false withholds it.
 import { readFileSync } from "node:fs"
 import { homedir, hostname } from "node:os"
 import path from "node:path"
@@ -21,6 +23,8 @@ export const DEFAULT_SLOTS = 4
 const MEMORY_MB_MAX = 2 ** 31
 const GATEWAY = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/
 const IMAGE = /^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}$/
+/** A harness id as hellos and launch specs spell it. */
+const HARNESS = /^[a-z0-9][a-z0-9._-]{0,63}$/
 
 export interface NodeConfig {
   /** Every launch workspace must resolve (realpath) under one of these. Empty: the node prepares nothing. */
@@ -31,6 +35,8 @@ export interface NodeConfig {
   readonly memoryMB?: number
   /** The `openshell` runtime's settings; absent when node.json has no openshell section. */
   readonly openshell?: OpenShellNodeConfig
+  /** Per-harness overrides of detection (true: offer it, false: withhold it); absent: detection alone. */
+  readonly harnesses?: Readonly<Record<string, boolean>>
 }
 
 /** node.json `openshell`: whether the node offers sandboxes, through which gateway, with which image and profiles. */
@@ -100,8 +106,26 @@ export function normalizeNodeConfig(raw: unknown): NodeConfigResult {
   }
 
   const openshell = r.openshell === undefined ? undefined : normalizeOpenShell(r.openshell, problems)
+  const harnesses = r.harnesses === undefined ? undefined : normalizeHarnesses(r.harnesses, problems)
 
-  return { config: { workspaceRoots, labels, slots, ...(memoryMB !== undefined ? { memoryMB } : {}), ...(openshell ? { openshell } : {}) }, problems }
+  return {
+    config: { workspaceRoots, labels, slots, ...(memoryMB !== undefined ? { memoryMB } : {}), ...(openshell ? { openshell } : {}), ...(harnesses ? { harnesses } : {}) },
+    problems,
+  }
+}
+
+function normalizeHarnesses(raw: unknown, problems: string[]): Record<string, boolean> | undefined {
+  if (!isObject(raw)) {
+    problems.push("harnesses must be an object of harness names to true or false")
+    return undefined
+  }
+  const out: Record<string, boolean> = {}
+  for (const [name, on] of Object.entries(raw)) {
+    if (!HARNESS.test(name)) problems.push(`harnesses: ${show(name)} is not a harness name`)
+    else if (typeof on !== "boolean") problems.push(`harnesses.${name} must be true or false`)
+    else out[name] = on
+  }
+  return out
 }
 
 function normalizeOpenShell(raw: unknown, problems: string[]): OpenShellNodeConfig | undefined {
