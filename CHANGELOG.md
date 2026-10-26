@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **MCP over HTTP**: the hub serves `hub mcp`'s tools at `POST /mcp` (MCP Streamable HTTP, stateless JSON
+  responses) for MCP clients and gateways. Auth is `Authorization: Bearer <token>` (an app token with the tools'
+  scopes; device, session and act tokens too); a missing or bad token answers `401` with `WWW-Authenticate: Bearer`.
+  The tools run as that token through the agent API in process, so scopes, grants, tenancy and the audit apply.
+  Packages now ship `packages/cli/src` (the image copies it too).
+
 ## 0.7.1
 
 - **Release**: the npm package is published again. 0.7.0's publish step had no Bun for the CLI bundle, so 0.7.0 is

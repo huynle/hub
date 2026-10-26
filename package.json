@@ -49,6 +49,8 @@
     "packages/protocol/package.json",
     "packages/sdk/src",
     "packages/sdk/package.json",
+    "packages/cli/src",
+    "packages/cli/package.json",
     "packages/cli/dist/hub-cli.js",
     "packages/runtime-sdk/src",
     "packages/runtime-sdk/package.json",

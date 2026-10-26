@@ -33,6 +33,7 @@ import type { Launch } from "./agent/launch-store"
 import { decisionStateQuery, MessageFeed } from "./agent/message-routes"
 import { hubDirectory } from "./agent/directory-routes"
 import { agentApi, agentRoutes, agentVerifiers, isAgentPath, wellKnown, type AgentRoute } from "./agent/routes"
+import { MCP_PATH, mcpHttp } from "./mcp-http"
 import { SessionTokens } from "./agent/session-tokens"
 import { SessionTokenPush } from "./session-token-push"
 import { TokenKeys } from "./token-keys"
@@ -927,6 +928,16 @@ export function startCentral(options: CentralOptions): Central {
     routes: [...agentRoutes(agentDeps), ...(options.agent?.routes ?? [])],
   })
 
+  // POST /mcp (MCP Streamable HTTP): `hub mcp`'s tools as the bearer's caller; their /api/agent calls are dispatched
+  // to this handler in process.
+  const mcp = mcpHttp({
+    publicURL: () => publicURL,
+    isOwnOrigin: (origin) => origins.has(origin),
+    verify: async (token) => (await resolveActor(new Request(`${url}${MCP_PATH}`, { headers: { authorization: `Bearer ${token}` } }))).ok,
+    dispatch: async (request) => (await handle(request, server)) ?? error(500, "No response"),
+    version: options.version ?? "0.0.0",
+  })
+
   async function handle(request: Request, server: Server<SpokeSocketData>): Promise<Response | undefined> {
     const url = new URL(request.url)
     const { pathname } = url
@@ -969,6 +980,7 @@ export function startCentral(options: CentralOptions): Central {
       if (method === "GET" && pathname === "/login") return login(request, url)
       if (oidc && method === "GET" && pathname === "/auth/login") return await authLogin(url)
       if (oidc && method === "GET" && pathname === "/auth/callback") return await authCallback(request, url)
+      if (pathname === MCP_PATH) return await mcp(request)
       if (isAgentPath(pathname)) return await agent.handle(request, url)
       if (pathname.startsWith("/api/")) return await api(request, server, url)
       if (method === "GET") return await staticFile(pathname, request.headers.get("accept-encoding"))

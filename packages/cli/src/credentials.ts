@@ -3,14 +3,17 @@
 // mode 0600) with an app token.
 import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
+import type { Fetch } from "../../sdk/src/index.ts"
 
 export type Env = Record<string, string | undefined>
 
 export interface Credentials {
   readonly url: string
   readonly token: string
-  /** env: HUB_URL + HUB_SESSION_TOKEN; login: the login file. */
-  readonly source: "env" | "login"
+  /** env: HUB_URL + HUB_SESSION_TOKEN; login: the login file; http: the caller of the hub's POST /mcp. */
+  readonly source: "env" | "login" | "http"
+  /** How to reach the hub (default: the global fetch); POST /mcp dispatches in process. */
+  readonly fetch?: Fetch
 }
 
 export interface Login {
