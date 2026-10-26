@@ -22,7 +22,7 @@ function fakeTmux() {
     calls.push(args)
     if (args.includes("new-session") || args.includes("new-window")) {
       const name = args[args.indexOf(args.includes("new-session") ? "-s" : "-n") + 1]
-      return { code: 0, stdout: `${name}\t@1\t%1\n`, stderr: "" }
+      return { code: 0, stdout: `${name} @1 %1\n`, stderr: "" }
     }
     if (args.includes("display-message")) return state.alive ? { code: 0, stdout: "0\n", stderr: "" } : { code: 1, stdout: "", stderr: "can't find pane: %1" }
     return { code: 0, stdout: "", stderr: "" }
