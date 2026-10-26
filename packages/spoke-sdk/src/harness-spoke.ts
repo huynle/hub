@@ -42,8 +42,11 @@ export type HandledOp = Exclude<Op, "sessionTokens" | "actTokens" | "deliver">
 export type OpHandler<O extends HandledOp> = (req: Extract<ServerRequest, { op: O }>) => Promise<ResultFor[O]> | ResultFor[O]
 export type OpHandlers = { readonly [O in HandledOp]?: OpHandler<O> }
 export type DeliverRequest = Extract<ServerRequest, { op: "deliver" }>
-/** Features that change how an op is served rather than adding one; each needs the op it modifies. */
-export type ModifierFeature = "permissionMessage" | "launch" | "hubPrompt"
+/**
+ * Features that change how an op is served rather than adding one; each needs the op it modifies, except
+ * "turnEvents" (the spoke reports every turn's end as the harness confirms it), which is about events, not an op.
+ */
+export type ModifierFeature = "permissionMessage" | "launch" | "hubPrompt" | "turnEvents"
 
 export interface HarnessSpokeOptions extends Omit<HarnessHelloOptions, "ops" | "features"> {
   readonly server: string
@@ -62,7 +65,7 @@ export interface HarnessSpokeOptions extends Omit<HarnessHelloOptions, "ops" | "
   readonly onState?: ConnectionOptions["onState"]
 }
 
-const MODIFIER_NEEDS: Record<ModifierFeature, string> = { permissionMessage: "permission", launch: "create", hubPrompt: "deliver" }
+const MODIFIER_NEEDS: Record<ModifierFeature, string | null> = { permissionMessage: "permission", launch: "create", hubPrompt: "deliver", turnEvents: null }
 const ALWAYS: readonly SpokeFeature[] = ["sessionTokens", "actTokens"]
 const CORE: readonly string[] = CORE_OPS
 
@@ -98,8 +101,8 @@ export class HarnessSpoke {
     const modifiers = [...new Set(options.features ?? [])]
     for (const feature of modifiers) {
       const needs = MODIFIER_NEEDS[feature]
-      if (!needs) throw new Error(`Unknown modifier feature ${JSON.stringify(feature)}`)
-      if (!served.has(needs)) throw new Error(`The ${feature} feature needs a ${needs} handler`)
+      if (needs === undefined || !Object.hasOwn(MODIFIER_NEEDS, feature)) throw new Error(`Unknown modifier feature ${JSON.stringify(feature)}`)
+      if (needs !== null && !served.has(needs)) throw new Error(`The ${feature} feature needs a ${needs} handler`)
     }
     const optional = [...new Set(handled.filter((op) => !CORE.includes(op)).map((op) => featureForOp(op)))]
     const hello = buildHarnessHello({ ...options, ops, features: [...optional, ...(this.#deliver ? ["deliver" as const] : []), ...ALWAYS, ...modifiers] })

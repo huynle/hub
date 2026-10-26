@@ -64,6 +64,8 @@
     "packages/preset/src",
     "packages/preset/presets",
     "packages/preset/package.json",
+    "packages/codex/src",
+    "packages/codex/package.json",
     "bin",
     "web/dist",
     "docker",
@@ -87,7 +89,8 @@
     "packages/testkit",
     "packages/claude-code",
     "packages/conformance",
-    "packages/preset"
+    "packages/preset",
+    "packages/codex"
   ],
   "engines": {
     "bun": ">=1.3"

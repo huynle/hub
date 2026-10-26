@@ -47,6 +47,8 @@ describe("main package", () => {
       "packages/preset/src",
       "packages/preset/presets",
       "packages/preset/package.json",
+      "packages/codex/src",
+      "packages/codex/package.json",
     ])
     expect(main.files.some((f: string) => f.includes("opencode-voice-shim"))).toBe(false)
     expect(main.workspaces).not.toContain("packages/opencode-voice-shim")

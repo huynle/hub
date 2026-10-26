@@ -61,6 +61,14 @@ describe("hello", () => {
     expect(make({ handlers: { permission: async () => ({}) }, features: ["permissionMessage"] }).spoke.features).toContain("permissionMessage")
   })
 
+  test("turnEvents (confirmed turn ends, rpc evidence trusted for idle) is announced without needing an op", async () => {
+    const { socket } = await connected({ evidence: "rpc", handlers: { turn: async () => ({ outcome: "succeeded", reply: "" }) }, features: ["turnEvents"] })
+    const hello = socket.frames.find((f) => f.t === "hello")
+    if (hello?.t !== "hello") throw new Error("no hello")
+    expect(hello.features).toEqual(["turn", "sessionTokens", "actTokens", "turnEvents"])
+    expect(make({ features: ["turnEvents"] }).spoke.features).toContain("turnEvents")
+  })
+
   test("a handler for an op that only modelPrefs serves is not enough on its own", () => {
     expect(() => make({ handlers: { setModelPrefs: async () => ({ prefs: {}, defaults: {} }) } })).toThrow(/modelPrefs/)
   })
