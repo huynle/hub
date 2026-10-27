@@ -25,6 +25,17 @@ async function rejection(promise: Promise<unknown>): Promise<unknown> {
 }
 
 describe("requests", () => {
+  test("webhook management uses the durable agent API and delete accepts 204", async () => {
+    const webhook = { id: "wh_1", url: "https://hooks.example/x", events: ["message.*"], by: "app:tok", created: 1 }
+    hub.routes["POST /api/agent/webhooks"] = () => Response.json({ webhook, secret: "whsec_once" }, { status: 201 })
+    hub.routes["GET /api/agent/webhooks"] = () => Response.json({ webhooks: [webhook] })
+    hub.routes["GET /api/agent/webhooks/wh_1"] = () => Response.json({ webhook, deliveries: [] })
+    hub.routes["DELETE /api/agent/webhooks/wh_1"] = () => new Response(null, { status: 204 })
+    expect((await client().webhookCreate({ url: webhook.url, events: webhook.events })).secret).toBe("whsec_once")
+    expect((await client().webhooks()).webhooks).toEqual([webhook])
+    expect((await client().webhook("wh_1")).webhook).toEqual(webhook)
+    expect(await client().webhookDelete("wh_1")).toBeUndefined()
+  })
   test("archive state uses the tenant-addressed PUT contract", async () => {
     hub.routes["PUT /api/agent/sessions/@api/archive"] = () => Response.json({ sessionID: "ses_1", archived: true, changed: true })
     expect(await client().setArchived("@api", true)).toEqual({ sessionID: "ses_1", archived: true, changed: true })

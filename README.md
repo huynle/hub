@@ -773,7 +773,9 @@ transport; protocol revisions `2025-06-18`, `2025-03-26` and `2024-11-05`), and 
 the call) get no answer, other methods answer `-32601`. Its tools are the CLI's verbs: `whoami`, `status`,
 `sessions`, `show`, `log`, `who`, `msg`, `ask`, `reply`, `decline`, `inbox`, `message_show` (`id`, `wait`),
 `mute` and `unmute` (`addr`; agent-message mutes, not console notifications), `decisions` (`state`) and
-`decision_show` (`id`) (reading the Decisions you asked; no tool answers one, only the user does) and the act verbs `approve`, `deny`,
+`decision_show` (`id`) (reading the Decisions you asked; no tool answers one, only the user does), and
+`webhook_create` (`url`, `events`, `label`), `webhooks`, `webhook_show` (`id`) and `webhook_delete` (`id`). Webhooks
+carry the same canonical compact events as `events`; their signing secret appears only in `webhook_create`. The act verbs are `approve`, `deny`,
 `answer` (`answer` object or `cancel`), `prompt` (`delivery`) and `stop`, and the launch tools `launch` (`repo`
 required and absolute; `mode`, `branch`, `base`, `remote`, `key`, `name`, `roles`, `harness`, `agent`, `model`,
 `runtime`, `profile`, `machine`, `nodeLabels` and `labels` objects, `prefer`, `prompt`, `end`, `timeout`,

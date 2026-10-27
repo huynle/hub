@@ -459,6 +459,26 @@ export interface LaunchArtifacts {
   readonly dirty?: boolean
 }
 
+export interface WebhookView {
+  readonly id: string
+  readonly url: string
+  readonly events: readonly string[]
+  readonly by: string
+  readonly label?: string
+  readonly created: number
+}
+
+export interface WebhookDelivery {
+  readonly id: string
+  readonly event: string
+  readonly type: string
+  readonly state: "pending" | "delivered" | "failed"
+  readonly attempts: number
+  readonly created: number
+  readonly nextAt?: number
+  readonly last?: { readonly at: number; readonly status?: number; readonly error?: string }
+}
+
 /** A launch as the hub reports it (the spec with its defaults filled in). */
 export interface LaunchView {
   readonly id: string

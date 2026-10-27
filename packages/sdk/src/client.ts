@@ -43,6 +43,8 @@ import type {
   WatchEvent,
   EventsPage,
   Whoami,
+  WebhookDelivery,
+  WebhookView,
 } from "./types.ts"
 
 const AGENT = "/api/agent"
@@ -322,6 +324,22 @@ export class HubClient {
    */
   events(options: CallOptions & { readonly cursor?: string; readonly wait?: number; readonly limit?: number; readonly types?: readonly string[]; readonly sessions?: readonly string[] } = {}): Promise<EventsPage> {
     return this.call("GET", `${AGENT}/events`, { query: { cursor: options.cursor, wait: options.wait, limit: options.limit, type: options.types, session: options.sessions }, ...signalOf(options) })
+  }
+
+  webhookCreate(input: { readonly url: string; readonly events?: readonly string[]; readonly label?: string }, options: CallOptions = {}): Promise<{ webhook: WebhookView; secret: string }> {
+    return this.call("POST", `${AGENT}/webhooks`, { body: input, ...signalOf(options) })
+  }
+
+  webhooks(options: CallOptions = {}): Promise<{ webhooks: WebhookView[] }> {
+    return this.call("GET", `${AGENT}/webhooks`, signalOf(options))
+  }
+
+  webhook(id: string, options: CallOptions = {}): Promise<{ webhook: WebhookView; deliveries: WebhookDelivery[] }> {
+    return this.call("GET", `${AGENT}/webhooks/${segment(id)}`, signalOf(options))
+  }
+
+  webhookDelete(id: string, options: CallOptions = {}): Promise<void> {
+    return this.call("DELETE", `${AGENT}/webhooks/${segment(id)}`, signalOf(options))
   }
 
   // Organization (sessions:manage).

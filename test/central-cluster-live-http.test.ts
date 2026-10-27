@@ -329,11 +329,11 @@ for (const variant of variants) {
       expect(answered).toMatchObject({ message: { id: askID, state: "answered" }, answer: { text: "yes" } })
     })
 
-    test("a launch change on A streams once on both pods; webhooks queue it only on A", async () => {
+    test("a launch change on A streams once on both pods; canonical webhooks queue it only on A", async () => {
       const { a, b, userID } = await pods(variant)
       const queued: string[] = []
-      a.webhooks.onLaunch = (async () => void queued.push("a")) as any
-      b.webhooks.onLaunch = (async () => void queued.push("b")) as any
+      a.webhooks.publishCanonical = (async () => void queued.push("a")) as any
+      b.webhooks.publishCanonical = (async () => void queued.push("b")) as any
       const onA = frames(await a.api("/api/events"))
       const onB = frames(await b.api("/api/events"))
       await Promise.all([onA.next(isType("catalog")), onB.next(isType("catalog"))])

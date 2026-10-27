@@ -7,7 +7,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { createHmac } from "node:crypto"
 import { parseWebhookSignature, webhookSignedPayload, webhookTimestampFresh } from "../packages/protocol/src/webhook"
 import type { Launch } from "../src/central/agent/launch-store"
-import { launchEvent, WEBHOOK_OUTBOX, Webhooks, type WebhookEvent, type WebhooksDeps } from "../src/central/agent/webhooks"
+import { canonicalWebhookEvent, launchEvent, WEBHOOK_OUTBOX, Webhooks, type WebhookEvent, type WebhooksDeps } from "../src/central/agent/webhooks"
 import { MemoryLocks } from "../src/central/backend/memory-counters"
 import { MemoryStateStore } from "../src/central/backend/memory-state"
 import { AgentError } from "../src/central/agent/errors"
@@ -116,6 +116,16 @@ describe("registrations", () => {
     expect(webhook.events).toEqual(["launch.ended", "launch.running"])
   })
 
+  test("canonical event families and wildcards are accepted; unknown patterns are rejected", async () => {
+    const { webhooks } = setup()
+    const { webhook } = await webhooks.register(U, "user", {
+      url: "https://hooks.example.com/x",
+      events: ["session.*", "message.changed", "launch.*", "role.claimed", "session.*"],
+    })
+    expect(webhook.events).toEqual(["session.*", "message.changed", "launch.*", "role.claimed"])
+    await expect(webhooks.register(U, "user", { url: "https://hooks.example.com/y", events: ["secret.leaked"] })).rejects.toMatchObject({ code: "invalid" })
+  })
+
   test("users see all their registrations, an app token only its own; other users' are not found", async () => {
     const { webhooks } = setup()
     const mine = (await webhooks.register(U, "user", { url: "https://hooks.example.com/u" })).webhook
@@ -140,6 +150,26 @@ describe("registrations", () => {
 })
 
 describe("delivery", () => {
+  test("canonical journal event keeps its stable id and compact payload", async () => {
+    const hook = receiver()
+    const { webhooks } = setup()
+    await webhooks.register(U, "user", { url: hook.url, events: ["message.*"] })
+    const compact = { id: "evt_0123456789abcdef0123", at: T0, type: "message.changed", subject: { messageID: "msg_1" }, data: { kind: "msg", state: "sent" } }
+    expect(await webhooks.publishCanonical(U, compact, "message", { parties: ["app:a"] })).toBe(1)
+    await webhooks.drain()
+    expect(JSON.parse(hook.received[0]!.body)).toEqual(canonicalWebhookEvent(SOURCE, U, compact))
+    expect(JSON.parse(hook.received[0]!.body).id).toBe(compact.id)
+  })
+
+  test("persisted exact legacy launch patterns still match the equivalent canonical launch state", async () => {
+    const hook = receiver()
+    const { webhooks } = setup()
+    await webhooks.register(U, "user", { url: hook.url, events: ["launch.ended"] })
+    const queued = { id: "evt_0123456789abcdef0123", at: T0, type: "launch.changed", subject: { launchID: "l1" }, data: { state: "queued" } }
+    const ended = { ...queued, id: "evt_1123456789abcdef0123", data: { state: "ended" } }
+    expect(await webhooks.publishCanonical(U, queued, "launch", { by: "user" })).toBe(0)
+    expect(await webhooks.publishCanonical(U, ended, "launch", { by: "user" })).toBe(1)
+  })
   test("a published event is POSTed signed, with Hub-Event and Hub-Delivery; the delivery is recorded", async () => {
     const hook = receiver()
     const { webhooks } = setup()
@@ -198,6 +228,20 @@ describe("delivery", () => {
     expect(await webhooks.publish(U, event("evt_other"), { by: "app:bbbbbbbbbbbbbbbb" })).toBe(0)
     expect(await webhooks.publish(U, event("evt_mine"), { by: "app:aaaaaaaaaaaaaaaa" })).toBe(1)
     alive = false
+    await webhooks.drain()
+    expect(hook.received).toEqual([])
+    expect(await webhooks.list(U)).toEqual([])
+  })
+
+  test("canonical app delivery is audience-filtered and dropped when a required family scope is revoked", async () => {
+    const hook = receiver()
+    let scopes = ["events:subscribe", "messages:read"]
+    const { webhooks } = setup({ appScopes: () => scopes })
+    await webhooks.register(U, "app:aaaaaaaaaaaaaaaa", { url: hook.url, events: ["message.*"] })
+    const compact = { id: "evt_0123456789abcdef0123", at: T0, type: "message.changed", subject: { messageID: "msg_1" }, data: { kind: "msg", state: "sent" } }
+    expect(await webhooks.publishCanonical(U, compact, "message", { parties: ["app:bbbbbbbbbbbbbbbb"] })).toBe(0)
+    expect(await webhooks.publishCanonical(U, { ...compact, id: "evt_1123456789abcdef0123" }, "message", { parties: ["app:aaaaaaaaaaaaaaaa"] })).toBe(1)
+    scopes = ["events:subscribe"]
     await webhooks.drain()
     expect(hook.received).toEqual([])
     expect(await webhooks.list(U)).toEqual([])

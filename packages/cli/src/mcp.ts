@@ -320,11 +320,39 @@ const eventsTool: Tool = {
   },
 }
 
+const webhookText = (w: { id: string; url: string; events: readonly string[]; label?: string }) => `${w.id}${w.label ? `  ${w.label}` : ""}  ${w.url}  ${w.events.join(",")}`
+const webhookTools: readonly Tool[] = [
+  {
+    name: "webhook_create",
+    description: "Create a durable signed webhook for canonical compact events. The signing secret is returned only here. Needs events:subscribe plus every selected family's scope.",
+    properties: { url: STRING, events: { type: "array", items: STRING }, label: STRING }, required: ["url"], readOnly: false,
+    run: async (hub, args, signal) => {
+      const events = optionalStrings(args, "events")
+      const label = optional(args, "label")
+      const r = await hub.webhookCreate({ url: need(args, "url"), ...(events ? { events } : {}), ...(label ? { label } : {}) }, { signal })
+      return `${webhookText(r.webhook)}\nsigning secret (shown once): ${r.secret}`
+    },
+  },
+  {
+    name: "webhooks", description: "List webhook registrations owned by this credential; secrets are never returned.", properties: {}, readOnly: true,
+    run: async (hub, _args, signal) => { const r = await hub.webhooks({ signal }); return r.webhooks.length ? r.webhooks.map(webhookText).join("\n") : "no webhooks" },
+  },
+  {
+    name: "webhook_show", description: "Show one webhook and its retained delivery attempts; never its secret.", properties: { id: STRING }, required: ["id"], readOnly: true,
+    run: async (hub, args, signal) => { const r = await hub.webhook(need(args, "id"), { signal }); return `${webhookText(r.webhook)}\n${JSON.stringify(r.deliveries)}` },
+  },
+  {
+    name: "webhook_delete", description: "Delete one webhook and its pending deliveries.", properties: { id: STRING }, required: ["id"], readOnly: false, organizes: true, idempotent: false,
+    run: async (hub, args, signal) => { const id = need(args, "id"); await hub.webhookDelete(id, { signal }); return `Deleted webhook ${id}` },
+  },
+]
+
 const TOOLS: readonly Tool[] = [
   ...archiveTools(true),
   ...archiveTools(false),
   ...nameTools,
   eventsTool,
+  ...webhookTools,
   {
     name: "whoami",
     description: "Who this hub credential is: the app token of `hub login` (or the session of HUB_SESSION_TOKEN) and its user.",
