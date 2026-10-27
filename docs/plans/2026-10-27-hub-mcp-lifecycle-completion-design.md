@@ -8,6 +8,8 @@ Complete the public Hub MCP control-plane surface for an external orchestrator: 
 
 Add the app-token scope `sessions:manage` for organizational changes: archive/unarchive, pin/unpin, naming, and role claim/release. It does not permit prompting, stopping, answering, approving, launching, credential management, or grant management. Existing tokens gain no new authority. `sessions:act` and `sessions:launch` continue to require grants.
 
+An app token changing roles needs both `sessions:manage` and a matching grant with the existing `roles` verb. Sessions retain their existing self-management rules.
+
 Credential and grant administration remain console-only. User Decisions remain user-only to answer.
 
 ## Session lifecycle
@@ -28,6 +30,10 @@ Add an MCP `events(cursor?, wait?, limit?, types?, sessions?)` tool backed by a 
 
 Events cover session presence/state, blockers, archive state, messages and asks, launches, machine/spoke state, names, roles and later pins. Payloads are compact metadata: never prompt text, message bodies, credentials, webhook secrets or another tenant's identifiers. Existing SSE watch should consume the same event semantics to prevent divergent definitions.
 
+Retention is bounded to 24 hours or 10,000 compact events per user, whichever trims first. Cursor reset is a typed successful response with `reset: true`, a fresh cursor, and the snapshot reads the caller must refresh. Compact events exclude blocker summaries and other free text. `/api/agent/watch`, not the richer console `/api/events`, aligns to these semantics.
+
+Webhook creation and event polling require a dedicated `events:subscribe` app-token scope. Individual event families are additionally filtered by the token's read, manage, message or launch scopes.
+
 ## Ordered delivery
 
 1. Archive/unarchive and `sessions:manage`, including token UI.
@@ -37,6 +43,8 @@ Events cover session presence/state, blockers, archive state, messages and asks,
 5. Webhook MCP management and canonical event coverage.
 6. Provision and verify an eligible launch node; exercise launch through end.
 7. Pin/unpin and preview-first bulk archive-inactive.
+
+Bulk archive applies only an exact bounded preview set and revalidates it at write time; sessions that became active, pinned or open are skipped and reported.
 
 The phases are sequential because they share `packages/sdk`, `packages/cli/src/mcp.ts`, central agent routes, tests and documentation.
 
