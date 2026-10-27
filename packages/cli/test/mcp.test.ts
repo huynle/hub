@@ -91,7 +91,7 @@ describe("JSON-RPC core", () => {
   })
 })
 
-const VERBS = ["archive", "unarchive", "events", "whoami", "status", "sessions", "show", "log", "who", "msg", "ask", "reply", "decline", "inbox", "approve", "deny", "answer", "prompt", "stop", "launch", "launches", "launch_show", "launch_stop"]
+const VERBS = ["archive", "unarchive", "name", "role_claim", "role_release", "events", "whoami", "status", "sessions", "show", "log", "who", "msg", "ask", "reply", "decline", "inbox", "approve", "deny", "answer", "prompt", "stop", "launch", "launches", "launch_show", "launch_stop"]
 
 describe("tools/list", () => {
   test("lists one tool per CLI verb, each with a description and an object input schema", async () => {
@@ -127,6 +127,32 @@ describe("archive tools", () => {
     expect(textOf(await call("archive", { addr: "@api" }))).toContain("Archived @api")
     expect(textOf(await call("unarchive", { addr: "@api" }))).toContain("Unarchived @api")
     expect(hub.seen.map((s) => s.body.archived)).toEqual([true, false])
+  })
+})
+
+describe("name and role tools", () => {
+  test("name, role_claim and role_release call the directory routes for the addressed session", async () => {
+    hub.routes["POST /api/agent/name"] = () => Response.json({ sessionID: "ses_1", name: "lead", alias: "api" })
+    hub.routes["POST /api/agent/roles/claim"] = () => Response.json({ sessionID: "ses_1", role: "reviewer", project: "hub", generation: 2, exclusive: true })
+    hub.routes["POST /api/agent/roles/release"] = () => Response.json({ sessionID: "ses_1", role: "reviewer", project: "hub", released: true })
+    expect(textOf(await call("name", { addr: "@api", name: "@lead" }))).toContain("@lead")
+    expect(textOf(await call("role_claim", { addr: "@lead", role: "@@reviewer", project: "hub", exclusive: true }))).toContain("@@reviewer.hub")
+    expect(textOf(await call("role_release", { addr: "@lead", role: "reviewer.hub" }))).toContain("@@reviewer.hub")
+    expect(hub.seen.map((s) => [s.path, s.body])).toEqual([
+      ["/api/agent/name", { name: "@lead", session: "@api" }],
+      ["/api/agent/roles/claim", { role: "reviewer", exclusive: true, session: "@lead", project: "hub" }],
+      ["/api/agent/roles/release", { role: "reviewer.hub", session: "@lead" }],
+    ])
+  })
+
+  test("name and role are required; organization writes are annotated non-destructive", async () => {
+    for (const [tool, args] of [["name", { addr: "@api" }], ["role_claim", { addr: "@api" }], ["role_release", {}]] as const) expect((await call(tool, args)).result.isError).toBe(true)
+    expect(hub.seen).toEqual([])
+    const r = (await server().handle({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} })) as any
+    const by = (name: string) => r.result.tools.find((t: any) => t.name === name)
+    for (const name of ["archive", "unarchive", "name", "role_claim", "role_release"]) expect(by(name).annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false })
+    expect(by("name").annotations.idempotentHint).toBe(true)
+    expect(by("role_claim").inputSchema.required).toEqual(["role"])
   })
 })
 

@@ -176,6 +176,28 @@ describe("MCP over HTTP", () => {
     expect(raw.includes(token)).toBe(false)
   })
 
+  test("name, role_claim and role_release: sessions:manage, and a roles grant for roles, through real /mcp", async () => {
+    h = await harness()
+    await spoke(h, { sessions: [session("ses_org", { title: "Org me", directory: "/work/org" })] })
+    const reader = (await appToken(["sessions:read"])).token
+    expect((await json(await call(reader, "name", { addr: "ses_org", name: "lead" }))).result.isError).toBe(true)
+    const { id, token } = await appToken(["sessions:manage"])
+    expect(textOf(await json(await call(token, "name", { addr: "ses_org", name: "@lead" })))).toContain("Named ses_org @lead")
+    const ungranted = await json(await call(token, "role_claim", { addr: "@lead", role: "reviewer" }))
+    expect(ungranted.result.isError).toBe(true)
+    expect(textOf(ungranted)).toContain("forbidden")
+    expect((await h.api("/api/agent/grants", { method: "POST", json: { holder: `app:${id}`, scope: { projects: ["/work/org"] }, allow: ["roles"] } })).status).toBe(201)
+    expect(textOf(await json(await call(token, "role_claim", { addr: "@lead", role: "reviewer", exclusive: true })))).toContain("holds @@reviewer (generation 1, exclusive)")
+    expect((await json(await call(token, "role_claim", { addr: "@lead", role: "orchestrator" }))).result.isError).toBe(true)
+    const raw = await (await call(token, "role_release", { addr: "@lead", role: "reviewer" })).text()
+    expect(textOf(JSON.parse(raw))).toContain("released @@reviewer")
+    expect(raw.includes(token)).toBe(false)
+    const list = await json(await post(token, rpc(3, "tools/list")))
+    for (const name of ["name", "role_claim", "role_release"]) {
+      expect(list.result.tools.find((t: any) => t.name === name).annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false, openWorldHint: false })
+    }
+  })
+
   test("events: a resumable cursor over the journal, needing events:subscribe, through real /mcp", async () => {
     h = await harness()
     await spoke(h, { sessions: [session("ses_ev", { title: "SECRET title" })] })

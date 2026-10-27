@@ -126,7 +126,7 @@ const userView = (user: UserRecord) => ({
 export function agentRoutes(deps: AgentDeps): AgentRoute[] {
   const feed = deps.feed ?? new MessageFeed()
   return [
-    ...(deps.directory ? directoryRoutes(deps.directory, deps.store, deps.agentEvents) : []),
+    ...(deps.directory ? directoryRoutes({ directory: deps.directory, store: deps.store, ...(deps.agentEvents ? { events: deps.agentEvents } : {}), ...(deps.registry ? { registry: deps.registry } : {}), ...(deps.grants ? { grants: deps.grants } : {}), ...(deps.acting ? { acting: deps.acting } : {}), ...(deps.audit ? { audit: deps.audit } : {}) }) : []),
     ...(deps.directory && deps.agentEvents && deps.eventCursorKeys ? eventsRoutes({ events: deps.agentEvents, keys: deps.eventCursorKeys, directory: deps.directory }) : []),
     ...(deps.directory && deps.delivery ? messageRoutes({ delivery: deps.delivery, directory: deps.directory, store: deps.store, feed, ...(deps.decisions ? { decisions: deps.decisions } : {}) }) : []),
     ...(deps.directory && deps.registry ? readRoutes({ store: deps.store, directory: deps.directory, registry: deps.registry, ...(deps.spokes ? { spokes: deps.spokes } : {}), ...launchReads(deps), ...(deps.agentEvents && deps.eventCursorKeys ? { events: { events: deps.agentEvents, keys: deps.eventCursorKeys, directory: deps.directory } } : {}), ...(deps.heartbeatMs !== undefined ? { heartbeatMs: deps.heartbeatMs } : {}), ...(deps.now ? { now: deps.now } : {}), ...(deps.draining ? { draining: deps.draining } : {}) }) : []),

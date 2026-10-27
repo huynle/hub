@@ -210,6 +210,10 @@ interface Tool {
   readonly properties: Record<string, unknown>
   readonly required?: readonly string[]
   readonly readOnly: boolean
+  /** A write that only reorganizes (reversible, no harness side effect): destructiveHint false. */
+  readonly organizes?: boolean
+  /** Repeating it with the same arguments changes nothing more. */
+  readonly idempotent?: boolean
   /** The text of the answer. */
   run(hub: HubClient, args: Args, signal: AbortSignal): Promise<string>
 }
@@ -220,12 +224,66 @@ const archiveTools = (archived: boolean): readonly Tool[] => [{
   properties: { addr: ADDR },
   required: ["addr"],
   readOnly: false,
+  organizes: true,
+  idempotent: true,
   run: async (hub, args, signal) => {
     const addr = need(args, "addr")
     const result = await hub.setArchived(addr, archived, { signal })
     return `${archived ? "Archived" : "Unarchived"} ${addr} (${result.sessionID})${result.changed ? "" : "; already in that state"}`
   },
 }]
+
+const TARGET = { ...ADDR, description: `${ADDR.description} Required for an app token; a session token defaults to itself.` } as const
+const ROLE = { ...STRING, description: "A role (reviewer, @@reviewer or reviewer.project)." } as const
+const ROLE_PROJECT = { ...STRING, description: "Scope the role to this project (as role.project)." } as const
+const MANAGE_NOTE = "Needs scope sessions:manage for an app token"
+const roleText = (r: { role: string; project?: string }) => `@@${r.role}${r.project !== undefined ? `.${r.project}` : ""}`
+
+const nameTools: readonly Tool[] = [
+  {
+    name: "name",
+    description: `Name a session (@name); its previous name stays an alias for 24 h. A taken name fails (name_taken). ${MANAGE_NOTE}.`,
+    properties: { addr: TARGET, name: { ...STRING, description: "The name: 2–40 characters a-z, 0-9 and - (a leading @ is fine)." } },
+    required: ["name"],
+    readOnly: false,
+    organizes: true,
+    idempotent: true,
+    run: async (hub, args, signal) => {
+      const session = optional(args, "addr")
+      const r = await hub.name(need(args, "name"), { ...(session ? { session } : {}), signal })
+      return `Named ${r.sessionID} @${r.name}${r.alias ? ` (@${r.alias} stays an alias for 24 h)` : ""}`
+    },
+  },
+  {
+    name: "role_claim",
+    description: `Claim a role for a session; exclusive fails while another session holds it. Reserved roles (orchestrator…, concierge…) are the user's to assign. ${MANAGE_NOTE}, plus a grant allowing roles on the session's project.`,
+    properties: { addr: TARGET, role: ROLE, project: ROLE_PROJECT, exclusive: { type: "boolean", description: "Be the only holder." } },
+    required: ["role"],
+    readOnly: false,
+    organizes: true,
+    idempotent: true,
+    run: async (hub, args, signal) => {
+      const session = optional(args, "addr")
+      const project = optional(args, "project")
+      const r = await hub.claimRole(need(args, "role"), { ...(session ? { session } : {}), ...(project !== undefined ? { project } : {}), ...(optionalBool(args, "exclusive") ? { exclusive: true } : {}), signal })
+      return `${r.sessionID} holds ${roleText(r)} (generation ${r.generation}${r.exclusive ? ", exclusive" : ""})`
+    },
+  },
+  {
+    name: "role_release",
+    description: `Release a role a session holds (not_found when it does not). ${MANAGE_NOTE}, plus a grant allowing roles on the session's project.`,
+    properties: { addr: TARGET, role: ROLE, project: ROLE_PROJECT },
+    required: ["role"],
+    readOnly: false,
+    organizes: true,
+    run: async (hub, args, signal) => {
+      const session = optional(args, "addr")
+      const project = optional(args, "project")
+      const r = await hub.releaseRole(need(args, "role"), { ...(session ? { session } : {}), ...(project !== undefined ? { project } : {}), signal })
+      return `${r.sessionID} released ${roleText(r)}`
+    },
+  },
+]
 
 const eventsTool: Tool = {
   name: "events",
@@ -255,6 +313,7 @@ const eventsTool: Tool = {
 const TOOLS: readonly Tool[] = [
   ...archiveTools(true),
   ...archiveTools(false),
+  ...nameTools,
   eventsTool,
   {
     name: "whoami",
@@ -525,7 +584,7 @@ const toolList = () =>
     name: t.name,
     description: t.description,
     inputSchema: { type: "object", properties: t.properties, ...(t.required ? { required: [...t.required] } : {}), additionalProperties: false },
-    annotations: { readOnlyHint: t.readOnly, openWorldHint: false },
+    annotations: { readOnlyHint: t.readOnly, openWorldHint: false, ...(t.organizes ? { destructiveHint: false } : {}), ...(t.idempotent ? { idempotentHint: true } : {}) },
   }))
 
 /** A failure as the tool's text: `code: message`, candidates, missing feature, retry time, hint. */

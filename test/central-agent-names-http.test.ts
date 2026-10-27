@@ -203,3 +203,113 @@ describe("PUT /api/agent/sessions/:addr/archive", () => {
     expect((await mine("/api/agent/sessions/ses_1/archive", { archived: "yes" }, MANAGE)).status).toBe(400)
   })
 })
+
+describe("managed apps: names and roles (sessions:manage; role writes also need a roles grant)", () => {
+  /** The journal's organization (manage) events for the local user after `position`, as [type, sessionID, data]. */
+  const journal = async (position: string) => {
+    const result = await h.agentEvents.since("local", position)
+    if ("reset" in result && result.reset) throw new Error("journal reset")
+    return (result as any).records
+      .filter((r: any) => r.family === "manage")
+      .map((r: any) => [r.event.type, r.event.subject.sessionID, r.event.data])
+  }
+  /** A real app token with these scopes, and a fetch as it. */
+  const appToken = async (scopes: string[]) => {
+    const token = await json(await h.api("/api/agent/app-tokens", { method: "POST", json: { scopes } }))
+    return { id: token.id as string, post: (pathname: string, body: unknown) => bearer(pathname, token.token, { method: "POST", json: body }) }
+  }
+  const grant = (id: string, projects: string[], allow: string[] = ["roles"]) => h.api("/api/agent/grants", { method: "POST", json: { holder: `app:${id}`, scope: { projects }, allow } })
+
+  test("a managed app names any session by address; audited and one session.named event per change", async () => {
+    await start()
+    const position = await h.agentEvents.latest("local")
+    const res = await post("/api/agent/name", { name: "@lead", session: "@web-work" }, MANAGE)
+    expect(res.status).toBe(200)
+    expect(await json(res)).toEqual({ sessionID: "ses_2", name: "lead", alias: "web-work" })
+    expect((await post("/api/agent/name", { name: "lead", session: "ses_2" }, MANAGE)).status).toBe(200)
+    const missing = await post("/api/agent/name", { name: "other" }, MANAGE)
+    expect(missing.status).toBe(400)
+    expect((await json(missing)).error.code).toBe("invalid")
+    expect(await journal(position)).toEqual([["session.named", "ses_2", { name: "lead" }]])
+    expect(h.store.auditLog().filter((e) => e.action === "session.name").map((e) => [e.target, e.detail])).toEqual([["ses_2", "app"]])
+  })
+
+  test("names stay tenant-bound: foreign and unknown sessions are both not_found", async () => {
+    await start()
+    const bob = await h.store.upsertUser({ email: "bob@example.test", role: "user" })
+    const machine = await h.store.addMachine("bob box", bob.id)
+    await spoke(h, { machine, processID: "p2", sessions: [session("ses_bob")] })
+    for (const target of ["ses_bob", "ses_unknown"]) {
+      const res = await post("/api/agent/name", { name: "mine", session: target }, MANAGE)
+      expect(res.status).toBe(404)
+      expect((await json(res)).error.code).toBe("not_found")
+    }
+  })
+
+  test("an app's role claim and release need sessions:manage and a roles grant covering the session's project", async () => {
+    await start()
+    const reader = await appToken(["sessions:read"])
+    expect((await reader.post("/api/agent/roles/claim", { role: "reviewer", session: "ses_2" })).status).toBe(403)
+    const app = await appToken(["sessions:manage"])
+    const ungranted = await app.post("/api/agent/roles/claim", { role: "reviewer", session: "ses_2" })
+    expect(ungranted.status).toBe(403)
+    expect((await json(ungranted)).error.code).toBe("forbidden")
+    expect((await grant(app.id, ["/elsewhere"])).status).toBe(201)
+    expect((await grant(app.id, ["/work"], ["prompt"])).status).toBe(201)
+    expect((await app.post("/api/agent/roles/claim", { role: "reviewer", session: "ses_2" })).status).toBe(403)
+    expect((await grant(app.id, ["/work"])).status).toBe(201)
+    const position = await h.agentEvents.latest("local")
+    const claimed = await app.post("/api/agent/roles/claim", { role: "reviewer", session: "@web-work", exclusive: true })
+    expect(claimed.status).toBe(200)
+    expect(await json(claimed)).toEqual({ sessionID: "ses_2", role: "reviewer", generation: 1, exclusive: true })
+    expect(await json(await app.post("/api/agent/roles/claim", { role: "reviewer", session: "ses_2" }))).toMatchObject({ generation: 1 })
+    const released = await app.post("/api/agent/roles/release", { role: "reviewer", session: "ses_2" })
+    expect(await json(released)).toEqual({ sessionID: "ses_2", role: "reviewer", released: true })
+    expect(await journal(position)).toEqual([
+      ["role.claimed", "ses_2", { role: "reviewer", generation: 1, exclusive: true }],
+      ["role.released", "ses_2", { role: "reviewer" }],
+    ])
+    const audit = (await json(await h.api("/api/agent/audit"))).entries.map((e: any) => [e.verb, e.target.sessionID, e.decision, e.outcome, e.actor.kind])
+    expect(audit.slice(0, 3)).toEqual([
+      ["roles.release", "ses_2", "allow", "ok", "app"],
+      ["roles", "ses_2", "allow", "ok", "app"],
+      ["roles", "ses_2", "allow", "ok", "app"],
+    ])
+    expect(h.store.auditLog().filter((e) => e.action === "role.claim" || e.action === "role.release").map((e) => e.action)).toEqual(["role.release", "role.claim"])
+  })
+
+  test("an app never claims a reserved role, even under a roles grant; the kill switch pauses role writes", async () => {
+    await start()
+    const app = await appToken(["sessions:manage"])
+    await grant(app.id, ["/work"])
+    const reserved = await app.post("/api/agent/roles/claim", { role: "orchestrator", session: "ses_2" })
+    expect(reserved.status).toBe(403)
+    expect((await json(reserved)).error.code).toBe("forbidden")
+    await h.api("/api/agent/acting", { method: "PUT", json: { enabled: false } })
+    expect((await app.post("/api/agent/roles/claim", { role: "reviewer", session: "ses_2" })).status).toBe(423)
+  })
+
+  test("an app's role write on a foreign or unknown session is not_found, before any grant check", async () => {
+    await start()
+    const bob = await h.store.upsertUser({ email: "bob@example.test", role: "user" })
+    const machine = await h.store.addMachine("bob box", bob.id)
+    await spoke(h, { machine, processID: "p2", sessions: [session("ses_bob")] })
+    const app = await appToken(["sessions:manage"])
+    for (const target of ["ses_bob", "ses_unknown"]) {
+      const res = await app.post("/api/agent/roles/claim", { role: "reviewer", session: target })
+      expect(res.status).toBe(404)
+      expect((await json(res)).error.code).toBe("not_found")
+    }
+  })
+
+  test("users and sessions keep their rules, now also with role events", async () => {
+    await start()
+    const position = await h.agentEvents.latest("local")
+    expect((await post("/api/agent/roles/claim", { role: "builder.hub" }, SES_1)).status).toBe(200)
+    expect((await post("/api/agent/roles/claim", { role: "orchestrator", session: "ses_2" })).status).toBe(200)
+    expect(await journal(position)).toEqual([
+      ["role.claimed", "ses_1", { role: "builder", project: "hub", generation: 1 }],
+      ["role.claimed", "ses_2", { role: "orchestrator", generation: 1 }],
+    ])
+  })
+})
