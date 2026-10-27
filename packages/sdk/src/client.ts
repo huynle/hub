@@ -5,6 +5,7 @@ import { sseEvents } from "./sse.ts"
 import type {
   Approved,
   AppTokenView,
+  Archived,
   Asked,
   CreatedAppToken,
   Decision,
@@ -310,6 +311,12 @@ export class HubClient {
       throw cause
     }
     yield* sseEvents(response, signal)
+  }
+
+  // Organization (sessions:manage).
+
+  setArchived(addr: string, archived: boolean, options: CallOptions = {}): Promise<Archived> {
+    return this.call("PUT", `${AGENT}/sessions/${segment(addr)}/archive`, { body: { archived }, ...signalOf(options) })
   }
 
   // Naming.

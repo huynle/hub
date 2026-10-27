@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Archive through MCP**: `archive` and `unarchive` (and the narrow agent API
+  `PUT /api/agent/sessions/:addr/archive`) change the Hub's archived state without deleting a harness session.
+  App tokens use the new explicit `sessions:manage` scope, selectable in Settings → Agents. Existing tokens do
+  not gain the scope; operations are idempotent and preserve unrelated view preferences.
+
 - Add App token management to Settings → Agents: create scoped tokens, copy the one-time bearer secret and grant-holder ID, list existing tokens and revoke them.
 
 - **MCP over HTTP**: the hub serves `hub mcp`'s tools at `POST /mcp` (MCP Streamable HTTP, stateless JSON

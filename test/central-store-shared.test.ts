@@ -155,6 +155,24 @@ for (const variant of variants) {
       expect((await a.state.get(HUB_ROWS, "device-tokens", device.tokenHash))?.value).toEqual({ id: device.id })
     })
 
+    test("archive mutations preserve concurrent writes across pods and remain idempotent", async () => {
+      const { a, b, settle } = await variant.make()
+      const user = await a.store.upsertUser({ email: "archive@example.test", role: "user" })
+      await a.store.setViewPrefs(user.id, { pinnedSessions: ["ses_pinned"] })
+      await settle()
+      await Promise.all(Array.from({ length: 20 }, (_, i) => (i % 2 ? a : b).store.setSessionArchived(user.id, `ses_${i}`, true)))
+      expect(await a.store.setSessionArchived(user.id, "ses_0", true)).toEqual({ changed: false })
+      await settle()
+      for (const pod of [a, b]) {
+        expect(pod.store.viewPrefs(user.id).hiddenSessions.sort()).toEqual(Array.from({ length: 20 }, (_, i) => `ses_${i}`).sort())
+        expect(pod.store.viewPrefs(user.id).pinnedSessions).toEqual(["ses_pinned"])
+      }
+      await Promise.all(Array.from({ length: 20 }, (_, i) => (i % 2 ? b : a).store.setSessionArchived(user.id, `ses_${i}`, false)))
+      await settle()
+      expect(a.store.viewPrefs(user.id).hiddenSessions).toEqual([])
+      expect(b.store.viewPrefs(user.id).hiddenSessions).toEqual([])
+    })
+
     test("a token B has not cached yet (store.changed lost) is found in the database", async () => {
       const { a, b } = await variant.make({ isolatedBus: true })
       const { machine, token } = await a.store.addMachine("box")

@@ -7,10 +7,11 @@ import { harness, session, spoke, waitFor, type Harness } from "./central-harnes
 /** Session token of ses_1 (a root session of the local user). */
 const SES_1 = "hst_fake_ses_1"
 const APP = "hat_fake_app"
+const MANAGE = "hat_fake_manage"
 
 const verifiers: BearerVerifier[] = [
   { kind: "session", verify: (token) => (token === SES_1 ? { kind: "session", userID: "local", machineID: "mch_x", sessionID: "ses_1" } : undefined) },
-  { kind: "app", verify: (token) => (token === APP ? { kind: "app", userID: "local", tokenID: "tok_1", scopes: ["sessions:read"] } : undefined) },
+  { kind: "app", verify: (token) => (token === APP ? { kind: "app", userID: "local", tokenID: "tok_1", scopes: ["sessions:read"] } : token === MANAGE ? { kind: "app", userID: "local", tokenID: "tok_manage", scopes: ["sessions:manage"] } : undefined) },
 ]
 
 let h: Harness
@@ -146,5 +147,59 @@ describe("POST /api/agent/roles/claim and /release", () => {
     expect((await post("/api/agent/roles/claim", { role: "reviewer", exclusive: "yes" }, SES_1)).status).toBe(400)
     expect((await post("/api/agent/roles/claim", {}, SES_1)).status).toBe(400)
     expect((await post("/api/agent/roles/release", { role: 1 }, SES_1)).status).toBe(400)
+  })
+})
+
+describe("PUT /api/agent/sessions/:addr/archive", () => {
+  const mine = (path: string, body: unknown, token?: string) => token ? bearer(path, token, { method: "PUT", json: body }) : h.api(path, { method: "PUT", json: body })
+
+  test("a managed app archives and unarchives idempotently, preserving unrelated preferences", async () => {
+    await start()
+    await h.store.setViewPrefs("local", { pinnedSessions: ["ses_2"], hiddenWorkspaces: ["/private"] })
+    for (let i = 0; i < 2; i++) {
+      const res = await mine("/api/agent/sessions/ses_1/archive", { archived: true }, MANAGE)
+      expect(res.status).toBe(200)
+      expect(await json(res)).toEqual({ sessionID: "ses_1", archived: true, changed: i === 0 })
+    }
+    expect(h.store.viewPrefs("local").hiddenSessions).toEqual(["ses_1"])
+    expect(h.store.viewPrefs("local").pinnedSessions).toEqual(["ses_2"])
+    expect(h.store.viewPrefs("local").hiddenWorkspaces).toEqual(["/private"])
+    expect(h.store.agentData("local").sessions?.find((s) => s.sessionID === "ses_1")?.archivedAt).toEqual(expect.any(Number))
+    expect(h.store.auditLog().filter((e) => e.action === "session.archive")).toHaveLength(1)
+    const remove = await mine("/api/agent/sessions/@api-refactor/archive", { archived: false }, MANAGE)
+    expect(await json(remove)).toEqual({ sessionID: "ses_1", archived: false, changed: true })
+    expect(await json(await mine("/api/agent/sessions/ses_1/archive", { archived: false }, MANAGE))).toMatchObject({ changed: false })
+    expect(h.store.agentData("local").sessions?.find((s) => s.sessionID === "ses_1")?.archivedAt).toBeUndefined()
+    expect(h.store.auditLog().filter((e) => e.action === "session.unarchive")).toHaveLength(1)
+  })
+
+  test("a read-scoped app cannot archive; users can", async () => {
+    await start()
+    expect((await mine("/api/agent/sessions/ses_1/archive", { archived: true }, APP)).status).toBe(403)
+    expect((await mine("/api/agent/sessions/ses_1/archive", { archived: true })).status).toBe(200)
+  })
+
+  test("archive writes stay bounded and session tokens cannot manage organization", async () => {
+    await start()
+    expect((await mine("/api/agent/sessions/ses_1/archive", { archived: true }, SES_1)).status).toBe(403)
+    const archived = Array.from({ length: 5000 }, (_, i) => `ses_old_${i}`)
+    await h.store.setViewPrefs("local", { hiddenSessions: archived })
+    const res = await mine("/api/agent/sessions/ses_1/archive", { archived: true }, MANAGE)
+    expect(res.status).toBe(400)
+    expect((await json(res)).error.code).toBe("invalid")
+    expect(h.store.viewPrefs("local").hiddenSessions).toEqual(archived)
+  })
+
+  test("foreign and unknown sessions are both not_found; invalid input is 400", async () => {
+    await start()
+    const bob = await h.store.upsertUser({ email: "bob@example.test", role: "user" })
+    const machine = await h.store.addMachine("bob box", bob.id)
+    await spoke(h, { machine, processID: "p2", sessions: [session("ses_bob")] })
+    for (const target of ["ses_bob", "ses_unknown"]) {
+      const res = await mine(`/api/agent/sessions/${target}/archive`, { archived: true }, MANAGE)
+      expect(res.status).toBe(404)
+      expect((await json(res)).error.code).toBe("not_found")
+    }
+    expect((await mine("/api/agent/sessions/ses_1/archive", { archived: "yes" }, MANAGE)).status).toBe(400)
   })
 })

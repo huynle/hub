@@ -36,7 +36,7 @@ const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every((s) =
 
 // ---------- app tokens ----------
 
-export const APP_TOKEN_SCOPES = ["sessions:read", "messages:send", "messages:read", "sessions:act", "sessions:launch"] as const
+export const APP_TOKEN_SCOPES = ["sessions:read", "sessions:manage", "messages:send", "messages:read", "sessions:act", "sessions:launch"] as const
 
 export interface AppTokenView {
   readonly id: string

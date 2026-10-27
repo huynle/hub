@@ -19,7 +19,7 @@ import type { AgentRoute } from "./routes"
  * acting on sessions (approve, deny, answer, prompt, stop) and launching sessions (phase 4), each of which still
  * needs a grant held by the token (with the act verb, or `launch` covering the repo).
  */
-export const APP_SCOPES: readonly string[] = ["sessions:read", "messages:send", "messages:read", "sessions:act", "sessions:launch"]
+export const APP_SCOPES: readonly string[] = ["sessions:read", "sessions:manage", "messages:send", "messages:read", "sessions:act", "sessions:launch"]
 export const DEFAULT_APP_SCOPES: readonly string[] = ["sessions:read"]
 export const MAX_APP_TOKENS = 50
 export const MAX_APP_TOKEN_LABEL = 100

@@ -127,8 +127,26 @@ function target(directory: Directory, { actor, user }: AgentContext, addr: strin
 const NO_STORE = { "cache-control": "no-store" }
 const ok = (body: unknown) => Response.json(body, { headers: NO_STORE })
 
-export function directoryRoutes(directory: Directory): AgentRoute[] {
+export function directoryRoutes(directory: Directory, store: Pick<Store, "setSessionArchived" | "audit">): AgentRoute[] {
   return [
+    {
+      method: "PUT",
+      path: `${AGENT_PREFIX}/sessions/:addr/archive`,
+      allow: { scope: "sessions:manage" },
+      async handle(context) {
+        const body = await readBody(context.request)
+        if (flag(body, "archived") === undefined) throw new AgentError("invalid", "archived must be true or false")
+        const sessionID = target(directory, context, context.params.addr)
+        const archived = body.archived === true
+        const result = await store.setSessionArchived(context.user.id, sessionID, archived)
+        if (!result) throw new AgentError("invalid", "The archive is full; unarchive a session first")
+        if (result.changed) {
+          await directory.sync(context.user.id)
+          await store.audit({ actor: context.user.id, action: archived ? "session.archive" : "session.unarchive", target: sessionID, detail: context.actor.kind })
+        }
+        return ok({ sessionID, archived, changed: result.changed })
+      },
+    },
     {
       method: "GET",
       path: `${AGENT_PREFIX}/who`,
