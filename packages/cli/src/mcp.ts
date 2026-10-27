@@ -214,7 +214,22 @@ interface Tool {
   run(hub: HubClient, args: Args, signal: AbortSignal): Promise<string>
 }
 
+const archiveTools = (archived: boolean): readonly Tool[] => [{
+  name: archived ? "archive" : "unarchive",
+  description: `${archived ? "Archive" : "Unarchive"} a session in the Hub's normal views (the harness session is not deleted). Needs scope sessions:manage for an app token.`,
+  properties: { addr: ADDR },
+  required: ["addr"],
+  readOnly: false,
+  run: async (hub, args, signal) => {
+    const addr = need(args, "addr")
+    const result = await hub.setArchived(addr, archived, { signal })
+    return `${archived ? "Archived" : "Unarchived"} ${addr} (${result.sessionID})${result.changed ? "" : "; already in that state"}`
+  },
+}]
+
 const TOOLS: readonly Tool[] = [
+  ...archiveTools(true),
+  ...archiveTools(false),
   {
     name: "whoami",
     description: "Who this hub credential is: the app token of `hub login` (or the session of HUB_SESSION_TOKEN) and its user.",

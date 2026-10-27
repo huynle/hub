@@ -70,6 +70,13 @@ describe("POST /api/agent/app-tokens", () => {
     expect(body.scopes).toEqual(["sessions:launch", "sessions:read"])
   })
 
+  test("organizational scope: sessions:manage", async () => {
+    await start()
+    const { res, body } = await create({ scopes: ["sessions:manage", "sessions:read"] })
+    expect(res.status).toBe(201)
+    expect(body.scopes).toEqual(["sessions:manage", "sessions:read"])
+  })
+
   test("only the sha256 hash reaches state.json", async () => {
     await start()
     const { body } = await create({ label: "brain" })

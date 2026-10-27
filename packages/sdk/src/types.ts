@@ -121,6 +121,12 @@ export interface DirectoryEntry {
   readonly roles: readonly RoleView[]
 }
 
+export interface Archived {
+  readonly sessionID: string
+  readonly archived: boolean
+  readonly changed: boolean
+}
+
 export interface Named {
   readonly sessionID: string
   readonly name: string

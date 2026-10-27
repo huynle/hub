@@ -161,6 +161,21 @@ describe("MCP over HTTP", () => {
     for (const name of ["whoami", "status", "sessions", "msg", "ask", "inbox", "approve", "launch"]) expect(names).toContain(name)
   })
 
+  test("archive and unarchive act only with sessions:manage, through real /mcp", async () => {
+    h = await harness()
+    await spoke(h, { sessions: [session("ses_archive", { title: "Archive me" })] })
+    const { token } = await appToken(["sessions:read", "sessions:manage"])
+    const denied = await json(await call(await appToken(["sessions:read"]).then((x) => x.token), "archive", { addr: "ses_archive" }))
+    expect(denied.result.isError).toBe(true)
+    const archived = await call(token, "archive", { addr: "ses_archive" })
+    const raw = await archived.text()
+    expect(textOf(JSON.parse(raw))).toContain("Archived ses_archive")
+    expect(h.store.viewPrefs("local").hiddenSessions).toEqual(["ses_archive"])
+    expect(textOf(await json(await call(token, "unarchive", { addr: "ses_archive" })))).toContain("Unarchived ses_archive")
+    expect(h.store.viewPrefs("local").hiddenSessions).toEqual([])
+    expect(raw.includes(token)).toBe(false)
+  })
+
   test("tools/call whoami answers the caller (app token), never its token", async () => {
     h = await harness()
     const { id, token } = await appToken(["sessions:read"])

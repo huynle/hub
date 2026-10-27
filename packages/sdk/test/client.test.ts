@@ -25,6 +25,12 @@ async function rejection(promise: Promise<unknown>): Promise<unknown> {
 }
 
 describe("requests", () => {
+  test("archive state uses the tenant-addressed PUT contract", async () => {
+    hub.routes["PUT /api/agent/sessions/@api/archive"] = () => Response.json({ sessionID: "ses_1", archived: true, changed: true })
+    expect(await client().setArchived("@api", true)).toEqual({ sessionID: "ses_1", archived: true, changed: true })
+    expect(hub.seen[0]!.body).toEqual({ archived: true })
+  })
+
   test("GET by default with the bearer token and accept JSON; a trailing slash on the URL is dropped", async () => {
     hub.routes["GET /api/agent/whoami"] = () => Response.json({ ok: 1 })
     const answer = await client(`${hub.url}//`).call("GET", "/api/agent/whoami")

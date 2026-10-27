@@ -49,6 +49,7 @@ describe("app tokens", () => {
     expect(appTokenBody("", ["sessions:read"])).toEqual({ ok: false, error: "Give the token a label" })
     expect(appTokenBody("Gateway", [])).toEqual({ ok: false, error: "Pick at least one scope" })
     expect(appTokenBody("Gateway", ["unknown"])).toEqual({ ok: false, error: "Unknown scope: unknown" })
+    expect(appTokenBody("Gateway", ["sessions:manage"])).toEqual({ ok: true, body: { label: "Gateway", scopes: ["sessions:manage"] } })
   })
 })
 

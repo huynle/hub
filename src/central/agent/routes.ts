@@ -123,7 +123,7 @@ const userView = (user: UserRecord) => ({
 export function agentRoutes(deps: AgentDeps): AgentRoute[] {
   const feed = deps.feed ?? new MessageFeed()
   return [
-    ...(deps.directory ? directoryRoutes(deps.directory) : []),
+    ...(deps.directory ? directoryRoutes(deps.directory, deps.store) : []),
     ...(deps.directory && deps.delivery ? messageRoutes({ delivery: deps.delivery, directory: deps.directory, store: deps.store, feed, ...(deps.decisions ? { decisions: deps.decisions } : {}) }) : []),
     ...(deps.directory && deps.registry ? readRoutes({ store: deps.store, directory: deps.directory, registry: deps.registry, ...(deps.delivery ? { feed } : {}), ...(deps.spokes ? { spokes: deps.spokes } : {}), ...launchReads(deps), ...(deps.watchRegistry ? { watchRegistry: deps.watchRegistry } : {}), ...(deps.heartbeatMs !== undefined ? { heartbeatMs: deps.heartbeatMs } : {}), ...(deps.now ? { now: deps.now } : {}), ...(deps.draining ? { draining: deps.draining } : {}) }) : []),
     {

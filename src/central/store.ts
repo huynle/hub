@@ -58,6 +58,8 @@ export interface ViewPrefs {
 }
 
 export const VIEW_PREF_KEYS = ["hiddenSessions", "hiddenWorkspaces", "pinnedSessions", "pinnedWorkspaces"] as const
+/** Archived sessions accumulate for longer than the other view-preference lists. */
+export const VIEW_PREF_MAX_ARCHIVED = 5000
 
 export interface AuditEntry {
   at: number
@@ -908,6 +910,23 @@ export class Store {
       user.viewPrefs = next
       tx.touch("users", id)
       return this.viewPrefs(id)
+    })
+  }
+
+  /** Changes one archived session atomically; undefined means the bounded archive list is full. */
+  setSessionArchived(id: string, sessionID: string, archived: boolean): Promise<{ changed: boolean } | undefined> {
+    return this.mutate((tx) => {
+      const user = this.user(id)
+      if (!user) return undefined
+      const next = this.viewPrefs(id)
+      const listed = next.hiddenSessions.includes(sessionID)
+      const changed = archived !== listed
+      if (!changed) return { changed }
+      if (archived && next.hiddenSessions.length >= VIEW_PREF_MAX_ARCHIVED) return undefined
+      next.hiddenSessions = archived ? [...next.hiddenSessions, sessionID] : next.hiddenSessions.filter((id) => id !== sessionID)
+      user.viewPrefs = next
+      tx.touch("users", id)
+      return { changed }
     })
   }
 

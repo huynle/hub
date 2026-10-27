@@ -91,7 +91,7 @@ describe("JSON-RPC core", () => {
   })
 })
 
-const VERBS = ["whoami", "status", "sessions", "show", "log", "who", "msg", "ask", "reply", "decline", "inbox", "approve", "deny", "answer", "prompt", "stop", "launch", "launches", "launch_show", "launch_stop"]
+const VERBS = ["archive", "unarchive", "whoami", "status", "sessions", "show", "log", "who", "msg", "ask", "reply", "decline", "inbox", "approve", "deny", "answer", "prompt", "stop", "launch", "launches", "launch_show", "launch_stop"]
 
 describe("tools/list", () => {
   test("lists one tool per CLI verb, each with a description and an object input schema", async () => {
@@ -103,6 +103,15 @@ describe("tools/list", () => {
       expect(t.inputSchema.type).toBe("object")
     }
     expect(tools.find((t) => t.name === "show").inputSchema.required).toEqual(["addr"])
+  })
+})
+
+describe("archive tools", () => {
+  test("archive and unarchive update one session's Hub state", async () => {
+    hub.routes["PUT /api/agent/sessions/@api/archive"] = (_r, _u, body) => Response.json({ sessionID: "ses_1", archived: body.archived, changed: true })
+    expect(textOf(await call("archive", { addr: "@api" }))).toContain("Archived @api")
+    expect(textOf(await call("unarchive", { addr: "@api" }))).toContain("Unarchived @api")
+    expect(hub.seen.map((s) => s.body.archived)).toEqual([true, false])
   })
 })
 

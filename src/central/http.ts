@@ -55,7 +55,7 @@ import { LaunchTokens } from "./agent/launch-tokens"
 import { LaunchFeed, launchInfo } from "./agent/launch-routes"
 import type { WatchRegistry } from "./agent/watch"
 import { DRAIN_RETRY_AFTER_MS, DRAIN_TIMEOUT_MS, RequestTimeoutError, RequestTooLargeError, SpokeError, SpokeHub, type DrainOptions, type Notifier, type SpokeHubOptions, type SpokeSocketData } from "./spoke-ws"
-import { ACTIVITY_INTERVAL_MAX, ACTIVITY_INTERVAL_MIN, LOCAL_USER, PUSH_PREF_KEYS, quietHoursInput, Store, VIEW_PREF_KEYS, type DeviceRecord, type LegacyPushPrefs, type PushPrefs, type UserRecord, type ViewPrefs } from "./store"
+import { ACTIVITY_INTERVAL_MAX, ACTIVITY_INTERVAL_MIN, LOCAL_USER, PUSH_PREF_KEYS, quietHoursInput, Store, VIEW_PREF_KEYS, VIEW_PREF_MAX_ARCHIVED, type DeviceRecord, type LegacyPushPrefs, type PushPrefs, type UserRecord, type ViewPrefs } from "./store"
 
 export interface Speech {
   transcribe(audio: Uint8Array, format: string): Promise<string>
@@ -233,8 +233,6 @@ const MAX_TITLE_CHARS = 200
 const MAX_HERDR_WORKSPACE_CHARS = 100
 /** View preferences: entries per list and characters per entry. */
 const VIEW_PREF_MAX_ENTRIES = 500
-/** hiddenSessions holds archived sessions (Archive in the console), which add up over time. */
-const VIEW_PREF_MAX_ARCHIVED = 5000
 const VIEW_PREF_MAX_CHARS = 4096
 const DECISIONS = new Set<PermissionDecision>(["once", "always", "reject"])
 /** Longest utterance accepted for conversation mode (characters, after trimming). */

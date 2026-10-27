@@ -245,6 +245,11 @@ conversation mode and utterances (403 `not_exposed` for sessions not shared with
 
 ## Agent identity (agent API)
 
+**Organization.** `PUT /api/agent/sessions/:addr/archive {archived: true|false}` archives or unarchives one
+session in Hub views without deleting it in its harness. Users always may; app tokens need `sessions:manage`.
+The operation is idempotent, returns `{sessionID, archived, changed}`, and preserves unrelated view preferences.
+MCP exposes the same operations as `archive` and `unarchive`.
+
 Agents, scripts and apps talk to the hub through `/api/agent/*`, a small API with its own credentials, separate
 from the console's routes. Every request resolves to exactly one **actor**:
 
@@ -252,7 +257,7 @@ from the console's routes. Every request resolves to exactly one **actor**:
 |---|---|---|
 | user | the device cookie (browsers) or the same secret as `Authorization: Bearer <device token>` (apps, CLIs; [linked with a code](#multi-user-sign-in-with-google)) | you, on one of your devices |
 | session | a **session token** `hst1.…` the hub mints for each session a spoke reports | that session's shells (`HUB_SESSION_TOKEN`) |
-| app | an **app token** `hat_…` you create (scopes `sessions:read`, `messages:send`, `messages:read`, `sessions:act`) | a script or tool outside a session (`hub login`) |
+| app | an **app token** `hat_…` you create (scopes `sessions:read`, `sessions:manage`, `messages:send`, `messages:read`, `sessions:act`) | a script or tool outside a session (`hub login`) |
 
 **Session tokens in shells.** The hub mints a 24 h token for every session (subagents included) its spokes report
 for you and pushes it to the spoke, which keeps it in memory only. Every shell an agent starts through OpenCode's
@@ -768,7 +773,7 @@ calls in flight) or on SIGINT/SIGTERM.
 set, else the `hub login` file. MCP clients start servers without a hub session's shell environment, so in practice
 it acts as the **app token** you logged in with (needs `sessions:read`, `messages:send` and `messages:read`), not
 as an OpenCode session: messages are sent from the app, and replies to them land in its inbox (the `inbox` tool),
-not in a session. Naming and roles stay out (app tokens cannot use them). Inside OpenCode, agents use the plugin's
+not in a session. App tokens can archive and unarchive sessions with `sessions:manage`; naming and roles still stay out. Inside OpenCode, agents use the plugin's
 `hub` tool instead, which acts as the calling session.
 
 #### Over HTTP (/mcp)
@@ -782,7 +787,7 @@ none), a body of at most 1 MiB (else `413`) and, when sent, a supported `MCP-Pro
 browser `Origin` other than the hub's own is refused (`403`); requests without one (servers, gateways) are fine.
 
 **Auth.** `Authorization: Bearer <token>`: any credential the agent API takes, in practice an **app token**
-(Settings → Agents, or `POST /api/agent/app-tokens`) with the scopes the tools need: `sessions:read` (reading),
+(Settings → Agents, or `POST /api/agent/app-tokens`) with the scopes the tools need: `sessions:read` (reading), `sessions:manage` (archive/unarchive),
 `messages:send` and `messages:read` (messaging), `sessions:act` plus a grant (act tools), `sessions:launch` plus a
 launch grant (launch tools). Device, session and act tokens work too. No or a bad token answers `401` with
 `WWW-Authenticate: Bearer realm="hub"` (no OAuth discovery). The tools call `/api/agent` as that token, inside the
