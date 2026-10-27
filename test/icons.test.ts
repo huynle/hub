@@ -16,11 +16,12 @@ describe("icons", () => {
     expect(readFileSync(pub("icon.svg"), "utf8")).toBe(markSVG({ tile: "rounded", scale: 1 }))
   })
 
-  test("uses the console palette: dark tile, light mark, accent hub", () => {
+  test("uses the console dark palette and teal brand hub", () => {
     const css = read("web/src/styles.css")
     expect(css).toContain(`--bg: ${BG};`)
     expect(css).toContain(`--text: ${LIGHT};`)
     expect(css).toContain(`--accent: ${ACCENT};`)
+    expect(ACCENT).toBe("#3ad3bf")
     const svg = markSVG({ tile: "rounded", scale: 1 })
     for (const color of [BG, LIGHT, ACCENT]) expect(svg).toContain(color)
   })

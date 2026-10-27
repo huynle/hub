@@ -3,14 +3,20 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
-    <meta name="theme-color" content="#141413" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#101214" media="(prefers-color-scheme: dark)" />
+    <meta name="color-scheme" content="light dark" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Hub" />
     <title>Hub</title>
     <script>
+      // Color theme before first paint. System is represented by no override.
+      try {
+        var t = localStorage.getItem("hub.theme")
+        if (t === "light" || t === "dark") document.documentElement.dataset.theme = t
+      } catch (e) {}
       // Text size before the first paint (web/src/core/font-scale.ts, key "hub.fontScale", 0.8–1.8).
       try {
         var s = parseFloat(localStorage.getItem("hub.fontScale"))
