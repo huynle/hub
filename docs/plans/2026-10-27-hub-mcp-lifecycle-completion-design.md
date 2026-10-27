@@ -54,6 +54,48 @@ New API routes and MCP tools are additive. Persisted event data must be bounded 
 
 Each phase ships independently through CI and Flux, then refreshes the gateway snapshot. Tool writes receive correct MCP annotations for gateway review. Existing approved tools remain available while newly discovered tools stay disabled until reviewed.
 
+## Frozen public contracts
+
+### Organization routes and tools
+
+- `PUT /api/agent/sessions/:addr/archive {"archived": boolean}` → `{sessionID, archived, changed}`. MCP: `archive(addr)` and `unarchive(addr)`.
+- `PUT /api/agent/sessions/:addr/pin {"pinned": boolean}` → `{sessionID, pinned, changed}`. MCP: `pin(addr)` and `unpin(addr)`.
+- Existing name and role routes remain; MCP adds `name`, `role_claim`, and `role_release` without changing their wire contracts.
+- Archive/pin/name require `sessions:manage`. App role writes require `sessions:manage` plus a matching grant containing `roles` and covering the target project.
+- Foreign and unknown addresses both answer `404 not_found`. Invalid input is `400 invalid`; missing scope is `403 forbidden`.
+
+### Events route and tool
+
+`GET /api/agent/events?cursor=&wait=&limit=&type=&session=` and MCP `events` use the same contract. `wait` is seconds, 0–60; `limit` is 1–200, default 50; `type` and `session` may repeat. The server inspects at most 1,000 journal records per request. Filters advance the cursor over every inspected record. `more` means unscanned records remain, whether or not they match.
+
+Normal response:
+
+```json
+{"events":[{"id":"evt_…","at":1793090000000,"type":"session.changed","subject":{"sessionID":"ses_…"},"data":{"state":"idle"}}],"cursor":"hev1_…","more":false,"reset":false}
+```
+
+Expired or trimmed cursor (successful recovery response, never silent):
+
+```json
+{"events":[],"cursor":"hev1_…","more":false,"reset":true,"refresh":["status","sessions","inbox","decisions","launches"]}
+```
+
+Malformed, forged, future, cross-user or unsupported-version cursors answer `400 invalid_cursor`; they do not reset. Cursors are opaque, versioned, authenticated, tenant-bound strings. Unknown event types are valid and must be ignored by clients. Compact payloads are built from allowlists and contain no free text. Tenant-visible machine identity may include machine ID/name, online state and advertised harness capabilities; connection, pod and transient spoke IDs are forbidden.
+
+### Webhooks
+
+MCP tools are `webhook_create`, `webhooks`, `webhook_show`, and `webhook_delete`. Management and polling require `events:subscribe`. Delivery is additionally filtered: session/catalog events need `sessions:read`; archive/name/role/pin events need `sessions:manage`; message/Decision events need `messages:read`; launch events need `sessions:launch`. Mixed-family registration requires every applicable scope. The signing secret appears only in `webhook_create` output.
+
+### Messaging and bulk organization
+
+Messaging MCP tools are `mute`, `unmute`, `message_show`, `decisions`, and `decision_show`. Mute means agent-message mute. No Decision-answer tool is added.
+
+Bulk inactive archive is a two-step contract: `archive_inactive(preview=true, inactiveFor, limit)` returns an opaque short-lived preview token and exact candidates; `archive_inactive(previewToken, confirm=true)` revalidates that exact bounded set. Sessions now active, pinned, open, foreign or already archived are skipped with reasons. The result returns `changed` and `skipped` IDs; no atomic rollback is promised.
+
+### Event rollout
+
+Phase 2 deploys in compatibility stages: (1) canonical writers deploy while old agent watch stays authoritative; (2) all pods are verified on the writer version; (3) events readers/API and MCP are enabled; (4) `/api/agent/watch` switches to canonical semantics; (5) compatibility code is removed only in a later release. One stable event ID is assigned before cross-pod fanout, and storage append is idempotent by that ID. Rollback readers reject unsupported versions rather than skipping records.
+
 ## Verification
 
 Each phase uses red-first tests for conditional behavior and security boundaries, then typecheck, web/server build, targeted integration tests, repository CI, live `/mcp` discovery and at least one end-to-end call through `gateway.huynle.com`. Security coverage includes scope denial, tenant isolation, cursor tampering/expiry, bounded reads and writes, retry/idempotency, secret redaction and no prompt/message contents in compact events.
