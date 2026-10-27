@@ -91,7 +91,7 @@ describe("JSON-RPC core", () => {
   })
 })
 
-const VERBS = ["archive", "unarchive", "name", "role_claim", "role_release", "events", "whoami", "status", "sessions", "show", "log", "who", "msg", "ask", "reply", "decline", "inbox", "message_show", "mute", "unmute", "decisions", "decision_show", "approve", "deny", "answer", "prompt", "stop", "launch", "launches", "launch_show", "launch_stop"]
+const VERBS = ["archive", "unarchive", "name", "role_claim", "role_release", "events", "webhook_create", "webhooks", "webhook_show", "webhook_delete", "whoami", "status", "sessions", "show", "log", "who", "msg", "ask", "reply", "decline", "inbox", "message_show", "mute", "unmute", "decisions", "decision_show", "approve", "deny", "answer", "prompt", "stop", "launch", "launches", "launch_show", "launch_stop"]
 
 describe("tools/list", () => {
   test("lists one tool per CLI verb, each with a description and an object input schema", async () => {
@@ -118,6 +118,23 @@ describe("events tool", () => {
   test("rejects out-of-range wait and limit before calling the hub", async () => {
     for (const args of [{ wait: 61 }, { limit: 0 }, { limit: 201 }]) expect((await call("events", args)).result.isError).toBe(true)
     expect(hub.seen).toEqual([])
+  })
+})
+
+describe("webhook tools", () => {
+  test("create shows the signing secret once; list/show do not; delete uses the id", async () => {
+    const webhook = { id: "wh_1", url: "https://hooks.example/x", events: ["message.*"], by: "app:tok", label: "ci", created: 1 }
+    hub.routes["POST /api/agent/webhooks"] = () => Response.json({ webhook, secret: "whsec_secret" }, { status: 201 })
+    hub.routes["GET /api/agent/webhooks"] = () => Response.json({ webhooks: [webhook] })
+    hub.routes["GET /api/agent/webhooks/wh_1"] = () => Response.json({ webhook, deliveries: [] })
+    hub.routes["DELETE /api/agent/webhooks/wh_1"] = () => new Response(null, { status: 204 })
+    expect(textOf(await call("webhook_create", { url: webhook.url, events: ["message.*"], label: "ci" }))).toContain("whsec_secret")
+    expect(textOf(await call("webhooks"))).not.toContain("whsec_secret")
+    expect(textOf(await call("webhook_show", { id: "wh_1" }))).not.toContain("whsec_secret")
+    expect(textOf(await call("webhook_delete", { id: "wh_1" }))).toContain("wh_1")
+    expect(hub.seen.map((s) => [s.method, s.path])).toEqual([
+      ["POST", "/api/agent/webhooks"], ["GET", "/api/agent/webhooks"], ["GET", "/api/agent/webhooks/wh_1"], ["DELETE", "/api/agent/webhooks/wh_1"],
+    ])
   })
 })
 

@@ -827,15 +827,9 @@ export function startCentral(options: CentralOptions): Central {
     resolve: options.resolveHost ?? systemResolveHost,
     ...(config.webhooksAllowPrivate ? { allowPrivate: true } : {}),
     appAlive: (userID, tokenID) => store.agentData(userID).appTokens?.some((t) => t.id === tokenID && Array.isArray(t.scopes) && t.scopes.includes(WEBHOOK_SCOPE)) === true,
+    appScopes: (userID, tokenID) => store.agentData(userID).appTokens?.find((t) => t.id === tokenID)?.scopes,
     userAgent: `hub/${options.version ?? "0.0.0"}`,
   })
-  launchFeed.subscribe((userID, launch) => {
-    void webhooks
-      .onLaunch(userID, launch, launchInfo(launch))
-      // Queued here, sent by the webhooks leader (kicked when that is another pod).
-      .then((queued) => (queued && !webhookLeader.isLeader() ? webhookLeader.kick() : undefined))
-      .catch((cause) => console.error(`[hub] webhook queue failed: ${(cause as Error).message}`))
-  }, { origin: true })
   const webhookLeader = leader("webhooks", {
     onElected: () => webhooks.start(),
     onDeposed: () => webhooks.stop(),
@@ -843,7 +837,12 @@ export function startCentral(options: CentralOptions): Central {
   })
   // The canonical agent event journal (lifecycle design, Events): each change appended once across the cluster;
   // presence by the agent-events leader, everything else where it happens (event-writers.ts).
-  const agentEvents = new AgentEvents({ log: backends.agentEvents ?? new MemoryEventLog({ now, max: AGENT_EVENTS_MAX, maxAgeMs: AGENT_EVENTS_AGE_MS }), kv: backends.kv, now })
+  const agentEvents = new AgentEvents({
+    log: backends.agentEvents ?? new MemoryEventLog({ now, max: AGENT_EVENTS_MAX, maxAgeMs: AGENT_EVENTS_AGE_MS }),
+    kv: backends.kv,
+    now,
+    onAppend: (userID, record) => webhooks.publishCanonical(userID, record.event, record.family, record.audience).then((queued) => (queued && !webhookLeader.isLeader() ? webhookLeader.kick() : undefined)),
+  })
   const agentEventWriters = new EventWriters({
     events: agentEvents,
     kv: backends.kv,

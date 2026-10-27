@@ -27,12 +27,19 @@ import {
 import type { Clock, Locks, StateStore, Timers } from "../backend/types"
 import { publicFetch, PublicURLError, publicURLProblem, type ResolveHost } from "../push-target"
 import { AgentError } from "./errors"
+import type { AgentEvent, EventAudience, EventFamily } from "./events"
 import { LAUNCH_STATES, type Launch } from "./launch-store"
 
 export const WEBHOOKS = "webhooks"
 export const WEBHOOK_OUTBOX = "webhook-outbox"
 /** Every event type a webhook can receive (phase 4: launch changes). */
-export const WEBHOOK_EVENT_TYPES: readonly string[] = LAUNCH_STATES.map((state) => `launch.${state}`)
+export const CANONICAL_WEBHOOK_EVENT_TYPES: readonly string[] = [
+  "session.added", "session.removed", "session.changed", "session.archived", "session.named",
+  "blocker.opened", "blocker.closed", "machine.changed", "role.claimed", "role.released",
+  "message.changed", "launch.changed",
+]
+/** Includes persisted pre-canonical launch registrations for rolling rollback compatibility. */
+export const WEBHOOK_EVENT_TYPES: readonly string[] = [...CANONICAL_WEBHOOK_EVENT_TYPES, ...LAUNCH_STATES.map((state) => `launch.${state}`)]
 export const DEFAULT_WEBHOOK_EVENTS: readonly string[] = ["launch.*"]
 export const MAX_WEBHOOKS = 20
 export const MAX_WEBHOOK_URL = 2048
@@ -133,6 +140,8 @@ export interface WebhooksDeps {
   readonly fetch?: typeof globalThis.fetch
   /** Whether an app token (by its id) may still have webhooks; its registrations are dropped when not. */
   readonly appAlive?: (userID: string, tokenID: string) => boolean
+  /** Current scopes of an app token; absent preserves the legacy liveness-only check. */
+  readonly appScopes?: (userID: string, tokenID: string) => readonly string[] | undefined
   readonly backoffMs?: readonly number[]
   readonly timeoutMs?: number
   readonly maxResponseBytes?: number
@@ -165,12 +174,28 @@ function matches(pattern: string, type: string): boolean {
 function eventsOf(raw: unknown): string[] {
   if (raw === undefined) return [...DEFAULT_WEBHOOK_EVENTS]
   if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_WEBHOOK_EVENTS || !raw.every((e): e is string => typeof e === "string")) {
-    throw invalid(`events must be a list of 1 to ${MAX_WEBHOOK_EVENTS} event types`, `e.g. ["launch.*"]`)
+    throw invalid(`events must be a list of 1 to ${MAX_WEBHOOK_EVENTS} event types`, `e.g. ["launch.*", "message.changed"]`)
   }
   for (const pattern of raw) {
-    if (!WEBHOOK_EVENT_TYPES.some((type) => matches(pattern, type))) throw invalid(`Unknown event type ${pattern}`, `Use launch.* or one of ${WEBHOOK_EVENT_TYPES.join(", ")}`)
+    if (!WEBHOOK_EVENT_TYPES.some((type) => matches(pattern, type))) throw invalid(`Unknown event type ${pattern}`, "Use a canonical event type or family wildcard")
   }
   return [...new Set(raw)]
+}
+
+export function webhookEventScopes(patterns: readonly string[]): string[] {
+  const scopes = new Set<string>()
+  if (patterns.some((pattern) => LAUNCH_STATES.some((state) => matches(pattern, `launch.${state}`)))) scopes.add("sessions:launch")
+  for (const pattern of patterns) for (const type of CANONICAL_WEBHOOK_EVENT_TYPES) if (matches(pattern, type)) {
+    if (type === "message.changed") scopes.add("messages:read")
+    else if (type === "launch.changed") scopes.add("sessions:launch")
+    else if (["session.archived", "session.named", "role.claimed", "role.released"].includes(type)) scopes.add("sessions:manage")
+    else scopes.add("sessions:read")
+  }
+  return [...scopes]
+}
+
+export function canonicalWebhookEvent(source: string, userID: string, event: AgentEvent): WebhookEvent {
+  return { id: event.id, type: event.type, source, subject: event.subject.launchID ?? event.subject.messageID ?? event.subject.sessionID ?? event.subject.machineID ?? event.id, time: new Date(event.at).toISOString(), user: userID, schemaVersion: 1, data: { subject: event.subject, data: event.data } }
 }
 
 const view = ({ secret: _secret, ...rest }: Registration): WebhookView => rest
@@ -286,8 +311,9 @@ export class Webhooks {
    * only when `by` (who caused it) is that app. Resolves with how many deliveries were newly queued (an event
    * already queued for a registration is not queued again).
    */
-  async publish(userID: string, event: WebhookEvent, options: { readonly by?: string } = {}): Promise<number> {
-    const targets = (await this.registrations(userID)).filter((r) => (r.by === "user" || r.by === options.by) && r.events.some((p) => matches(p, event.type)))
+  async publish(userID: string, event: WebhookEvent, options: { readonly by?: string; readonly owners?: readonly string[]; readonly matchTypes?: readonly string[] } = {}): Promise<number> {
+    const matchTypes = options.matchTypes ?? [event.type]
+    const targets = (await this.registrations(userID)).filter((r) => (r.by === "user" || r.by === options.by || options.owners?.includes(r.by)) && r.events.some((p) => matchTypes.some((type) => matches(p, type))))
     if (!targets.length) return 0
     const max = this.deps.maxOutbox ?? WEBHOOK_OUTBOX_MAX
     let size = (await this.deps.state.list(userID, WEBHOOK_OUTBOX)).length
@@ -306,6 +332,15 @@ export class Webhooks {
     }
     if (queued) this.kick()
     return queued
+  }
+
+  publishCanonical(userID: string, event: AgentEvent, _family: EventFamily, audience?: EventAudience): Promise<number> {
+    const legacyLaunchType = event.type === "launch.changed" && typeof event.data.state === "string" ? `launch.${event.data.state}` : undefined
+    return this.publish(userID, canonicalWebhookEvent(this.deps.source, userID, event), {
+      ...(audience?.by ? { by: audience.by } : {}),
+      ...(audience?.parties ? { owners: audience.parties.filter((party) => party.startsWith("app:")) } : {}),
+      ...(legacyLaunchType ? { matchTypes: [event.type, legacyLaunchType] } : {}),
+    })
   }
 
   /** A launch change (the LaunchFeed): `data` is the launch as the API shows it. */
@@ -400,6 +435,14 @@ export class Webhooks {
       if (registration.by !== "user" && this.deps.appAlive && !this.deps.appAlive(userID, registration.by.slice("app:".length))) {
         await this.remove(userID, registration.id)
         return
+      }
+      if (registration.by !== "user" && this.deps.appScopes) {
+        const scopes = this.deps.appScopes(userID, registration.by.slice("app:".length))
+        const required = ["events:subscribe", ...webhookEventScopes(registration.events)]
+        if (!scopes || required.some((scope) => !scopes.includes(scope))) {
+          await this.remove(userID, registration.id)
+          return
+        }
       }
       const { last, final } = await this.send(registration, entry, now, timeoutMs)
       const attempts = entry.attempts + 1

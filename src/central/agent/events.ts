@@ -75,12 +75,14 @@ export interface AgentEventsOptions {
   readonly log: EventLog
   readonly kv: Kv
   readonly now?: Clock
+  readonly onAppend?: (userID: string, record: Pick<EventRecord, "event" | "family" | "audience">) => void | Promise<void>
 }
 
 export class AgentEvents {
   private readonly log: EventLog
   private readonly kv: Kv
   private readonly now: Clock
+  private readonly onAppend?: AgentEventsOptions["onAppend"]
   /** Readers waiting for this process's next append, per user (long polling; other pods' appends are rechecked). */
   private readonly waiters = new Map<string, Set<() => void>>()
 
@@ -88,6 +90,7 @@ export class AgentEvents {
     this.log = options.log
     this.kv = options.kv
     this.now = options.now ?? Date.now
+    this.onAppend = options.onAppend
   }
 
   /** Stores an event once per id; returns its id. */
@@ -113,6 +116,11 @@ export class AgentEvents {
       await this.kv.del(claim).catch(() => {})
       throw cause
     }
+    await this.onAppend?.(userID, {
+      event: { id, at: record.at, type: input.type, subject: input.subject, data: input.data },
+      family: input.family,
+      ...(input.audience ? { audience: input.audience } : {}),
+    })
     const waiting = this.waiters.get(userID)
     if (waiting) for (const wake of [...waiting]) wake()
     return id

@@ -310,13 +310,20 @@ describe("a launch's life", () => {
   })
 
   test("the user's webhook got each change, signed (verifyWebhook); the launch's history orders them", async () => {
-    await waitFor(() => hooks.filter((e) => e.subject === id).length >= 4, 8000)
-    await h.webhooks.drain()
+    await Bun.sleep(0)
+    await h.agentEventWriters.settled()
+    for (let i = 0; i < 100 && hooks.filter((e) => e.subject === id).length < 4; i++) {
+      await h.webhooks.drain()
+      await Bun.sleep(20)
+    }
+    expect(hooks.filter((e) => e.subject === id).length).toBeGreaterThanOrEqual(4)
     // Deliveries run concurrently, so they may arrive out of order: a receiver orders them by the launch.
-    const mine = hooks.filter((e) => e.subject === id).sort((x, y) => x.data.launch.history.length - y.data.launch.history.length)
-    expect(mine.map((e) => e.type)).toEqual(["launch.queued", "launch.provisioning", "launch.running", "launch.ended"])
+    const order = ["queued", "provisioning", "running", "ended"]
+    const mine = hooks.filter((e) => e.subject === id).sort((x, y) => order.indexOf(x.data.data.state) - order.indexOf(y.data.data.state))
+    expect(mine.map((e) => e.type)).toEqual(["launch.changed", "launch.changed", "launch.changed", "launch.changed"])
+    expect(mine.map((e) => e.data.data.state)).toEqual(order)
     expect(mine.every((e) => e.verified)).toBe(true)
-    expect(mine.at(-1)!.data.launch).toMatchObject({ id, state: "ended", outcome: "idle" })
+    expect(mine.at(-1)!.data).toMatchObject({ subject: { launchID: id }, data: { state: "ended", outcome: "idle" } })
   })
 
   test("the launched session's shell token cannot launch (403, exit 5)", async () => {
@@ -376,7 +383,7 @@ describe("app tokens", () => {
   let app: Who & { id: string; token: string }
 
   test("sessions:launch without a launch grant: 403 (exit 5)", async () => {
-    const created = await h.api("/api/agent/app-tokens", { method: "POST", json: { label: "launcher", scopes: ["sessions:launch"] } })
+    const created = await h.api("/api/agent/app-tokens", { method: "POST", json: { label: "launcher", scopes: ["sessions:launch", "events:subscribe"] } })
     expect(created.status).toBe(201)
     const { id, token } = await body(created)
     app = { id, token, ...(await login(token, "app-home")) }
@@ -428,8 +435,14 @@ describe("app tokens", () => {
       // The app sees only the launches it started.
       expect(json(await cli(["launches", "list", "--json"], app)).launches.map((l: any) => l.id)).toEqual([id])
       expect((await cli(["launches", "stop", id], app)).code).toBe(0)
-      await waitFor(() => appHooks.some((e) => e.subject === id) && hooks.some((e) => e.subject === id && e.type === "launch.ended"), 8000)
-      await h.webhooks.drain()
+      await Bun.sleep(0)
+      await h.agentEventWriters.settled()
+      for (let i = 0; i < 100 && !(appHooks.some((e) => e.subject === id) && hooks.some((e) => e.subject === id && e.type === "launch.changed" && e.data.data.state === "ended")); i++) {
+        await h.webhooks.drain()
+        await Bun.sleep(20)
+      }
+      expect(appHooks.some((e) => e.subject === id)).toBe(true)
+      expect(hooks.some((e) => e.subject === id && e.type === "launch.changed" && e.data.data.state === "ended")).toBe(true)
       expect(new Set(appHooks.map((e) => e.subject))).toEqual(new Set([id]))
       expect(appHooks.every((e) => e.verified)).toBe(true)
     } finally {

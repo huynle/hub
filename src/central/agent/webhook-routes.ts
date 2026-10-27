@@ -13,13 +13,13 @@ import type { Store } from "../store"
 import type { AgentActor } from "./actor"
 import { AgentError } from "./errors"
 import type { AgentRoute } from "./routes"
-import type { WebhookOwner, Webhooks } from "./webhooks"
+import { webhookEventScopes, type WebhookOwner, type Webhooks } from "./webhooks"
 
 // A literal: routes.ts imports this module.
 const PATH = "/api/agent/webhooks"
 const NO_STORE = { "cache-control": "no-store" }
 /** Users; apps with sessions:launch. */
-export const WEBHOOK_SCOPE = "sessions:launch"
+export const WEBHOOK_SCOPE = "events:subscribe"
 const ALLOW = { scope: WEBHOOK_SCOPE } as const
 
 export type RouteWebhooks = Pick<Webhooks, "register" | "list" | "get" | "remove" | "deliveries">
@@ -28,6 +28,13 @@ export type RouteWebhooks = Pick<Webhooks, "register" | "list" | "get" | "remove
 const ownerOf = (actor: AgentActor): WebhookOwner | undefined => (actor.kind === "app" ? `app:${actor.tokenID}` : undefined)
 
 const notFound = (id: string) => new AgentError("not_found", `No webhook ${id}`)
+
+const requireEventScopes = (actor: AgentActor, events: unknown) => {
+  if (actor.kind !== "app") return
+  const patterns = events === undefined ? ["launch.*"] : Array.isArray(events) && events.every((e) => typeof e === "string") ? events : []
+  const missing = webhookEventScopes(patterns).filter((scope) => !actor.scopes.includes(scope))
+  if (missing.length) throw new AgentError("forbidden", `Webhook events need scope ${missing.join(", ")}`)
+}
 
 async function bodyOf(request: Request): Promise<Record<string, unknown>> {
   const raw = JSON.parse(await request.text()) as unknown
@@ -43,6 +50,7 @@ export function webhookRoutes(webhooks: RouteWebhooks, store?: Pick<Store, "audi
       allow: ALLOW,
       async handle({ request, actor, user }) {
         const input = await bodyOf(request)
+        requireEventScopes(actor, input.events)
         const result = await webhooks.register(user.id, ownerOf(actor) ?? "user", { url: input.url, events: input.events, label: input.label })
         await store?.audit({ actor: user.id, action: "webhook.create", target: result.webhook.id, detail: new URL(result.webhook.url).host })
         return Response.json(result, { status: 201, headers: NO_STORE })

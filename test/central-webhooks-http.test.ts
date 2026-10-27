@@ -60,16 +60,16 @@ test("a user registers a webhook (secret once), and each launch change is POSTed
   await waitFor(() => hook.received.length >= 1)
   const got = hook.received[0]!
   const evt = JSON.parse(got.body)
-  expect(evt).toMatchObject({ type: "launch.queued", source: PUBLIC, subject: launch.id, schemaVersion: 1, data: { launch: { id: launch.id, state: "queued", by: "user" } } })
-  expect(got.headers.get("hub-event")).toBe("launch.queued")
+  expect(evt).toMatchObject({ type: "launch.changed", source: PUBLIC, subject: launch.id, schemaVersion: 1, data: { subject: { launchID: launch.id }, data: { state: "queued" } } })
+  expect(got.headers.get("hub-event")).toBe("launch.changed")
   const sig = parseWebhookSignature(got.headers.get("hub-signature"))!
   expect(sig.v1).toEqual([createHmac("sha256", secret).update(webhookSignedPayload(sig.t, got.body)).digest("hex")])
 
   await h.api(`/api/agent/launches/${launch.id}`, { method: "DELETE" })
-  await waitFor(() => hook.received.some((r) => r.headers.get("hub-event") === "launch.ended"))
+  await waitFor(() => hook.received.some((r) => JSON.parse(r.body).data?.data?.state === "ended"))
   const detail = await json(await h.api(`/api/agent/webhooks/${webhook.id}`))
   expect(detail.webhook.id).toBe(webhook.id)
-  expect(detail.deliveries.map((d: any) => d.type)).toContain("launch.queued")
+  expect(detail.deliveries.map((d: any) => d.type)).toContain("launch.changed")
 
   expect((await h.api(`/api/agent/webhooks/${webhook.id}`, { method: "DELETE" })).status).toBe(204)
   expect((await h.api(`/api/agent/webhooks/${webhook.id}`)).status).toBe(404)
@@ -88,7 +88,7 @@ test("app tokens need sessions:launch, manage only their own webhooks and get on
   h = await privateHub()
   const hook = receiver()
   const readOnly = await json(await h.api("/api/agent/app-tokens", { method: "POST", json: { scopes: ["sessions:read"] } }))
-  const token = await json(await h.api("/api/agent/app-tokens", { method: "POST", json: { scopes: ["sessions:launch"] } }))
+  const token = await json(await h.api("/api/agent/app-tokens", { method: "POST", json: { scopes: ["events:subscribe", "sessions:launch"] } }))
   const as = (t: string) => (pathname: string, init: RequestInit & { json?: unknown } = {}) => h.api(pathname, { ...init, cookie: null, origin: null, headers: { authorization: `Bearer ${t}` } })
   const asApp = as(token.token)
   expect((await as(readOnly.token)("/api/agent/webhooks", { method: "POST", json: { url: hook.url } })).status).toBe(403)
@@ -119,6 +119,18 @@ test("app tokens need sessions:launch, manage only their own webhooks and get on
   expect(await remaining()).toEqual([userHook.id])
   await h.webhooks.drain()
   expect(hook.received).toHaveLength(1)
+})
+
+test("app registrations need events:subscribe plus every selected canonical family's scope", async () => {
+  h = await privateHub()
+  const hook = receiver()
+  const as = (t: string) => (pathname: string, init: RequestInit & { json?: unknown } = {}) => h.api(pathname, { ...init, cookie: null, origin: null, headers: { authorization: `Bearer ${t}` } })
+  const missingSubscribe = await json(await h.api("/api/agent/app-tokens", { method: "POST", json: { scopes: ["messages:read"] } }))
+  const missingFamily = await json(await h.api("/api/agent/app-tokens", { method: "POST", json: { scopes: ["events:subscribe", "messages:read"] } }))
+  const complete = await json(await h.api("/api/agent/app-tokens", { method: "POST", json: { scopes: ["events:subscribe", "messages:read", "sessions:manage"] } }))
+  expect((await as(missingSubscribe.token)("/api/agent/webhooks", { method: "POST", json: { url: hook.url, events: ["message.*"] } })).status).toBe(403)
+  expect((await as(missingFamily.token)("/api/agent/webhooks", { method: "POST", json: { url: hook.url, events: ["message.*", "role.*"] } })).status).toBe(403)
+  expect((await as(complete.token)("/api/agent/webhooks", { method: "POST", json: { url: hook.url, events: ["message.*", "role.*"] } })).status).toBe(201)
 })
 
 test("the webhook routes are in the route table as agent routes", async () => {
