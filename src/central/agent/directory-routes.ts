@@ -7,11 +7,23 @@
 //   POST /api/agent/name           {name, session?}
 //   POST /api/agent/roles/claim    {role, exclusive?, project?, session?}
 //   POST /api/agent/roles/release  {role, project?, session?}
+//   PUT  /api/agent/sessions/:addr/archive {archived}
 // `session` is an address (ses_…, ID prefix, @name, …) resolved for the caller; a session token defaults to
-// its own session, a user must name one.
-import { type AgentEvents, archiveEvent } from "./events"
+// its own session, a user or app must name one. Foreign and unknown sessions are both not_found.
+//
+// App tokens (lifecycle design, decision xwzersmm): naming and archiving need sessions:manage; a role claim or
+// release also needs a grant allowing `roles` whose projects cover the (live) session's directory, in the acting
+// order (kill switch → grant → hourly cap → kill switch), with every outcome in the agent audit (verb roles or
+// roles.release). Reserved roles stay the user's to assign. Each change is in the admin audit and the event
+// journal once (session.named, role.claimed, role.released, session.archived); a no-op is neither.
+import type { ActingSwitch } from "./acting-switch"
+import { auditOf } from "./acting"
+import type { AgentAudit, AuditDecision, AuditOutcome } from "./audit"
+import { partyFromActor } from "./envelope"
+import { type AgentEvents, archiveEvent, type EventInput, namedEvent, roleEvent } from "./events"
+import type { Grant, Grants } from "./grants"
 import path from "node:path"
-import type { CatalogMachine, RegistryMessage } from "../registry"
+import type { CatalogMachine, Registry, RegistryMessage } from "../registry"
 import type { Store } from "../store"
 import { Directory, type ReportedSession, type SessionSource } from "./directory"
 import { AgentError } from "./errors"
@@ -128,7 +140,56 @@ function target(directory: Directory, { actor, user }: AgentContext, addr: strin
 const NO_STORE = { "cache-control": "no-store" }
 const ok = (body: unknown) => Response.json(body, { headers: NO_STORE })
 
-export function directoryRoutes(directory: Directory, store: Pick<Store, "setSessionArchived" | "audit">, events?: Pick<AgentEvents, "append">): AgentRoute[] {
+export interface DirectoryRoutesDeps {
+  readonly directory: Directory
+  readonly store: Pick<Store, "setSessionArchived" | "audit">
+  readonly events?: Pick<AgentEvents, "append">
+  /** App role writes: the live session (its directory, for the grant's projects). */
+  readonly registry?: Pick<Registry, "sessionTenant" | "session">
+  readonly grants?: Pick<Grants, "usable" | "consume">
+  readonly acting?: Pick<ActingSwitch, "ensureActing">
+  readonly audit?: Pick<AgentAudit, "record">
+}
+
+const MANAGE = { session: true, scope: "sessions:manage" } as const
+
+export function directoryRoutes(deps: DirectoryRoutesDeps): AgentRoute[] {
+  const { directory, store, events } = deps
+
+  /** The admin audit and the journal, once per change. */
+  async function changed(context: AgentContext, action: string, sessionID: string, event: EventInput): Promise<void> {
+    await store.audit({ actor: context.user.id, action, target: sessionID, detail: context.actor.kind })
+    await events?.append(context.user.id, event).catch((cause) => console.error(`[hub] ${event.type} event failed: ${(cause as Error).message}`))
+  }
+
+  /** A role write: users and sessions as before; an app under a `roles` grant on the session's project, audited. */
+  async function roleWrite<T>(context: AgentContext, verb: "roles" | "roles.release", sessionID: string, run: () => Promise<T>): Promise<T> {
+    const { actor, user } = context
+    if (actor.kind !== "app") return run()
+    const { registry, grants, acting, audit } = deps
+    if (!registry || !grants || !acting || !audit) throw new AgentError("forbidden", "This hub does not let app tokens change roles")
+    let grant: Grant | undefined
+    const record = (decision: AuditDecision, outcome: AuditOutcome, reason?: string) =>
+      audit.record(user.id, { actor: partyFromActor(actor), verb, target: { sessionID }, ...(grant ? { grant: grant.id } : {}), decision, ...(reason ? { reason } : {}), outcome })
+    try {
+      acting.ensureActing(user.id)
+      const live = registry.sessionTenant(sessionID) === user.id ? registry.session(sessionID) : undefined
+      if (!live) throw new AgentError("offline", "No spoke reports this session now, so its project cannot be checked against a grant")
+      const usable = await grants.usable(actor, "roles", { directory: live.directory })
+      if (!usable.length) throw new AgentError("forbidden", "No grant lets this app change roles in this session's project")
+      grant = usable[0]!
+      await grants.consume(grant)
+      acting.ensureActing(user.id)
+      const result = await run()
+      await record("allow", "ok")
+      return result
+    } catch (cause) {
+      const [decision, outcome] = auditOf(cause)
+      await record(decision, outcome, cause instanceof Error ? cause.message : undefined)
+      throw cause
+    }
+  }
+
   return [
     {
       method: "PUT",
@@ -143,8 +204,7 @@ export function directoryRoutes(directory: Directory, store: Pick<Store, "setSes
         if (!result) throw new AgentError("invalid", "The archive is full; unarchive a session first")
         if (result.changed) {
           await directory.sync(context.user.id)
-          await store.audit({ actor: context.user.id, action: archived ? "session.archive" : "session.unarchive", target: sessionID, detail: context.actor.kind })
-          await events?.append(context.user.id, archiveEvent(sessionID, archived)).catch((cause) => console.error(`[hub] archive event failed: ${(cause as Error).message}`))
+          await changed(context, archived ? "session.archive" : "session.unarchive", sessionID, archiveEvent(sessionID, archived))
         }
         return ok({ sessionID, archived, changed: result.changed })
       },
@@ -163,28 +223,39 @@ export function directoryRoutes(directory: Directory, store: Pick<Store, "setSes
     {
       method: "POST",
       path: `${AGENT_PREFIX}/name`,
-      allow: { session: true },
+      allow: MANAGE,
       handle: async (context) => {
         const body = await readBody(context.request)
         const name = text(body, "name", true)
         const sessionID = target(directory, context, text(body, "session"))
-        return ok(await directory.setName(context.user.id, sessionID, name))
+        const before = directory.resolveOne(context.user.id, sessionID).name
+        const named = await directory.setName(context.user.id, sessionID, name)
+        if (named.name !== before) await changed(context, "session.name", sessionID, namedEvent(sessionID, named.name))
+        return ok(named)
       },
     },
     {
       method: "POST",
       path: `${AGENT_PREFIX}/roles/claim`,
-      allow: { session: true },
+      allow: MANAGE,
       handle: async (context) => {
         const body = await readBody(context.request)
         const role = text(body, "role", true)
         const exclusive = flag(body, "exclusive")
         const project = text(body, "project")
         const sessionID = target(directory, context, text(body, "session"))
-        const claim = await directory.claimRole(context.user.id, sessionID, role, {
-          ...(exclusive !== undefined ? { exclusive } : {}),
-          ...(project !== undefined ? { project } : {}),
-          byUser: context.actor.kind === "user",
+        const claim = await roleWrite(context, "roles", sessionID, async () => {
+          const before = directory.resolveOne(context.user.id, sessionID).roles
+          const claim = await directory.claimRole(context.user.id, sessionID, role, {
+            ...(exclusive !== undefined ? { exclusive } : {}),
+            ...(project !== undefined ? { project } : {}),
+            byUser: context.actor.kind === "user",
+          })
+          const prev = before.find((r) => r.role === claim.role && r.project === claim.project)
+          if (!prev || prev.generation !== claim.generation || !!prev.exclusive !== !!claim.exclusive) {
+            await changed(context, "role.claim", sessionID, roleEvent(sessionID, true, claim))
+          }
+          return claim
         })
         return ok({ sessionID, ...claim })
       },
@@ -192,13 +263,18 @@ export function directoryRoutes(directory: Directory, store: Pick<Store, "setSes
     {
       method: "POST",
       path: `${AGENT_PREFIX}/roles/release`,
-      allow: { session: true },
+      allow: MANAGE,
       handle: async (context) => {
         const body = await readBody(context.request)
         const role = text(body, "role", true)
         const project = text(body, "project")
         const sessionID = target(directory, context, text(body, "session"))
-        return ok({ sessionID, ...(await directory.releaseRole(context.user.id, sessionID, role, project)), released: true })
+        const released = await roleWrite(context, "roles.release", sessionID, async () => {
+          const released = await directory.releaseRole(context.user.id, sessionID, role, project)
+          await changed(context, "role.release", sessionID, roleEvent(sessionID, false, released))
+          return released
+        })
+        return ok({ sessionID, ...released, released: true })
       },
     },
   ]

@@ -248,11 +248,16 @@ conversation mode and utterances (403 `not_exposed` for sessions not shared with
 **Organization.** `PUT /api/agent/sessions/:addr/archive {archived: true|false}` archives or unarchives one
 session in Hub views without deleting it in its harness. Users always may; app tokens need `sessions:manage`.
 The operation is idempotent, returns `{sessionID, archived, changed}`, and preserves unrelated view preferences.
-MCP exposes the same operations as `archive` and `unarchive`.
+MCP exposes the same operations as `archive` and `unarchive`. Naming (`POST /api/agent/name`) also takes an app
+token with `sessions:manage`; role claims and releases take one with `sessions:manage` **and** a grant allowing
+`roles` whose projects cover the session's directory (the session must be online), under the kill switch and hourly
+cap, with every outcome in the agent audit (verbs `roles` and `roles.release`). Reserved roles stay yours to assign.
+Apps and users name the session (`session`); foreign and unknown sessions are both `404 not_found`. MCP: `name`,
+`role_claim` and `role_release`. Each change is one `session.named`, `role.claimed` or `role.released` event.
 
 **Events.** `GET /api/agent/events?cursor=&wait=&limit=&type=&session=` reads a bounded per-user journal (24 h or
 10,000 events) of compact events: `session.added/removed/changed`, `blocker.opened/closed`, `machine.changed`,
-`message.changed`, `launch.changed`, `session.archived`. Each is `{id, at, type, subject, data}` with IDs and states
+`message.changed`, `launch.changed`, `session.archived`, `session.named`, `role.claimed`, `role.released`. Each is `{id, at, type, subject, data}` with IDs and states
 only: never prompts, message bodies, titles, blocker summaries, launch reasons or labels. Without a cursor the answer
 is empty with a cursor at the latest event; pass the returned `cursor` back to get what came after. `wait` (0–60 s)
 holds the request while nothing matches; `limit` is 1–200 (default 50); `type` (exact, or `launch.*`) and `session`
@@ -263,7 +268,7 @@ re-read those, then continue with the new cursor. `GET /api/agent/watch` streams
 (`{type: "ready"}` first, `{type: "reset", refresh}` when its cursor is no longer covered, `event: ping` while
 idle), with the same visibility and filters (`blocked=1` is `type=blocker.*`). A malformed, forged or another user's cursor is
 `400 invalid_cursor`. Unknown event types are valid; ignore them. App tokens need `events:subscribe`, and see each
-family only with its scope: session and machine events with `sessions:read`, archive events with `sessions:manage`,
+family only with its scope: session and machine events with `sessions:read`, archive, name and role events with `sessions:manage`,
 messages they are a party to with `messages:read`, launches they started with `sessions:launch`. MCP: `events`.
 
 Agents, scripts and apps talk to the hub through `/api/agent/*`, a small API with its own credentials, separate
@@ -321,8 +326,8 @@ cookie and a hub bearer token (400).
 | `GET /api/agent/watch?blocked=1&session=<addr>&cursor=` | ✓ | ✓ | ✓ (+ each family's scope) | SSE of the same compact events as `/api/agent/events` (see **Events**), after `ready`; each frame's `id:` is a cursor to resume with (`?cursor=` or `Last-Event-ID`); `reset` when it is no longer covered |
 | `GET /api/agent/events?cursor=&wait=&limit=&type=&session=` | ✓ | ✓ | `events:subscribe` (+ each family's scope) | compact events after a resumable cursor (see **Events** above) |
 | `GET /api/agent/who?project=&role=` | ✓ | ✓ | ✓ | named, role-holding and online sessions |
-| `POST /api/agent/name {name, session?}` | ✓ | own session | – | names a session (`409 name_taken`) |
-| `POST /api/agent/roles/claim {role, exclusive?, project?, session?}` · `…/roles/release` | ✓ | own session | – | claims (with a new `generation`) or releases a role |
+| `POST /api/agent/name {name, session?}` | ✓ | own session | `sessions:manage` | names a session (`409 name_taken`) |
+| `POST /api/agent/roles/claim {role, exclusive?, project?, session?}` · `…/roles/release` | ✓ | own session | `sessions:manage` + `roles` grant | claims (with a new `generation`) or releases a role; never a reserved role for an app |
 | `POST /api/agent/msg {to, text, wake?, urgent?, all?}` | ✓ | ✓ | `messages:send` | tells a session (`all`: every holder of a role); never yourself |
 | `POST /api/agent/ask {to, text, expiresIn?, wait?}` | ✓ | ✓ | `messages:send` | an ask, open until answered, declined or expired; `wait` (≤ 60 s) returns the `answer` |
 | `POST /api/agent/ask {to: "@me", text, options?, recommendation?, urgency?, tier?, deadline?, onTimeout?, about?, wait?}` | – | ✓ | `messages:send` | opens a **Decision** for the user (below): `{message, decision, answer?}` |
@@ -472,7 +477,7 @@ where the call is visible and audited.
   reserved roles), or `app:<token id>` (one of your app tokens).
 - **scope.projects**: 1–20 absolute project directories; a session is in scope when its directory is one of them or
   inside one (on a path boundary, after resolving `.`/`..`; worktrees inside the project count).
-- **allow**: the verbs (`approve`, `deny`, `answer`, `prompt`, `stop`; `roles` is accepted for role management).
+- **allow**: the verbs (`approve`, `deny`, `answer`, `prompt`, `stop`; `roles` lets an app token with `sessions:manage` claim and release roles of sessions in scope).
   `deny`, `answer`, `prompt` and `stop` need only the verb; `approve` also needs the request to pass the patterns.
 - **permissions**: patterns `action[:glob]` in OpenCode's wildcard syntax (`*` any run, `?` one character, a trailing
   ` *` optional; `bash` is OpenCode's `shell`; the action alone means every resource). A request is allowed only
@@ -790,7 +795,7 @@ calls in flight) or on SIGINT/SIGTERM.
 set, else the `hub login` file. MCP clients start servers without a hub session's shell environment, so in practice
 it acts as the **app token** you logged in with (needs `sessions:read`, `messages:send` and `messages:read`), not
 as an OpenCode session: messages are sent from the app, and replies to them land in its inbox (the `inbox` tool),
-not in a session. App tokens can archive and unarchive sessions with `sessions:manage`; naming and roles still stay out. Inside OpenCode, agents use the plugin's
+not in a session. App tokens can archive, unarchive and name sessions with `sessions:manage`, and claim or release roles with it plus a `roles` grant. Inside OpenCode, agents use the plugin's
 `hub` tool instead, which acts as the calling session.
 
 #### Over HTTP (/mcp)
@@ -804,7 +809,7 @@ none), a body of at most 1 MiB (else `413`) and, when sent, a supported `MCP-Pro
 browser `Origin` other than the hub's own is refused (`403`); requests without one (servers, gateways) are fine.
 
 **Auth.** `Authorization: Bearer <token>`: any credential the agent API takes, in practice an **app token**
-(Settings → Agents, or `POST /api/agent/app-tokens`) with the scopes the tools need: `sessions:read` (reading), `sessions:manage` (archive/unarchive), `events:subscribe` (events),
+(Settings → Agents, or `POST /api/agent/app-tokens`) with the scopes the tools need: `sessions:read` (reading), `sessions:manage` (archive/unarchive, name; roles also need a `roles` grant), `events:subscribe` (events),
 `messages:send` and `messages:read` (messaging), `sessions:act` plus a grant (act tools), `sessions:launch` plus a
 launch grant (launch tools). Device, session and act tokens work too. No or a bad token answers `401` with
 `WWW-Authenticate: Bearer realm="hub"` (no OAuth discovery). The tools call `/api/agent` as that token, inside the

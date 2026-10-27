@@ -1,5 +1,5 @@
 // The canonical agent event journal (lifecycle design: Events; decision xwzersmm). One bounded journal per user of
-// compact events that GET /api/agent/events, MCP `events` and (later) /api/agent/watch read:
+// compact events that GET /api/agent/events, MCP `events` and /api/agent/watch read:
 //
 //   {id: "evt_…", at, type, subject: {sessionID?, rootID?, messageID?, senderID?, launchID?, machineID?}, data}
 //
@@ -192,6 +192,24 @@ export function launchEvent(launch: Launch): EventInput {
 
 /** A session's archive state changed. */
 export const archiveEvent = (sessionID: string, archived: boolean): EventInput => ({ type: "session.archived", family: "manage", subject: { sessionID }, data: { archived } })
+
+/** A session was explicitly named (names are validated slugs: a-z, 0-9 and -). */
+export const namedEvent = (sessionID: string, name: string): EventInput => ({ type: "session.named", family: "manage", subject: { sessionID }, data: { name } })
+
+/** A session claimed (held) or released a role; role and project are validated slugs. */
+export function roleEvent(sessionID: string, held: boolean, role: { role: string; project?: string; generation?: number; exclusive?: boolean }): EventInput {
+  return {
+    type: held ? "role.claimed" : "role.released",
+    family: "manage",
+    subject: { sessionID },
+    data: {
+      role: role.role,
+      ...(role.project !== undefined ? { project: role.project } : {}),
+      ...(held && role.generation !== undefined ? { generation: role.generation } : {}),
+      ...(held && role.exclusive ? { exclusive: true } : {}),
+    },
+  }
+}
 
 interface Known {
   state: string

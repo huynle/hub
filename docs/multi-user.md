@@ -141,7 +141,9 @@ What each actor may do:
 - **session**: read every session of its user; name, claim and release roles **for its own session only**
   (`403 forbidden` for another one); send, answer and read its own messages (never to itself); no console
   routes (`403`), no token management, no messaging switch.
-- **app**: what its scopes allow: `sessions:read` (status, sessions, show, log, watch, who), `messages:send`
+- **app**: what its scopes allow: `sessions:read` (status, sessions, show, log, watch, who), `sessions:manage` (archive,
+  unarchive, name any of its user's sessions; claim and release non-reserved roles under a grant with verb `roles`
+  on the session's project), `messages:send`
   (msg, ask, reply, decline, mute, unmute, grant requests), `messages:read` (inbox, messages/:id, its own `message.changed`
   events), `sessions:act` (approve, deny, answer, prompt, stop, under a grant) and `sessions:launch` (launch,
   list and stop its own launches under a grant with verb `launch`; register its own webhooks); `whoami` always. No
