@@ -235,6 +235,8 @@ export interface Backends {
   readonly state: StateStore
   readonly bus: Bus
   readonly events: EventLog
+  /** The canonical agent event journal's log (24 h / 10,000 per user); the hub makes a memory one when absent. */
+  readonly agentEvents?: EventLog
   readonly counters: Counters
   readonly locks: Locks
   readonly catalog: Catalog

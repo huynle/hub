@@ -6,6 +6,7 @@
 // requests skip it) → 403 forbidden; credential → 401 unauthorized / token_expired; route → 404 not_found;
 // route class (agentAllows) → 403 forbidden; then the handler, whose throws become the envelope (agentFailure).
 // Path parameters address sessions as `:addr` (resolved per caller), never `:session`.
+import type { AgentEvents } from "./events"
 import type { DeviceRecord, Store, UserRecord } from "../store"
 import type { Directory } from "./directory"
 import { directoryRoutes } from "./directory-routes"
@@ -87,6 +88,8 @@ export interface AgentDeps {
   readonly launches?: RouteLaunches
   /** Webhooks (P4-T10): the /api/agent/webhooks routes when given. */
   readonly webhooks?: RouteWebhooks
+  /** The canonical agent event journal: archive changes are appended to it. */
+  readonly agentEvents?: Pick<AgentEvents, "append">
   /** Launch changes: the watch stream's launch events. */
   readonly launchFeed?: Pick<LaunchFeed, "subscribe">
   /** needs_user escalations of the act verbs (P3-T8 opens a Decision); without it needs_user is only answered. */
@@ -123,7 +126,7 @@ const userView = (user: UserRecord) => ({
 export function agentRoutes(deps: AgentDeps): AgentRoute[] {
   const feed = deps.feed ?? new MessageFeed()
   return [
-    ...(deps.directory ? directoryRoutes(deps.directory, deps.store) : []),
+    ...(deps.directory ? directoryRoutes(deps.directory, deps.store, deps.agentEvents) : []),
     ...(deps.directory && deps.delivery ? messageRoutes({ delivery: deps.delivery, directory: deps.directory, store: deps.store, feed, ...(deps.decisions ? { decisions: deps.decisions } : {}) }) : []),
     ...(deps.directory && deps.registry ? readRoutes({ store: deps.store, directory: deps.directory, registry: deps.registry, ...(deps.delivery ? { feed } : {}), ...(deps.spokes ? { spokes: deps.spokes } : {}), ...launchReads(deps), ...(deps.watchRegistry ? { watchRegistry: deps.watchRegistry } : {}), ...(deps.heartbeatMs !== undefined ? { heartbeatMs: deps.heartbeatMs } : {}), ...(deps.now ? { now: deps.now } : {}), ...(deps.draining ? { draining: deps.draining } : {}) }) : []),
     {
