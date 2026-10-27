@@ -154,6 +154,22 @@ async function restartNode(openshell: boolean): Promise<void> {
 
 const launch = async (id: string) => (await h.launches.view(USER, id))!
 
+/** Waits until the fake CLI has not been called for `quietMs`. */
+async function quietFake(quietMs = 300, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs
+  let count = fake.calls().length
+  let since = Date.now()
+  while (Date.now() - since < quietMs) {
+    if (Date.now() > deadline) throw new Error("the fake OpenShell CLI never went quiet")
+    await Bun.sleep(50)
+    const now = fake.calls().length
+    if (now !== count) {
+      count = now
+      since = Date.now()
+    }
+  }
+}
+
 async function untilState(id: string, states: string[], timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs
   for (;;) {
@@ -479,7 +495,11 @@ describe("profiles and failures", () => {
   }, SLOW)
 
   test("a sandbox the gateway cannot create: the launch ends failed with the reason, before any session", async () => {
+    // The fake keeps failures in a state file its CLI processes rewrite: wait until earlier tests' cleanups stop
+    // calling it, so the failure is not lost to a concurrent rewrite, and check that it stuck.
+    await quietFake()
     fake.fail({ command: "sandbox create", stderr: "Error:   × image pull failed: not authorized\n" })
+    expect(fake.state().failures.some((f) => f.command === "sandbox create")).toBe(true)
     const id = await launchSandboxed("broken", ["--branch", "feat/broken", "--prompt", "Never"])
     const ended = await untilState(id, ["ended"])
     expect(ended.outcome).toBe("failed")
