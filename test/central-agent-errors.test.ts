@@ -6,6 +6,7 @@ describe("agent error envelope", () => {
   test("every design §8 code plus unauthorized, token_expired and invalid has an HTTP status", () => {
     expect(AGENT_ERROR_STATUS).toEqual({
       invalid: 400,
+      invalid_cursor: 400,
       unauthorized: 401,
       token_expired: 401,
       needs_user: 403,

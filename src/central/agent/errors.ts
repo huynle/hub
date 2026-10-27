@@ -5,6 +5,8 @@
 export const AGENT_ERROR_STATUS = {
   /** Malformed request (bad JSON, bad fields, cookie and bearer together). */
   invalid: 400,
+  /** An events cursor this hub did not give this user, or cannot read (start again without one). */
+  invalid_cursor: 400,
   /** No credential, or an unknown, revoked or disabled one. */
   unauthorized: 401,
   /** A session or app token that expired: get a new one. */

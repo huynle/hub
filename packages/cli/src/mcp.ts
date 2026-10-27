@@ -227,9 +227,35 @@ const archiveTools = (archived: boolean): readonly Tool[] => [{
   },
 }]
 
+const eventsTool: Tool = {
+  name: "events",
+  description:
+    "Compact Hub events (session.*, blocker.*, machine.changed, message.changed, launch.changed, session.archived) after a cursor, as JSON {events, cursor, more, reset, refresh?}. Call without cursor to start at the latest, then pass back the returned cursor. reset:true means the cursor expired: re-read the listed snapshots (status, sessions, inbox, …) and continue with the new cursor. Unknown event types are valid; ignore them. Needs scope events:subscribe (plus each family's scope) for an app token.",
+  properties: {
+    cursor: { ...STRING, description: "The cursor from the previous events answer (hev1_…); omit to start at the latest." },
+    wait: { type: "integer", minimum: 0, maximum: WAIT_POLL_MAX_S, description: `Seconds to wait while nothing matches (0–${WAIT_POLL_MAX_S}).` },
+    limit: { type: "integer", minimum: 1, maximum: 200, description: "At most this many events (default 50)." },
+    types: { type: "array", items: STRING, description: "Only these event types (exact, or a family like launch.*)." },
+    sessions: { type: "array", items: STRING, description: "Only events of these sessions (ses_…, @name, @@role)." },
+  },
+  readOnly: true,
+  run: async (hub, args, signal) => {
+    const page = await hub.events({
+      cursor: optional(args, "cursor"),
+      wait: optionalInt(args, "wait", 0, WAIT_POLL_MAX_S),
+      limit: optionalInt(args, "limit", 1, 200),
+      types: optionalStrings(args, "types"),
+      sessions: optionalStrings(args, "sessions"),
+      signal,
+    })
+    return JSON.stringify(page)
+  },
+}
+
 const TOOLS: readonly Tool[] = [
   ...archiveTools(true),
   ...archiveTools(false),
+  eventsTool,
   {
     name: "whoami",
     description: "Who this hub credential is: the app token of `hub login` (or the session of HUB_SESSION_TOKEN) and its user.",

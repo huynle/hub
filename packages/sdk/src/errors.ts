@@ -6,6 +6,7 @@ import type { Evaluation } from "./types.ts"
 /** The codes the hub answers with (src/central/agent/errors.ts); later phases may add more, so any string is kept. */
 export type ErrorCode =
   | "invalid"
+  | "invalid_cursor"
   | "unauthorized"
   | "token_expired"
   | "needs_user"

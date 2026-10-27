@@ -91,7 +91,7 @@ describe("JSON-RPC core", () => {
   })
 })
 
-const VERBS = ["archive", "unarchive", "whoami", "status", "sessions", "show", "log", "who", "msg", "ask", "reply", "decline", "inbox", "approve", "deny", "answer", "prompt", "stop", "launch", "launches", "launch_show", "launch_stop"]
+const VERBS = ["archive", "unarchive", "events", "whoami", "status", "sessions", "show", "log", "who", "msg", "ask", "reply", "decline", "inbox", "approve", "deny", "answer", "prompt", "stop", "launch", "launches", "launch_show", "launch_stop"]
 
 describe("tools/list", () => {
   test("lists one tool per CLI verb, each with a description and an object input schema", async () => {
@@ -103,6 +103,21 @@ describe("tools/list", () => {
       expect(t.inputSchema.type).toBe("object")
     }
     expect(tools.find((t) => t.name === "show").inputSchema.required).toEqual(["addr"])
+  })
+})
+
+describe("events tool", () => {
+  test("passes cursor, wait, limit and repeated filters as the query; answers the page as JSON", async () => {
+    const page = { events: [{ id: "evt_1", at: 1, type: "session.archived", subject: { sessionID: "ses_1" }, data: { archived: true } }], cursor: "hev1_b.m", more: false, reset: false }
+    hub.routes["GET /api/agent/events"] = () => Response.json(page)
+    const text = textOf(await call("events", { cursor: "hev1_a.m", wait: 5, limit: 10, types: ["session.archived", "launch.*"], sessions: ["@api"] }))
+    expect(JSON.parse(text)).toEqual(page)
+    expect(hub.seen[0]!.path).toBe("/api/agent/events?cursor=hev1_a.m&wait=5&limit=10&type=session.archived&type=launch.*&session=%40api")
+  })
+
+  test("rejects out-of-range wait and limit before calling the hub", async () => {
+    for (const args of [{ wait: 61 }, { limit: 0 }, { limit: 201 }]) expect((await call("events", args)).result.isError).toBe(true)
+    expect(hub.seen).toEqual([])
   })
 })
 
