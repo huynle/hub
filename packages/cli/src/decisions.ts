@@ -21,6 +21,7 @@ export const DECISION_FLAGS: Readonly<Record<string, FlagKind>> = {
 const URGENCIES = ["low", "normal", "high"]
 const TIERS = ["confirm", "tap"]
 const STATES: readonly DecisionState[] = ["open", "answered", "expired", "closed"]
+export const DECISION_STATES = STATES
 
 /** `id=label` or `id=label:safe` (the label may contain colons; only a trailing `:safe` marks it safe). */
 export function optionArg(value: string): DecisionOption {
