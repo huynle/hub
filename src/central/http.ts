@@ -928,7 +928,7 @@ export function startCentral(options: CentralOptions): Central {
         },
       })
     : undefined
-  const agentDeps = { draining: drainSignal.signal, store, sessionTokens, directory, registry, spokes, delivery, decisions, feed, heartbeatMs, now, audit, grants, grantRequests, acting, actions, escalate, launches, launchFeed, webhooks, agentEvents, maxPromptChars: MAX_PROMPT_CHARS, ...(watchRegistry ? { watchRegistry } : {}) }
+  const agentDeps = { draining: drainSignal.signal, store, sessionTokens, directory, registry, spokes, delivery, decisions, feed, heartbeatMs, now, audit, grants, grantRequests, acting, actions, escalate, launches, launchFeed, webhooks, agentEvents, eventCursorKeys: tokenKeys, maxPromptChars: MAX_PROMPT_CHARS, ...(watchRegistry ? { watchRegistry } : {}) }
   const resolveActor = createResolver({
     cookieName: COOKIE,
     findDevice: (token) => deviceOfToken(token),

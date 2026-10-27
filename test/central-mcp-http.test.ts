@@ -176,6 +176,25 @@ describe("MCP over HTTP", () => {
     expect(raw.includes(token)).toBe(false)
   })
 
+  test("events: a resumable cursor over the journal, needing events:subscribe, through real /mcp", async () => {
+    h = await harness()
+    await spoke(h, { sessions: [session("ses_ev", { title: "SECRET title" })] })
+    const denied = await json(await call((await appToken(["sessions:read"])).token, "events"))
+    expect(denied.result.isError).toBe(true)
+    const { token } = await appToken(["events:subscribe", "sessions:read", "sessions:manage"])
+    const first = JSON.parse(textOf(await json(await call(token, "events"))))
+    expect(first).toMatchObject({ events: [], more: false, reset: false })
+    expect(first.cursor).toMatch(/^hev1_/)
+    expect((await call(token, "archive", { addr: "ses_ev" })).status).toBe(200)
+    const raw = textOf(await json(await call(token, "events", { cursor: first.cursor, wait: 5, limit: 10, types: ["session.archived"], sessions: ["ses_ev"] })))
+    expect(raw).not.toContain("SECRET")
+    const page = JSON.parse(raw)
+    expect(page.events).toEqual([{ id: expect.stringMatching(/^evt_/), at: expect.any(Number), type: "session.archived", subject: { sessionID: "ses_ev" }, data: { archived: true } }])
+    const bad = await json(await call(token, "events", { cursor: "hev1_forged.x" }))
+    expect(bad.result.isError).toBe(true)
+    expect(textOf(bad)).toContain("invalid_cursor")
+  })
+
   test("tools/call whoami answers the caller (app token), never its token", async () => {
     h = await harness()
     const { id, token } = await appToken(["sessions:read"])

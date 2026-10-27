@@ -41,6 +41,7 @@ import type {
   Status,
   Stopped,
   WatchEvent,
+  EventsPage,
   Whoami,
 } from "./types.ts"
 
@@ -311,6 +312,15 @@ export class HubClient {
       throw cause
     }
     yield* sseEvents(response, signal)
+  }
+
+  /**
+   * GET /api/agent/events: the compact events after `cursor` (none: start at the latest). wait: seconds (0–60) to
+   * hold while nothing matches; limit 1–200; types (exact, or `launch.*`) and sessions filter but still advance the
+   * cursor. App tokens need events:subscribe plus each family's scope.
+   */
+  events(options: CallOptions & { readonly cursor?: string; readonly wait?: number; readonly limit?: number; readonly types?: readonly string[]; readonly sessions?: readonly string[] } = {}): Promise<EventsPage> {
+    return this.call("GET", `${AGENT}/events`, { query: { cursor: options.cursor, wait: options.wait, limit: options.limit, type: options.types, session: options.sessions }, ...signalOf(options) })
   }
 
   // Organization (sessions:manage).

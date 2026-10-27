@@ -81,6 +81,8 @@ export class AgentEvents {
   private readonly log: EventLog
   private readonly kv: Kv
   private readonly now: Clock
+  /** Readers waiting for this process's next append, per user (long polling; other pods' appends are rechecked). */
+  private readonly waiters = new Map<string, Set<() => void>>()
 
   constructor(options: AgentEventsOptions) {
     this.log = options.log
@@ -111,7 +113,28 @@ export class AgentEvents {
       await this.kv.del(claim).catch(() => {})
       throw cause
     }
+    const waiting = this.waiters.get(userID)
+    if (waiting) for (const wake of [...waiting]) wake()
     return id
+  }
+
+  /** Resolves on this process's next append for the user, after `ms`, or when `signal` aborts. */
+  appended(userID: string, ms: number, signal?: AbortSignal): Promise<void> {
+    return new Promise((resolve) => {
+      let set = this.waiters.get(userID)
+      if (!set) this.waiters.set(userID, (set = new Set()))
+      const done = () => {
+        clearTimeout(timer)
+        signal?.removeEventListener("abort", done)
+        set!.delete(done)
+        if (set!.size === 0 && this.waiters.get(userID) === set) this.waiters.delete(userID)
+        resolve()
+      }
+      const timer = setTimeout(done, ms)
+      set.add(done)
+      if (signal?.aborted) done()
+      else signal?.addEventListener("abort", done, { once: true })
+    })
   }
 
   /** The position of the user's latest record; a reader holding it gets every later one. */

@@ -121,6 +121,27 @@ export interface DirectoryEntry {
   readonly roles: readonly RoleView[]
 }
 
+/** One compact event of GET /api/agent/events (no free text). Unknown types are valid: ignore them. */
+export interface AgentEvent {
+  readonly id: string
+  readonly at: number
+  readonly type: string
+  readonly subject: Readonly<Record<string, string>>
+  readonly data: Readonly<Record<string, string | number | boolean>>
+}
+
+/**
+ * A page of GET /api/agent/events: pass `cursor` to the next call. `more`: records remain unread. `reset`: the
+ * cursor was no longer covered (expired, trimmed, hub restarted); re-read the `refresh` snapshots, then go on.
+ */
+export interface EventsPage {
+  readonly events: AgentEvent[]
+  readonly cursor: string
+  readonly more: boolean
+  readonly reset: boolean
+  readonly refresh?: string[]
+}
+
 export interface Archived {
   readonly sessionID: string
   readonly archived: boolean

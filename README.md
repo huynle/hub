@@ -250,6 +250,20 @@ session in Hub views without deleting it in its harness. Users always may; app t
 The operation is idempotent, returns `{sessionID, archived, changed}`, and preserves unrelated view preferences.
 MCP exposes the same operations as `archive` and `unarchive`.
 
+**Events.** `GET /api/agent/events?cursor=&wait=&limit=&type=&session=` reads a bounded per-user journal (24 h or
+10,000 events) of compact events: `session.added/removed/changed`, `blocker.opened/closed`, `machine.changed`,
+`message.changed`, `launch.changed`, `session.archived`. Each is `{id, at, type, subject, data}` with IDs and states
+only: never prompts, message bodies, titles, blocker summaries, launch reasons or labels. Without a cursor the answer
+is empty with a cursor at the latest event; pass the returned `cursor` back to get what came after. `wait` (0–60 s)
+holds the request while nothing matches; `limit` is 1–200 (default 50); `type` (exact, or `launch.*`) and `session`
+may repeat and still advance the cursor over what they skip. At most 1,000 events are inspected per request; `more`
+means some remain. A cursor the journal no longer covers (expired, trimmed, hub restarted) answers
+`{events: [], cursor, more: false, reset: true, refresh: ["status", "sessions", "inbox", "decisions", "launches"]}`:
+re-read those, then continue with the new cursor. A malformed, forged or another user's cursor is
+`400 invalid_cursor`. Unknown event types are valid; ignore them. App tokens need `events:subscribe`, and see each
+family only with its scope: session and machine events with `sessions:read`, archive events with `sessions:manage`,
+messages they are a party to with `messages:read`, launches they started with `sessions:launch`. MCP: `events`.
+
 Agents, scripts and apps talk to the hub through `/api/agent/*`, a small API with its own credentials, separate
 from the console's routes. Every request resolves to exactly one **actor**:
 
@@ -257,7 +271,7 @@ from the console's routes. Every request resolves to exactly one **actor**:
 |---|---|---|
 | user | the device cookie (browsers) or the same secret as `Authorization: Bearer <device token>` (apps, CLIs; [linked with a code](#multi-user-sign-in-with-google)) | you, on one of your devices |
 | session | a **session token** `hst1.…` the hub mints for each session a spoke reports | that session's shells (`HUB_SESSION_TOKEN`) |
-| app | an **app token** `hat_…` you create (scopes `sessions:read`, `sessions:manage`, `messages:send`, `messages:read`, `sessions:act`) | a script or tool outside a session (`hub login`) |
+| app | an **app token** `hat_…` you create (scopes `sessions:read`, `sessions:manage`, `messages:send`, `messages:read`, `sessions:act`, `sessions:launch`, `events:subscribe`) | a script or tool outside a session (`hub login`) |
 
 **Session tokens in shells.** The hub mints a 24 h token for every session (subagents included) its spokes report
 for you and pushes it to the spoke, which keeps it in memory only. Every shell an agent starts through OpenCode's
@@ -303,6 +317,7 @@ cookie and a hub bearer token (400).
 | `GET /api/agent/sessions/:addr` | ✓ | ✓ | ✓ | one session with full blockers and the spoke's summary (`unsupported` when its harness lacks it) |
 | `GET /api/agent/sessions/:addr/log?n=20` | ✓ | ✓ | ✓ | newest timeline rows (1–200); `422 unsupported {feature, harness}` when the spoke has no timeline, `503 offline` |
 | `GET /api/agent/watch?blocked=1&session=<addr>` | ✓ | ✓ | ✓ | SSE of compact events (`ready`, `state`, `blocker.opened/closed`, `session.added/removed`, `message`; no text) |
+| `GET /api/agent/events?cursor=&wait=&limit=&type=&session=` | ✓ | ✓ | `events:subscribe` (+ each family's scope) | compact events after a resumable cursor (see **Events** above) |
 | `GET /api/agent/who?project=&role=` | ✓ | ✓ | ✓ | named, role-holding and online sessions |
 | `POST /api/agent/name {name, session?}` | ✓ | own session | – | names a session (`409 name_taken`) |
 | `POST /api/agent/roles/claim {role, exclusive?, project?, session?}` · `…/roles/release` | ✓ | own session | – | claims (with a new `generation`) or releases a role |
@@ -787,7 +802,7 @@ none), a body of at most 1 MiB (else `413`) and, when sent, a supported `MCP-Pro
 browser `Origin` other than the hub's own is refused (`403`); requests without one (servers, gateways) are fine.
 
 **Auth.** `Authorization: Bearer <token>`: any credential the agent API takes, in practice an **app token**
-(Settings → Agents, or `POST /api/agent/app-tokens`) with the scopes the tools need: `sessions:read` (reading), `sessions:manage` (archive/unarchive),
+(Settings → Agents, or `POST /api/agent/app-tokens`) with the scopes the tools need: `sessions:read` (reading), `sessions:manage` (archive/unarchive), `events:subscribe` (events),
 `messages:send` and `messages:read` (messaging), `sessions:act` plus a grant (act tools), `sessions:launch` plus a
 launch grant (launch tools). Device, session and act tokens work too. No or a bad token answers `401` with
 `WWW-Authenticate: Bearer realm="hub"` (no OAuth discovery). The tools call `/api/agent` as that token, inside the
