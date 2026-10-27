@@ -32,6 +32,8 @@ import { qrCode, qrSvgPath } from "../lib/qr"
 import { voicePrefs } from "../voice/audio"
 import { FONT_SCALE_DEFAULT, FONT_SCALE_MAX, FONT_SCALE_MIN, FONT_SCALE_STEP, formatScale } from "../core/font-scale"
 import { setTextScale, textScale } from "./text-size"
+import { THEMES, type Theme } from "../core/theme"
+import { setTheme, theme } from "./theme"
 
 const SECTIONS: Array<[string, string]> = [
   ["account", "Account"],
@@ -313,6 +315,19 @@ function AppearanceSection() {
   return (
     <Section id="appearance" title="Appearance">
       <ul class="switches">
+        <li class="appearance-theme">
+          <span id="color-theme">Color theme</span>
+          <div class="theme-toggle" role="radiogroup" aria-labelledby="color-theme">
+            <For each={THEMES}>
+              {(choice) => (
+                <button type="button" role="radio" aria-checked={theme() === choice} class="theme-choice" onClick={() => setTheme(choice as Theme)}>
+                  {choice === "light" ? "☀" : choice === "dark" ? "☾" : "▣"}
+                  <span>{choice[0]!.toUpperCase() + choice.slice(1)}</span>
+                </button>
+              )}
+            </For>
+          </div>
+        </li>
         <li class="speed">
           <label for="text-size">Text size</label>
           <input

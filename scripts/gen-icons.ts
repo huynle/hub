@@ -14,9 +14,9 @@ import path from "node:path"
 import { chromium, type Page } from "playwright-core"
 import { chromiumPath } from "../web/e2e/chromium"
 
-export const BG = "#141413"
-export const LIGHT = "#e8e6e1"
-export const ACCENT = "#fab283"
+export const BG = "#101214"
+export const LIGHT = "#e7e5e0"
+export const ACCENT = "#3ad3bf"
 
 const ROOT = path.join(import.meta.dir, "..")
 const OUT = path.join(ROOT, "web", "public")
