@@ -771,7 +771,9 @@ OpenCode (Claude Desktop, Cursor, other agents). It speaks JSON-RPC 2.0, one mes
 transport; protocol revisions `2025-06-18`, `2025-03-26` and `2024-11-05`), and answers `initialize`, `ping`,
 `tools/list` and `tools/call`; notifications (`notifications/initialized`, `notifications/cancelled`, which aborts
 the call) get no answer, other methods answer `-32601`. Its tools are the CLI's verbs: `whoami`, `status`,
-`sessions`, `show`, `log`, `who`, `msg`, `ask`, `reply`, `decline`, `inbox` and the act verbs `approve`, `deny`,
+`sessions`, `show`, `log`, `who`, `msg`, `ask`, `reply`, `decline`, `inbox`, `message_show` (`id`, `wait`),
+`mute` and `unmute` (`addr`; agent-message mutes, not console notifications), `decisions` (`state`) and
+`decision_show` (`id`) (reading the Decisions you asked; no tool answers one, only the user does) and the act verbs `approve`, `deny`,
 `answer` (`answer` object or `cancel`), `prompt` (`delivery`) and `stop`, and the launch tools `launch` (`repo`
 required and absolute; `mode`, `branch`, `base`, `remote`, `key`, `name`, `roles`, `harness`, `agent`, `model`,
 `runtime`, `profile`, `machine`, `nodeLabels` and `labels` objects, `prefer`, `prompt`, `end`, `timeout`,
@@ -779,7 +781,8 @@ required and absolute; `mode`, `branch`, `base`, `remote`, `key`, `name`, `roles
 (`to`, `text`, `addr`, `id`, `requestID`, `formID`, `why`, `n`, `wake`, `urgent`, `all`, `project`, `role`, …). The act
 tools need an app token with scope `sessions:act` and a grant, the launch tools scope `sessions:launch` and a
 launch grant; `needs_user` results include the evaluation. `ask` takes `wait` of at
-most 60 s (one long poll; a longer wait is cut to 60) and `expires` in seconds or as `2h`. Answers are the CLI's
+most 60 s (one long poll; a longer wait is cut to 60) and `expires` in seconds or as `2h`; `ask @me` reports the
+Decision it opened. Answers are the CLI's
 short text; messages and answers from other sessions come in the hub's envelope and are marked as not from the
 user. Hub errors are tool results with `isError: true` and the hub's `code: message` (plus candidates and hint),
 never protocol errors. Only protocol frames go to stdout; the server ends when stdin closes (after answering the

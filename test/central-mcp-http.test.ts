@@ -198,6 +198,48 @@ describe("MCP over HTTP", () => {
     }
   })
 
+  test("message_show, decisions and decision_show: only the caller's own, foreign IDs like unknown ones; no tool answers a Decision", async () => {
+    h = await harness()
+    await spoke(h, { sessions: [session("ses_mute", { title: "Mute me" })] })
+    const asker = await appToken(["messages:send", "messages:read"])
+    const other = await appToken(["messages:send", "messages:read"])
+    const reader = (await appToken(["sessions:read"])).token
+    const asked = await json(await call(asker.token, "ask", { to: "@me", text: "Ship the secret plan?" }))
+    expect(asked.result.isError).toBe(false)
+    const messageID = /ask (msg_\w+)/.exec(textOf(asked))![1]!
+    const decisionID = /decision (dec_\w+)/.exec(textOf(asked))![1]!
+    const shown = textOf(await json(await call(asker.token, "message_show", { id: messageID })))
+    expect(shown).toContain(`----- ${messageID} -----`)
+    expect(shown).toContain("open")
+    expect(textOf(await json(await call(asker.token, "decisions", { state: "open" })))).toContain(decisionID)
+    expect(textOf(await json(await call(asker.token, "decision_show", { id: decisionID })))).toContain("Ship the secret plan?")
+    for (const [tool, id, unknown] of [["message_show", messageID, "msg_nothing"], ["decision_show", decisionID, "dec_nothing"]] as const) {
+      const foreign = await json(await call(other.token, tool, { id }))
+      const missing = await json(await call(other.token, tool, { id: unknown }))
+      expect([foreign.result.isError, missing.result.isError]).toEqual([true, true])
+      expect(textOf(foreign).replace(id, "X")).toBe(textOf(missing).replace(unknown, "X"))
+      expect(JSON.stringify(foreign)).not.toContain("secret plan")
+    }
+    expect(textOf(await json(await call(other.token, "decisions")))).toBe("no decisions")
+    expect((await json(await call(reader, "message_show", { id: messageID }))).result.isError).toBe(true)
+    const list = await json(await post(asker.token, rpc(3, "tools/list")))
+    expect(list.result.tools.map((t: any) => t.name).filter((n: string) => /decision/.test(n))).toEqual(["decisions", "decision_show"])
+    const answer = await fetch(`${h.url}/api/decisions/${decisionID}/answer`, { method: "POST", headers: { authorization: `Bearer ${asker.token}`, "content-type": "application/json", origin: PUBLIC }, body: JSON.stringify({ option: "yes" }) })
+    expect([401, 403]).toContain(answer.status)
+    expect(textOf(await json(await call(asker.token, "decision_show", { id: decisionID })))).toContain("open")
+  })
+
+  test("mute and unmute: agent-message mutes of the caller, needing messages:send, through real /mcp", async () => {
+    h = await harness()
+    await spoke(h, { sessions: [session("ses_mute", { title: "Mute me" })] })
+    const { token } = await appToken(["messages:send", "messages:read"])
+    expect((await json(await call((await appToken(["messages:read"])).token, "mute", { addr: "ses_mute" }))).result.isError).toBe(true)
+    expect(textOf(await json(await call(token, "mute", { addr: "ses_mute" })))).toBe("muted: ses_mute")
+    expect(textOf(await json(await call(token, "inbox")))).toContain("ses_mute")
+    expect(textOf(await json(await call(token, "unmute", { addr: "ses_mute" })))).toBe("muted: nobody")
+    expect((await json(await call(token, "mute", { addr: "ses_nothing" }))).result.isError).toBe(true)
+  })
+
   test("events: a resumable cursor over the journal, needing events:subscribe, through real /mcp", async () => {
     h = await harness()
     await spoke(h, { sessions: [session("ses_ev", { title: "SECRET title" })] })

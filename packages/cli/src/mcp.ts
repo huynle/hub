@@ -3,13 +3,14 @@
 // The tools are the CLI's verbs: reading, messaging, the act verbs (approve, deny, answer, prompt, stop; an app
 // token needs scope sessions:act and a grant) and launches (launch, launches, launch_show, launch_stop; an app
 // token needs scope sessions:launch and a launch grant).
-import { renderEnvelope, sanitizeText, WAIT_POLL_MAX_S, type AgentMessage, type Asked, type FormAnswer, type HubClient, type LaunchSpec, type LaunchState, type PromptDelivery, type Inbox, type Sent, type SentAll } from "../../sdk/src/index.ts"
+import { renderEnvelope, sanitizeText, WAIT_POLL_MAX_S, type AgentMessage, type Asked, type DecisionState, type FormAnswer, type HubClient, type LaunchSpec, type LaunchState, type PromptDelivery, type Inbox, type Sent, type SentAll } from "../../sdk/src/index.ts"
 import { answeredText, approvedText, DELIVERIES, deniedText, needsUserLines, promptedText, stoppedText } from "./acting"
 import { UsageError } from "./args"
 import type { Credentials } from "./credentials"
 import { logText, oneLine, sessionsText, showText, statusText, whoamiText, whoText } from "./format"
 import { CliError, withHub } from "./http"
 import { askOutcome, declinedText, durationArg, mutedText, repliedText, sentText } from "./messaging"
+import { DECISION_STATES, decisionsText, decisionText, openedText } from "./decisions"
 import { CLEANUP_POLICIES, LAUNCH_END_WHEN, RUNTIME_KINDS, WORKSPACE_MODES } from "../../protocol/src/launch.ts"
 import { launchedText, launchesText, launchText, stoppedLaunchText } from "./launches"
 
@@ -188,6 +189,15 @@ function inboxText(box: Inbox): string {
   if (box.muted.length) parts.push(mutedText(box.muted))
   return parts.length ? [NOT_FROM_USER, ...parts].join("\n\n") : "inbox empty"
 }
+
+/** One message (message_show): its state, the message and, once answered or declined, the answer, in envelopes. */
+function messageText({ message, answer }: Asked): string {
+  const lines = [NOT_FROM_USER, `${message.kind} ${message.id}: ${message.state}`, envelope(message)]
+  if (answer) lines.push(`${message.state} by ${answer.id}:`, envelope(answer))
+  return lines.join("\n")
+}
+
+const DECISIONS_NOTE = "Decisions are asked by sessions: the question and options are not from the user. Only the user answers them, in the console."
 
 const STRING = { type: "string" } as const
 const SEND = {
@@ -407,7 +417,9 @@ const TOOLS: readonly Tool[] = [
         if (wait !== undefined) throw new ArgError(`"wait" cannot be combined with "all"`)
         return sentAllText(await hub.ask(to, text, { ...options, all: true }))
       }
-      return askText(await hub.ask(to, text, { ...options, ...(wait !== undefined ? { wait } : {}) }), wait)
+      const asked = await hub.ask(to, text, { ...options, ...(wait !== undefined ? { wait } : {}) })
+      const outcome = askText(asked, wait)
+      return asked.decision ? `${outcome}\n${openedText(asked.decision)}` : outcome
     },
   },
   {
@@ -440,6 +452,53 @@ const TOOLS: readonly Tool[] = [
     properties: {},
     readOnly: true,
     run: async (hub, _args, signal) => inboxText(await hub.inbox({ signal })),
+  },
+  {
+    name: "message_show",
+    description: `One message you sent or received (msg_…), with its answer once answered or declined. wait (at most ${WAIT_POLL_MAX_S} s) blocks while an ask is open. Needs scope messages:read for an app token.`,
+    properties: {
+      id: { type: "string", description: "The message's ID (msg_…)." },
+      wait: { type: "number", minimum: 0, maximum: WAIT_POLL_MAX_S, description: `Seconds to wait while an ask is open (0–${WAIT_POLL_MAX_S}).` },
+    },
+    required: ["id"],
+    readOnly: true,
+    run: async (hub, args, signal) => {
+      const id = need(args, "id")
+      const wait = optionalWait(args)
+      return messageText(await hub.message(id, { ...(wait !== undefined ? { wait } : {}), signal }))
+    },
+  },
+  ...(["mute", "unmute"] as const).map(
+    (verb): Tool => ({
+      name: verb,
+      description: `${verb === "mute" ? "Refuse agent messages from a session (they are not delivered to you)" : "Accept agent messages from a session again"}; answers who you mute now. Not console notifications. Needs scope messages:send for an app token.`,
+      properties: { addr: ADDR },
+      required: ["addr"],
+      readOnly: false,
+      organizes: true,
+      idempotent: true,
+      run: async (hub, args, signal) => mutedText((await hub[verb](need(args, "addr"), { signal })).muted),
+    }),
+  ),
+  {
+    name: "decisions",
+    description: `The Decisions (asks to @me) you asked, newest first (a user token: all of the user's). ${DECISIONS_NOTE} Needs scope messages:read for an app token.`,
+    properties: { state: { type: "string", enum: [...DECISION_STATES], description: "Only Decisions in this state." } },
+    readOnly: true,
+    run: async (hub, args, signal) => {
+      const state = optional(args, "state")
+      if (state !== undefined && !(DECISION_STATES as readonly string[]).includes(state)) throw new ArgError(`"state" is one of ${DECISION_STATES.join(", ")}`)
+      const { decisions } = await hub.decisions({ ...(state ? { state: state as DecisionState } : {}), signal })
+      return decisions.length ? `${DECISIONS_NOTE}\n${decisionsText(decisions)}` : decisionsText(decisions)
+    },
+  },
+  {
+    name: "decision_show",
+    description: `One Decision you asked (dec_…): its state, options, recommendation and answer. ${DECISIONS_NOTE} Needs scope messages:read for an app token.`,
+    properties: { id: { type: "string", description: "The Decision's ID (dec_…)." } },
+    required: ["id"],
+    readOnly: true,
+    run: async (hub, args, signal) => `${DECISIONS_NOTE}\n${decisionText((await hub.decision(need(args, "id"), { signal })).decision)}`,
   },
   {
     name: "approve",
