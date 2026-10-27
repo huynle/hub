@@ -7,7 +7,7 @@ import { validateLaunchSpec } from "../src/central/agent/launch-spec"
 import { harness, session, spoke, sse, waitFor, type Harness } from "./central-harness"
 
 const APP = "hat_fake_app"
-const verifiers: BearerVerifier[] = [{ kind: "app", verify: (token) => (token === APP ? { kind: "app", userID: "local", tokenID: "tok_1", scopes: ["sessions:read"] } : undefined) }]
+const verifiers: BearerVerifier[] = [{ kind: "app", verify: (token) => (token === APP ? { kind: "app", userID: "local", tokenID: "tok_1", scopes: ["sessions:read", "sessions:launch"] } : undefined) }]
 
 let h: Harness
 afterEach(async () => {
@@ -68,7 +68,7 @@ describe("labels of launched sessions", () => {
 })
 
 describe("launch events on GET /api/agent/watch", () => {
-  test("the user's watch gets compact launch events (state, labels); ?blocked=1 and another session's watch do not", async () => {
+  test("the user's watch gets compact launch.changed events (state; never reason or labels); ?blocked=1 and another session's watch do not", async () => {
     await start()
     const events = sse(await h.api("/api/agent/watch"))
     const blocked = sse(await h.api("/api/agent/watch?blocked=1"))
@@ -77,23 +77,23 @@ describe("launch events on GET /api/agent/watch", () => {
     await blocked.next((m) => m.type === "ready")
     await other.next((m) => m.type === "ready")
     const created = await json(await h.api("/api/agent/launches", { method: "POST", json: { workspace: { repo: "/u/hub", branch: "b" }, labels: LABELS } }))
-    const event = await events.next((m) => m.type === "launch")
-    expect(event).toEqual({ type: "launch", id: created.launch.id, state: "queued", reason: created.launch.reason, labels: LABELS, at: expect.any(Number) })
+    const event = await events.next((m) => m.type === "launch.changed")
+    expect(event).toEqual({ id: expect.stringMatching(/^evt_/), at: expect.any(Number), type: "launch.changed", subject: { launchID: created.launch.id }, data: { state: "queued" } })
     // a later session event reaches the others, never the launch
     h.launchFeed.publish("local", { ...(await h.launches.store.get("local", created.launch.id))!, state: "running", sessionID: "ses_2" })
-    expect(await other.next((m) => m.type === "launch")).toMatchObject({ id: created.launch.id, state: "running", sessionID: "ses_2" })
-    await expect(blocked.next((m) => m.type === "launch", 150)).rejects.toThrow(/timed out/)
+    expect(await other.next((m) => m.type === "launch.changed")).toMatchObject({ subject: { launchID: created.launch.id, sessionID: "ses_2" }, data: { state: "running" } })
+    await expect(blocked.next((m) => m.type === "launch.changed", 150)).rejects.toThrow(/timed out/)
     for (const s of [events, blocked, other]) await s.cancel()
   })
 
-  test("an app's watch gets only the launches it started", async () => {
+  test("an app's watch (sessions:launch) gets only the launches it started", async () => {
     await start()
     const app = sse(await h.api("/api/agent/watch", { cookie: null, origin: null, headers: { authorization: `Bearer ${APP}` } }))
     await app.next((m) => m.type === "ready")
     const mine = await json(await h.api("/api/agent/launches", { method: "POST", json: { workspace: { repo: "/u/hub", branch: "b" } } }))
     const stored = (await h.launches.store.get("local", mine.launch.id))!
     h.launchFeed.publish("local", { ...stored, id: "lch_app", by: "app:tok_1" })
-    expect(await app.next((m) => m.type === "launch")).toMatchObject({ id: "lch_app" })
+    expect(await app.next((m) => m.type === "launch.changed")).toMatchObject({ subject: { launchID: "lch_app" } })
     await app.cancel()
   })
 })

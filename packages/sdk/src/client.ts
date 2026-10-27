@@ -298,15 +298,16 @@ export class HubClient {
   }
 
   /**
-   * GET /api/agent/watch: the events (session.*, blocker.*, …) as they happen, until the hub closes the stream or
-   * `signal` aborts (which ends the iteration quietly). blocked: only blocker events; session: one address.
+   * GET /api/agent/watch: the journal's compact events (the same as events()) as they happen, until the hub closes
+   * the stream or `signal` aborts (which ends the iteration quietly). blocked: only blocker events; session: one
+   * address; cursor: resume after an event's `id` (or an events() cursor).
    */
-  async *watch(options: CallOptions & { readonly blocked?: boolean; readonly session?: string } = {}): AsyncGenerator<WatchEvent, void, undefined> {
+  async *watch(options: CallOptions & { readonly blocked?: boolean; readonly session?: string; readonly cursor?: string } = {}): AsyncGenerator<WatchEvent, void, undefined> {
     const { signal } = options
     if (signal?.aborted) return
     let response: Response
     try {
-      response = await this.request("GET", `${AGENT}/watch`, { query: { blocked: options.blocked ? "1" : undefined, session: options.session }, ...signalOf(options) })
+      response = await this.request("GET", `${AGENT}/watch`, { query: { blocked: options.blocked ? "1" : undefined, session: options.session, cursor: options.cursor }, ...signalOf(options) })
     } catch (cause) {
       if (signal?.aborted) return
       throw cause

@@ -142,7 +142,8 @@ step, and running ones are watched again.
 ### Events
 
 Every change of a launch is an SSE event `{type: "launch", launch}` on the user's `/api/events` stream, and a
-`launch` event on `GET /api/agent/watch` (without the prompt). The `placing` step and a fall back to `queued` are
+compact `launch.changed` event (launch ID, session, state, outcome, name; never the prompt, reason or labels) on
+`GET /api/agent/events` and `GET /api/agent/watch`. The `placing` step and a fall back to `queued` are
 not reported; they are in the launch's history.
 
 ## Placement and caps

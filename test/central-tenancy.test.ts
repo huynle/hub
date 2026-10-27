@@ -655,9 +655,9 @@ describe("bob cannot reach alice's launches", () => {
       const seen: any[] = []
       await stream.next((m) => {
         seen.push(m)
-        return m.type === "launch"
+        return m.type === "launch" || m.type === "launch.changed"
       })
-      expect(seen.filter((m) => m.type === "launch").map((m) => m.id ?? m.launch.id)).toEqual([mine])
+      expect(seen.filter((m) => m.type === "launch" || m.type === "launch.changed").map((m) => m.subject?.launchID ?? m.launch.id)).toEqual([mine])
       expect(JSON.stringify(seen)).not.toContain(id)
       expect(JSON.stringify(seen)).not.toContain("secret plan")
     }

@@ -2,6 +2,7 @@
 // Sessions are reported by real spokes; session and app tokens come from fake verifiers.
 import { afterEach, describe, expect, test } from "bun:test"
 import type { BearerVerifier } from "../src/central/agent/actor"
+import { archiveEvent } from "../src/central/agent/events"
 import { harness, session, spoke, sse, waitFor, type Harness } from "./central-harness"
 
 const SES_1 = "hst_fake_ses_1"
@@ -222,37 +223,107 @@ describe("GET /api/agent/sessions/:addr/log", () => {
   })
 })
 
-describe("GET /api/agent/watch", () => {
-  const listeners = () => ((h.registry as any).listeners as Set<unknown>).size
+/** Raw SSE frames of a watch (each `{id?, event?, data?}`), for the cursor (`id:`) lines the sse() helper skips. */
+function frames(response: Response) {
+  const reader = response.body!.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ""
+  return {
+    async next(predicate: (frame: { id?: string; event?: string; data?: any }) => boolean = () => true, timeoutMs = 3000) {
+      const deadline = Date.now() + timeoutMs
+      for (;;) {
+        let index: number
+        while ((index = buffer.indexOf("\n\n")) >= 0) {
+          const chunk = buffer.slice(0, index)
+          buffer = buffer.slice(index + 2)
+          const frame: { id?: string; event?: string; data?: any } = {}
+          for (const line of chunk.split("\n")) {
+            if (line.startsWith("id: ")) frame.id = line.slice(4)
+            else if (line.startsWith("event: ")) frame.event = line.slice(7)
+            else if (line.startsWith("data: ")) frame.data = frame.event ? line.slice(6) : JSON.parse(line.slice(6))
+          }
+          if (predicate(frame)) return frame
+        }
+        const left = deadline - Date.now()
+        if (left <= 0) throw new Error("timed out waiting for SSE frame")
+        const result = await Promise.race([reader.read(), Bun.sleep(left).then(() => ({ timeout: true }) as const)])
+        if ("timeout" in result) continue
+        if (result.done) throw new Error("SSE stream ended")
+        buffer += decoder.decode(result.value, { stream: true })
+      }
+    },
+    cancel: () => reader.cancel(),
+  }
+}
 
-  test("streams compact state and blocker events for a session token; cleans up on disconnect", async () => {
+describe("GET /api/agent/watch (canonical journal events)", () => {
+  const waiters = () => ((h.agentEvents as any).waiters as Map<string, Set<unknown>>).get("local")?.size ?? 0
+
+  test("streams the journal's compact events (no summaries) for a session token; cleans up on disconnect", async () => {
     const { client } = await start()
-    const before = listeners()
     const disconnect = new AbortController()
     const res = await bearer("/api/agent/watch", SES_1, { signal: disconnect.signal })
     expect(res.status).toBe(200)
     expect(res.headers.get("content-type")).toBe("text/event-stream")
     const events = sse(res)
-    expect(await events.next()).toMatchObject({ type: "ready" })
-    await waitFor(() => listeners() === before + 1)
+    expect(await events.next()).toEqual({ type: "ready", at: expect.any(Number) })
     client.send(event("permission.asked", { sessionID: "ses_2", id: "per_2", action: "bash", resources: ["rm -rf dist"] }))
-    expect(await events.next((m) => m.type === "blocker.opened")).toMatchObject({ sessionID: "ses_2", rootID: "ses_2", blocker: { kind: "permission", id: "per_2", summary: "bash: rm -rf dist" } })
-    expect(await events.next((m) => m.type === "state")).toMatchObject({ sessionID: "ses_2", state: "blocked", prev: "working" })
+    const opened = await events.next((m) => m.type === "blocker.opened")
+    expect(opened).toEqual({ id: expect.stringMatching(/^evt_/), at: expect.any(Number), type: "blocker.opened", subject: { sessionID: "ses_2", rootID: "ses_2" }, data: { blockerID: "per_2", kind: "permission" } })
+    expect(await events.next((m) => m.type === "session.changed")).toMatchObject({ subject: { sessionID: "ses_2" }, data: { state: "blocked", prev: "working" } })
     client.send(event("permission.replied", { sessionID: "ses_2", requestID: "per_2" }))
-    expect(await events.next((m) => m.type === "blocker.closed")).toMatchObject({ sessionID: "ses_2", id: "per_2" })
+    expect(await events.next((m) => m.type === "blocker.closed")).toMatchObject({ subject: { sessionID: "ses_2" }, data: { blockerID: "per_2" } })
+    await waitFor(() => waiters() > 0)
     disconnect.abort()
-    await waitFor(() => listeners() === before)
+    await waitFor(() => waiters() === 0)
   })
 
-  test("sends a ping heartbeat", async () => {
+  test("every frame carries a resumable cursor id; pings too", async () => {
     await start()
-    const reader = (await h.api("/api/agent/watch")).body!.getReader()
-    const decoder = new TextDecoder()
-    let text = ""
-    const deadline = Date.now() + 2000
-    while (!text.includes("event: ping") && Date.now() < deadline) text += decoder.decode((await reader.read()).value ?? new Uint8Array(), { stream: true })
-    expect(text).toContain("event: ping")
-    await reader.cancel()
+    const stream = frames(await h.api("/api/agent/watch"))
+    const ready = await stream.next()
+    expect(ready.data).toMatchObject({ type: "ready" })
+    expect(ready.id).toMatch(/^hev1_/)
+    const ping = await stream.next((f) => f.event === "ping")
+    expect(ping.id).toMatch(/^hev1_/)
+    await stream.cancel()
+  })
+
+  test("Last-Event-ID (or ?cursor=) resumes after what the client saw; a bad one is 400 invalid_cursor", async () => {
+    await start()
+    const first = frames(await h.api("/api/agent/watch"))
+    const { id } = await first.next()
+    await first.cancel()
+    await h.agentEvents.append("local", archiveEvent("ses_2", true))
+    for (const init of [{ headers: { "last-event-id": id! } }, { path: `?cursor=${encodeURIComponent(id!)}` }] as const) {
+      const resumed = sse(await h.api(`/api/agent/watch${"path" in init ? init.path : ""}`, "headers" in init ? { headers: init.headers } : {}))
+      await resumed.next((m) => m.type === "ready")
+      expect(await resumed.next()).toMatchObject({ type: "session.archived", subject: { sessionID: "ses_2" }, data: { archived: true } })
+      await resumed.cancel()
+    }
+    for (const init of [{ headers: { "last-event-id": "hev1_forged.x" } }, { path: "?cursor=nope" }] as const) {
+      const res = await h.api(`/api/agent/watch${"path" in init ? init.path : ""}`, "headers" in init ? { headers: init.headers } : {})
+      expect(res.status).toBe(400)
+      expect((await json(res)).error.code).toBe("invalid_cursor")
+    }
+  })
+
+  test("a cursor the journal no longer covers starts with a reset event naming the reads to refresh", async () => {
+    let clock = Date.now()
+    h = await harness({ agent: { verifiers }, timing: { heartbeatMs: 40 }, now: () => clock } as any)
+    const first = frames(await h.api("/api/agent/watch"))
+    const { id } = await first.next()
+    await first.cancel()
+    await h.agentEvents.append("local", archiveEvent("ses_1", true))
+    clock += 25 * 3_600_000
+    await h.agentEvents.append("local", archiveEvent("ses_2", true))
+    const stream = frames(await h.api("/api/agent/watch", { headers: { "last-event-id": id! } }))
+    expect((await stream.next()).data).toMatchObject({ type: "ready" })
+    const reset = await stream.next()
+    expect(reset.data).toEqual({ type: "reset", at: expect.any(Number), refresh: ["status", "sessions", "inbox", "decisions", "launches"] })
+    expect(reset.id).toMatch(/^hev1_/)
+    expect(reset.id).not.toBe(id)
+    await stream.cancel()
   })
 
   test("blocked=1 sends blocker events only; session=<addr> only that session's tree", async () => {
@@ -264,29 +335,37 @@ describe("GET /api/agent/watch", () => {
     client.send(event("permission.replied", { sessionID: "ses_1", requestID: "per_1" }))
     client.send(event("session.execution.succeeded", { sessionID: "ses_2" }))
     client.send(event("permission.asked", { sessionID: "ses_2", id: "per_2", action: "bash" }))
-    expect(await blocked.next()).toMatchObject({ type: "blocker.closed", sessionID: "ses_1", id: "per_1" })
-    expect(await blocked.next()).toMatchObject({ type: "blocker.opened", sessionID: "ses_2" })
-    expect(await one.next()).toMatchObject({ type: "state", sessionID: "ses_2", state: "idle" })
-    expect(await one.next((m) => m.type !== "state")).toMatchObject({ type: "blocker.opened", sessionID: "ses_2" })
+    expect(await blocked.next()).toMatchObject({ type: "blocker.closed", subject: { sessionID: "ses_1" }, data: { blockerID: "per_1" } })
+    expect(await blocked.next()).toMatchObject({ type: "blocker.opened", subject: { sessionID: "ses_2" } })
+    expect(await one.next()).toMatchObject({ type: "session.changed", subject: { sessionID: "ses_2" }, data: { state: "idle" } })
+    expect(await one.next((m) => m.type !== "session.changed")).toMatchObject({ type: "blocker.opened", subject: { sessionID: "ses_2" } })
     await blocked.cancel()
     await one.cancel()
     const missing = await h.api("/api/agent/watch?session=@nobody")
     expect(missing.status).toBe(404)
   })
 
-  test("reports sessions added to and removed from the catalog", async () => {
+  test("reports sessions added to and removed from the catalog, without titles", async () => {
     const { client } = await start()
     const events = sse(await h.api("/api/agent/watch"))
     await events.next((m) => m.type === "ready")
-    const sessions = [
-      session("ses_1", { title: "API refactor", projectName: "hub" }),
-      session("ses_4", { title: "New one", projectName: "hub" }),
-    ]
-    client.send({ t: "sessions", sessions })
-    expect(await events.next((m) => m.type === "session.added")).toMatchObject({ sessionID: "ses_4", title: "New one" })
-    const removed = [await events.next((m) => m.type === "session.removed"), await events.next((m) => m.type === "session.removed")]
-    expect(removed.map((m) => m.sessionID).sort()).toEqual(["ses_2", "ses_3"])
+    client.send({ t: "sessions", sessions: [session("ses_1", { title: "API refactor", projectName: "hub" }), session("ses_4", { title: "New one", projectName: "hub" })] })
+    const added = await events.next((m) => m.type === "session.added", 5000)
+    expect(added).toMatchObject({ subject: { sessionID: "ses_4" }, data: {} })
+    expect(JSON.stringify(added)).not.toContain("New one")
+    const removed = [await events.next((m) => m.type === "session.removed", 5000), await events.next((m) => m.type === "session.removed", 5000)]
+    expect(removed.map((m) => m.subject.sessionID).sort()).toEqual(["ses_2", "ses_3"])
     await events.cancel()
+  })
+
+  test("an app token sees only the families its scopes allow (sessions:read: no archive events)", async () => {
+    await start()
+    const app = sse(await bearer("/api/agent/watch", APP))
+    await app.next((m) => m.type === "ready")
+    await h.agentEvents.append("local", archiveEvent("ses_2", true))
+    await h.agentEvents.append("local", { type: "session.changed", family: "session", subject: { sessionID: "ses_2" }, data: { state: "idle" } })
+    expect(await app.next((m) => m.type !== "ping")).toMatchObject({ type: "session.changed" })
+    await app.cancel()
   })
 })
 

@@ -19,9 +19,8 @@ import type { Directory, DirectoryEntry, RoleView } from "./directory"
 import type { AgentActor } from "./actor"
 import { AgentError } from "./errors"
 import { AGENT_PREFIX, type AgentRoute } from "./routes"
-import { partyFromActor, partyKey } from "./envelope"
-import { launchedBy } from "./launch-routes"
-import { type LaunchSource, watchStream, type MessageSource, type WatchRegistry } from "./watch"
+import { watchStream } from "./watch"
+import type { EventsRouteDeps } from "./events-routes"
 
 /** Labels per session ID. */
 export type SessionLabels = ReadonlyMap<string, Readonly<Record<string, string>>>
@@ -46,14 +45,10 @@ export interface ReadDeps {
   readonly directory: Directory
   readonly registry: ReadRegistry
   readonly spokes?: SpokeRequester
-  /** Agent messages for the watch stream's message events. */
-  readonly feed?: MessageSource
   /** The labels of the user's launched sessions (none without it). */
   readonly labels?: (userID: string) => Promise<SessionLabels>
-  /** Launch changes for the watch stream's launch events. */
-  readonly launches?: LaunchSource
-  /** What the watch stream of a user reads (cluster mode: status from every pod); the registry when absent. */
-  readonly watchRegistry?: (userID: string) => WatchRegistry
+  /** The journal GET /api/agent/watch streams (no watch route without it). */
+  readonly events?: EventsRouteDeps
   /** Watch stream heartbeat (default WATCH_HEARTBEAT_MS). */
   readonly heartbeatMs?: number
   /** Aborted when the hub drains: watch streams end with a `retry:` hint. */
@@ -358,32 +353,33 @@ export function readRoutes(deps: ReadDeps): AgentRoute[] {
       allow: READ,
       handle: async ({ user, params, url }) => ok(await log(deps, user.id, params.addr!, url.searchParams.get("n"))),
     },
-    {
-      method: "GET",
-      path: `${AGENT_PREFIX}/watch`,
-      allow: READ,
-      handle: ({ user, url, request, actor }) => {
-        const addr = url.searchParams.get("session") || undefined
-        // Message events: the user sees all; a session, or an app with messages:read, those it is a party to.
-        const messageReader = actor.kind === "user" || actor.kind === "session" || actor.scopes.includes("messages:read")
-        const messages = deps.feed && messageReader ? { feed: deps.feed, ...(actor.kind === "user" ? {} : { party: partyKey(partyFromActor(actor)) }) } : undefined
-        const sessions = addr ? new Set(deps.directory.resolve(user.id, addr).sessions.map((s) => s.sessionID)) : undefined
-        const blocked = ["1", "true"].includes(url.searchParams.get("blocked") ?? "")
-        // Launch events: the user sees all; an app or session those it started.
-        const launches = deps.launches ? { feed: deps.launches, ...(actor.kind === "user" ? {} : { by: launchedBy(actor) }) } : undefined
-        return watchStream({
-          registry: deps.watchRegistry?.(user.id) ?? deps.registry,
-          userID: user.id,
-          signal: request.signal,
-          blocked,
-          ...(sessions ? { sessions } : {}),
-          ...(messages ? { messages } : {}),
-          ...(launches ? { launches } : {}),
-          ...(deps.heartbeatMs !== undefined ? { heartbeatMs: deps.heartbeatMs } : {}),
-          ...(deps.now ? { now: deps.now } : {}),
-          ...(deps.draining ? { draining: deps.draining } : {}),
-        })
-      },
-    },
+    ...(deps.events ? [watchRoute(deps, deps.events)] : []),
   ]
+}
+
+/** GET /api/agent/watch: the journal's events live (watch.ts), with the events route's visibility and filters. */
+function watchRoute(deps: ReadDeps, events: EventsRouteDeps): AgentRoute {
+  return {
+    method: "GET",
+    path: `${AGENT_PREFIX}/watch`,
+    allow: READ,
+    handle: ({ user, url, request, actor }) => {
+      const addr = url.searchParams.get("session") || undefined
+      const sessions = addr ? new Set(deps.directory.resolve(user.id, addr).sessions.map((s) => s.sessionID)) : undefined
+      const blocked = ["1", "true"].includes(url.searchParams.get("blocked") ?? "")
+      const cursor = url.searchParams.get("cursor") || request.headers.get("last-event-id") || undefined
+      return watchStream({
+        events,
+        userID: user.id,
+        actor,
+        signal: request.signal,
+        ...(blocked ? { types: ["blocker.*"] } : {}),
+        ...(sessions ? { sessions } : {}),
+        ...(cursor ? { cursor } : {}),
+        ...(deps.heartbeatMs !== undefined ? { heartbeatMs: deps.heartbeatMs } : {}),
+        ...(deps.now ? { now: deps.now } : {}),
+        ...(deps.draining ? { draining: deps.draining } : {}),
+      })
+    },
+  }
 }

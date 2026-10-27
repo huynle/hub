@@ -108,7 +108,7 @@ interface ReadOptions {
 const typeMatches = (types: readonly string[], type: string) => types.length === 0 || types.some((t) => (t.endsWith(".*") ? type.startsWith(t.slice(0, -1)) : t === type))
 
 const sessionMatches = (sessions: ReadonlySet<string> | undefined, event: AgentEvent) =>
-  !sessions || (event.subject.sessionID !== undefined && sessions.has(event.subject.sessionID)) || (event.subject.rootID !== undefined && sessions.has(event.subject.rootID))
+  !sessions || [event.subject.sessionID, event.subject.rootID, event.subject.senderID].some((id) => id !== undefined && sessions.has(id))
 
 export async function read(deps: EventsRouteDeps, userID: string, actor: AgentActor, options: ReadOptions, signal?: AbortSignal): Promise<EventsPage> {
   const { events, keys } = deps

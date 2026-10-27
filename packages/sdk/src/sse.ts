@@ -5,6 +5,8 @@ import type { WatchEvent } from "./types.ts"
 /** Parses SSE text incrementally: feed chunks, get complete events (events without data are skipped). */
 export class SseParser {
   #buffer = ""
+  /** The last `id:` seen (it carries over to later events, as in EventSource). */
+  #id = ""
 
   push(chunk: string): WatchEvent[] {
     this.#buffer += chunk.replace(/\r\n?/g, "\n")
@@ -22,8 +24,9 @@ export class SseParser {
         const value = colon < 0 ? "" : line.slice(colon + 1).replace(/^ /, "")
         if (field === "event") event = value
         else if (field === "data") data.push(value)
+        else if (field === "id" && !value.includes("\0")) this.#id = value
       }
-      if (data.length) out.push({ event, data: data.join("\n") })
+      if (data.length) out.push({ event, data: data.join("\n"), ...(this.#id ? { id: this.#id } : {}) })
     }
     return out
   }

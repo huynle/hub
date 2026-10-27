@@ -282,7 +282,7 @@ for (const variant of variants) {
       const { message } = (await sent.json()) as any
       const live = await console_.next((f) => f.data?.type === "message" && f.data.message.id === message.id)
       expect(live.id).toBeDefined()
-      expect(await watch.next((m) => m.type === "message")).toMatchObject({ id: message.id, sessionID: "ses_2", senderID: "ses_1" })
+      expect(await watch.next((m) => m.type === "message.changed", 4000)).toMatchObject({ subject: { messageID: message.id, sessionID: "ses_2", senderID: "ses_1" } })
       // A later event as a marker: the message was not streamed twice.
       await a.launchFeed.publish(userID, fakeLaunch(userID, "lch_marker"))
       await console_.next(isType("launch"))
@@ -299,7 +299,7 @@ for (const variant of variants) {
       await watch.next((m) => m.type === "ready")
       await Bun.sleep(50)
       client.send(ev("session.execution.started", { sessionID: "ses_1" }))
-      expect(await watch.next((m) => m.type === "state")).toMatchObject({ sessionID: "ses_1", state: "working" })
+      expect(await watch.next((m) => m.type === "session.changed" && m.data.state === "working", 4000)).toMatchObject({ subject: { sessionID: "ses_1" }, data: { state: "working" } })
       await watch.cancel()
     })
 
@@ -341,7 +341,9 @@ for (const variant of variants) {
       await watch.next((m) => m.type === "ready")
       a.launchFeed.publish(userID, fakeLaunch(userID, "lch_1"))
       for (const stream of [onA, onB]) expect((await stream.next(isType("launch"))).data.launch).toMatchObject({ id: "lch_1", state: "queued" })
-      expect(await watch.next((m) => m.type === "launch")).toMatchObject({ id: "lch_1", labels: { job: "x" } })
+      const launched = await watch.next((m) => m.type === "launch.changed", 4000)
+      expect(launched).toMatchObject({ subject: { launchID: "lch_1" }, data: { state: "queued" } })
+      expect(JSON.stringify(launched)).not.toContain("job")
       a.launchFeed.publish(userID, fakeLaunch(userID, "lch_2"))
       for (const stream of [onA, onB]) await stream.next((f) => f.data?.launch?.id === "lch_2")
       for (const stream of [onA, onB]) expect(stream.all.filter((f) => f.data?.launch?.id === "lch_1")).toHaveLength(1)
@@ -390,8 +392,13 @@ for (const variant of variants) {
       // Bob's own event as a marker.
       bobSpoke.send(ev("session.execution.started", { sessionID: "ses_9" }))
       await stream.next((f) => f.data?.type === "status" && f.data.sessionID === "ses_9")
-      const watched = await watch.next((m) => m.type === "state")
-      expect(watched.sessionID).toBe("ses_9")
+      const seen: any[] = []
+      const watched = await watch.next((m) => {
+        seen.push(m)
+        return m.type === "session.changed" && m.subject.sessionID === "ses_9"
+      }, 4000)
+      expect(watched.data.state).toBe("working")
+      for (const secret of ["ses_1", "secret", "lch_alice"]) expect(JSON.stringify(seen)).not.toContain(secret)
       const text = JSON.stringify(stream.all)
       expect(text).not.toContain("ses_1")
       expect(text).not.toContain("secret")

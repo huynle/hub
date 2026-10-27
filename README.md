@@ -259,7 +259,9 @@ holds the request while nothing matches; `limit` is 1–200 (default 50); `type`
 may repeat and still advance the cursor over what they skip. At most 1,000 events are inspected per request; `more`
 means some remain. A cursor the journal no longer covers (expired, trimmed, hub restarted) answers
 `{events: [], cursor, more: false, reset: true, refresh: ["status", "sessions", "inbox", "decisions", "launches"]}`:
-re-read those, then continue with the new cursor. A malformed, forged or another user's cursor is
+re-read those, then continue with the new cursor. `GET /api/agent/watch` streams the same events live over SSE
+(`{type: "ready"}` first, `{type: "reset", refresh}` when its cursor is no longer covered, `event: ping` while
+idle), with the same visibility and filters (`blocked=1` is `type=blocker.*`). A malformed, forged or another user's cursor is
 `400 invalid_cursor`. Unknown event types are valid; ignore them. App tokens need `events:subscribe`, and see each
 family only with its scope: session and machine events with `sessions:read`, archive events with `sessions:manage`,
 messages they are a party to with `messages:read`, launches they started with `sessions:launch`. MCP: `events`.
@@ -316,7 +318,7 @@ cookie and a hub bearer token (400).
 | `GET /api/agent/sessions?project=&state=&machine=&label=k=v` | ✓ | ✓ | ✓ | the same sessions as a flat list |
 | `GET /api/agent/sessions/:addr` | ✓ | ✓ | ✓ | one session with full blockers and the spoke's summary (`unsupported` when its harness lacks it) |
 | `GET /api/agent/sessions/:addr/log?n=20` | ✓ | ✓ | ✓ | newest timeline rows (1–200); `422 unsupported {feature, harness}` when the spoke has no timeline, `503 offline` |
-| `GET /api/agent/watch?blocked=1&session=<addr>` | ✓ | ✓ | ✓ | SSE of compact events (`ready`, `state`, `blocker.opened/closed`, `session.added/removed`, `message`; no text) |
+| `GET /api/agent/watch?blocked=1&session=<addr>&cursor=` | ✓ | ✓ | ✓ (+ each family's scope) | SSE of the same compact events as `/api/agent/events` (see **Events**), after `ready`; each frame's `id:` is a cursor to resume with (`?cursor=` or `Last-Event-ID`); `reset` when it is no longer covered |
 | `GET /api/agent/events?cursor=&wait=&limit=&type=&session=` | ✓ | ✓ | `events:subscribe` (+ each family's scope) | compact events after a resumable cursor (see **Events** above) |
 | `GET /api/agent/who?project=&role=` | ✓ | ✓ | ✓ | named, role-holding and online sessions |
 | `POST /api/agent/name {name, session?}` | ✓ | own session | – | names a session (`409 name_taken`) |

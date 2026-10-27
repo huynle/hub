@@ -49,7 +49,26 @@ describe("SseParser", () => {
   })
 })
 
+describe("SseParser ids", () => {
+  test("each event carries the latest id seen (a heartbeat's too), as a resumable cursor", () => {
+    const parser = new SseParser()
+    expect(parser.push("id: c1\ndata: a\n\ndata: b\n\nevent: ping\nid: c2\ndata: 0\n\ndata: c\n\n")).toEqual([
+      { event: "message", data: "a", id: "c1" },
+      { event: "message", data: "b", id: "c1" },
+      { event: "ping", data: "0", id: "c2" },
+      { event: "message", data: "c", id: "c2" },
+    ])
+  })
+})
+
 describe("watch", () => {
+  test("cursor resumes: it goes in the query", async () => {
+    hub.routes["GET /api/agent/watch"] = () => sse("")
+    await collect(client().watch({ cursor: "hev1_a.b" }))
+    expect(hub.seen.map((s) => s.path)).toEqual(["/api/agent/watch?cursor=hev1_a.b"])
+  })
+
+
   test("yields the hub's events and skips ping heartbeats; the stream ending ends the iteration", async () => {
     hub.routes["GET /api/agent/watch"] = () => sse('event: ping\ndata: {}\n\nevent: session.state\ndata: {"sessionID":"ses_1"}\n\n')
     expect(await collect(client().watch())).toEqual([{ event: "session.state", data: '{"sessionID":"ses_1"}' }])

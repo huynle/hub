@@ -298,6 +298,8 @@ export interface Inbox {
 export interface WatchEvent {
   readonly event: string
   readonly data: string
+  /** The stream's cursor at this event (GET /api/agent/watch?cursor= resumes after it). */
+  readonly id?: string
 }
 
 // Acting (POST /api/agent/sessions/:addr/{approve,deny,answer,prompt,stop}; src/central/agent/acting.ts).
