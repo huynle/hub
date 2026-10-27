@@ -170,8 +170,8 @@ Live events (session updates, messages, launches) are published per user (`user.
 streaming text deltas is also appended to the user's event stream in Valkey (the last 2000 events, at most
 5 minutes old), so an SSE client that reconnects to *another* pod with `Last-Event-ID` gets what it missed; when
 the gap is too old it gets a `resync` and refetches. Streamed text (deltas, reasoning) is sent live only: a
-console that reconnects refetches the transcript. Message and launch feeds (`feed.messages`, `feed.launches`) reach every pod, so a watcher
-anywhere sees them.
+console that reconnects refetches the transcript. Message and launch feeds (`feed.messages`, `feed.launches`) reach every pod. `/api/agent/watch` and
+`/api/agent/events` read the shared agent event journal (a Valkey stream per user), so they see every pod's changes.
 
 ### Leaders
 

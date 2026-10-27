@@ -41,7 +41,7 @@ import { SessionTokens } from "./agent/session-tokens"
 import { SessionTokenPush } from "./session-token-push"
 import { TokenKeys } from "./token-keys"
 import { EventLog } from "./events-log"
-import { BusyError, Registry, type RegistryMessage } from "./registry"
+import { BusyError, Registry } from "./registry"
 import { createActions, type Unsupported, unsupportedMessage } from "./actions"
 import { audioFormat, SpeechError } from "./speech/provider"
 import { SpeechService } from "./speech/service"
@@ -56,7 +56,6 @@ import { randomBytes, randomUUID } from "node:crypto"
 import { LaunchEngine } from "./agent/launch-engine"
 import { LaunchTokens } from "./agent/launch-tokens"
 import { LaunchFeed, launchInfo } from "./agent/launch-routes"
-import type { WatchRegistry } from "./agent/watch"
 import { DRAIN_RETRY_AFTER_MS, DRAIN_TIMEOUT_MS, RequestTimeoutError, RequestTooLargeError, SpokeError, SpokeHub, type DrainOptions, type Notifier, type SpokeHubOptions, type SpokeSocketData } from "./spoke-ws"
 import { ACTIVITY_INTERVAL_MAX, ACTIVITY_INTERVAL_MIN, LOCAL_USER, PUSH_PREF_KEYS, quietHoursInput, Store, VIEW_PREF_KEYS, VIEW_PREF_MAX_ARCHIVED, type DeviceRecord, type LegacyPushPrefs, type PushPrefs, type UserRecord, type ViewPrefs } from "./store"
 
@@ -909,26 +908,7 @@ export function startCentral(options: CentralOptions): Central {
     void escalations.closed(tenant, requestID).catch((cause) => console.error(`[hub] escalation close failed: ${(cause as Error).message}`))
   })
   const escalate: Escalate = (escalation) => escalations.escalate(escalation)
-  /** Cluster mode: what GET /api/agent/watch reads; status of sessions on any pod comes from the user's live events. */
-  const watchRegistry = live
-    ? (userID: string): WatchRegistry => ({
-        catalog: () => registry.catalog(),
-        sessionTenant: (sessionID) => registry.sessionTenant(sessionID),
-        subscribe: (listener) => {
-          const offCatalog = registry.subscribe((message) => {
-            if (message.type === "catalog") listener(message)
-          })
-          const subscription = live.subscribe(userID, (event) => {
-            if (event.message.type === "status") listener(event.message as unknown as RegistryMessage, userID)
-          })
-          return () => {
-            offCatalog()
-            subscription.close()
-          }
-        },
-      })
-    : undefined
-  const agentDeps = { draining: drainSignal.signal, store, sessionTokens, directory, registry, spokes, delivery, decisions, feed, heartbeatMs, now, audit, grants, grantRequests, acting, actions, escalate, launches, launchFeed, webhooks, agentEvents, eventCursorKeys: tokenKeys, maxPromptChars: MAX_PROMPT_CHARS, ...(watchRegistry ? { watchRegistry } : {}) }
+  const agentDeps = { draining: drainSignal.signal, store, sessionTokens, directory, registry, spokes, delivery, decisions, feed, heartbeatMs, now, audit, grants, grantRequests, acting, actions, escalate, launches, webhooks, agentEvents, eventCursorKeys: tokenKeys, maxPromptChars: MAX_PROMPT_CHARS }
   const resolveActor = createResolver({
     cookieName: COOKIE,
     findDevice: (token) => deviceOfToken(token),

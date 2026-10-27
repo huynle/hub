@@ -28,7 +28,7 @@ import { type ActingSwitch, actingSwitchRoutes } from "./acting-switch"
 import { Acting, type ActingRegistry, type Escalate } from "./acting"
 import { actingRoutes } from "./acting-routes"
 import type { Actions } from "../actions"
-import { type LaunchFeed, launchRoutes, type RouteLaunches } from "./launch-routes"
+import { launchRoutes, type RouteLaunches } from "./launch-routes"
 import { type RouteWebhooks, webhookRoutes } from "./webhook-routes"
 
 export const AGENT_PREFIX = "/api/agent"
@@ -94,8 +94,6 @@ export interface AgentDeps {
   readonly agentEvents?: Pick<AgentEvents, "append" | "latest" | "since" | "appended">
   /** Signing keys of GET /api/agent/events cursors; the events route is served when given with agentEvents. */
   readonly eventCursorKeys?: CursorKeys
-  /** Launch changes: the watch stream's launch events. */
-  readonly launchFeed?: Pick<LaunchFeed, "subscribe">
   /** needs_user escalations of the act verbs (P3-T8 opens a Decision); without it needs_user is only answered. */
   readonly escalate?: Escalate
   /** The console's prompt limit, for the user's prompts on the act route. */
@@ -104,8 +102,6 @@ export interface AgentDeps {
   readonly feed?: MessageFeed
   /** Heartbeat of GET /api/agent/watch. */
   readonly heartbeatMs?: number
-  /** What GET /api/agent/watch reads per user (cluster mode); the registry when absent. */
-  readonly watchRegistry?: ReadDeps["watchRegistry"]
   /** Aborted when the hub drains: watch streams end with a `retry:` hint. */
   readonly draining?: AbortSignal
   readonly now?: () => number
@@ -133,7 +129,7 @@ export function agentRoutes(deps: AgentDeps): AgentRoute[] {
     ...(deps.directory ? directoryRoutes(deps.directory, deps.store, deps.agentEvents) : []),
     ...(deps.directory && deps.agentEvents && deps.eventCursorKeys ? eventsRoutes({ events: deps.agentEvents, keys: deps.eventCursorKeys, directory: deps.directory }) : []),
     ...(deps.directory && deps.delivery ? messageRoutes({ delivery: deps.delivery, directory: deps.directory, store: deps.store, feed, ...(deps.decisions ? { decisions: deps.decisions } : {}) }) : []),
-    ...(deps.directory && deps.registry ? readRoutes({ store: deps.store, directory: deps.directory, registry: deps.registry, ...(deps.delivery ? { feed } : {}), ...(deps.spokes ? { spokes: deps.spokes } : {}), ...launchReads(deps), ...(deps.watchRegistry ? { watchRegistry: deps.watchRegistry } : {}), ...(deps.heartbeatMs !== undefined ? { heartbeatMs: deps.heartbeatMs } : {}), ...(deps.now ? { now: deps.now } : {}), ...(deps.draining ? { draining: deps.draining } : {}) }) : []),
+    ...(deps.directory && deps.registry ? readRoutes({ store: deps.store, directory: deps.directory, registry: deps.registry, ...(deps.spokes ? { spokes: deps.spokes } : {}), ...launchReads(deps), ...(deps.agentEvents && deps.eventCursorKeys ? { events: { events: deps.agentEvents, keys: deps.eventCursorKeys, directory: deps.directory } } : {}), ...(deps.heartbeatMs !== undefined ? { heartbeatMs: deps.heartbeatMs } : {}), ...(deps.now ? { now: deps.now } : {}), ...(deps.draining ? { draining: deps.draining } : {}) }) : []),
     {
       method: "GET",
       path: `${AGENT_PREFIX}/whoami`,
@@ -152,9 +148,9 @@ export function agentRoutes(deps: AgentDeps): AgentRoute[] {
   ]
 }
 
-/** What the read routes show of launches: launched sessions' labels (the latest launch wins) and launch events. */
-function launchReads(deps: AgentDeps): Pick<ReadDeps, "labels" | "launches"> {
-  const { launches, launchFeed } = deps
+/** What the read routes show of launches: launched sessions' labels (the latest launch wins). */
+function launchReads(deps: AgentDeps): Pick<ReadDeps, "labels"> {
+  const { launches } = deps
   return {
     ...(launches
       ? {
@@ -166,7 +162,6 @@ function launchReads(deps: AgentDeps): Pick<ReadDeps, "labels" | "launches"> {
           },
         }
       : {}),
-    ...(launchFeed ? { launches: launchFeed } : {}),
   }
 }
 

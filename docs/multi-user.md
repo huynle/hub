@@ -142,8 +142,8 @@ What each actor may do:
   (`403 forbidden` for another one); send, answer and read its own messages (never to itself); no console
   routes (`403`), no token management, no messaging switch.
 - **app**: what its scopes allow: `sessions:read` (status, sessions, show, log, watch, who), `messages:send`
-  (msg, ask, reply, decline, mute, unmute, grant requests), `messages:read` (inbox, messages/:id, its own `message`
-  watch events), `sessions:act` (approve, deny, answer, prompt, stop, under a grant) and `sessions:launch` (launch,
+  (msg, ask, reply, decline, mute, unmute, grant requests), `messages:read` (inbox, messages/:id, its own `message.changed`
+  events), `sessions:act` (approve, deny, answer, prompt, stop, under a grant) and `sessions:launch` (launch,
   list and stop its own launches under a grant with verb `launch`; register its own webhooks); `whoami` always. No
   other writes, no console routes, no token management (`403`).
 - **acting**: only a session's act token (never its shell token: `403`) and app tokens with `sessions:act` act, and
@@ -216,7 +216,7 @@ Agent messages (msg, ask, reply, decline), Decisions, pending deliveries and mut
 - **Decisions** are answered only by their user (console cookie, or a device token for `confirm` Decisions; `tap`
   needs the cookie), never by a session or app token and never by the asker. The first answer wins.
 - **Scopes** for app tokens: `messages:send` (msg, ask, reply, decline, mute, unmute) and `messages:read` (inbox,
-  messages/:id, decisions, its own `message` watch events). Sessions may send and read their own messages without
+  messages/:id, decisions, its own `message.changed` events). Sessions may send and read their own messages without
   scopes. A message carries no grants: receiving one gives the recipient no new rights.
 - **Delivery** goes hub → spoke only, to connections of the recipient's user that report the session and announce
   `deliver`.
