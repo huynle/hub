@@ -16,6 +16,9 @@ import { authPage, cookieValue, deviceName, OIDC_COOKIE, OidcClient, OidcError }
 import { isNotificationKind, Push, type PushSender } from "./push"
 import { pushEndpointProblem, resolveHost as systemResolveHost, type ResolveHost } from "./push-target"
 import { Webhooks } from "./agent/webhooks"
+import { AGENT_EVENTS_AGE_MS, AGENT_EVENTS_MAX, AgentEvents, archiveEvent } from "./agent/events"
+import { EventWriters } from "./agent/event-writers"
+import { MemoryEventLog } from "./backend/memory-events"
 import { WEBHOOK_SCOPE } from "./agent/webhook-routes"
 import { hubBackends, type Backends } from "./backend"
 import { createResolver, type AgentActor, type BearerVerifier, type CredentialMode } from "./agent/actor"
@@ -138,6 +141,10 @@ export interface Central {
   readonly launchTokens: LaunchTokens
   /** Webhooks (P4-T10): registrations and the outbox sender; launch changes are published to it. */
   readonly webhooks: Webhooks
+  /** The canonical agent event journal (GET /api/agent/events, MCP events): compact events per user, 24 h / 10,000. */
+  readonly agentEvents: AgentEvents
+  /** The journal's writers (state, blockers, presence, messages, launches); settled() waits for queued appends. */
+  readonly agentEventWriters: EventWriters
   /** The JSON API's route table (method, path, access), for audits and tests. */
   readonly routes: readonly RouteInfo[]
   /**
@@ -835,6 +842,20 @@ export function startCentral(options: CentralOptions): Central {
     onDeposed: () => webhooks.stop(),
     onKick: () => void webhooks.drain().catch((cause) => console.error(`[hub] webhook delivery failed: ${(cause as Error).message}`)),
   })
+  // The canonical agent event journal (lifecycle design, Events): each change appended once across the cluster;
+  // presence by the agent-events leader, everything else where it happens (event-writers.ts).
+  const agentEvents = new AgentEvents({ log: backends.agentEvents ?? new MemoryEventLog({ now, max: AGENT_EVENTS_MAX, maxAgeMs: AGENT_EVENTS_AGE_MS }), kv: backends.kv, now })
+  const agentEventWriters = new EventWriters({
+    events: agentEvents,
+    kv: backends.kv,
+    registry,
+    machineOwner: (machineID) => store.machines().find((m) => m.id === machineID)?.ownerID,
+    users: allUsers,
+    messages: feed,
+    launches: launchFeed,
+  })
+  agentEventWriters.start()
+  leader("agent-events", { onElected: () => agentEventWriters.elected(), onDeposed: () => agentEventWriters.deposed() })
   for (const loop of leaders) void loop.start()
 
   // One credential resolver for every /api request: device cookie, device token, session and app tokens.
@@ -907,7 +928,7 @@ export function startCentral(options: CentralOptions): Central {
         },
       })
     : undefined
-  const agentDeps = { draining: drainSignal.signal, store, sessionTokens, directory, registry, spokes, delivery, decisions, feed, heartbeatMs, now, audit, grants, grantRequests, acting, actions, escalate, launches, launchFeed, webhooks, maxPromptChars: MAX_PROMPT_CHARS, ...(watchRegistry ? { watchRegistry } : {}) }
+  const agentDeps = { draining: drainSignal.signal, store, sessionTokens, directory, registry, spokes, delivery, decisions, feed, heartbeatMs, now, audit, grants, grantRequests, acting, actions, escalate, launches, launchFeed, webhooks, agentEvents, maxPromptChars: MAX_PROMPT_CHARS, ...(watchRegistry ? { watchRegistry } : {}) }
   const resolveActor = createResolver({
     cookieName: COOKIE,
     findDevice: (token) => deviceOfToken(token),
@@ -1070,9 +1091,14 @@ export function startCentral(options: CentralOptions): Central {
     // The phone's session view (hidden/pinned sessions and workspaces), per user, synced to their other devices.
     route("GET", "/api/prefs/view", "user", ({ user }) => Response.json({ prefs: store.viewPrefs(user.id) }, { headers: NO_STORE })),
     route("PUT", "/api/prefs/view", "user", async ({ request, user, device }) => {
+      const before = new Set(store.viewPrefs(user.id).hiddenSessions)
       const prefs = await store.setViewPrefs(user.id, viewPrefsInput(await request.json()))
       // The user's other devices only: never another user, and not the device that made the change.
       toUser(user.id, { type: "prefs", prefs }, device.id)
+      // Archive changes made in the console go to the agent event journal like the agent API's.
+      const after = new Set(prefs.hiddenSessions)
+      const changes = [...[...after].filter((id) => !before.has(id)).map((id) => archiveEvent(id, true)), ...[...before].filter((id) => !after.has(id)).map((id) => archiveEvent(id, false))]
+      for (const change of changes) await agentEvents.append(user.id, change).catch((cause) => console.error(`[hub] archive event failed: ${(cause as Error).message}`))
       return Response.json({ prefs }, { headers: NO_STORE })
     }),
     route("GET", "/api/reads", "user", ({ user }) => Response.json({ reads: store.reads(user.id) }, { headers: NO_STORE })),
@@ -1940,6 +1966,8 @@ export function startCentral(options: CentralOptions): Central {
     launchFeed,
     launchTokens,
     webhooks,
+    agentEvents,
+    agentEventWriters,
     routes: [...routes.map(({ method, path, access }) => ({ method, path, access })), ...agent.routes.map(({ method, path }) => ({ method, path, access: "agent" as const }))],
     drain(drainOptions: DrainOptions = {}) {
       draining ??= runDrain(drainOptions)
@@ -1950,6 +1978,7 @@ export function startCentral(options: CentralOptions): Central {
       await Promise.allSettled([...leaders.map((loop) => loop.stop()), recommendations?.stop()])
       launches.shutdown()
       webhooks.stop()
+      agentEventWriters.stop()
       tokenPush.stop()
       delivery.stop()
       decisions.stop()

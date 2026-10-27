@@ -6,6 +6,7 @@ import { FileStateStore, type FileStateStoreOptions } from "./file-state"
 import { MemoryBus } from "./memory-bus"
 import { MemoryCatalog } from "./memory-catalog"
 import { MemoryCounters, MemoryLocks } from "./memory-counters"
+import { AGENT_EVENTS_AGE_MS, AGENT_EVENTS_MAX } from "../agent/events"
 import { MemoryEventLog } from "./memory-events"
 import { MemoryKv } from "./memory-kv"
 import { MemoryStateStore } from "./memory-state"
@@ -37,6 +38,7 @@ export function memoryBackends(options: MemoryBackendsOptions = {}): Backends {
     state: new MemoryStateStore({ now }),
     bus: new MemoryBus(options.timers ? { timers: options.timers } : {}),
     events: new MemoryEventLog({ now }),
+    agentEvents: new MemoryEventLog({ now, max: AGENT_EVENTS_MAX, maxAgeMs: AGENT_EVENTS_AGE_MS }),
     counters: new MemoryCounters({ now }),
     locks: new MemoryLocks({ now }),
     catalog: new MemoryCatalog({ now }),
@@ -95,6 +97,7 @@ export function clusterBackends(options: ClusterBackendsOptions): Backends {
     state,
     bus,
     events: new ValkeyEventLog(shared, now ? { now } : {}),
+    agentEvents: new ValkeyEventLog(shared, { ...(now ? { now } : {}), max: AGENT_EVENTS_MAX, maxAgeMs: AGENT_EVENTS_AGE_MS, prefix: "hub:agent:" }),
     counters: new ValkeyCounters(shared),
     locks: new ValkeyLocks(shared, now ? { now } : {}),
     catalog: new ValkeyCatalog(shared, now ? { now } : {}),

@@ -9,6 +9,7 @@
 //   POST /api/agent/roles/release  {role, project?, session?}
 // `session` is an address (ses_…, ID prefix, @name, …) resolved for the caller; a session token defaults to
 // its own session, a user must name one.
+import { type AgentEvents, archiveEvent } from "./events"
 import path from "node:path"
 import type { CatalogMachine, RegistryMessage } from "../registry"
 import type { Store } from "../store"
@@ -127,7 +128,7 @@ function target(directory: Directory, { actor, user }: AgentContext, addr: strin
 const NO_STORE = { "cache-control": "no-store" }
 const ok = (body: unknown) => Response.json(body, { headers: NO_STORE })
 
-export function directoryRoutes(directory: Directory, store: Pick<Store, "setSessionArchived" | "audit">): AgentRoute[] {
+export function directoryRoutes(directory: Directory, store: Pick<Store, "setSessionArchived" | "audit">, events?: Pick<AgentEvents, "append">): AgentRoute[] {
   return [
     {
       method: "PUT",
@@ -143,6 +144,7 @@ export function directoryRoutes(directory: Directory, store: Pick<Store, "setSes
         if (result.changed) {
           await directory.sync(context.user.id)
           await store.audit({ actor: context.user.id, action: archived ? "session.archive" : "session.unarchive", target: sessionID, detail: context.actor.kind })
+          await events?.append(context.user.id, archiveEvent(sessionID, archived)).catch((cause) => console.error(`[hub] archive event failed: ${(cause as Error).message}`))
         }
         return ok({ sessionID, archived, changed: result.changed })
       },

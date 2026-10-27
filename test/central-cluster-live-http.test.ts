@@ -8,6 +8,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import type { BearerVerifier } from "../src/central/agent/actor"
+import { AGENT_EVENTS_AGE_MS, AGENT_EVENTS_MAX } from "../src/central/agent/events"
 import type { Launch } from "../src/central/agent/launch-store"
 import { memoryBackends, type Backends } from "../src/central/backend"
 import { PostgresStateStore } from "../src/central/backend/postgres-state"
@@ -15,6 +16,7 @@ import { ValkeyBus } from "../src/central/backend/valkey-bus"
 import { ValkeyCatalog } from "../src/central/backend/valkey-catalog"
 import { ValkeyEventLog } from "../src/central/backend/valkey-events"
 import { ValkeyKv } from "../src/central/backend/valkey-kv"
+import { ValkeyLocks } from "../src/central/backend/valkey-locks"
 import { centralConfig } from "../src/central/config"
 import { startCentral, type Central } from "../src/central/http"
 import { dockerAvailable, ItCluster, itClusterEnabled } from "./cluster-it"
@@ -58,13 +60,16 @@ if (itClusterEnabled() && (await dockerAvailable())) {
     async make() {
       const db = await it.freshDatabase()
       const valkey = await it.freshValkey()
-      const bundles: Array<{ bus: ValkeyBus; kv: ValkeyKv; catalog: ValkeyCatalog; events: ValkeyEventLog; state: PostgresStateStore }> = []
+      const bundles: Array<{ bus: ValkeyBus; kv: ValkeyKv; catalog: ValkeyCatalog; events: ValkeyEventLog; agentEvents: ValkeyEventLog; locks: ValkeyLocks; state: PostgresStateStore }> = []
       const bundle = (pod: string): Backends => {
         const parts = {
           bus: new ValkeyBus(valkey, { instanceID: `${pod}-bus` }),
           kv: new ValkeyKv(valkey),
           catalog: new ValkeyCatalog(valkey),
           events: new ValkeyEventLog(valkey),
+          agentEvents: new ValkeyEventLog(valkey, { prefix: "hub:agent:", max: AGENT_EVENTS_MAX, maxAgeMs: AGENT_EVENTS_AGE_MS }),
+          // Shared leases, as in production (clusterBackends): one leader per job across the pods.
+          locks: new ValkeyLocks(valkey),
           state: new PostgresStateStore({ url: db, migrate: true }),
         }
         bundles.push(parts)
@@ -79,6 +84,8 @@ if (itClusterEnabled() && (await dockerAvailable())) {
             x.kv.close()
             x.catalog.close()
             x.events.close()
+            x.agentEvents.close()
+            await x.locks.close()
             await x.state.close()
           }
         },
@@ -340,6 +347,29 @@ for (const variant of variants) {
       for (const stream of [onA, onB]) expect(stream.all.filter((f) => f.data?.launch?.id === "lch_1")).toHaveLength(1)
       expect(queued).toEqual(["a", "a"])
       await Promise.all([onA.cancel(), onB.cancel(), watch.cancel()])
+    })
+
+    test("agent event journal: each change is written once across pods, readable on either", async () => {
+      const { a, b, userID } = await pods(variant)
+      const from = await b.agentEvents.latest(userID)
+      const client = await spokeOn(a, userID, [{ id: "ses_1", title: "API refactor" }])
+      await waitFor(() => b.registry.hasSession("ses_1"))
+      client.send(ev("session.execution.started", { sessionID: "ses_1" }))
+      a.launchFeed.publish(userID, fakeLaunch(userID, "lch_1"))
+      const read = async () => {
+        const result = await b.agentEvents.since(userID, from)
+        if (!("records" in result)) throw new Error("journal reset")
+        return result.records.map((r) => r.event)
+      }
+      for (let i = 0; i < 300 && !(await read()).some((e) => e.type === "session.changed" && e.data.state === "working"); i++) await Bun.sleep(10)
+      // Room for any duplicate writer to show up.
+      await Bun.sleep(300)
+      const events = await read()
+      const count = (type: string, match: (e: (typeof events)[number]) => boolean = () => true) => events.filter((e) => e.type === type && match(e)).length
+      expect(count("session.added", (e) => e.subject.sessionID === "ses_1")).toBe(1)
+      expect(count("session.changed", (e) => e.data.state === "working")).toBe(1)
+      expect(count("launch.changed", (e) => e.subject.launchID === "lch_1")).toBe(1)
+      expect(new Set(events.map((e) => e.id)).size).toBe(events.length)
     })
 
     test("tenancy: another user's streams on B never get A's events of this user", async () => {
