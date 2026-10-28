@@ -10,12 +10,14 @@ import {
   HARNESS_ORDER,
   hostFingerprint,
   PACKAGE_MANAGERS,
+  rootPathIn,
   SEMVER,
   sha256Hex,
   targetOf,
   validateDiscoverySnapshot,
   type ConfigFile,
   type DiscoverySnapshot,
+  type ExecutionContext,
   type HarnessPresence,
   type PackageManager,
   type Result,
@@ -41,11 +43,11 @@ interface ConfigCandidate {
   readonly format: ConfigFile["format"]
 }
 
-/** The config files a setup plan might touch, with their owners. */
-export function configCandidates(platform: string, roots: readonly RootMapping[]): ConfigCandidate[] {
+/** The config files a setup plan might touch, with their owners, as seen from `context` (where discovery runs). */
+export function configCandidates(platform: string, roots: readonly RootMapping[], context: ExecutionContext = "host"): ConfigCandidate[] {
   const at = (id: RootID, rel: string) => {
     const r = roots.find((x) => x.id === id)
-    return r ? join(r.containerPath ?? r.path, rel) : undefined
+    return r ? join(rootPathIn(r, context), rel) : undefined
   }
   const list: (ConfigCandidate | undefined)[] = []
   const add = (id: RootID, rel: string, owner: ConfigFile["owner"], format: ConfigFile["format"]) => {
@@ -76,6 +78,8 @@ export function discover(probe: DiscoveryProbe, options: DiscoverOptions): Resul
   const libc = discoverLibc(probe)
   const target = targetOf(probe.platform, probe.arch, libc)
   const container = discoverContainer(probe)
+  // v1.1: discovery runs where apply will run; inside a container every root is read as containerPath ?? path.
+  const context: ExecutionContext = container === "none" ? "host" : "container"
   if (container !== "none") roots = mapContainerRoots(roots, parseMountinfo(decode(probe.readFile("/proc/self/mountinfo", 1024 * 1024))))
 
   const dirs = pathDirs(probe)
@@ -95,12 +99,12 @@ export function discover(probe: DiscoveryProbe, options: DiscoverOptions): Resul
     if (!path) return { id, installed: false, health: { state: "unverified", probes: [] } }
     const shim = classifyExecutable(probe, name, path)
     shims.push(shim)
-    const install = installOf(probe, id, shim, roots!)
+    const install = installOf(probe, id, shim, roots!, context)
     return { id, installed: true, path, ...(install.version ? { version: install.version } : {}), installMethod: install.installMethod, health: { state: "unverified", probes: [] } }
   })
 
   const configs: ConfigFile[] = []
-  for (const c of configCandidates(probe.platform, roots)) {
+  for (const c of configCandidates(probe.platform, roots, context)) {
     if (probe.stat(c.path) !== "file") continue
     const bytes = probe.readFile(c.path)
     if (!bytes) return fail("/configs", "invalid_value", `${c.path} exists but cannot be read; discovery will not guess its contents`)

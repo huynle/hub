@@ -4,16 +4,25 @@
 // every chosen harness, opt-in runtime checks), drops exact duplicates, refuses conflicting ones, never implies
 // escalation, puts the actions in dependency order, and replaces any config write behind a symlink with a
 // ManualEdit blocker (decision Q8). Writes that cannot become a manual edit are refused.
+//
+// v1.1: the snapshot digest is the contract's snapshotDigest; `enrollment: "separate"` (from the caller or the
+// profile) leaves enroll-machine out, so the direct and Ansible paths plan the same digest; a merge into a format
+// hubctl cannot edit losslessly (TOML) becomes an unmergeable-format ManualEdit for the file in this execution
+// context; refusals use escalation_required and no_service_manager.
 import {
   actionPaths,
   canonicalJSON,
   checkTarget,
-  digestOf,
+  enrollmentModeOf,
+  executionContextOf,
   fail,
   HARNESS_ORDER,
   manualEditFor,
   ok,
   REQUIRED_PROBES,
+  resolvePathRef,
+  snapshotDigest,
+  unmergeableEditFor,
   validateAction,
   validateDiscoverySnapshot,
   validateProfile,
@@ -22,6 +31,7 @@ import {
   type ActionKind,
   type AdapterRegistry,
   type DiscoverySnapshot,
+  type EnrollmentMode,
   type HarnessID,
   type Issue,
   type ManualEdit,
@@ -51,6 +61,11 @@ export interface PlanSources {
   readonly adapters?: AdapterRegistry
   /** Further planners (services, enrollment, launches), after the adapters. */
   readonly contributors?: readonly PlanContributor[]
+  /**
+   * v1.1: "separate" leaves enroll-machine out of the plan (the machine is enrolled by its own `hubctl machine
+   * enroll`); default: the profile's enrollment mode, else "inline". Apply must re-plan with the same option.
+   */
+  readonly enrollment?: EnrollmentMode
 }
 
 export interface PlannedSetup {
@@ -59,11 +74,8 @@ export interface PlannedSetup {
   readonly evidence: readonly PreviewEvidence[]
 }
 
-/**
- * The digest a plan and its preview token pin for the snapshot: the canonical snapshot without its capture time,
- * so rediscovering an unchanged host gives the same digest.
- */
-export const snapshotDigest = (snapshot: DiscoverySnapshot): string => digestOf({ ...snapshot, capturedAt: undefined })
+/** The contract's canonical snapshot digest (v1.1: defined once, in contracts/discovery.ts), re-exported. */
+export { snapshotDigest }
 
 /** Execution phases: each action kind runs after everything it depends on. */
 const PHASE: Readonly<Record<ActionKind, number>> = {
@@ -113,7 +125,7 @@ export function planSetup(input: { readonly snapshot: DiscoverySnapshot; readonl
   const target = checkTarget(snapshot.host.target)
   if (!target.ok || !snapshot.host.supported) return failed(issuesAt("/snapshot/host/target", target.ok ? fail("", "unsupported_platform", "unsupported host") : target))
   if (profile.services.length > 0 && snapshot.managers.service === "none")
-    return fail("/profile/services", "inconsistent", `the ${profile.id} profile installs services, but this host has no user service manager (launchd or systemd --user)`)
+    return fail("/profile/services", "no_service_manager", `the ${profile.id} profile installs services, but this host has no user service manager (launchd or systemd --user)`)
 
   // Collect: the state dir, then each chosen harness's adapter actions, then the other contributors.
   const planInput: PlanInput = { snapshot, profile }
@@ -126,6 +138,8 @@ export function planSetup(input: { readonly snapshot: DiscoverySnapshot; readonl
     groups.push(group)
   }
   for (const contribute of input.contributors ?? []) groups.push([...contribute(planInput)])
+  // v1.1: a separate enrollment is its own step; the plan never enrolls.
+  if ((input.enrollment ?? enrollmentModeOf(profile)) === "separate") for (const group of groups) group.splice(0, group.length, ...group.filter((a) => a.kind !== "enroll-machine"))
   // Every chosen harness is verified by real probes (presence is never readiness); runtimes are checked, never installed.
   const all = () => groups.flat()
   for (const [id, group] of harnessGroup) if (!all().some((a) => a.kind === "verify-harness" && a.harness === id)) group.push(verifyHarness(id))
@@ -153,7 +167,7 @@ export function planSetup(input: { readonly snapshot: DiscoverySnapshot; readonl
   const kept: Action[] = []
   for (const action of actions) {
     if (action.escalation === "elevated" && profile.escalation !== "explicit") {
-      issues.push({ path: `/actions/${action.id}`, code: "inconsistent", message: `${action.id} needs escalation, which the ${profile.id} profile never allows` })
+      issues.push({ path: `/actions/${action.id}`, code: "escalation_required", message: `${action.id} needs escalation, which the ${profile.id} profile never allows` })
       continue
     }
     const unmapped = actionPaths(action).find((ref) => !snapshot.roots.some((r) => r.id === ref.root))
@@ -162,6 +176,14 @@ export function planSetup(input: { readonly snapshot: DiscoverySnapshot; readonl
       continue
     }
     const link = "path" in action ? input.links(action.path) : undefined
+    if (!link && action.kind === "merge-config" && action.format === "toml") {
+      // v1.1: hubctl cannot edit TOML losslessly; the user gets the exact edit for the file as this hubctl sees it.
+      const where = resolvePathRef(action.path, snapshot.roots, executionContextOf(snapshot))
+      const edit = where.ok ? unmergeableEditFor(action, where.value) : undefined
+      if (edit) blockers.push(edit)
+      else issues.push({ path: `/actions/${action.id}`, code: "unmapped_root", message: `this host has no ${action.path.root} root` })
+      continue
+    }
     if (!link) {
       kept.push(action)
       continue

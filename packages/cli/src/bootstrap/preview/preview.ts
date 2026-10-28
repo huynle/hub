@@ -42,7 +42,7 @@ export interface PreviewRequest extends PlanSources {
 function discoverAndPlan(probe: DiscoveryProbe, profile: Profile, now: number, sources: PlanSources): Result<{ snapshot: DiscoverySnapshot } & PlannedSetup> {
   const snap = discover(probe, { now })
   if (!snap.ok) return snap
-  const planned = planSetup({ snapshot: snap.value, profile, links: inspectLinks(probe, snap.value), adapters: sources.adapters, contributors: sources.contributors })
+  const planned = planSetup({ snapshot: snap.value, profile, links: inspectLinks(probe, snap.value), adapters: sources.adapters, contributors: sources.contributors, enrollment: sources.enrollment })
   return planned.ok ? ok({ snapshot: snap.value, ...planned.value }) : planned
 }
 

