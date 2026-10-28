@@ -1,0 +1,82 @@
+---
+argument_specs:
+  main:
+    short_description: Bootstrap a machine into Hub through hubctl (preview, apply, verify)
+    description:
+      - Render the release, pins and profile with `hubctl setup ansible`; do not write them by hand.
+      - The role never enrolls the machine; run `hubctl machine enroll` on the host as a separate step.
+    options:
+      hub_bootstrap_vars_schema:
+        type: str
+        required: true
+        choices: [hub.ansible-vars]
+        description: Schema of the rendered vars.
+      hub_bootstrap_vars_version:
+        type: int
+        required: true
+        choices: [1]
+        description: Version of the rendered vars.
+      hub_bootstrap_release:
+        type: str
+        required: true
+        description: The hubctl release whose signed manifest pins everything below.
+      hub_bootstrap_channel:
+        type: str
+        required: true
+        choices: [stable, next]
+        description: Release channel.
+      hub_bootstrap_minimum_version:
+        type: str
+        required: true
+        description: The manifest's security floor (checked against the downloaded manifest).
+      hub_bootstrap_manifest_url:
+        type: str
+        required: true
+        description: https URL of hubctl-manifest.json for the release.
+      hub_bootstrap_artifacts:
+        type: dict
+        required: true
+        description: Per target, the hubctl download (url, file, size, sha256) pinned by the verified manifest.
+      hub_bootstrap_harness_pins:
+        type: list
+        elements: dict
+        required: true
+        description: The manifest's harness pins (harness, version, target, sha256), checked against the download.
+      hub_bootstrap_profile:
+        type: dict
+        required: true
+        description: The hub.bootstrap-profile document, passed to hubctl unchanged.
+      hub_bootstrap_profile_digest:
+        type: str
+        required: true
+        description: sha256 digest of the profile's canonical JSON.
+      hub_bootstrap_expected_plan:
+        type: raw
+        default: null
+        description: When set (planDigest, hostFingerprint, snapshotDigest, target), only that previewed plan applies.
+      hub_bootstrap_escalate:
+        type: bool
+        default: false
+        description: Pass --escalate (the plan has elevated actions and the profile allows explicit escalation).
+      hub_bootstrap_confirm_activation:
+        type: bool
+        default: false
+        description: Pass --confirm-activation (the plan activates services).
+      hub_bootstrap_allow_downgrade:
+        type: bool
+        default: false
+        description: Pass --allow-downgrade (never below the security floor).
+      hub_bootstrap_require_ready:
+        type: bool
+        default: true
+        description: Fail when `hubctl setup verify` reports a harness that is not ready.
+      hub_bootstrap_cache_dir:
+        type: str
+        description: Cache of the digest-checked hubctl and its manifest.
+      hub_bootstrap_state_dir:
+        type: str
+        description: Where the preview is kept for apply.
+      hub_bootstrap_stage_in_check_mode:
+        type: bool
+        default: true
+        description: In check mode, still download the pinned hubctl into the cache so the preview can run.

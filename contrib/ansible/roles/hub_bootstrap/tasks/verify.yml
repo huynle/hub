@@ -1,0 +1,41 @@
+---
+# Readiness comes only from real probes (`hubctl setup verify`); an install is not a ready harness. Enrollment is
+# reported, never performed: the device-code flow is a separate step a person approves on the host.
+- name: Verify the harnesses with real probes
+  ansible.builtin.command:
+    argv: "{{ [_hub_bootstrap_hubctl, 'setup', 'verify', '--profile', '-', '--json'] }}"
+    stdin: "{{ _hub_bootstrap_profile_json }}"
+  register: _hub_bootstrap_verify_run
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Check the harnesses are ready
+  ansible.builtin.assert:
+    that:
+      - _hub_bootstrap_verify_run.rc == 0
+    fail_msg: >-
+      hubctl setup verify: not ready (exit {{ _hub_bootstrap_verify_run.rc }}): {{ _hub_bootstrap_verify_run.stdout }}.
+      Provider and harness logins stay with the user on the host.
+    quiet: true
+  when:
+    - not ansible_check_mode
+    - hub_bootstrap_require_ready | bool
+
+- name: Read the machine's enrollment status
+  ansible.builtin.command:
+    argv: "{{ [_hub_bootstrap_hubctl, 'machine', 'status', '--json'] }}"
+  register: _hub_bootstrap_status_run
+  check_mode: false
+  changed_when: false
+  failed_when: false
+  when: _hub_bootstrap_staged | bool
+
+- name: Remind that enrollment is a separate step
+  ansible.builtin.debug:
+    msg: >-
+      This machine is not enrolled. Enroll it on the host yourself (device code):
+      `hubctl machine enroll`.
+  when:
+    - _hub_bootstrap_staged | bool
+    - _hub_bootstrap_status_run.rc != 0 or (_hub_bootstrap_status_run.stdout | from_json).data.state | default('unconfigured') in ['unconfigured', 'revoked']

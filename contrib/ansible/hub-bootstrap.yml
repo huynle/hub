@@ -1,0 +1,10 @@
+---
+# Example: bootstrap the hosts in the `hub_machines` group with the vars `hubctl setup ansible` rendered.
+#   ansible-playbook -i inventory hub-bootstrap.yml -e @hub-bootstrap-vars.yml --check --diff   # preview only
+#   ansible-playbook -i inventory hub-bootstrap.yml -e @hub-bootstrap-vars.yml                  # apply + verify
+- name: Bootstrap Hub with hubctl
+  hosts: "{{ hub_bootstrap_hosts | default('hub_machines') }}"
+  gather_facts: true
+  become: false
+  roles:
+    - role: hub_bootstrap

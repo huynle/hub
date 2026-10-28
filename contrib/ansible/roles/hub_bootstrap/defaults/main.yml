@@ -1,0 +1,24 @@
+---
+# Defaults for hub_bootstrap. The release, artifact pins, harness pins and profile have no defaults: render them
+# with `hubctl setup ansible` (see README.md) and pass the file with `-e @hub-bootstrap-vars.yml`.
+
+# Bound the play to one previewed plan (set by the renderer when it is given a plan; null = any plan for the profile).
+hub_bootstrap_expected_plan: null
+
+# Explicit consent, passed to `hubctl setup apply` as --escalate / --confirm-activation / --allow-downgrade.
+# Never on by default.
+hub_bootstrap_escalate: false
+hub_bootstrap_confirm_activation: false
+hub_bootstrap_allow_downgrade: false
+
+# Fail the play when `hubctl setup verify` reports a harness or provider that is not ready.
+hub_bootstrap_require_ready: true
+
+# Where the digest-checked hubctl and its signed manifest are cached, and where the preview is kept for apply.
+hub_bootstrap_cache_dir: "{{ ansible_facts['user_dir'] }}/.cache/hub/bootstrap"
+hub_bootstrap_state_dir: "{{ ansible_facts['user_dir'] }}/.local/state/hub/ansible"
+
+# Check mode needs a hubctl to preview with. When true (the default), check mode still downloads the pinned hubctl
+# and its manifest into hub_bootstrap_cache_dir (content-checked, not on PATH); nothing else is written. When false,
+# check mode skips the preview on hosts without a cached hubctl.
+hub_bootstrap_stage_in_check_mode: true

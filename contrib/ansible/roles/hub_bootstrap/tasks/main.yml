@@ -1,0 +1,26 @@
+---
+# hub_bootstrap: stage the pinned hubctl, then let hubctl preview, apply and verify. The role has no installer,
+# service or config logic of its own; those are typed plan actions hubctl applies (and journals) itself.
+- name: Check the rendered vars and the host's target
+  ansible.builtin.assert:
+    that:
+      - hub_bootstrap_vars_schema == 'hub.ansible-vars'
+      - hub_bootstrap_vars_version | int == 1
+      - _hub_bootstrap_target in hub_bootstrap_artifacts
+      - hub_bootstrap_expected_plan is none or hub_bootstrap_expected_plan.target == _hub_bootstrap_target
+    fail_msg: >-
+      No pinned hubctl for {{ _hub_bootstrap_target }} in release {{ hub_bootstrap_release }}, or the vars were
+      rendered from a plan for another target. Render the vars again with `hubctl setup ansible`.
+    quiet: true
+
+- name: Stage the signed hubctl
+  ansible.builtin.import_tasks: stage.yml
+
+- name: Preview the plan
+  ansible.builtin.import_tasks: preview.yml
+
+- name: Apply the previewed plan
+  ansible.builtin.import_tasks: apply.yml
+
+- name: Verify the harnesses
+  ansible.builtin.import_tasks: verify.yml
