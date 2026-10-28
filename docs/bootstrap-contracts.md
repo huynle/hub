@@ -106,7 +106,10 @@ rediscovering an unchanged host gives the same digest. It is the only digest pla
 revalidation and the Ansible vars pin for a snapshot (§3.4).
 
 Discovery reports a harness reached through `data:hub/harnesses/<harness>/current` (§3.6.1) as
-`installMethod: "hub"`, with the version of the directory the link resolves to (v1.1).
+`installMethod: "hub"`, with the version of the directory the link resolves to (v1.1). It also finds such a harness
+when it is not on PATH (`current/bin/opencode`, `current/claude`, `current/bin/codex`; PATH still wins), so a
+preview after an install plans no second install (HBS-13). hub's own `config:hub/claude-code.json` is a config
+candidate, so the Claude Code adapter's merge is pinned to the discovered digest.
 
 Harness entries keep **presence apart from health**. `installed: true` means the harness was found. Its
 `health.state` stays `unverified` until probes run. `verified` requires at least one passing non-`presence` probe
@@ -265,7 +268,7 @@ hubctl (`unsupported_version`).
   |---|---|---|
   | OpenCode | sha256 pinned in hub's signed manifest | none |
   | Claude Code | sha256 pinned in hub's signed manifest | upstream GPG-signed `manifest.json` (`gpg-manifest`), macOS notarization (`macos-notarization`); no hard `gpg` dependency |
-  | Codex | sha256 pinned in hub's signed manifest | sigstore bundle where upstream publishes one (`sigstore`) |
+  | Codex | sha256 pinned in hub's signed manifest | sigstore bundle where upstream publishes one (`sigstore`); macOS notarization (`macos-notarization`, allowed since HBS-13; the Codex source does not check it yet, so pins must not list it) |
 - `decideHarnessInstall(pin, {installed, floor, allowDowngrade})` applies the same downgrade policy as hubctl,
   with the pin's `minimumVersion` as the harness floor.
 - Rollback (v1.1 layout): each version is installed once into its own immutable directory
@@ -354,7 +357,8 @@ and observed within the last 15 minutes. `presence` never counts. Adapters must 
 
 With `--json`, stdout carries exactly one `hub.bootstrap.result` envelope:
 `{command, ok, data?, error?: {code, message, hint?}, warnings?}`. `ok: true` has no error; `ok: false` always has
-one. The validator rejects any envelope containing a secret.
+one. The validator rejects any envelope containing a secret. Since HBS-13 the one exception is `/data/token` when
+`data` is a `hub.setup-preview` (the preview token is not a credential, §3.4); its values are still scanned.
 
 Exit codes 0–9 are the CLI's existing codes (`http.ts` `EXIT`), unchanged. The bootstrap adds:
 
@@ -552,41 +556,88 @@ and the GitHub releases API. The release process that writes the pins (I5) re-ch
 Note: `scripts/test-ci.sh` runs `packages/*/test/*.test.ts` (one directory level). Dependent tests belong in
 `packages/cli/test/*.test.ts` and import from `./bootstrap/fixtures`.
 
-## 7. Integration requirements (HBS-13)
+## 7. Integration (HBS-13)
 
-This task does not edit these files. These are the edits needed to wire the contracts in.
+The integration requirements I1–I4 and I7 (the CLI, node.ts and spoke-services.ts, main.ts, the credential store,
+the v1.1 wiring) are done by HBS-13; I5 and I6 (the release) by the release module. This section records what the
+integration is and what is still open.
 
-- **I1 `packages/cli/src/cli.ts`**
-  - Add the `machine` group (`enroll`, `status`) and the `setup` group (`discover`, `preview`, `apply`,
-    `recover`, `ansible`).
-  - Print `ResultEnvelope` under `--json`, and map failures through `exitFor`.
-  - Keep `EXIT` 0–9 untouched (`BOOTSTRAP_EXIT` extends it).
-  - Change the `readinessProblems` hint in node.ts from "enrol it with the OpenCode plugin's /hub dialog" to
-    `hubctl machine enroll`.
-  - Add `--escalate`, `--confirm-activation` and `--allow-downgrade` as explicit flags. They are never defaults.
-  - `setup preview --json` prints the `SetupPreview`. Blockers are rendered for people as the exact edit and the
-    file it belongs in (`resolvedPath`).
-- **I2 `packages/cli/src/node.ts` and `spoke-services.ts`**
-  - Replace `templateDir()` file reads with `EMBEDDED_ASSETS` (embed with Bun `import … with { type: "text" }`, or
-    a generated module like `scripts/gen-web-entry.ts`). Today a standalone binary cannot find `scripts/`.
-  - Replace `Program {execPath, entry}` and the `__RUNTIME__ __ENTRY__` placeholders with `ProgramLayout` +
-    `serviceArgv`:
-    - The plist renders one `<string>` per argv word.
-    - The systemd unit renders `ExecStart=` from the words, using the existing `sd()` quoting.
-  - `currentProgram()` becomes `programLayout({execPath: process.execPath, entry: realpath(argv[1])})`.
-  - The templates in `scripts/*.plist` / `*.service` need an argv placeholder (e.g. `__ARGV__`) instead of
-    `__RUNTIME__ __ENTRY__`.
-- **I3 `packages/cli/src/main.ts`**
-  - Add `machine enroll` (it polls until approved) to the commands that handle SIGINT/SIGTERM, so Ctrl-C cancels
-    the device-code poll cleanly.
-  - `delete process.env.BUN_BE_BUN` stays.
-  - Standalone builds compile `main.ts` directly: `bun build --compile packages/cli/src/main.ts`.
-- **I4 `src/config.ts`**
-  - `normalize()` drops unknown keys, so `writeConfig(readConfig(...))` is lossy.
-  - The `CredentialStore` implementation must merge into the raw JSON object (read raw, set
-    `machineID`/`token`/`server`, write atomically with 0600) and preserve every other key. Alternatively, change
-    `normalize`/`writeConfig` to carry unknown keys through.
-  - `withServer` already drops credentials on a server change. Keep that rule: a credential belongs to its server.
+### 7.1 The command surface
+
+`packages/cli/src/setup/` composes the modules; `cli.ts` registers the `machine` and `setup` groups.
+
+| File | Role |
+|---|---|
+| `commands.ts` | `machine enroll|status`, `setup discover|preview|apply|verify|drift|rollback|recover|ansible`: flags, the envelope (`--json`), text output, `exitFor`. |
+| `runtime.ts` | The composition root: the adapter registry, the contributors and the executors, built once per command from the same profile and choices, so preview and apply plan the same digest. |
+| `contributors.ts` | `hubctlContributor` (install-artifact `user-bin:hubctl` + link `user-bin:hub`, from a verified manifest), `enrollmentContributor` (inline enrollment), `refusing` (a Result refusal becomes a typed `PlanRefusal`). |
+| `dispatch.ts` | `dispatchByHarness` and `dispatchHarnessSource` (amendment A2): one executor per kind, routed by `action.harness`; an unregistered harness is refused at preflight. |
+| `spoke-probe.ts` | `spoke-connected` for all three adapters: `GET /spoke/presence` with the machine credential (§7.3). |
+| `state.ts` | The setup request file, `state:hub/bootstrap/state.json` and the requests by plan digest (§7.4). |
+| `launch-driver.ts` | The `LaunchDriver` of the verification launch, over the existing hub launch API (the user's `hub login`). |
+
+- **Preview and apply.** `setup preview --out <file>` writes a `hub.setup-request` (mode 0600): the
+  `SetupPreview` plus the profile and choices apply must re-plan with (`--enrollment`, `--confirm-activation`,
+  `--allow-downgrade`, `--workspace-root`, `--verify-launch`, `--server`/`--name`). `setup apply --preview <file>`
+  rediscovers and re-plans with them inside the engine's `replan` hook (`revalidateApply`), and the engine applies
+  that fresh plan. Consent is given again at apply (`--escalate`, `--confirm-activation`, `--allow-downgrade`); the
+  Ansible role's argv (`directCommands`) is unchanged.
+- **Refusals.** Adapters and contributors that throw a contract refusal (`OpencodePlanError`, `PlanRefusal`) become
+  envelope errors with their code (amendment A1 is met at the composition layer; `planSetup` is unchanged). A planner
+  issue code that is not an `ErrorCode` maps to `invalid` (exit 2).
+- **Profiles.** `--profile` takes a catalog id, a file or `-`; documents are read with `loadProfile` (version 1
+  migrates to 2). Without `--profile`, `verify`/`drift`/`preview` use the applied profile, else `session-only`. A
+  profile that drops services plans their typed removal (`planProfileChange`, needs `--allow-downgrade`).
+- **Services.** The node-services planner runs as a contributor with the service layout: the standalone
+  `user-bin:hubctl` when the plan installs it, else this process (`programLayout`). Units are rendered by
+  `renderServiceUnit` for both `setup` and `hub node|claude-code|codex-spoke install` (I2; no template is read from
+  `scripts/` at run time). The `ServiceControl` is `createServiceControl` over `spawnManagerRunner`; the
+  planner's notes (activation, linger) are printed as warnings.
+- **Enrollment.** `machine enroll` (`credentialStoreFor(env, home, {migrate: true})`, prompts on stderr) and
+  `machine status` (revoked → 9, offline → 7, `insecure` reported with its warning). Inline enrollment is an
+  `enroll-machine` step (class credential, `config:hub/config.json`; refused when `HUB_SPOKE_CONFIG` points
+  elsewhere), whose undo clears the credential. main.ts aborts `machine enroll`, `setup apply` and `setup recover` on
+  SIGINT/SIGTERM (I3).
+- **Executable.** Standalone builds compile `main.ts`, which reaches `release/trust-root.ts` through `commands.ts`
+  (a test builds main.ts with a marker define and finds it). The `hub`/`hubctl` launchers exec `~/.local/bin/hubctl`
+  when it exists (OpenCode README: authority).
+- **Harness binaries.** Claude Code: `HUB_CLAUDE_BIN` > `binary` in `claude-code.json` (next to config.json, so it
+  follows `HUB_SPOKE_CONFIG`) > PATH, for the daemon, `hub claude` and the node (`claudeBinary`). Codex:
+  `HUB_CODEX_BIN` > `data/hub/harnesses/codex/current/bin/codex` > PATH (`codexBinary`), for `hub codex` (which
+  passes `HUB_CODEX_BIN` on to the spoke it starts), the spoke and its unit. `CODEX_APP_SERVER_ARGS` is shared by
+  the spoke and the adapter's probe launcher.
+
+### 7.2 Engine additions
+
+- `ApplierConfig.keepBackups`: a committed transaction keeps its backups (the CLI sets it), and
+  `Applier.rollback({to?})` undoes committed transactions newest first with the recovery rules. Without kept
+  backups a restore is a conflict, never a guess.
+- `planSetup` no longer treats the final symlink of `link-executable` / `select-harness-version` as written through
+  (they replace it atomically); a symlinked directory above them is still refused.
+
+### 7.3 Spoke presence (central)
+
+`GET /spoke/presence`, machine token only (a launch-bound, unknown or revoked token is 401): `{machineID, spokes:
+[{harness, evidence, features}]}` for the caller's own machine, nothing about sessions, directories, pids or other
+machines. It is read-only and the only central change; no exec channel. OpenCode is connected when an `opencode` spoke
+is; Claude Code when a `claude-code` spoke is, and conformant when it reports `hooks` evidence; Codex when a `codex`
+spoke is. In cluster mode it answers from the pod's registry catalog, like `GET /api/machines`.
+
+### 7.4 What persists
+
+- The engine's journals (`state:hub/bootstrap/journal/<tx>.json`) and plans (`<tx>.plan.json`, pinned by
+  `planDigest`) are the applied plans and the used-nonce record.
+- `state:hub/bootstrap/state.json` (`hub.bootstrap-state`): the applied profile, choices and catalog revision, the
+  last transaction and plan digest, and the security floors (hubctl's `minimumVersion`, each harness pin's
+  `minimumVersion` for this target), which only rise and feed the downgrade policy.
+- `state:hub/bootstrap/requests/<hex>.json`: the request each applied plan was made from (resume and rollback
+  re-plan with it).
+- The drift `Observation` is read fresh by `setup drift` from the files the desired plan manages (never persisted:
+  it must describe the files now). A field the adapters no longer plan because it is converged is taken from the
+  applied plan, so it reads as in sync, not retired.
+
+### 7.5 Release (I5, I6; built by the release module, `packages/cli/src/bootstrap/release/README.md`)
+
 - **I5 release (`scripts/build-binaries.sh`, `.github/workflows/release.yml`)**
   - These currently build the central **server** (`.build/hub.ts`) as `hub-<target>`, including `windows-x64`.
   - Add a separate hubctl build: `bun build --compile --target=<SUPPORTED_TARGETS[].bunTarget>
@@ -596,19 +647,29 @@ This task does not edit these files. These are the edits needed to wire the cont
   - Sign it with a detached ed25519 signature, from the single release key held as a GitHub Actions secret (e.g.
     `HUB_RELEASE_SIGNING_KEY`) and readable only by the release job (decision Q5). Never commit a key.
   - Smoke test `hubctl --version` and `hubctl machine status --json` on linux-x64.
-- **I7 v1.1 wiring (HBS-13)**
-  - `createApplier({context})`: pass `executionContextOf(snapshot)` from the discovery that produced the plan, and the
-    `snapshot` in each `FreshPlan` (apply then checks `snapshotDigest`).
-  - `builtinExecutors({services})`: supply a typed `ServiceControl` (`deactivate`/`activate` for launchd /
-    systemd --user). Without it, `deactivate-service` is refused at preflight.
-  - `setup preview`/`apply`: add `--enrollment inline|separate` (default: the profile's, else inline) and pass the
-    same value to `previewSetup` and `revalidateApply`.
-  - Map the new error codes through `exitFor`; render `insecure` status warnings; render `unmergeable-format`
-    blockers (no link, the file itself).
-  - Read profiles with `migrateProfile`/`loadProfile` (version 1 documents migrate to 2).
 - **I6 shipped trust root**
   - hubctl embeds the `TrustRoot` (public keys only) at build time: v1 has one active key, threshold 1. Rotation
     documents are published next to releases and accepted through `rotateTrustRoot`.
+
+
+### 7.6 Open items and known limits
+
+- **A3:** a JSON/JSONC config that does not parse is still a bare `manual_edit_required` refusal (exit 10) from the
+  OpenCode adapter, not a structured `unmergeable-format` edit; the message names the file.
+- **A5:** `previous` of `install-harness` / `select-harness-version` comes from the history only when hub installed
+  the earlier version; discovery does not record a tree digest.
+- **A6:** nothing puts a hub-installed OpenCode on PATH; services and launches use absolute paths.
+- **Activation priors** are kept in memory: after a crash, recovery unloads a service even if it was loaded before
+  the apply (no persistence without consent); a rolled-back unit file is restored but the running service is not
+  reloaded. A dedicated `service_failed` code and journaling a root directory apply creates are not done (a root
+  is not expressible as a `PathRef`).
+- **Codex notarization** is allowed as evidence but not checked by the Codex source.
+- A Codex or Claude Code on PATH wins over the hub-installed one at discovery, so a unit planned before and after an
+  install can differ (a second apply then rewrites it).
+- The verification launch uses `checkout` mode in the first workspace root, which must be a git repository, and
+  needs `hub login` with an app token allowed to launch.
+- The release key, its trust root (`trust-root.json`) and the reviewed pin list (`harness-pins.json`) are not set up
+  yet (§7.5): until they are, no build can verify a release manifest.
 
 ## 8. Decisions (resolved 2026-10-28) and open items
 
@@ -639,6 +700,7 @@ Open items carried to later tasks:
 - HBS-06: the OpenCode 2.x upstream source.
 - The Claude Code adapter's choice of OpenPGP verifier when one is available.
 - The release job's harness pin list and its review process (I5).
+- The integration's own open items and known limits: §7.6.
 
 Resolved by amendment v1.1 (review findings on the merged modules, §9): the duplicated snapshot digest, container
 path resolution, enrollment in Ansible-comparable plans, imprecise planner and enrollment codes, an existing

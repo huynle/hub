@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **hubctl bootstrap**: `hubctl machine enroll|status` and `hubctl setup discover|preview|apply|verify|drift|
+  rollback|recover|ansible` (also as `hub …`; the program name grants nothing). A standalone hubctl enrolls the
+  machine with the device code, previews a deterministic typed plan (writes nothing; `--out` keeps it for apply),
+  and applies exactly that plan after rediscovering and re-planning: pinned OpenCode, Claude Code and Codex installs
+  from the signed release manifest (`--manifest`), lossless config edits, hub's user services (loaded only with
+  `--confirm-activation`), an optional bounded verification launch (`--verify-launch`), all journaled and undone
+  with `setup rollback`. Readiness comes from real probes (`setup verify`, exit 15 when not ready). `--json` prints
+  one `hub.bootstrap.result` envelope; exits 10–15 are new (docs/bootstrap-contracts.md §3.11).
+- **Hub API**: `GET /spoke/presence` (machine token only, read-only) lists which harness spokes of the caller's own
+  machine are connected (harness, evidence, features), for `hubctl setup verify`.
+- `hub node install`, `hub claude-code install` and `hub codex-spoke install` render their units from templates
+  embedded in the program (so a standalone hubctl can install them); a standalone hubctl's units start the binary
+  itself. The hints for an unenrolled machine now say `hubctl machine enroll`.
+- The `hub`/`hubctl` launchers run `~/.local/bin/hubctl` when it is installed. `hub claude`, the Claude Code daemon
+  and the node run the Claude Code `hubctl setup` installed (HUB_CLAUDE_BIN, else hub's `claude-code.json`
+  `binary`, else PATH); `hub codex`, the Codex spoke and its unit the hub-installed Codex (HUB_CODEX_BIN, else
+  `~/.local/share/hub/harnesses/codex/current/bin/codex`, else PATH). The node's host runtime now offers `codex`
+  when the Codex CLI is found.
+
 - **Archive through MCP**: `archive` and `unarchive` (and the narrow agent API
   `PUT /api/agent/sessions/:addr/archive`) change the Hub's archived state without deleting a harness session.
   App tokens use the new explicit `sessions:manage` scope, selectable in Settings → Agents. Existing tokens do
