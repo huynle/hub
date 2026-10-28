@@ -4,8 +4,8 @@
 // process from ephemeral keys, so no key, certificate or digest of a real release is committed.
 import { createHash, generateKeyPairSync, sign, type KeyObject } from "node:crypto"
 import { gzipSync } from "node:zlib"
-import { manifestPayload, verifyManifest, type ArtifactManifest, type HarnessPin, type VerifiedManifest } from "../../src/bootstrap/contracts/index.ts"
-import { MANIFEST_UNSIGNED, MINUTE, T0, TRUST_ROOT_TEMPLATE } from "./fixtures.ts"
+import { manifestPayload, verifyManifest, type ArtifactManifest, type DiscoverySnapshot, type HarnessPin, type Profile, type VerifiedManifest } from "../../src/bootstrap/contracts/index.ts"
+import { DIGEST, MANIFEST_UNSIGNED, MINUTE, PROFILE_SESSION_ONLY, T0, TRUST_ROOT_TEMPLATE } from "./fixtures.ts"
 
 // ---------- tar archives ----------
 
@@ -323,3 +323,40 @@ export function fakeDownloads(files: Record<string, Uint8Array | "error">) {
     },
   }
 }
+
+// ---------- discovery and profiles for Codex plans ----------
+
+/** A Linux host (no container) where Codex is not installed yet and ~/.codex/config.toml exists. */
+export const CODEX_DISCOVERY_LINUX: DiscoverySnapshot = {
+  schema: "hub.discovery-snapshot",
+  version: 1,
+  capturedAt: T0,
+  host: { fingerprint: DIGEST.e, platform: "linux", arch: "x64", libc: "glibc", target: "linux-x64", supported: true, os: { name: "Ubuntu", version: "24.04" } },
+  topology: { container: "none", shims: [] },
+  managers: { package: ["apt"], runtime: [], service: "systemd-user" },
+  harnesses: [
+    { id: "opencode", installed: false, health: { state: "unverified", probes: [] } },
+    { id: "claude-code", installed: false, health: { state: "unverified", probes: [] } },
+    { id: "codex", installed: false, health: { state: "unverified", probes: [] } },
+  ],
+  runtimes: [],
+  configs: [{ path: "/home/dev/.codex/config.toml", owner: "harness:codex", format: "toml", sha256: DIGEST.c }],
+  roots: [
+    { id: "home", path: "/home/dev" },
+    { id: "config", path: "/home/dev/.config" },
+    { id: "state", path: "/home/dev/.local/state" },
+    { id: "data", path: "/home/dev/.local/share" },
+    { id: "user-bin", path: "/home/dev/.local/bin" },
+    { id: "systemd-user", path: "/home/dev/.config/systemd/user" },
+  ],
+}
+
+/** The same host with Codex already installed by hub at `version` (reached through data:hub/harnesses/codex/current). */
+export const codexDiscoveredAt = (version: string, base: DiscoverySnapshot = CODEX_DISCOVERY_LINUX): DiscoverySnapshot => ({
+  ...base,
+  harnesses: base.harnesses.map((h) =>
+    h.id === "codex" ? { id: "codex", installed: true, path: "/home/dev/.local/share/hub/harnesses/codex/current/bin/codex", version, installMethod: "hub", health: { state: "unverified", probes: [] } } : h,
+  ),
+})
+
+export const PROFILE_CODEX: Profile = { ...PROFILE_SESSION_ONLY, harnesses: ["codex"] }
