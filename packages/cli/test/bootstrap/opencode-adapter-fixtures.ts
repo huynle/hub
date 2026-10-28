@@ -157,3 +157,34 @@ export function zip(entries: readonly ArchiveEntry[], options: { store?: boolean
 
 /** Stand-in for the OpenCode binary (not a real executable). */
 export const FAKE_BINARY = "\u007fELF fake opencode 2.2.0"
+
+// ---------- a hub manifest pinning fake OpenCode archives, signed with an ephemeral key ----------
+
+import { createHash, generateKeyPairSync, sign } from "node:crypto"
+import { manifestPayload, verifyManifest, type ArtifactManifest, type HarnessPin, type VerifiedManifest } from "../../src/bootstrap/contracts/index.ts"
+import { MANIFEST_UNSIGNED, TRUST_ROOT_TEMPLATE } from "./fixtures.ts"
+
+export const sha256Of = (b: Uint8Array | string) => `sha256:${createHash("sha256").update(b).digest("hex")}`
+
+/** The pinned OpenCode version of these tests. */
+export const PINNED = "2.2.0"
+export const ARCHIVES = {
+  "darwin-arm64": { file: "opencode-darwin-arm64.zip", bytes: zip([{ name: "opencode", content: FAKE_BINARY }]) },
+  "linux-x64": { file: "opencode-linux-x64.tar.gz", bytes: tarGz([{ name: "opencode", content: FAKE_BINARY }]) },
+} as const
+
+export function opencodePin(target: keyof typeof ARCHIVES, version = PINNED): HarnessPin {
+  const a = ARCHIVES[target]
+  return { harness: "opencode", version, target, url: `https://github.com/anomalyco/opencode/releases/download/v${version}/${a.file}`, file: a.file, size: a.bytes.byteLength, sha256: sha256Of(a.bytes), evidence: [] }
+}
+
+/** A verified hub 0.8.0 manifest whose OpenCode pins are `pins` (the other harnesses' pins kept). */
+export function signedManifest(pins: readonly HarnessPin[] = [opencodePin("darwin-arm64"), opencodePin("linux-x64")]): VerifiedManifest {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519")
+  const body: Omit<ArtifactManifest, "signatures"> = { ...MANIFEST_UNSIGNED, harnesses: [...MANIFEST_UNSIGNED.harnesses.filter((h) => h.harness !== "opencode"), ...pins] }
+  const manifest: ArtifactManifest = { ...body, signatures: [{ keyID: "hub-release-1", algorithm: "ed25519", value: sign(null, Buffer.from(manifestPayload(body)), privateKey).toString("base64") }] }
+  const root = { ...TRUST_ROOT_TEMPLATE, keys: [{ ...TRUST_ROOT_TEMPLATE.keys[0]!, publicKey: publicKey.export({ format: "der", type: "spki" }).toString("base64") }] }
+  const verified = verifyManifest(manifest, root)
+  if (!verified.ok) throw new Error(JSON.stringify(verified.issues))
+  return verified.value
+}

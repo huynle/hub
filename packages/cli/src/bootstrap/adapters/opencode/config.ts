@@ -43,7 +43,14 @@ export type PluginState =
 
 export type McpState = { readonly state: "absent" } | { readonly state: "registered" } | { readonly state: "stale"; readonly found: string }
 
-export type FindingCode = "plugin-unpinned" | "plugin-custom-source" | "plugin-legacy-name" | "plugin-drift" | "mcp-stale-authority"
+export type FindingCode =
+  | "plugin-unpinned"
+  | "plugin-custom-source"
+  | "plugin-legacy-name"
+  | "plugin-drift"
+  | "mcp-stale-authority"
+  | "harness-user-installed"
+  | "harness-newer-than-pin"
 
 /** Something worth telling the user that needs no refusal (secret-free: specs, versions and paths only). */
 export interface Finding {
