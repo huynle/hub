@@ -72,8 +72,9 @@ describe("renderRoleVars from a profile", () => {
     const { vars } = rendered()
     expect(vars.hub_bootstrap_vars_schema).toBe(ANSIBLE_VARS_SCHEMA)
     expect(vars.hub_bootstrap_vars_version).toBe(1)
-    expect(vars.hub_bootstrap_profile).toEqual(F.PROFILE_LAUNCH_NODE)
-    expect(vars.hub_bootstrap_profile_digest).toBe(digestOf(F.PROFILE_LAUNCH_NODE))
+    // v1.1: the role always plans with a separate enrollment.
+    expect(vars.hub_bootstrap_profile).toEqual({ ...F.PROFILE_LAUNCH_NODE, enrollment: "separate" })
+    expect(vars.hub_bootstrap_profile_digest).toBe(digestOf({ ...F.PROFILE_LAUNCH_NODE, enrollment: "separate" }))
     expect(vars.hub_bootstrap_expected_plan).toBeNull()
   })
 
@@ -186,7 +187,7 @@ describe("direct and rendered paths have the same plan semantics", () => {
     const back = (Bun.YAML.parse(yaml) as RoleVars).hub_bootstrap_profile
     const checked = validateProfile(back)
     expect(checked.ok).toBe(true)
-    expect(digestOf(back)).toBe(digestOf(F.PROFILE_LAUNCH_NODE))
+    expect(digestOf(back)).toBe(digestOf({ ...F.PROFILE_LAUNCH_NODE, enrollment: "separate" }))
   })
 
   test("the role's commands are the direct commands, with consent only as asked", () => {

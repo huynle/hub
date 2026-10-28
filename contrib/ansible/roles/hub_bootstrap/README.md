@@ -16,7 +16,9 @@ wrapper around it. The role reimplements nothing:
 
 **Enrollment is a separate, explicit step.** The role never enrolls a machine. It refuses a plan that contains
 `enroll-machine`, and only reports `hubctl machine status`. Enroll the machine on the host yourself with
-`hubctl machine enroll`; that is the device-code flow, which a person approves.
+`hubctl machine enroll`; that is the device-code flow, which a person approves. Since contract v1.1 the rendered
+profile says `enrollment: "separate"`, so hubctl plans without `enroll-machine` on the host and the plan digest is
+the one the direct path gets with the same profile (or `--enrollment separate`).
 
 The vars carry **no secrets** and never will. They hold the profile, release pins and consent flags only. The
 renderer scans its output and refuses anything credential-shaped. The machine credential only ever lives in
@@ -93,7 +95,7 @@ hubctl setup apply --preview <file> --manifest <file> [--escalate] [--confirm-ac
 hubctl setup verify --profile <file|-> --json
     Runs the real probes for the profile's harnesses. Exit 0 when ready, 15 (harness_not_ready) otherwise.
 hubctl machine status --json
-    Envelope data: EnrollmentStatus (state unconfigured | configured | verified | revoked | offline).
+    Envelope data: EnrollmentStatus (state unconfigured | configured | verified | revoked | offline | insecure).
 hubctl setup ansible --profile <file> [--plan <file>] --release-url <https-url> [--escalate]
     [--confirm-activation] [--allow-downgrade] [--no-require-ready]
     Verifies the release manifest, then prints renderYAML(renderRoleVars(...)). Errors use the envelope codes.

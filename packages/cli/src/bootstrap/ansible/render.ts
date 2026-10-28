@@ -11,6 +11,10 @@
 // Never a credential: inputs are validated, and the rendered vars are scanned (findSecrets) and refused, not
 // redacted, if anything credential-shaped got through. Enrollment is never part of the vars or the role: a plan that
 // enrolls is refused, because the device-code flow is a separate step a person approves.
+//
+// v1.1: the rendered profile always says `enrollment: "separate"`, so hubctl plans without enroll-machine on the
+// host and the role's plan digest equals the direct path's (`--enrollment separate`, or the same profile). A plan
+// rendered together with its snapshot is checked against the contract's one canonical snapshotDigest.
 import {
   canonicalJSON,
   checkHarnessPin,
@@ -19,6 +23,8 @@ import {
   migrateProfile,
   planDigest,
   selectArtifact,
+  snapshotDigest,
+  validateDiscoverySnapshot,
   validateSetupPlan,
   type ErrorCode,
   type Issue,
@@ -54,6 +60,8 @@ export interface RenderInput {
   readonly profile: unknown
   /** The plan `hubctl setup preview` showed for one host, to pin the role to it. */
   readonly plan?: unknown
+  /** v1.1: the discovery snapshot that plan was made from, to check the plan against it (canonical snapshotDigest). */
+  readonly snapshot?: unknown
   readonly manifest: VerifiedManifest
   readonly options: RenderOptions
 }
@@ -174,7 +182,8 @@ export function renderRoleVars(input: RenderInput): RenderResult {
   if (!base) return refuse("usage", "the release URL must be https, without credentials, query or fragment", "/options/releaseBaseURL")
   const migrated = migrateProfile(input.profile)
   if (!migrated.ok) return refuse("invalid", `invalid profile: ${describeIssues(migrated.issues)}`, "/profile")
-  const profile = JSON.parse(canonicalJSON(migrated.value)) as Profile
+  // The role never enrolls: hubctl on the host plans with a separate enrollment.
+  const profile = JSON.parse(canonicalJSON({ ...migrated.value, enrollment: "separate" })) as Profile
   if (options.escalate && profile.escalation !== "explicit") return refuse("usage", "the profile never escalates; escalate cannot be passed", "/options/escalate")
 
   let expected: ExpectedPlan | null = null
@@ -184,6 +193,11 @@ export function renderRoleVars(input: RenderInput): RenderResult {
     const plan = checked.value
     const problem = checkPlan(plan, profile, manifest, options)
     if (problem) return problem
+    if (input.snapshot !== undefined) {
+      const snap = validateDiscoverySnapshot(input.snapshot)
+      if (!snap.ok) return refuse("invalid", `invalid snapshot: ${describeIssues(snap.issues)}`, "/snapshot")
+      if (snapshotDigest(snap.value) !== plan.snapshotDigest) return refuse("preview_stale", "the plan was not made from this snapshot; preview again", "/plan/snapshotDigest")
+    }
     expected = { planDigest: planDigest(plan), hostFingerprint: plan.hostFingerprint, snapshotDigest: plan.snapshotDigest, target: plan.target }
   }
 
