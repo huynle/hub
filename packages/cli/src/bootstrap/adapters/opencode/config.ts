@@ -62,7 +62,7 @@ const isObject = (v: unknown): v is { [key: string]: Value } => typeof v === "ob
 const basename = (p: string) => p.slice(p.lastIndexOf("/") + 1)
 
 /** The desired plugin spec: `@huynle/hub`, or `@huynle/hub@<version>` when pinned. */
-export const pluginSpec = (desired: Pick<DesiredRegistration, "pluginVersion">): string => (desired.pluginVersion ? `${HUB_PLUGIN_PACKAGE}@${desired.pluginVersion}` : HUB_PLUGIN_PACKAGE)
+export const pluginSpec = (desired: { readonly pluginVersion?: string }): string => (desired.pluginVersion ? `${HUB_PLUGIN_PACKAGE}@${desired.pluginVersion}` : HUB_PLUGIN_PACKAGE)
 
 /** What a plugin spec names: the hub plugin (from npm, by its legacy name, or a custom source) or something else. */
 export function classifyPluginSpec(spec: string): { readonly source: PluginSource; readonly version?: string } | undefined {
@@ -171,7 +171,7 @@ export function inspectOpencodeConfig(text: string | undefined, desired: Desired
 }
 
 /** The merge-config sets that register the plugin (none when it already is). */
-export function pluginSets(plugin: PluginState, desired: Pick<DesiredRegistration, "pluginVersion">): ConfigSet[] {
+export function pluginSets(plugin: PluginState, desired: { readonly pluginVersion?: string }): ConfigSet[] {
   const spec = pluginSpec(desired)
   switch (plugin.state) {
     case "absent":

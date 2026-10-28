@@ -55,22 +55,22 @@ describe("inspectOpencodeConfig", () => {
   test("version drift: an older pin is updated in place (the package field of an object entry only)", () => {
     const s = value(inspect('{ "plugins": ["a", "@huynle/hub@0.6.0"] }', "0.7.1"))
     expect(s.plugin).toMatchObject({ state: "drift", pointer: "/plugins/1", found: "0.6.0" })
-    expect(pluginSets(s.plugin, { authority: AUTHORITY, pluginVersion: "0.7.1" })).toEqual([{ pointer: "/plugins/1", value: "@huynle/hub@0.7.1" }])
+    expect(pluginSets(s.plugin, { pluginVersion: "0.7.1" })).toEqual([{ pointer: "/plugins/1", value: "@huynle/hub@0.7.1" }])
     const o = value(inspect('{ "plugins": [{ "package": "@huynle/hub@0.6.0", "options": { "keep": true } }] }', "0.7.1"))
-    expect(pluginSets(o.plugin, { authority: AUTHORITY, pluginVersion: "0.7.1" })).toEqual([{ pointer: "/plugins/0/package", value: "@huynle/hub@0.7.1" }])
+    expect(pluginSets(o.plugin, { pluginVersion: "0.7.1" })).toEqual([{ pointer: "/plugins/0/package", value: "@huynle/hub@0.7.1" }])
   })
 
   test("the legacy plugin name (@huynle/opencode-voice only re-exports hub) is drift too", () => {
     const r = value(inspect('{ "plugins": ["@huynle/opencode-voice"] }'))
     expect(r.plugin).toMatchObject({ state: "drift", pointer: "/plugins/0" })
     expect(r.findings.map((f) => f.code)).toContain("plugin-legacy-name")
-    expect(pluginSets(r.plugin, { authority: AUTHORITY })).toEqual([{ pointer: "/plugins/0", value: "@huynle/hub" }])
+    expect(pluginSets(r.plugin, {})).toEqual([{ pointer: "/plugins/0", value: "@huynle/hub" }])
   })
 
   test("an absent plugin is appended to plugins", () => {
     const r = value(inspect('{ "plugins": ["a"] }', "0.7.1"))
-    expect(pluginSets(r.plugin, { authority: AUTHORITY, pluginVersion: "0.7.1" })).toEqual([{ pointer: "/plugins/-", value: "@huynle/hub@0.7.1" }])
-    expect(pluginSets(value(inspect('{ "plugins": ["@huynle/hub"] }')).plugin, { authority: AUTHORITY })).toEqual([])
+    expect(pluginSets(r.plugin, { pluginVersion: "0.7.1" })).toEqual([{ pointer: "/plugins/-", value: "@huynle/hub@0.7.1" }])
+    expect(pluginSets(value(inspect('{ "plugins": ["@huynle/hub"] }')).plugin, {})).toEqual([])
   })
 
   test("a duplicate plugin is refused: OpenCode would load one of them, and hubctl cannot tell which you meant", () => {
@@ -117,7 +117,7 @@ describe("mcpServerSets", () => {
   })
 
   test("merged into the full config, only the edited regions change: every other byte stays", () => {
-    const sets = [...pluginSets(value(inspect(CONFIG_WITH_EVERYTHING, "0.7.1")).plugin, { authority: AUTHORITY, pluginVersion: "0.7.1" }), ...value(mcpServerSets(CONFIG_WITH_EVERYTHING, AUTHORITY))]
+    const sets = [...pluginSets(value(inspect(CONFIG_WITH_EVERYTHING, "0.7.1")).plugin, { pluginVersion: "0.7.1" }), ...value(mcpServerSets(CONFIG_WITH_EVERYTHING, AUTHORITY))]
     const out = value(mergeConfigText(CONFIG_WITH_EVERYTHING, "jsonc", sets))
     // Insertions only: the original text is a subsequence of the result, and what was added is the two registrations.
     const extra = insertionsOf(CONFIG_WITH_EVERYTHING, out)
