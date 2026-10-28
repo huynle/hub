@@ -3,7 +3,7 @@
 // are the CLI's existing ones (http.ts EXIT) with unchanged meanings; the bootstrap adds 10 and up.
 import { EXIT } from "../../http.ts"
 import { findSecrets } from "./secrets.ts"
-import { bool, Checker, header, list, oneOf, shape, text, type Result } from "./validate.ts"
+import { bool, Checker, header, isRecord, list, oneOf, shape, text, type Result } from "./validate.ts"
 
 export const BOOTSTRAP_EXIT = Object.freeze({
   ...EXIT,
@@ -131,6 +131,9 @@ export function validateEnvelope(value: unknown): Result<ResultEnvelope> {
   if (r.ok === true && r.error !== undefined) c.add("/error", "inconsistent", "a success has no error")
   if (r.ok === false && r.error === undefined) c.add("/error", "inconsistent", "a failure names its error")
   if (r.warnings !== undefined) list(c, "/warnings", r.warnings, 64, (p, w) => text(c, p, w, 500))
-  for (const p of findSecrets(value)) c.add(p, "secret", "output never carries credentials")
+  // `setup preview --json` prints the SetupPreview, whose /token is a preview token (no authority, contract §3.4),
+  // not a credential; its values are still scanned.
+  const allow = isRecord(r.data) && r.data.schema === "hub.setup-preview" ? new Set(["/data/token"]) : new Set<string>()
+  for (const p of findSecrets(value, "", allow)) c.add(p, "secret", "output never carries credentials")
   return c.result(value)
 }

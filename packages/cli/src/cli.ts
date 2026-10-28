@@ -22,6 +22,7 @@ import { presetMain } from "../../preset/src/main.ts"
 import { codexMain } from "../../codex/src/main.ts"
 import { installSpokeService, isServiceVerb, SERVICE_VERBS, spokeServiceStatus, spokeServiceStatusText, uninstallSpokeService, type SpokeServiceName } from "./spoke-services"
 import { runCodex } from "../../codex/src/wrapper.ts"
+import { BOOTSTRAP_FLAGS, bootstrapCommand, MACHINE_VERBS, SETUP_VERBS, type BootstrapSeams } from "./setup/commands.ts"
 
 export { EXIT } from "./http"
 
@@ -46,6 +47,8 @@ export interface Io {
   program?: Program
   /** `hub node openshell check`: the openshell executable (default "openshell" on PATH). */
   openshellBinary?: string
+  /** `hubctl machine …` / `hubctl setup …`: test seams (fakes for the network, clock and service manager). */
+  bootstrap?: BootstrapSeams
 }
 
 export const USAGE = `Usage: hub <command> [options]     (also installed as hubctl)
@@ -108,6 +111,29 @@ Launching (users; agents and app tokens with sessions:launch under a grant with 
                                       --label tags it for apps, --node-label picks nodes (--prefer: not required)
   hub launches list [--state S[,S]] [--label k=v]...   your launches (agents: the ones they started)
   hub launches show <launchID> · hub launches stop <launchID>   (stop: exit 8 when it already ended)
+
+Machine (this machine's one identity; no harness needed)
+  hub machine enroll --server <hub URL> [--name N] [--reenroll] [--no-verify]
+                                      device-code enrollment: approve the code on the hub (Ctrl-C cancels)
+  hub machine status [--no-verify]    unconfigured, configured, verified, revoked (exit 9), offline (exit 7)
+                                      or insecure (a plain-http hub: reported, never sent the credential)
+
+Setup (discover → preview → explicit apply; docs/bootstrap-contracts.md)
+  hub setup discover                  what this host has (read-only)
+  hub setup preview [--profile session-only|launch-node|full-harness|<file>|-] [--manifest <file>]
+         [--out <file>] [--enrollment inline|separate] [--server <hub URL> [--name N]]
+         [--workspace-root <dir>]... [--verify-launch <harness>] [--confirm-activation] [--allow-downgrade]
+                                      the exact plan and the manual edits it needs; writes nothing (--out
+                                      keeps the preview for apply, mode 0600)
+  hub setup apply --preview <file> [--manifest <file>] [--escalate] [--confirm-activation] [--allow-downgrade]
+                                      rediscover, re-plan and apply exactly that plan (journaled; 12 when the
+                                      host changed since the preview, 13 locked, 14 recover first)
+  hub setup verify [--profile P]      real probes: version, provider login, spoke connected (15 not ready)
+  hub setup drift [--profile P]       hub's managed fields: in sync, missing, outdated or changed by you
+  hub setup rollback [--to <txID>] [--dry-run]   undo applied transactions (your later edits are kept)
+  hub setup recover [--resume]        finish or roll back an interrupted apply
+  hub setup ansible --profile P --manifest <file> --release-url <url> [--plan <preview>] [consent flags]
+                                      the vars of contrib/ansible/roles/hub_bootstrap (no secrets)
 
 Node (this machine runs launches; design §6.3)
   hub node run                        the node daemon until Ctrl-C/SIGTERM (needs an enrolled machine and
@@ -607,8 +633,27 @@ const COMMANDS: Record<string, Command> = {
   },
 }
 
+// `hubctl machine …` and `hubctl setup …` print hub.bootstrap.result envelopes and map exits through exitFor.
+for (const label of Object.keys(BOOTSTRAP_FLAGS))
+  COMMANDS[label] = {
+    flags: BOOTSTRAP_FLAGS[label],
+    handle: ({ io, parsed }) =>
+      bootstrapCommand(label, parsed, {
+        env: io.env,
+        home: io.home,
+        stdout: io.stdout,
+        stderr: io.stderr,
+        ...(io.stdin ? { stdin: io.stdin } : {}),
+        ...(io.signal ? { signal: io.signal } : {}),
+        ...(io.cwd ? { cwd: io.cwd } : {}),
+        program: io.program ?? currentProgram(),
+        version: VERSION,
+        ...(io.bootstrap ? { bootstrap: io.bootstrap } : {}),
+      }),
+  }
+
 /** Commands with sub-verbs (`hub role claim`). */
-const GROUPS: Record<string, string[]> = { "claude-code": [...SERVICE_VERBS], "codex-spoke": [...SERVICE_VERBS], role: ["claim", "release"], decisions: ["list"], grant: ["list", "show", "create", "revoke", "request"], launches: ["list", "show", "stop"], node: ["run", "install", "uninstall", "status", "openshell"], "node openshell": ["check"] }
+const GROUPS: Record<string, string[]> = { machine: [...MACHINE_VERBS], setup: [...SETUP_VERBS], "claude-code": [...SERVICE_VERBS], "codex-spoke": [...SERVICE_VERBS], role: ["claim", "release"], decisions: ["list"], grant: ["list", "show", "create", "revoke", "request"], launches: ["list", "show", "stop"], node: ["run", "install", "uninstall", "status", "openshell"], "node openshell": ["check"] }
 
 const groupVerbs = (label: string): string[] | undefined => (Object.hasOwn(GROUPS, label) ? GROUPS[label] : undefined)
 
