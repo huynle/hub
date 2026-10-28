@@ -701,9 +701,9 @@ export function createApplier(config: ApplierConfig): Applier {
         await this.mark(entry, entry.after ? "undone" : "skipped")
         return "nothing-to-do"
       }
-      let decision = recoveryDecision(entry, current)
-      // An enrollment interrupted before it was journaled done stored a credential we never recorded: clear it.
-      if (entry.class === "credential" && entry.status === "pending" && !entry.after) decision = "clear-credential"
+      // An enrollment interrupted before it was journaled done stored a credential we never recorded: the contract
+      // clears it (recoveryDecision, v1.1).
+      const decision = recoveryDecision(entry, current)
       switch (decision) {
         case "nothing-to-do":
           await this.mark(entry, entry.after ? "undone" : "skipped")

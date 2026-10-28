@@ -49,13 +49,25 @@ export function validatePathRef(value: unknown): Result<PathRef> {
   return c.result(value)
 }
 
-/** The absolute path of `ref` on a host with these roots. */
-export function resolvePathRef(ref: PathRef, roots: readonly RootMapping[]): Result<string> {
+/**
+ * v1.1: where the code that resolves a path runs. `path` is always the host's view of a root; `containerPath` is
+ * what a process inside the container sees (discovery records it only when it ran inside one). hubctl resolves
+ * paths for the context it runs in: inside the container, a root is `containerPath ?? path`; on the host, `path`.
+ */
+export const EXECUTION_CONTEXTS = ["host", "container"] as const
+export type ExecutionContext = (typeof EXECUTION_CONTEXTS)[number]
+
+/** The absolute directory of `root` as seen from `context`. */
+export const rootPathIn = (root: RootMapping, context: ExecutionContext): string => (context === "container" ? (root.containerPath ?? root.path) : root.path)
+
+/** The absolute path of `ref` on a host with these roots, as seen from `context` (default: the host). */
+export function resolvePathRef(ref: PathRef, roots: readonly RootMapping[], context: ExecutionContext = "host"): Result<string> {
   const checked = validatePathRef(ref)
   if (!checked.ok) return checked as Result<string>
   const root = roots.find((r) => r.id === ref.root)
-  if (!root || !isAbsolutePath(root.path)) return fail("/root", "unmapped_root", `this host has no ${ref.root} root`)
-  return ok(root.path === "/" ? `/${ref.rel}` : `${root.path}/${ref.rel}`)
+  const base = root ? rootPathIn(root, context) : undefined
+  if (!base || !isAbsolutePath(base)) return fail("/root", "unmapped_root", `this host has no ${ref.root} root`)
+  return ok(base === "/" ? `/${ref.rel}` : `${base}/${ref.rel}`)
 }
 
 export type EntryKind = "file" | "directory" | "symlink" | "missing" | "other"

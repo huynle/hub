@@ -6,7 +6,7 @@
 // foreign, expired or replayed preview applies nothing.
 import { checkAction, type Action } from "./actions.ts"
 import { digestOf } from "./canonical.ts"
-import { PROFILE_IDS, PROFILE_VERSION, type ProfileID } from "./profile.ts"
+import { PLAN_PROFILE_VERSIONS, PROFILE_IDS, type PlanProfileVersion, type ProfileID } from "./profile.ts"
 import { checkTarget } from "./platform.ts"
 import { bool, Checker, digest, fail, header, instant, isRecord, list, ok, oneOf, shape, text, type Result } from "./validate.ts"
 
@@ -21,7 +21,8 @@ export interface SetupPlan {
   /** digestOf the DiscoverySnapshot the plan was made from. */
   readonly snapshotDigest: string
   readonly target: string
-  readonly profile: { readonly id: ProfileID; readonly version: typeof PROFILE_VERSION }
+  /** v1.1: the profile version it was planned from (1 for plans made by a v1.0 hubctl). */
+  readonly profile: { readonly id: ProfileID; readonly version: PlanProfileVersion }
   /** True iff some action is elevated; apply then needs explicit consent (--escalate). */
   readonly requiresEscalation: boolean
   /** True iff the plan activates a service; apply then needs explicit consent. */
@@ -41,7 +42,7 @@ export function validateSetupPlan(value: unknown): Result<SetupPlan> {
   const profile = shape(c, "/profile", r.profile, ["id", "version"])
   if (profile) {
     oneOf(c, "/profile/id", profile.id, PROFILE_IDS)
-    if (profile.version !== PROFILE_VERSION) c.add("/profile/version", "unsupported_version", `profile version must be ${PROFILE_VERSION}`)
+    if (!(PLAN_PROFILE_VERSIONS as readonly unknown[]).includes(profile.version)) c.add("/profile/version", "unsupported_version", `profile version must be one of ${PLAN_PROFILE_VERSIONS.join(", ")}`)
   }
   bool(c, "/requiresEscalation", r.requiresEscalation)
   bool(c, "/activatesServices", r.activatesServices)
@@ -55,20 +56,38 @@ export function validateSetupPlan(value: unknown): Result<SetupPlan> {
   const installed = new Set<string>()
   const verified = new Set<string>()
   const unverifiedInstalls = new Map<string, number>()
+  // v1.1: an installed version is made current (select-harness-version) before it is verified.
+  const awaitingSelect = new Map<string, { version: string; index: number }>()
+  const removed = new Set<string>()
+  const installAt = (harness: string, version: string) => actions.findIndex((a) => a.kind === "install-harness" && a.harness === harness && a.version === version)
   let enrollments = 0
   actions.forEach((a, i) => {
     const at = `/actions/${i}`
-    if (a.kind === "install-service") installed.add(`${String(a.service)}@${String(a.manager)}`)
-    if (a.kind === "install-harness") unverifiedInstalls.set(String(a.harness), i)
+    const service = `${String(a.service)}@${String(a.manager)}`
+    if (a.kind === "install-service") installed.add(service)
+    if (a.kind === "install-harness") {
+      unverifiedInstalls.set(String(a.harness), i)
+      awaitingSelect.set(String(a.harness), { version: String(a.version), index: i })
+    }
+    if (a.kind === "select-harness-version") {
+      const pending = awaitingSelect.get(String(a.harness))
+      if (pending?.version === a.version) awaitingSelect.delete(String(a.harness))
+      else if (installAt(String(a.harness), String(a.version)) > i) c.add(at, "inconsistent", "a harness version is installed before it is made current")
+      unverifiedInstalls.set(String(a.harness), i)
+    }
     if (a.kind === "verify-harness") {
+      if (awaitingSelect.has(String(a.harness))) c.add(at, "inconsistent", "a harness is verified after its installed version is made current")
       verified.add(String(a.harness))
       unverifiedInstalls.delete(String(a.harness))
     }
-    if (a.kind === "activate-service" && !installed.has(`${String(a.service)}@${String(a.manager)}`)) c.add(at, "inconsistent", "a service is installed before it is activated")
+    if (a.kind === "remove-service") removed.add(service)
+    if (a.kind === "deactivate-service" && removed.has(service)) c.add(at, "inconsistent", "a service is deactivated before it is removed")
+    if (a.kind === "activate-service" && !installed.has(service)) c.add(at, "inconsistent", "a service is installed before it is activated")
     if (a.kind === "launch-session" && !verified.has(String(a.harness))) c.add(at, "inconsistent", "a harness is verified before a session is launched on it")
     if (a.kind === "enroll-machine" && ++enrollments > 1) c.add(at, "duplicate", "a plan enrolls the machine at most once")
   })
   for (const i of unverifiedInstalls.values()) c.add(`/actions/${i}`, "inconsistent", "an installed harness is verified afterwards (install is not readiness)")
+  for (const { index } of awaitingSelect.values()) c.add(`/actions/${index}`, "inconsistent", "an installed harness version is made current afterwards (select-harness-version)")
   return c.result(value)
 }
 

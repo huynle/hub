@@ -20,7 +20,7 @@ import {
 } from "../src/bootstrap/contracts/index.ts"
 import { discover } from "../src/bootstrap/discovery/discover.ts"
 import { parsePreview, planSetup, previewSetup, renderPreview, revalidateApply, snapshotDigest, type PlanContributor } from "../src/bootstrap/preview/index.ts"
-import { ACTIONS, DISCOVERY_DARWIN, DISCOVERY_INVALID, DISCOVERY_LINUX_CONTAINER, DISCOVERY_UNSUPPORTED, INSTALL_CLAUDE, MINUTE, PREVIEW_INVALID, PROFILE_FULL_HARNESS, PROFILE_LAUNCH_NODE, PROFILE_SESSION_ONLY, T0 } from "./bootstrap/fixtures.ts"
+import { ACTIONS, DISCOVERY_DARWIN, DISCOVERY_INVALID, DISCOVERY_LINUX_CONTAINER, DISCOVERY_UNSUPPORTED, INSTALL_CLAUDE, MINUTE, PREVIEW_INVALID, SELECT_CLAUDE, PROFILE_FULL_HARNESS, PROFILE_LAUNCH_NODE, PROFILE_SESSION_ONLY, T0 } from "./bootstrap/fixtures.ts"
 import { dir, file, LINUX_IN_CONTAINER, LINUX_MUSL, LINUX_NATIVE, link, MAC_HOME, MAC_NATIVE, MAC_SYMLINKED_CONFIG, memoryProbe, type HostSpec } from "./bootstrap/discovery-fixtures.ts"
 
 const NONCE = "nonce-0123456789abcdef"
@@ -50,7 +50,7 @@ describe("planSetup and previewSetup", () => {
     const p = preview(MAC_NATIVE)
     expect(validateSetupPreview(p).ok).toBe(true)
     const s = snap(MAC_NATIVE)
-    expect(p.plan).toMatchObject({ hostFingerprint: s.host.fingerprint, snapshotDigest: snapshotDigest(s), target: "darwin-arm64", profile: { id: "session-only", version: 1 } })
+    expect(p.plan).toMatchObject({ hostFingerprint: s.host.fingerprint, snapshotDigest: snapshotDigest(s), target: "darwin-arm64", profile: { id: "session-only", version: 2 } })
     expect(p.plan.actions.map((a) => a.id)).toEqual(["state-dir", "verify-opencode"])
     expect(p.plan.actions[1]).toMatchObject({ kind: "verify-harness", harness: "opencode", probes: ["version-exec", "provider-auth", "spoke-connected"] })
     expect(p.plan.requiresEscalation).toBe(false)
@@ -103,13 +103,13 @@ describe("planSetup and previewSetup", () => {
       verify: async () => ({ harness: id, probes: [] }),
     })
     const registry = createAdapterRegistry()
-    registry.register(adapter("claude-code", [INSTALL_CLAUDE, { ...(ACTIONS["verify-harness"] as Action), id: "verify-claude-code", harness: "claude-code" } as Action]))
+    registry.register(adapter("claude-code", [INSTALL_CLAUDE, SELECT_CLAUDE, { ...(ACTIONS["verify-harness"] as Action), id: "verify-claude-code", harness: "claude-code" } as Action]))
     registry.register(adapter("opencode", [ACTIONS["register-mcp-server"]]))
     const profile: Profile = { ...PROFILE_SESSION_ONLY, harnesses: ["opencode", "claude-code"] }
     const p = preview(MAC_NATIVE, profile, { adapters: registry })
     expect(seen.map((i) => i.profile.id)).toEqual(["session-only", "session-only"])
     expect(seen[0]!.snapshot.host.target).toBe("darwin-arm64")
-    expect(p.plan.actions.map((a) => a.id)).toEqual(["state-dir", "install-claude", "opencode-mcp", "verify-opencode", "verify-claude-code"])
+    expect(p.plan.actions.map((a) => a.id)).toEqual(["state-dir", "install-claude", "select-claude", "opencode-mcp", "verify-opencode", "verify-claude-code"])
     // Upstream evidence for a pinned download needs the bytes: deferred to apply.
     expect(p.evidence).toEqual([
       { actionID: "install-claude", kind: "gpg-manifest", status: "deferred" },

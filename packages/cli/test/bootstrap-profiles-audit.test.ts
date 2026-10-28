@@ -35,7 +35,7 @@ describe("auditProfile", () => {
     expect(report.plan.activatesServices).toBe(false)
     expect(report.plan.snapshotDigest).toBe(digestOf(DARWIN_WITH_SHELL))
     expect(report.plan.hostFingerprint).toBe(DARWIN_WITH_SHELL.host.fingerprint)
-    expect(report.plan.profile).toEqual({ id: "full-harness", version: 1 })
+    expect(report.plan.profile).toEqual({ id: "full-harness", version: 2 })
   })
 
   test("a verified harness is reported verified (readiness still needs fresh probes at run time)", () => {

@@ -4,12 +4,22 @@
 //   full-harness   plus every chosen harness's spoke service (and opt-in OpenShell checks).
 // Profiles are versioned documents; an older document is upgraded by the migration hook, one version at a time,
 // before it is validated. Escalation is never automatic and services are never activated without confirmation.
+//
+// v1.1 (profile version 2): `revision` records the catalog revision a profile was made from (profile rebases use
+// it), and `enrollment` says whether the plan enrolls the machine ("inline", the default) or leaves it to a separate
+// `hubctl machine enroll` ("separate", which the Ansible path always uses), so both paths plan the same digest.
 import { SERVICE_IDS, type ServiceID } from "./exec.ts"
 import { HARNESS_ORDER, RUNTIME_IDS, type HarnessID, type RuntimeID } from "./harness.ts"
 import { bool, Checker, fail, header, int, isRecord, oneOf, shape, subset, type Result } from "./validate.ts"
 
 export const PROFILE_SCHEMA = "hub.bootstrap-profile"
-export const PROFILE_VERSION = 1
+export const PROFILE_VERSION = 2
+/** Profile versions a plan may record: plans made by a v1.0 hubctl (profile version 1) still validate and resume. */
+export const PLAN_PROFILE_VERSIONS = [1, 2] as const
+export type PlanProfileVersion = (typeof PLAN_PROFILE_VERSIONS)[number]
+/** v1.1: inline: the plan enrolls the machine (enroll-machine). separate: enrollment is its own step; the plan never enrolls. */
+export const ENROLLMENT_MODES = ["inline", "separate"] as const
+export type EnrollmentMode = (typeof ENROLLMENT_MODES)[number]
 export const PROFILE_IDS = ["session-only", "launch-node", "full-harness"] as const
 export type ProfileID = (typeof PROFILE_IDS)[number]
 
@@ -24,16 +34,25 @@ export interface Profile {
   readonly launch: { readonly enabled: boolean; readonly maxDurationS?: number }
   /** "explicit": the user may approve elevated actions at apply time; "never": the plan stays unprivileged. */
   readonly escalation: "never" | "explicit"
+  /** v1.1: the built-in catalog revision this profile was made from (absent: unknown, e.g. written by hand). */
+  readonly revision?: number
+  /** v1.1: whether the plan enrolls the machine (default "inline"). */
+  readonly enrollment?: EnrollmentMode
 }
+
+/** The enrollment mode a profile plans with. */
+export const enrollmentModeOf = (profile: Pick<Profile, "enrollment">): EnrollmentMode => profile.enrollment ?? "inline"
 
 /** The service each harness's spoke runs as, when it has one (OpenCode's spoke lives in its plugin). */
 export const HARNESS_SERVICE: Readonly<Partial<Record<HarnessID, ServiceID>>> = Object.freeze({ "claude-code": "claude-code", codex: "codex-spoke" })
 
 export function validateProfile(value: unknown): Result<Profile> {
   const c = new Checker()
-  const r = shape(c, "", value, ["schema", "version", "id", "harnesses", "runtimes", "services", "launch", "escalation"])
+  const r = shape(c, "", value, ["schema", "version", "id", "harnesses", "runtimes", "services", "launch", "escalation"], ["revision", "enrollment"])
   if (!r) return c.result(value)
   header(c, "", r, PROFILE_SCHEMA, PROFILE_VERSION)
+  if (r.revision !== undefined) int(c, "/revision", r.revision, 1, 1_000_000)
+  if (r.enrollment !== undefined) oneOf(c, "/enrollment", r.enrollment, ENROLLMENT_MODES)
   oneOf(c, "/id", r.id, PROFILE_IDS)
   oneOf(c, "/escalation", r.escalation, ["never", "explicit"] as const)
   const harnesses = subset(c, "/harnesses", r.harnesses, HARNESS_ORDER) ? r.harnesses : []
@@ -61,8 +80,13 @@ export function validateProfile(value: unknown): Result<Profile> {
 export type ProfileMigration = (raw: Record<string, unknown>) => unknown
 export type ProfileMigrations = Readonly<Record<number, ProfileMigration>>
 
-/** Registered migrations to the current version. Version 1 is the first frozen version, so there are none yet. */
-export const PROFILE_MIGRATIONS: ProfileMigrations = Object.freeze({})
+/**
+ * Registered migrations to the current version. 1 → 2 (v1.1): the new fields are optional and mean what a version-1
+ * document meant (catalog revision unknown, enrollment inline), so only the version changes.
+ */
+export const PROFILE_MIGRATIONS: ProfileMigrations = Object.freeze({
+  1: (raw: Record<string, unknown>) => ({ ...raw, version: 2 }),
+})
 
 /** Upgrades an older profile document step by step, then validates it. */
 export function migrateProfile(raw: unknown, migrations: ProfileMigrations = PROFILE_MIGRATIONS): Result<Profile> {

@@ -194,7 +194,7 @@ export const DISCOVERY_INVALID: Record<string, ThreatCase> = {
 
 export const PROFILE_SESSION_ONLY: Profile = {
   schema: "hub.bootstrap-profile",
-  version: 1,
+  version: 2,
   id: "session-only",
   harnesses: ["opencode"],
   runtimes: [],
@@ -205,7 +205,7 @@ export const PROFILE_SESSION_ONLY: Profile = {
 
 export const PROFILE_LAUNCH_NODE: Profile = {
   schema: "hub.bootstrap-profile",
-  version: 1,
+  version: 2,
   id: "launch-node",
   harnesses: ["opencode"],
   runtimes: [],
@@ -216,7 +216,7 @@ export const PROFILE_LAUNCH_NODE: Profile = {
 
 export const PROFILE_FULL_HARNESS: Profile = {
   schema: "hub.bootstrap-profile",
-  version: 1,
+  version: 2,
   id: "full-harness",
   harnesses: ["opencode", "claude-code", "codex"],
   runtimes: ["openshell"],
@@ -224,6 +224,21 @@ export const PROFILE_FULL_HARNESS: Profile = {
   launch: { enabled: true, maxDurationS: 3600 },
   escalation: "explicit",
 }
+
+/** v1.1: a version-1 profile (no revision, no enrollment mode); PROFILE_MIGRATIONS[1] upgrades it to version 2. */
+export const PROFILE_V1 = {
+  schema: "hub.bootstrap-profile",
+  version: 1,
+  id: "session-only",
+  harnesses: ["opencode"],
+  runtimes: [],
+  services: [],
+  launch: { enabled: false },
+  escalation: "never",
+} as const
+
+/** v1.1: a profile made from catalog revision 1 that leaves enrollment to a separate step (the Ansible path). */
+export const PROFILE_SEPARATE_ENROLLMENT: Profile = { ...PROFILE_LAUNCH_NODE, revision: 1, enrollment: "separate" }
 
 /** A pre-v1 profile document, for exercising the migration hook with an injected migration. */
 export const PROFILE_V0 = { schema: "hub.bootstrap-profile", version: 0, profile: "session-only", harness: "opencode" }
@@ -238,6 +253,8 @@ export const PROFILE_INVALID: Record<string, ThreatCase> = {
   spokeWithoutHarness: { value: { ...PROFILE_LAUNCH_NODE, services: ["node", "codex-spoke"] }, code: "inconsistent" },
   autoEscalation: { value: { ...PROFILE_SESSION_ONLY, escalation: "auto" }, code: "invalid_value" },
   fromTheFuture: { value: { ...PROFILE_SESSION_ONLY, version: 99 }, code: "unsupported_version" },
+  zeroRevision: { value: { ...PROFILE_SESSION_ONLY, revision: 0 }, code: "invalid_value" },
+  unknownEnrollmentMode: { value: { ...PROFILE_SESSION_ONLY, enrollment: "later" }, code: "invalid_value" },
 }
 
 // ---------- actions and plans ----------
@@ -347,6 +364,34 @@ export const ACTIONS: Record<Action["kind"], Action> = {
     owner: "hub",
     rollback: "restore-previous",
   },
+  "select-harness-version": {
+    id: "select-opencode",
+    kind: "select-harness-version",
+    escalation: "user",
+    summary: "Make OpenCode 2.0.26 the current version",
+    harness: "opencode",
+    version: "2.0.26",
+    path: { root: "data", rel: "hub/harnesses/opencode/current" },
+    target: { root: "data", rel: "hub/harnesses/opencode/2.0.26" },
+  },
+  "deactivate-service": {
+    id: "codex-spoke-deactivate",
+    kind: "deactivate-service",
+    escalation: "user",
+    summary: "Unload the hub Codex spoke agent (downgrade)",
+    service: "codex-spoke",
+    manager: "launchd",
+  },
+  "remove-service": {
+    id: "codex-spoke-remove",
+    kind: "remove-service",
+    escalation: "user",
+    summary: "Remove the hub Codex spoke launchd agent (downgrade)",
+    service: "codex-spoke",
+    manager: "launchd",
+    path: { root: "launch-agents", rel: "io.github.huynle.hub-codex-spoke.plist" },
+    sha256: DIGEST.e,
+  },
   "verify-harness": {
     id: "verify-opencode",
     kind: "verify-harness",
@@ -380,7 +425,7 @@ export const PLAN_LAUNCH_NODE: SetupPlan = {
   hostFingerprint: HOST,
   snapshotDigest: SNAPSHOT_DIGEST,
   target: "darwin-arm64",
-  profile: { id: "launch-node", version: 1 },
+  profile: { id: "launch-node", version: 2 },
   requiresEscalation: false,
   activatesServices: true,
   actions: [
@@ -406,7 +451,7 @@ const ELEVATED_INSTALL: Action = {
 
 export const PLAN_ELEVATED: SetupPlan = {
   ...PLAN_LAUNCH_NODE,
-  profile: { id: "session-only", version: 1 },
+  profile: { id: "session-only", version: 2 },
   requiresEscalation: true,
   activatesServices: false,
   actions: [ELEVATED_INSTALL],
@@ -453,6 +498,13 @@ export const ACTION_INVALID: Record<string, ThreatCase> = {
   credentialInEnroll: { value: withAction("enroll-machine", { machineToken: "abc" }), code: "unknown_field" },
   presenceIsNotVerification: { value: withAction("verify-harness", { probes: ["presence"] }), code: "invalid_value" },
   multilineSummary: { value: withAction("write-file", { summary: "ok\n$(id)" }), code: "invalid_value" },
+  // v1.1: the harness layout and service removal.
+  selectOutsideLayout: { value: withAction("select-harness-version", { path: { root: "user-bin", rel: "opencode" } }), code: "inconsistent" },
+  selectOtherVersion: { value: withAction("select-harness-version", { target: { root: "data", rel: "hub/harnesses/opencode/2.0.25" } }), code: "inconsistent" },
+  selectFloatingVersion: { value: withAction("select-harness-version", { version: "latest" }), code: "invalid_value" },
+  removeOutsideManagerRoot: { value: withAction("remove-service", { path: { root: "home", rel: "io.github.huynle.hub-codex-spoke.plist" } }), code: "inconsistent" },
+  removeUnpinned: { value: withAction("remove-service", { sha256: undefined }), code: "missing_field" },
+  deactivateUnknownService: { value: withAction("deactivate-service", { service: "sshd" }), code: "invalid_value" },
 }
 
 export const PLAN_INVALID: Record<string, ThreatCase> = {
@@ -579,11 +631,25 @@ export const ENROLLMENT_VERIFIED: EnrollmentStatus = {
 
 export const ENROLLMENT_UNCONFIGURED: EnrollmentStatus = { schema: "hub.enrollment-status", version: 1, state: "unconfigured" }
 
+/** v1.1: a credential stored for a plain-http, non-loopback hub: reported (never sent), not an error. */
+export const ENROLLMENT_INSECURE: EnrollmentStatus = {
+  schema: "hub.enrollment-status",
+  version: 1,
+  state: "insecure",
+  server: "http://hub.lan:8080",
+  machineID: "mach_01",
+}
+
 export const ENROLLMENT_INVALID: Record<string, ThreatCase> = {
   tokenField: { value: { ...ENROLLMENT_VERIFIED, token: "mt_secret" }, code: "unknown_field" },
   tokenInDetail: { value: { ...ENROLLMENT_VERIFIED, detail: "using hat_0123456789abcdef" }, code: "secret" },
   verifiedWithoutMachine: { value: { schema: "hub.enrollment-status", version: 1, state: "verified", server: "https://hub.example" }, code: "inconsistent" },
   unknownState: { value: { ...ENROLLMENT_VERIFIED, state: "trusted" }, code: "invalid_value" },
+  /** Only the insecure state may name a plain-http, non-loopback hub... */
+  verifiedOverPlainHttp: { value: { ...ENROLLMENT_VERIFIED, server: "http://hub.lan:8080" }, code: "invalid_value" },
+  /** ...and the insecure state names nothing else (an https or loopback hub is checked normally). */
+  insecureHttps: { value: { ...ENROLLMENT_INSECURE, server: "https://hub.example" }, code: "inconsistent" },
+  insecureChecked: { value: { ...ENROLLMENT_INSECURE, checkedAt: T0 }, code: "inconsistent" },
 }
 
 // ---------- journal and lock ----------
@@ -656,6 +722,30 @@ export const JOURNAL_INVALID: Record<string, ThreatCase> = {
   gapInSeq: { value: entryPatch(3, { seq: 9 }), code: "inconsistent" },
   doneWithoutAfter: { value: entryPatch(0, { after: undefined }), code: "inconsistent" },
   traversal: { value: entryPatch(0, { path: { root: "state", rel: "../../etc" } }), code: "invalid_path" },
+  /** v1.1: only a skipped entry (nothing changed) may leave an existing file without a backup. */
+  pendingWithoutBackup: { value: entryPatch(1, { status: "pending", backup: undefined, after: undefined }), code: "inconsistent" },
+}
+
+/** v1.1: an existing config the step found already as wanted: skipped, so nothing was backed up. */
+export const JOURNAL_SKIPPED_ENTRY: JournalEntry = {
+  seq: 1,
+  actionID: "opencode-plugin",
+  kind: "merge-config",
+  class: "config",
+  path: { root: "config", rel: "opencode/opencode.json" },
+  before: { exists: true, sha256: DIGEST.d, mode: 0o644 },
+  status: "skipped",
+}
+
+/** v1.1: an enrollment interrupted before it was journaled done: it records no `after` (the credential store wrote atomically). */
+export const JOURNAL_PENDING_CREDENTIAL: JournalEntry = {
+  seq: 1,
+  actionID: "enroll",
+  kind: "enroll-machine",
+  class: "credential",
+  path: { root: "config", rel: "hub/config.json" },
+  before: { exists: true, sha256: DIGEST.a, mode: 0o600 },
+  status: "pending",
 }
 
 export const LOCK: ApplyLock = {
@@ -751,13 +841,26 @@ export const INSTALL_CODEX: Action = {
 
 const VERIFY_CLAUDE: Action = { ...ACTIONS["verify-harness"], id: "verify-claude", harness: "claude-code", summary: "Verify Claude Code really runs" } as Action
 
+/** v1.1: switches data:hub/harnesses/claude-code/current to the freshly installed 2.1.90 (rollback restores 2.1.85). */
+export const SELECT_CLAUDE: Action = {
+  id: "select-claude",
+  kind: "select-harness-version",
+  escalation: "user",
+  summary: "Make Claude Code 2.1.90 the current version",
+  harness: "claude-code",
+  version: "2.1.90",
+  path: { root: "data", rel: "hub/harnesses/claude-code/current" },
+  target: { root: "data", rel: "hub/harnesses/claude-code/2.1.90" },
+  previous: { version: "2.1.85", sha256: DIGEST.c },
+}
+
 /** Installs then verifies (install is never readiness). */
 export const PLAN_HARNESS_INSTALL: SetupPlan = {
   ...PLAN_LAUNCH_NODE,
-  profile: { id: "session-only", version: 1 },
+  profile: { id: "session-only", version: 2 },
   requiresEscalation: false,
   activatesServices: false,
-  actions: [ACTIONS["install-harness"], ACTIONS["verify-harness"], INSTALL_CLAUDE, VERIFY_CLAUDE],
+  actions: [ACTIONS["install-harness"], ACTIONS["select-harness-version"], ACTIONS["verify-harness"], INSTALL_CLAUDE, SELECT_CLAUDE, VERIFY_CLAUDE],
 }
 
 const harnessWith = (patch: Record<string, unknown>) => ({ ...ACTIONS["install-harness"], ...patch })
@@ -773,12 +876,14 @@ export const HARNESS_ACTION_INVALID: Record<string, ThreatCase> = {
   installerScript: { value: harnessWith({ source: { ...(ACTIONS["install-harness"] as any).source, installer: "https://opencode.ai/install" } }), code: "unknown_field" },
   systemWithoutEscalation: { value: harnessWith({ path: { root: "system-bin", rel: "opencode" } }), code: "inconsistent" },
   unsupportedTarget: { value: harnessWith({ target: "linux-x64-musl" }), code: "unsupported_platform" },
+  /** v1.1: a version installs into its own immutable directory, never into `current` or another version's. */
+  installIntoCurrent: { value: harnessWith({ path: { root: "data", rel: "hub/harnesses/opencode/current" } }), code: "inconsistent" },
 }
 
 /** install-harness actions checked against the signed manifest's pins, with the outcome code. */
 export const HARNESS_PIN_INVALID: Record<string, ThreatCase> = {
   unpinnedTarget: { value: harnessWith({ target: "linux-arm64" }), code: "unpinned_artifact" },
-  unpinnedVersion: { value: harnessWith({ version: "2.0.27" }), code: "unpinned_artifact" },
+  unpinnedVersion: { value: harnessWith({ version: "2.0.27", path: { root: "data", rel: "hub/harnesses/opencode/2.0.27" } }), code: "unpinned_artifact" },
   digestMismatch: { value: harnessWith({ sha256: DIGEST.a }), code: "integrity_mismatch" },
   sourceMismatch: {
     value: harnessWith({ source: { manifest: "0.8.0", url: "https://evil.example/opencode-darwin-arm64.zip", file: "opencode-darwin-arm64.zip" } }),
@@ -792,18 +897,39 @@ export const HARNESS_PIN_INVALID: Record<string, ThreatCase> = {
 export const PLAN_HARNESS_INVALID: Record<string, ThreatCase> = {
   installWithoutVerify: { value: { ...PLAN_HARNESS_INSTALL, actions: [ACTIONS["install-harness"]] }, code: "inconsistent" },
   verifyBeforeInstall: { value: { ...PLAN_HARNESS_INSTALL, actions: [ACTIONS["verify-harness"], ACTIONS["install-harness"]] }, code: "inconsistent" },
+  /** v1.1: an installed version that is never made current would never run. */
+  installWithoutSelect: { value: { ...PLAN_HARNESS_INSTALL, actions: [ACTIONS["install-harness"], ACTIONS["verify-harness"]] }, code: "inconsistent" },
+  selectBeforeInstall: { value: { ...PLAN_HARNESS_INSTALL, actions: [ACTIONS["select-harness-version"], ACTIONS["install-harness"], ACTIONS["verify-harness"]] }, code: "inconsistent" },
+  verifyBeforeSelect: { value: { ...PLAN_HARNESS_INSTALL, actions: [ACTIONS["install-harness"], ACTIONS["verify-harness"], ACTIONS["select-harness-version"]] }, code: "inconsistent" },
+  removeBeforeDeactivate: { value: { ...PLAN_HARNESS_INSTALL, actions: [ACTIONS["remove-service"], ACTIONS["deactivate-service"]] }, code: "inconsistent" },
 }
 
-/** A harness binary replaced by an install; rollback restores the previous version from its backup. */
-export const HARNESS_JOURNAL_ENTRY: JournalEntry = {
+/**
+ * v1.1 harness layout: each version is an immutable directory data:hub/harnesses/<harness>/<version>, and
+ * data:hub/harnesses/<harness>/current is a symlink select-harness-version switches atomically. A fresh version
+ * directory is removed on rollback (nothing existed there)...
+ */
+export const HARNESS_INSTALL_JOURNAL_ENTRY: JournalEntry = {
   seq: 1,
   actionID: "install-claude",
   kind: "install-harness",
   class: "harness",
-  path: { root: "data", rel: "hub/harnesses/claude-code/current" },
-  before: { exists: true, sha256: DIGEST.c, mode: 0o755 },
+  path: { root: "data", rel: "hub/harnesses/claude-code/2.1.90" },
+  before: { exists: false },
   after: { exists: true, sha256: DIGEST.f, mode: 0o755 },
-  backup: { id: "bk_0001" },
+  status: "done",
+}
+
+/** ...and the `current` link it replaced is restored from its backup: it points at the previous version again. */
+export const HARNESS_JOURNAL_ENTRY: JournalEntry = {
+  seq: 2,
+  actionID: "select-claude",
+  kind: "select-harness-version",
+  class: "link",
+  path: { root: "data", rel: "hub/harnesses/claude-code/current" },
+  before: { exists: true, symlink: true, sha256: DIGEST.c },
+  after: { exists: true, symlink: true, sha256: DIGEST.f },
+  backup: { id: "bk_0002" },
   status: "done",
 }
 
@@ -836,6 +962,19 @@ export const MANUAL_EDIT_MCP: ManualEdit = {
   change: { op: "register-mcp-server", harness: "opencode", name: "hub" },
 }
 
+/** v1.1: a config hubctl cannot edit losslessly (TOML): the exact edit, for the file itself; no symlink involved. */
+export const MANUAL_EDIT_TOML: ManualEdit = {
+  kind: "manual-edit",
+  reason: "unmergeable-format",
+  actionID: "codex-hub",
+  path: { root: "home", rel: ".codex/config.toml" },
+  resolvedPath: "/Users/dev/.codex/config.toml",
+  format: "toml",
+  owner: "harness:codex",
+  precondition: { exists: true, sha256: DIGEST.a },
+  change: { op: "merge", set: [{ pointer: "/mcp_servers/hub/enabled", value: true }] },
+}
+
 const editWith = (patch: Record<string, unknown>) => ({ ...MANUAL_EDIT_MERGE, ...patch })
 
 export const MANUAL_EDIT_INVALID: Record<string, ThreatCase> = {
@@ -845,4 +984,6 @@ export const MANUAL_EDIT_INVALID: Record<string, ThreatCase> = {
   relativeResolved: { value: editWith({ resolvedPath: "dot/config/opencode/opencode.json" }), code: "invalid_path" },
   unknownReason: { value: editWith({ reason: "felt-like-it" }), code: "invalid_value" },
   shellOp: { value: editWith({ change: { op: "shell", script: "echo hi >> ~/.zshrc" } }), code: "invalid_value" },
+  symlinkWithoutLink: { value: editWith({ linkPath: undefined }), code: "missing_field" },
+  unmergeableWithLink: { value: { ...MANUAL_EDIT_TOML, linkPath: SYMLINK.linkPath }, code: "inconsistent" },
 }

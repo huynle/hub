@@ -5,7 +5,8 @@
 // (supported: false) so the refusal is explicit; planning for such a host fails.
 import { CONFIG_OWNERS, type ConfigOwner } from "./actions.ts"
 import { HARNESS_ORDER, PROBE_KINDS, RUNTIME_IDS, type HarnessID, type Probe, type RuntimeID } from "./harness.ts"
-import { ROOT_IDS, type RootMapping } from "./paths.ts"
+import { digestOf } from "./canonical.ts"
+import { ROOT_IDS, type ExecutionContext, type RootMapping } from "./paths.ts"
 import { checkTarget, targetOf, type Libc, type ServiceManager } from "./platform.ts"
 import { findSecrets } from "./secrets.ts"
 import { absPath, bool, Checker, digest, header, instant, list, oneOf, pointer, semver, shape, subset, text, type Result } from "./validate.ts"
@@ -121,6 +122,15 @@ function checkHarness(c: Checker, p: string, v: unknown) {
   if (h.state === "failed" && !probes.some((pr) => pr.ok === false)) c.add(pointer(p, "health"), "inconsistent", "failed needs a failing probe")
   if (r.installed === false && h.state !== "unverified") c.add(pointer(p, "health"), "inconsistent", "a harness that is not installed cannot be verified")
 }
+
+/**
+ * v1.1: the one canonical digest of a snapshot that plans, preview tokens, journals, audits and the Ansible vars
+ * pin: the canonical JSON without `capturedAt`, so rediscovering an unchanged host gives the same digest.
+ */
+export const snapshotDigest = (snapshot: DiscoverySnapshot): string => digestOf({ ...snapshot, capturedAt: undefined })
+
+/** v1.1: the context a plan made from this snapshot resolves paths in: where discovery (and so apply) ran. */
+export const executionContextOf = (snapshot: Pick<DiscoverySnapshot, "topology">): ExecutionContext => (snapshot.topology.container === "none" ? "host" : "container")
 
 export function validateDiscoverySnapshot(value: unknown): Result<DiscoverySnapshot> {
   const c = new Checker()

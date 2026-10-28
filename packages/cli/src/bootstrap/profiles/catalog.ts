@@ -11,7 +11,7 @@ export interface ProfileCatalog {
 /** The bound on a launch when the user chose none. */
 export const DEFAULT_LAUNCH_S = 3600
 
-const base = { schema: "hub.bootstrap-profile", version: 1, runtimes: [], escalation: "never" } as const
+const base = { schema: "hub.bootstrap-profile", version: 2, runtimes: [], escalation: "never" } as const
 
 export const PROFILE_CATALOG: ProfileCatalog = Object.freeze({
   revision: 1,

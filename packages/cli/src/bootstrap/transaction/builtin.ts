@@ -6,6 +6,9 @@
 //   write-file         an embedded/rendered asset whose bytes must match the plan's digest; never overwrites
 //   merge-config       a lossless JSON merge, only if the file is still as previewed (precondition digest)
 //   link-executable    the hub ↔ hubctl alias symlink (an existing entry is backed up and replaced)
+//   select-harness-version  v1.1: the harness's `current` link, switched atomically to an installed version
+//                      directory (relative, so it reads the same inside and outside a container); the previous
+//                      link is backed up, so a rollback makes the previous version current again
 //   install-service    the rendered unit, whose bytes must match the plan's digest
 //   install-artifact   hubctl from a verified manifest: exact target, pinned digest, downgrade policy, bytes checked
 //   install-harness    a harness pinned by the verified manifest: checkHarnessPin, downgrade policy, the pinned
@@ -124,6 +127,18 @@ export const linkExecutableExecutor = (): ActionExecutor<"link-executable"> => (
   },
 })
 
+export const selectHarnessVersionExecutor = (): ActionExecutor<"select-harness-version"> => ({
+  kind: "select-harness-version",
+  plan: (action) => ({ class: "link", path: action.path, resolve: { finalMayBeSymlink: true } }),
+  change: async (action, ctx) => {
+    const dir = ctx.resolve(action.target)
+    if (!dir.ok) return dir
+    if (ctx.fs.lstat(dir.value)?.kind !== "directory") return txFail("not_found", `${action.harness} ${action.version} is not installed (${dir.value} is not a directory)`)
+    // `current` and the version directory are siblings (contract harnessCurrentRef / harnessVersionRef).
+    return txOk({ type: "symlink", target: action.version, replace: "backup" })
+  },
+})
+
 export const installServiceExecutor = (render: BuiltinDeps["renderService"] = () => undefined): ActionExecutor<"install-service"> => ({
   kind: "install-service",
   plan: (action) => ({ class: "service", path: action.path }),
@@ -222,6 +237,7 @@ export function builtinExecutors(deps: BuiltinDeps): ExecutorMap {
     "write-file": writeFileExecutor(deps.assets),
     "merge-config": mergeConfigExecutor(),
     "link-executable": linkExecutableExecutor(),
+    "select-harness-version": selectHarnessVersionExecutor(),
     "install-service": installServiceExecutor(deps.renderService),
     "install-artifact": installArtifactExecutor(deps.hubctl),
     "install-harness": installHarnessExecutor(deps.harness),

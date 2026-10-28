@@ -2,7 +2,9 @@
 // record by digest). Each record lists what one apply on this host owned: per entry its class, path and before/
 // after digests and modes, never contents and never credentials. Harness installs are annotated with the pinned
 // version they installed and the version they replaced, so "what is installed" and "what a rollback restores" come
-// from the history rather than a guess.
+// from the history rather than a guess. v1.1 layout: each version has its own directory (a rolled-back install is
+// removed) and select-harness-version switches the `current` link (a rolled-back select restores the previous link,
+// so the version it records as `previous` is current again).
 //
 // rollbackTo plans undoing every transaction after a target, newest first, with the contract's recovery rules
 // (recoveryDecision) per entry. It simulates the file states as it goes: undoing a newer change to a file yields
@@ -23,6 +25,7 @@ import {
   type HarnessID,
   type InstallHarness,
   type JournalEntry,
+  type SelectHarnessVersion,
   type PathRef,
   type RecoveryDecision,
   type Result,
@@ -105,6 +108,12 @@ function checkedJournals(journals: readonly unknown[], context: HistoryContext):
 
 function installAction(plan: SetupPlan | undefined, actionID: string): InstallHarness | undefined {
   return plan?.actions.find((a): a is InstallHarness => a.kind === "install-harness" && a.id === actionID)
+}
+
+/** The plan action whose rollback brings back a previous harness version: a v1.1 select, or a v1.0 in-place install. */
+function restoringAction(plan: SetupPlan | undefined, entry: JournalEntry): InstallHarness | SelectHarnessVersion | undefined {
+  if (entry.kind !== "install-harness" && entry.kind !== "select-harness-version") return undefined
+  return plan?.actions.find((a): a is InstallHarness | SelectHarnessVersion => a.kind === entry.kind && a.id === entry.actionID)
 }
 
 function record(journal: TransactionJournal, plan: SetupPlan | undefined): TransactionRecord {
@@ -213,7 +222,7 @@ export function rollbackTo(journals: readonly unknown[], target: string | undefi
         else if (decision === "remove-created") predicted.set(key, { exists: false })
         else if (decision === "clear-credential") predicted.set(key, null)
       }
-      const action = decision === "restore-backup" && entry.kind === "install-harness" ? installAction(plan, entry.actionID) : undefined
+      const action = decision === "restore-backup" ? restoringAction(plan, entry) : undefined
       steps.push({
         txID: journal.txID,
         seq: entry.seq,

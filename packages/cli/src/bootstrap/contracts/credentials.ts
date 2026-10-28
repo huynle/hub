@@ -4,13 +4,15 @@
 // (status output, plans, journals, logs, generated Ansible) sees an EnrollmentStatus, which has no field for it.
 import type { EnrollPoll, EnrollStart } from "../../../../protocol/src/index.ts"
 import { findSecrets } from "./secrets.ts"
-import { Checker, header, hubURL, instant, oneOf, shape, text, type Result } from "./validate.ts"
+import { Checker, header, hubURL, instant, isInsecureHubURL, oneOf, pointer, shape, text, type Result } from "./validate.ts"
 
 /**
  * unconfigured: no machine credential. configured: a credential is stored but not checked. verified: the hub
  * accepted it just now. revoked: the hub rejected it (re-enroll). offline: the hub could not be reached to check.
+ * insecure (v1.1): a credential is stored for a plain-http hub that is not on loopback. It is reported (with a
+ * warning) and never sent there to be checked; a new enrollment over plain http to such a hub stays refused.
  */
-export const ENROLLMENT_STATES = ["unconfigured", "configured", "verified", "revoked", "offline"] as const
+export const ENROLLMENT_STATES = ["unconfigured", "configured", "verified", "revoked", "offline", "insecure"] as const
 export type EnrollmentState = (typeof ENROLLMENT_STATES)[number]
 
 export const ENROLLMENT_SCHEMA = "hub.enrollment-status"
@@ -68,7 +70,10 @@ const MACHINE_NAME = /^[A-Za-z0-9._ -]{1,64}$/
 export function enrollmentStatusFrom(credential: MachineCredential | undefined, probe: CredentialProbe | undefined, now: number): EnrollmentStatus {
   const base = { schema: ENROLLMENT_SCHEMA, version: 1 } as const
   if (!credential) return { ...base, state: "unconfigured" }
-  const state: EnrollmentState = !probe ? "configured" : !probe.reachable ? "offline" : probe.accepted ? "verified" : "revoked"
+  // v1.1: a plain-http, non-loopback hub is never probed, so no probe result can make it verified.
+  const insecure = isInsecureHubURL(credential.server)
+  if (insecure) probe = undefined
+  const state: EnrollmentState = insecure ? "insecure" : !probe ? "configured" : !probe.reachable ? "offline" : probe.accepted ? "verified" : "revoked"
   return {
     ...base,
     state,
@@ -85,7 +90,12 @@ export function validateEnrollmentStatus(value: unknown): Result<EnrollmentStatu
   if (!r) return c.result(value)
   header(c, "", r, ENROLLMENT_SCHEMA, 1)
   oneOf(c, "/state", r.state, ENROLLMENT_STATES)
-  if (r.server !== undefined) hubURL(c, "/server", r.server)
+  if (r.server !== undefined) {
+    if (r.state === "insecure") {
+      if (!isInsecureHubURL(r.server)) c.add("/server", "inconsistent", "insecure names a plain-http hub that is not on loopback")
+    } else hubURL(c, "/server", r.server)
+  }
+  if (r.state === "insecure" && r.checkedAt !== undefined) c.add(pointer("", "checkedAt"), "inconsistent", "an insecure hub is never checked")
   if (r.machineID !== undefined) text(c, "/machineID", r.machineID, 128, MACHINE_ID)
   if (r.machineName !== undefined) text(c, "/machineName", r.machineName, 64, MACHINE_NAME)
   if (r.checkedAt !== undefined) instant(c, "/checkedAt", r.checkedAt)

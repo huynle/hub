@@ -53,7 +53,7 @@ describe("desiredState", () => {
     const snapshot = clone(DISCOVERY_DARWIN)
     const withShell = { ...snapshot, runtimes: [{ id: "openshell" as const, present: true, version: "0.4.0" }] }
     const d = value(desiredState(deepFreeze(clone(PROFILE_FULL_HARNESS)), deepFreeze(withShell)))
-    expect(d.profile).toEqual({ id: "full-harness", version: 1 })
+    expect(d.profile).toEqual({ id: "full-harness", version: 2 })
     expect(d.target).toBe("darwin-arm64")
     expect(d.harnesses).toEqual([
       { id: "opencode", presence: "installed", owner: "user", version: "2.0.26", verify: ["version-exec", "provider-auth", "spoke-connected"] },

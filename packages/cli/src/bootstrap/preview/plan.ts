@@ -71,9 +71,14 @@ const PHASE: Readonly<Record<ActionKind, number>> = {
   "install-artifact": 1,
   "link-executable": 2,
   "install-harness": 3,
+  // v1.1: a freshly installed version is made current right after it is installed (and before it is verified).
+  "select-harness-version": 3.5,
   "write-file": 4,
   "merge-config": 4,
   "register-mcp-server": 4,
+  // v1.1: a removed component's service is unloaded, then its unit removed, before new services are installed.
+  "deactivate-service": 4.8,
+  "remove-service": 4.9,
   "install-service": 5,
   "enroll-machine": 6,
   "verify-harness": 7,

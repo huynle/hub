@@ -214,7 +214,7 @@ describe("Profile", () => {
   })
   test("migrateProfile refuses versions it cannot migrate and versions from the future", () => {
     expectRejected(migrateProfile(F.PROFILE_V0), "unmigratable")
-    expectRejected(migrateProfile({ ...F.PROFILE_SESSION_ONLY, version: 2 }), "unsupported_version")
+    expectRejected(migrateProfile({ ...F.PROFILE_SESSION_ONLY, version: 3 }), "unsupported_version")
   })
 })
 threatSuite("Profile", F.PROFILE_INVALID, validateProfile)
@@ -635,7 +635,7 @@ threatSuite("SetupPlan (harness installs)", F.PLAN_HARNESS_INVALID, validateSetu
 
 describe("harness rollback", () => {
   test("a replaced harness binary is restored from its backup; a new one is removed", () => {
-    const e = F.HARNESS_JOURNAL_ENTRY
+    const e = { ...F.HARNESS_JOURNAL_ENTRY, seq: 1 }
     expectValid(validateJournal({ ...F.JOURNAL_APPLYING, entries: [e] }))
     expect(recoveryDecision(e, e.after!)).toBe("restore-backup")
     expect(recoveryDecision({ ...e, before: { exists: false }, backup: undefined }, e.after!)).toBe("remove-created")

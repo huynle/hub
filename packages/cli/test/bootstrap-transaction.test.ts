@@ -142,7 +142,17 @@ describe("consent, host and version checks", () => {
   test("a refused downgrade or a plan whose artifact the verified manifest does not pin changes nothing", async () => {
     const w = world()
     const before = w.snapshot()
-    const unpinned = w.replan((p) => ({ ...p, actions: p.actions.map((a) => (a.kind === "install-harness" ? { ...a, version: "2.0.27" } : a)) }))
+    // v1.1: the unpinned version is installed into its own directory and made current.
+    const unpinned = w.replan((p) => ({
+      ...p,
+      actions: p.actions.map((a) =>
+        a.kind === "install-harness"
+          ? { ...a, version: "2.0.27", path: { root: "data", rel: "hub/harnesses/opencode/2.0.27" } }
+          : a.kind === "select-harness-version"
+            ? { ...a, version: "2.0.27", target: { root: "data", rel: "hub/harnesses/opencode/2.0.27" } }
+            : a,
+      ),
+    }))
     const r = await w.applier().apply({ token: w.token((await unpinned()).plan), replan: unpinned, consent: ALL })
     expect(codeOf(r)).toBe("unpinned_artifact")
     const wrongDigest = w.replan((p) => ({ ...p, actions: p.actions.map((a) => (a.kind === "install-artifact" ? { ...a, sha256: OTHER_HOST } : a)) }))
@@ -352,7 +362,7 @@ describe("rollback", () => {
       },
     }
     // Fail after enrollment: verify runs before enroll in this plan, so fail at activation instead.
-    const replan = w.replan((p) => ({ ...p, actions: [...p.actions.filter((a) => a.kind !== "verify-harness" && a.kind !== "launch-session" && a.kind !== "install-harness"), { ...ACTIONS["verify-harness"], id: "verify-late" } as Action] }))
+    const replan = w.replan((p) => ({ ...p, actions: [...p.actions.filter((a) => a.kind !== "verify-harness" && a.kind !== "launch-session" && a.kind !== "install-harness" && a.kind !== "select-harness-version"), { ...ACTIONS["verify-harness"], id: "verify-late" } as Action] }))
     const r = await w.applier({ hooks }).apply({ token: w.token((await replan()).plan), replan, consent: ALL })
     expect(codeOf(r)).toBe("harness_not_ready")
     const config = JSON.parse(w.read("config", "hub/config.json"))
