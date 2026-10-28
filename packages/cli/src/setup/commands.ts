@@ -54,6 +54,9 @@ import { TxStore } from "../bootstrap/transaction/store.ts"
 import type { TxOutcome } from "../bootstrap/transaction/engine.ts"
 import { readNodeConfig, nodeConfigPath } from "../../../node/src/config.ts"
 import { str, UsageError, type FlagKind, type Parsed } from "../args"
+import { resolveCredentials, type Env } from "../credentials"
+import { clientFor } from "../http"
+import { hubLaunchDriver } from "./launch-driver.ts"
 import { errorCodeOf, issuesText, PlanRefusal } from "./contributors.ts"
 import { createSetupRuntime, enrollPromptText, type RuntimePorts, type SetupRuntime } from "./runtime.ts"
 import { BootstrapStateStore, raiseFloors, validateSetupRequest, type BootstrapState, type SetupChoices, type SetupRequest } from "./state.ts"
@@ -209,8 +212,28 @@ function readState(snapshot: DiscoverySnapshot): BootstrapState {
   }
 }
 
+/** The verification launch over the hub launch API, with this shell's hub login (resolved when it starts). */
+function launchDriverFor(io: SetupIo) {
+  const store = credentialStoreFor(io.env, io.home)
+  const client = () => {
+    const credentials = resolveCredentials(io.env as Env, io.home)
+    if (!credentials) throw new Error("not logged in to the hub (run `hub login` with an app token allowed to launch)")
+    return clientFor(credentials)
+  }
+  return hubLaunchDriver({
+    launches: {
+      create: (spec, options) => client().launches.create(spec, options),
+      get: (id, options) => client().launches.get(id, options),
+      stop: (id, options) => client().launches.stop(id, options),
+      list: (filter) => client().launches.list(filter),
+    },
+    machineID: async () => (await store.read())?.machineID,
+  })
+}
+
 function runtimeFor(io: SetupIo, manifest: VerifiedManifest | undefined, snapshot: DiscoverySnapshot): SetupRuntime {
   const { probe, now } = context(io)
+  const ports: RuntimePorts = { launchDriver: launchDriverFor(io), ...io.bootstrap?.ports }
   return createSetupRuntime({
     env: io.env,
     home: io.home,
@@ -224,7 +247,7 @@ function runtimeFor(io: SetupIo, manifest: VerifiedManifest | undefined, snapsho
     ...(io.bootstrap?.fetch ? { fetch: io.bootstrap.fetch } : {}),
     ...(io.signal ? { signal: io.signal } : {}),
     stderr: io.stderr,
-    ...(io.bootstrap?.ports ? { ports: io.bootstrap.ports } : {}),
+    ports,
   })
 }
 
