@@ -106,8 +106,10 @@ export function installOf(probe: DiscoveryProbe, id: HarnessID, shim: Shim, root
   if (shim.kind === "container-shim") return { installMethod: "unknown" }
   const real = shim.kind === "host" || shim.kind === "wrapper" ? (shim.resolvesTo ?? shim.path) : shim.path
   const semver = (v: string | undefined) => (v && SEMVER.test(v) ? v : undefined)
-  const data = roots.find((r) => r.id === "data")?.path
-  const home = roots.find((r) => r.id === "home")?.path
+  // Paths are read in this (possibly container) view of each root.
+  const local = (root: string) => roots.find((r) => r.id === root)?.containerPath ?? roots.find((r) => r.id === root)?.path
+  const data = local("data")
+  const home = local("home")
   const hub = data ? new RegExp(`^${escape(data)}/hub/harnesses/${escape(id)}/([^/]+)(?:/|$)`).exec(real) : null
   if (hub && semver(hub[1])) return { installMethod: "hub", version: hub[1] }
   const brew = /\/(?:Cellar|Caskroom)\/[^/]+\/([^/]+)\//.exec(real)
