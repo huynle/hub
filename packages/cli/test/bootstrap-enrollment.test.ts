@@ -80,7 +80,7 @@ describe("machine enroll", () => {
     const h = hub({ polls: [{ status: "denied" }] })
     const run = await enroll(h)
     expect(run.result.exit).toBe(BOOTSTRAP_EXIT.forbidden)
-    expect(run.result.envelope).toMatchObject({ ok: false, error: { code: "forbidden" } })
+    expect(run.result.envelope).toMatchObject({ ok: false, error: { code: "enrollment_denied" } })
     expect(await run.store.read()).toBeUndefined()
     expectSecretFree(run)
   })
@@ -92,7 +92,7 @@ describe("machine enroll", () => {
 
     const pending = hub({ polls: [{ status: "pending" }], start: { expiresAt: Date.now() + 86_400_000 } })
     const byClient = await enroll(pending, { maxWaitMs: 60 })
-    expect(byClient.result.envelope).toMatchObject({ ok: false, error: { code: "needs_user" } })
+    expect(byClient.result.envelope).toMatchObject({ ok: false, error: { code: "enrollment_expired" } })
     expect(byClient.result.envelope.error?.message).toContain("expired")
     expect(await byClient.store.read()).toBeUndefined()
     expectSecretFree(byClient)
@@ -103,7 +103,7 @@ describe("machine enroll", () => {
     const abort = new AbortController()
     setTimeout(() => abort.abort(), 40)
     const run = await enroll(h, { signal: abort.signal, minIntervalMs: 5 })
-    expect(run.result.envelope).toMatchObject({ ok: false, error: { code: "needs_user" } })
+    expect(run.result.envelope).toMatchObject({ ok: false, error: { code: "cancelled" } })
     expect(run.result.envelope.error?.message).toContain("cancelled")
     expect(await run.store.read()).toBeUndefined()
 

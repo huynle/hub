@@ -10,6 +10,8 @@
 //   flight is never aborted, a failed save is retried, and when it still fails the credential stays in memory
 //   only (retryPersist) and the output names the machine ID so the user can revoke it. It is never written
 //   anywhere else and never printed.
+// - v1.1: the outcomes have their own codes: enrollment_denied (exit 5), enrollment_expired and cancelled (exit 4),
+//   the same exits as before.
 import { hostname } from "node:os"
 import type { EnrollStart } from "../../../../protocol/src/index.ts"
 import { EnrollmentRefused, pollEnrollment, startEnrollment } from "../../../../spoke-sdk/src/enroll.ts"
@@ -107,7 +109,7 @@ export async function machineEnroll(options: MachineEnrollOptions): Promise<Mach
   }
   const machineName = options.machineName ?? defaultMachineName(hostname())
   if (!MACHINE_NAME.test(machineName)) return failure(COMMAND, "usage", "The machine name must be 1–64 letters, digits, spaces, dots, dashes or underscores")
-  const cancelled = () => failure(COMMAND, "needs_user", "Enrollment cancelled; nothing was stored", { hint: "Run hubctl machine enroll again" })
+  const cancelled = () => failure(COMMAND, "cancelled", "Enrollment cancelled; nothing was stored", { hint: "Run hubctl machine enroll again" })
   if (signal?.aborted) return cancelled()
 
   let existing: MachineCredential | undefined
@@ -161,8 +163,8 @@ export async function machineEnroll(options: MachineEnrollOptions): Promise<Mach
     return failure(COMMAND, "offline", `Enrollment with ${server} failed`, { warnings })
   }
   if (outcome.status === "cancelled") return cancelled()
-  if (outcome.status === "denied") return failure(COMMAND, "forbidden", `The enrollment of ${machineName} was denied on the hub`, { warnings })
-  if (outcome.status !== "approved") return failure(COMMAND, "needs_user", "The enrollment code expired before it was approved; nothing was stored", { hint: "Run hubctl machine enroll again and approve the code on the hub", warnings })
+  if (outcome.status === "denied") return failure(COMMAND, "enrollment_denied", `The enrollment of ${machineName} was denied on the hub`, { warnings })
+  if (outcome.status !== "approved") return failure(COMMAND, "enrollment_expired", "The enrollment code expired before it was approved; nothing was stored", { hint: "Run hubctl machine enroll again and approve the code on the hub", warnings })
 
   const credential: MachineCredential = { server, machineID: outcome.machineID, machineName, token: outcome.machineToken }
   return persist(credential, options, warnings, options.persistAttempts ?? PERSIST_ATTEMPTS)
