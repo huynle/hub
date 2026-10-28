@@ -7,6 +7,9 @@
 //   pgpKey     an ephemeral RSA key generated at test time, with helpers that build OpenPGP v4 packets and
 //              detached signatures for the threat cases (no key material is committed).
 import { createHash, generateKeyPairSync, sign, type KeyObject } from "node:crypto"
+import { manifestPayload, verifyManifest, type ArtifactManifest, type HarnessPin, type VerifiedManifest } from "../../src/bootstrap/contracts/index.ts"
+import type { Downloader, ProbeRunner, RunResult, Scratch } from "../../src/bootstrap/adapters/claude/source.ts"
+import { MANIFEST_UNSIGNED, TRUST_ROOT_TEMPLATE } from "./fixtures.ts"
 
 /** Upstream Claude Code release-signing material, fetched read-only on 2026-10-28 (public data, no secrets). */
 export const UPSTREAM = {
@@ -169,3 +172,110 @@ export function pgpSign(key: PgpKey, data: Uint8Array, options: SignOptions = {}
 }
 
 export const armoredSignature = (key: PgpKey, data: Uint8Array, options?: SignOptions) => armor("SIGNATURE", pgpSign(key, data, options))
+
+// ---------- a pinned Claude Code release (fake binaries) ----------
+
+const MACHO = [0xcf, 0xfa, 0xed, 0xfe]
+const ELF = [0x7f, 0x45, 0x4c, 0x46]
+const binary = (magic: number[], text: string) => new Uint8Array([...magic, ...new TextEncoder().encode(text)])
+
+export const CLAUDE_VERSION = "2.1.90"
+/** Stand-ins for the upstream binaries: the right magic number, then a marker. */
+export const CLAUDE_BINARIES = {
+  "darwin-arm64": binary(MACHO, ` fake claude ${CLAUDE_VERSION} darwin-arm64`),
+  "linux-x64": binary(ELF, ` fake claude ${CLAUDE_VERSION} linux-x64`),
+} as const
+export type ClaudeTarget = keyof typeof CLAUDE_BINARIES
+
+export const sha256Hex = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex")
+export const RELEASES = "https://downloads.claude.ai/claude-code-releases"
+export const KEY_URL = "https://downloads.claude.ai/keys/claude-code.asc"
+export const binaryURL = (version: string, target: string) => `${RELEASES}/${version}/${target}/claude`
+
+export function claudePin(target: ClaudeTarget, version = CLAUDE_VERSION, bytes: Uint8Array = CLAUDE_BINARIES[target]): HarnessPin {
+  return {
+    harness: "claude-code",
+    version,
+    target,
+    url: binaryURL(version, target),
+    file: "claude",
+    size: bytes.byteLength,
+    sha256: `sha256:${sha256Hex(bytes)}`,
+    evidence: target.startsWith("darwin") ? ["gpg-manifest", "macos-notarization"] : ["gpg-manifest"],
+    minimumVersion: "2.1.89",
+  }
+}
+
+/** A hub manifest signed with an ephemeral ed25519 key, pinning `pins` for Claude Code (the others kept). */
+export function signedHubManifest(pins: readonly HarnessPin[] = [claudePin("darwin-arm64"), claudePin("linux-x64")]): VerifiedManifest {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519")
+  const body: Omit<ArtifactManifest, "signatures"> = { ...MANIFEST_UNSIGNED, harnesses: [...MANIFEST_UNSIGNED.harnesses.filter((h) => h.harness !== "claude-code"), ...pins] }
+  const manifest: ArtifactManifest = { ...body, signatures: [{ keyID: "hub-release-1", algorithm: "ed25519", value: sign(null, Buffer.from(manifestPayload(body)), privateKey).toString("base64") }] }
+  const root = { ...TRUST_ROOT_TEMPLATE, keys: [{ ...TRUST_ROOT_TEMPLATE.keys[0]!, publicKey: publicKey.export({ format: "der", type: "spki" }).toString("base64") }] }
+  const verified = verifyManifest(manifest, root)
+  if (!verified.ok) throw new Error(JSON.stringify(verified.issues))
+  return verified.value
+}
+
+/** An upstream-shaped manifest.json listing these binaries (platforms.<target>.checksum, size). */
+export function upstreamManifest(version: string, binaries: Partial<Record<ClaudeTarget, Uint8Array>> = CLAUDE_BINARIES): Uint8Array {
+  const platforms = Object.fromEntries(Object.entries(binaries).map(([t, b]) => [t, { binary: "claude", checksum: sha256Hex(b!), size: b!.byteLength }]))
+  return new TextEncoder().encode(`${JSON.stringify({ version, platforms }, null, 2)}\n`)
+}
+
+/** A fake https server: URL → bytes (or an Error to throw); records every request. */
+export class FakeDownloads implements Downloader {
+  readonly requests: string[] = []
+  constructor(readonly files: Map<string, Uint8Array | string | Error> = new Map()) {}
+  set(url: string, body: Uint8Array | string | Error) {
+    this.files.set(url, body)
+    return this
+  }
+  async get(url: string, maxBytes: number): Promise<Uint8Array> {
+    this.requests.push(url)
+    const body = this.files.get(url)
+    if (body === undefined) throw new Error(`404 ${url}`)
+    if (body instanceof Error) throw body
+    const bytes = typeof body === "string" ? new TextEncoder().encode(body) : body
+    if (bytes.byteLength > maxBytes) throw new Error(`${url} is larger than ${maxBytes} bytes`)
+    return bytes
+  }
+}
+
+/** The upstream bucket for one release, signed by `key` (default: a fresh ephemeral key). */
+export function upstreamRelease(options: { key?: PgpKey; version?: string; binaries?: Partial<Record<ClaudeTarget, Uint8Array>>; manifest?: Uint8Array; signature?: string | Error } = {}) {
+  const key = options.key ?? pgpKey()
+  const version = options.version ?? CLAUDE_VERSION
+  const manifest = options.manifest ?? upstreamManifest(version, options.binaries)
+  const downloads = new FakeDownloads()
+  for (const [target, bytes] of Object.entries(CLAUDE_BINARIES)) downloads.set(binaryURL(version, target), bytes)
+  downloads.set(`${RELEASES}/${version}/manifest.json`, manifest)
+  downloads.set(`${RELEASES}/${version}/manifest.json.sig`, options.signature ?? armoredSignature(key, manifest))
+  downloads.set(KEY_URL, key.armored)
+  return { key, downloads, manifest }
+}
+
+export interface RunCall {
+  readonly file: string
+  readonly args: readonly string[]
+  readonly env: Readonly<Record<string, string>>
+}
+
+/** A fake process runner: answers by (file, args) through `script`; records every call. */
+export class FakeRunner implements ProbeRunner {
+  readonly calls: RunCall[] = []
+  constructor(private readonly script: (file: string, args: readonly string[]) => RunResult) {}
+  async run(file: string, args: readonly string[], options: { readonly env: Readonly<Record<string, string>> }): Promise<RunResult> {
+    this.calls.push({ file, args: [...args], env: { ...options.env } })
+    return this.script(file, args)
+  }
+}
+
+/** A scratch area that only records what it was given (no files are written). */
+export class FakeScratch implements Scratch {
+  readonly files: Uint8Array[] = []
+  async withFile<T>(bytes: Uint8Array, use: (path: string) => Promise<T>): Promise<T> {
+    this.files.push(bytes)
+    return use(`/scratch/claude-${this.files.length}`)
+  }
+}
