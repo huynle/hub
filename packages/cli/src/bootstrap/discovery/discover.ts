@@ -56,6 +56,7 @@ export function configCandidates(platform: string, roots: readonly RootMapping[]
   }
   add("config", "hub/config.json", "hub", "json")
   add("config", "hub/node.json", "hub", "json")
+  add("config", "hub/claude-code.json", "hub", "json")
   add("config", "opencode/opencode.json", "harness:opencode", "json")
   add("config", "opencode/opencode.jsonc", "harness:opencode", "jsonc")
   add("home", ".claude.json", "harness:claude-code", "json")
@@ -69,6 +70,9 @@ export function configCandidates(platform: string, roots: readonly RootMapping[]
 }
 
 // ---------- snapshot ----------
+
+/** Where each harness's binary is inside a hub install root (the adapters' unpackers). */
+const HARNESS_BIN_DIR: Readonly<Record<(typeof HARNESS_ORDER)[number], string>> = { opencode: "/bin", "claude-code": "", codex: "/bin" }
 
 /** Discovers this host through `probe`. Fails (instead of recording) if anything found looks like a credential. */
 export function discover(probe: DiscoveryProbe, options: DiscoverOptions): Result<DiscoverySnapshot> {
@@ -95,6 +99,10 @@ export function discover(probe: DiscoveryProbe, options: DiscoverOptions): Resul
   const harnesses: HarnessPresence[] = HARNESS_ORDER.map((id) => {
     const name = HARNESS_BINARIES[id]
     const known = id === "opencode" ? [join(home, ".opencode/bin")] : id === "claude-code" ? [join(home, ".local/bin"), join(home, ".claude/local")] : []
+    // A harness hub installed (data:hub/harnesses/<id>/current) is found off PATH too, so a rerun after an install
+    // sees it (installMethod "hub") and plans nothing more. PATH still wins.
+    const data = roots!.find((r) => r.id === "data")
+    if (data) known.push(join(rootPathIn(data, context), `hub/harnesses/${id}/current${HARNESS_BIN_DIR[id]}`))
     const path = which(probe, [...dirs, ...known.filter((d) => !dirs.includes(d))], name)
     if (!path) return { id, installed: false, health: { state: "unverified", probes: [] } }
     const shim = classifyExecutable(probe, name, path)

@@ -3,13 +3,14 @@
 // token in the spoke's config.json, read-only), keeps a pid file in <hub state dir>/codex/spoke.pid (one service per
 // user: a second one refuses while the first runs) and attaches to the shared Codex daemon's socket when present.
 //
-// Settings (environment): HUB_CODEX_BIN (default `codex` on PATH), HUB_CODEX_DAEMON_SOCKET (another socket, or
+// Settings (environment): HUB_CODEX_BIN (default: the Codex `hubctl setup` installed, else `codex` on PATH), HUB_CODEX_DAEMON_SOCKET (another socket, or
 // "off"), HUB_CODEX_CONFIG (Codex config overrides for the app-server the spoke starts, one key=value per line,
 // passed as -c; Codex's files are never written).
 import { spawnSync } from "node:child_process"
 import { openSync, closeSync, readFileSync, rmSync, writeSync } from "node:fs"
 import { configPath } from "../../../src/config.ts"
 import { readSpokeCredentials } from "../../node/src/config.ts"
+import { codexBinary } from "../../node/src/harnesses.ts"
 import pkg from "../package.json" with { type: "json" }
 import { codexStateDir, ensurePrivateDir, daemonSocketPath, pidFile, readServicePid } from "./paths.ts"
 import { startCodexSpoke } from "./spoke.ts"
@@ -85,7 +86,7 @@ async function serve(io: CodexMainIo): Promise<number> {
     return 1
   }
   try {
-    const codexBin = io.env.HUB_CODEX_BIN || "codex"
+    const codexBin = codexBinary(io.env, io.home)
     const env: Record<string, string | undefined> = { ...io.env }
     delete env.BUN_BE_BUN
     const daemonSocket = daemonSocketPath(io.env, io.home)

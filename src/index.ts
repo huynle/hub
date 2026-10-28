@@ -2,7 +2,7 @@
 // console, phones and (optional) Voice speech live on the hub; this side only exposes sessions, forwards
 // their events, and runs remote / voice turns and permission replies on request.
 import { mkdirSync, readFileSync } from "node:fs"
-import { hostname } from "node:os"
+import { homedir, hostname } from "node:os"
 import { fileURLToPath } from "node:url"
 import { Plugin } from "@opencode/plugin"
 import { DEFAULT_SUBAGENT, prepareConfigPath } from "./config"
@@ -15,7 +15,7 @@ import { herdrRunner } from "./spoke/herdr"
 import { launchSource } from "./spoke/launch-source"
 import { HubRpcError, hubMsg, hubWho } from "./spoke/hub-rpc"
 import { HUB_TOOL, HUB_TOOL_DESCRIPTION, HUB_TOOL_INPUT, runHubTool } from "./spoke/hub-tool"
-import { cliEntry, installLaunchers } from "./spoke/launchers"
+import { cliEntry, installLaunchers, standaloneHubctl } from "./spoke/launchers"
 import { listServiceSessions } from "./spoke/listing"
 import { ensureLocalHub } from "./spoke/localhub"
 import { nodeConfigPath, readWorkspaceRoots } from "./spoke/node-roots"
@@ -199,7 +199,7 @@ async function registerShellEnv(ctx: Context, identity: (sessionID: string) => {
     // The `hub`/`hubctl` launchers run the CLI with this runtime (OpenCode's binary as bun; src/spoke/launchers.ts).
     const bun = typeof process.versions.bun === "string"
     const entry = cliEntry(fileURLToPath(new URL("..", import.meta.url)), bun)
-    if (entry) installLaunchers({ binDir, execPath: process.execPath, bun, entry })
+    if (entry) installLaunchers({ binDir, execPath: process.execPath, bun, entry, standalone: standaloneHubctl(homedir()) })
     else console.error("[hub] no built hub CLI (packages/cli/dist/hub-cli.js): `hub` is not installed")
   } catch (cause) {
     console.error("[hub] could not install the hub CLI launchers", cause)

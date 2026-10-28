@@ -52,7 +52,7 @@ describe("apply", () => {
     expect(w.read("config", "hub/node.json")).toBe(NODE_JSON)
     expect(statSync(w.box.path("config", "hub/node.json")).mode & 0o777).toBe(0o600)
     const opencode = JSON.parse(w.read("config", "opencode/opencode.json"))
-    expect(opencode).toEqual({ $schema: "https://opencode.ai/config.json", theme: "dark", "x-user-key": { keep: true }, plugin: ["@huynle/hub"] })
+    expect(opencode).toEqual({ $schema: "https://opencode.ai/config.json", theme: "dark", "x-user-key": { keep: true }, plugins: ["@huynle/hub"] })
     for (const f of HARNESS_FILES) expect(w.read("data", `hub/harnesses/opencode/2.0.26/${f.rel}`)).toBe(f.text)
     expect(w.read("launch-agents", "io.github.huynle.hub-node.plist")).toBe(SERVICE_UNIT)
     expect(JSON.parse(w.read("config", "hub/config.json"))).toMatchObject({ token: NEW_TOKEN, theme: "kept" })

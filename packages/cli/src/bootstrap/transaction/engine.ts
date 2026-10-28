@@ -77,6 +77,11 @@ export interface ApplierConfig {
   readonly newID?: () => string
   /** Observers (logging, progress); they cannot change actions. */
   readonly hooks?: JournalHooks
+  /**
+   * Keep a committed transaction's backups (`hubctl setup rollback` restores from them later). Default false: a
+   * commit drops them, so only an interrupted or failed transaction can be undone exactly.
+   */
+  readonly keepBackups?: boolean
 }
 
 /** Explicit consent flags (--escalate, --confirm-activation). Never defaults. */
@@ -108,6 +113,11 @@ export interface RecoverRequest {
   readonly consent?: Consent
 }
 
+/** `hubctl setup rollback`: undo committed transactions, newest first, back to just after `to` (or all of them). */
+export interface RollbackRequest {
+  readonly to?: string
+}
+
 export interface Conflict {
   readonly seq: number
   readonly actionID: string
@@ -137,6 +147,12 @@ export interface Applier {
   apply(request: ApplyRequest): Promise<TxOutcome>
   /** Recovers an interrupted transaction; ok without a report when there was nothing to recover. */
   recover(request: RecoverRequest): Promise<TxOutcome | { readonly ok: true; readonly report?: undefined }>
+  /**
+   * Undoes committed transactions of this host, newest first, with the recovery rules (restore backups, remove what
+   * hub created, clear a credential, keep anything changed since as a conflict). Ok without a report when there is
+   * nothing to undo. The report is the oldest transaction undone, with every transaction's steps and conflicts.
+   */
+  rollback(request: RollbackRequest): Promise<TxOutcome | { readonly ok: true; readonly report?: undefined }>
 }
 
 const FINISHED: readonly JournalState[] = ["committed", "rolled-back"]
@@ -308,6 +324,36 @@ export function createApplier(config: ApplierConfig): Applier {
     })
   }
 
+  async function rollback(request: RollbackRequest): Promise<TxOutcome | { readonly ok: true; readonly report?: undefined }> {
+    return locked<TxOutcome | { ok: true; report?: undefined }>(newID(), true, async (store, lock) => {
+      if (unfinished(store).length > 0) return txFail("recovery_required", "an interrupted apply must be recovered first (`hubctl setup recover`)")
+      const mine = store
+        .journals()
+        .filter((j) => j.hostFingerprint === config.host.fingerprint)
+        .sort((a, b) => a.startedAt - b.startedAt || (a.txID < b.txID ? -1 : a.txID > b.txID ? 1 : 0))
+      let start = 0
+      if (request.to !== undefined) {
+        const at = mine.findIndex((j) => j.txID === request.to)
+        if (at < 0) return txFail("invalid", `no transaction ${request.to} on this host`)
+        if (mine[at]!.state !== "committed") return txFail("invalid", `${request.to} did not commit; roll back to a committed transaction`)
+        start = at + 1
+      }
+      const undo = mine.slice(start).filter((j) => j.state === "committed").reverse()
+      if (undo.length === 0) return { ok: true }
+      const steps: StepOutcome[] = []
+      const conflicts: Conflict[] = []
+      let last: TxReport | undefined
+      for (const journal of undo) {
+        const r = await new Run(store, lock, store.readPlan(journal), journal).rollbackAll()
+        if (!r.ok) return r
+        last = r.report
+        steps.push(...r.report.steps)
+        conflicts.push(...r.report.conflicts)
+      }
+      return { ok: true, report: { ...last!, steps, conflicts } }
+    })
+  }
+
   /** One transaction: its journal, the plan it applies, and its report. */
   class Run {
     private journal: TransactionJournal
@@ -417,7 +463,7 @@ export function createApplier(config: ApplierConfig): Applier {
         failure = failureOf(error)
       }
       if (!failure) {
-        this.cleanup()
+        if (!config.keepBackups) this.cleanup()
         return { ok: true, report: this.report() }
       }
       const rolled = await this.rollbackAll()
@@ -813,5 +859,6 @@ export function createApplier(config: ApplierConfig): Applier {
   return {
     apply: async (request) => redact(await apply(request)),
     recover: async (request) => redact(await recover(request)),
+    rollback: async (request) => redact(await rollback(request)),
   }
 }

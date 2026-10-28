@@ -137,7 +137,7 @@ describe("planSetup and previewSetup", () => {
         format: "json",
         owner: "harness:opencode",
         precondition: (opencodePlugin({ snapshot: snap(MAC_SYMLINKED_CONFIG), profile: PROFILE_SESSION_ONLY })[0] as { precondition: { exists: boolean; sha256?: string } }).precondition,
-        change: { op: "merge", set: [{ pointer: "/plugin/-", value: "@huynle/hub" }] },
+        change: { op: "merge", set: [{ pointer: "/plugins/-", value: "@huynle/hub" }] },
       },
     ])
     expect(codes(previewApplicable(p))).toEqual(["manual_edit_required"])
@@ -288,7 +288,7 @@ describe("read-only and redacted", () => {
     const lines = renderPreview(p, MAC_HOME)
     const text = lines.join("\n")
     expect(text).toContain("~/dot/config/opencode/opencode.json")
-    expect(text).toContain("/plugin/-")
+    expect(text).toContain("/plugins/-")
     expect(text).not.toContain(MAC_HOME)
     expect(text).not.toContain(NONCE)
     expect(text).not.toContain("sk-ant")

@@ -972,6 +972,7 @@ export function startCentral(options: CentralOptions): Central {
         if (poll.status === "approved") broadcast({ type: "catalog" })
         return Response.json(poll)
       }
+      if (method === "GET" && pathname === "/spoke/presence") return await spokePresence(request)
       if (method === "GET" && pathname === "/.well-known/hub") {
         return wellKnown({ publicURL, version: options.version ?? "0.0.0", auth: config.auth.mode === "oidc" ? { mode: "oidc", issuer: config.auth.issuer } : { mode: "pairing" } })
       }
@@ -986,6 +987,31 @@ export function startCentral(options: CentralOptions): Central {
     } catch (cause) {
       return failure(cause)
     }
+  }
+
+  /**
+   * GET /spoke/presence: which harness spokes of the caller's own machine are connected (machine token only). The
+   * one read-only query a machine credential can make about itself, for `hubctl setup verify` (spoke-connected
+   * readiness): harness, evidence level and features only, never sessions, directories, pids or other machines.
+   */
+  async function spokePresence(request: Request): Promise<Response> {
+    const refused = () => Response.json({ error: "Invalid or revoked machine token" }, { status: 401 })
+    const token = /^Bearer\s+(\S+)$/i.exec(request.headers.get("authorization") ?? "")?.[1]
+    if (!token || token.startsWith("hlt1.")) return refused()
+    const machine = await store.findMachine(token)
+    if (machine) await store.recheck({ users: [machine.ownerID] })
+    const owner = machine && store.user(machine.ownerID)
+    if (!machine || machine.revoked || !owner || owner.disabled) return refused()
+    const processes = registry.catalog().find((m) => m.id === machine.id)?.processes ?? []
+    const seen = new Set<string>()
+    const spokes = processes.flatMap((p) => {
+      const entry = { harness: p.harness, evidence: p.evidence, features: [...p.features] }
+      const key = JSON.stringify(entry)
+      if (seen.has(key)) return []
+      seen.add(key)
+      return [entry]
+    })
+    return Response.json({ machineID: machine.id, spokes })
   }
 
   async function login(request: Request, url: URL): Promise<Response> {

@@ -157,10 +157,10 @@ describe("v1.1 snapshot digest at apply", () => {
 describe("v1.1 JSONC configs", () => {
   test("merges into a commented OpenCode config and keeps every comment", async () => {
     const w = world()
-    const text = '// my config\n{\n  "theme": "dark", // keep\n  "plugin": [\n    "x",\n  ],\n}\n'
+    const text = '// my config\n{\n  "theme": "dark", // keep\n  "plugins": [\n    "x",\n  ],\n}\n'
     writeFileSync(w.box.path("config", "opencode/opencode.json"), text)
     const merge = { ...(ACTIONS["merge-config"] as Extract<Action, { kind: "merge-config" }>), precondition: { exists: true, sha256: digestOfText(text) } } as Action
     expect(codeOf(await applyOnly(w, [merge]))).toBe("ok")
-    expect(w.read("config", "opencode/opencode.json")).toBe('// my config\n{\n  "theme": "dark", // keep\n  "plugin": [\n    "x",\n    "@huynle/hub",\n  ],\n}\n')
+    expect(w.read("config", "opencode/opencode.json")).toBe('// my config\n{\n  "theme": "dark", // keep\n  "plugins": [\n    "x",\n    "@huynle/hub",\n  ],\n}\n')
   })
 })

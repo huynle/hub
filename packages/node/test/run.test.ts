@@ -135,7 +135,7 @@ describe("runNode with openshell", () => {
     const { fake, name } = openshellFake()
     const controller = new AbortController()
     const lines: string[] = []
-    const env = { ...configDir({ server: hub.url, token: "mt", machineID: "m1" }, { workspaceRoots: [tmpdir()], openshell: { enabled: true, gateway: "lab", profiles: { web: {} } } }), PATH: process.env.PATH, HUB_CLAUDE_BIN: "/nonexistent/claude" }
+    const env = { ...configDir({ server: hub.url, token: "mt", machineID: "m1" }, { workspaceRoots: [tmpdir()], openshell: { enabled: true, gateway: "lab", profiles: { web: {} } } }), PATH: process.env.PATH, HUB_CLAUDE_BIN: "/nonexistent/claude", HUB_CODEX_BIN: "/nonexistent/codex" }
     const done = runNode({ env, home: "/nowhere", log: (l) => lines.push(l), signal: controller.signal, openshellBinary: fake.binary })
     await until(() => hub.hellos.length > 0)
     const hello = hub.hellos[0]!

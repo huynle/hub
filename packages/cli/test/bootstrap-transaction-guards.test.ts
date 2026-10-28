@@ -68,7 +68,7 @@ describe("guards", () => {
 
   test("two steps may edit the same file; the second's precondition is the file before this transaction", async () => {
     const w = world()
-    const second = { ...ACTIONS["merge-config"], id: "opencode-plugin-2", set: [{ pointer: "/plugin/-", value: "other-plugin" }] } as Action
+    const second = { ...ACTIONS["merge-config"], id: "opencode-plugin-2", set: [{ pointer: "/plugins/-", value: "other-plugin" }] } as Action
     const replan = w.replan((p) => {
       const first = p.actions.find((a) => a.id === "opencode-plugin")!
       const actions = [...p.actions]
@@ -77,6 +77,6 @@ describe("guards", () => {
     })
     const r = await w.applier().apply({ token: w.token((await replan()).plan), replan, consent: ALL })
     expect(r.ok ? "ok" : r.code).toBe("ok")
-    expect(JSON.parse(w.read("config", "opencode/opencode.json")).plugin).toEqual(["@huynle/hub", "other-plugin"])
+    expect(JSON.parse(w.read("config", "opencode/opencode.json")).plugins).toEqual(["@huynle/hub", "other-plugin"])
   })
 })

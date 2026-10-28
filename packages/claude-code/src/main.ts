@@ -9,7 +9,7 @@ import { spawnSync } from "node:child_process"
 import { realpathSync } from "node:fs"
 import { configPath } from "../../../src/config.ts"
 import { nodeConfigPath, readNodeConfig, readSpokeCredentials } from "../../node/src/config.ts"
-import { findExecutable } from "../../node/src/harnesses.ts"
+import { claudeBinary, findExecutable } from "../../node/src/harnesses.ts"
 import { runHook } from "./bridge.ts"
 import { startDaemon, type DaemonLaunchOptions } from "./daemon.ts"
 import { runMcpPipe } from "./mcp.ts"
@@ -42,12 +42,12 @@ export function claudeVersion(bin: string, env: ClaudeCodeIo["env"]): string {
 
 /**
  * How the daemon starts Claude Code for hub launches, or undefined when it does not: the Claude Code CLI must be
- * found (HUB_CLAUDE_BIN, else `claude` on PATH) and node.json must not withhold claude-code (harnesses). Launch
+ * found (claudeBinary: HUB_CLAUDE_BIN, hub's claude-code.json, else `claude` on PATH) and node.json must not withhold claude-code (harnesses). Launch
  * directories must be under node.json's workspaceRoots (read again at each create); launched sessions load the hub
  * plugin `hub claude` loads (written when the first launch needs it).
  */
 export function daemonLaunchOptions(io: { readonly env: ClaudeCodeIo["env"]; readonly home: string; readonly program: Program }): DaemonLaunchOptions | undefined {
-  const bin = findExecutable(io.env.HUB_CLAUDE_BIN || "claude", io.env)
+  const bin = findExecutable(claudeBinary(io.env, io.home), io.env)
   if (!bin) return undefined
   const file = nodeConfigPath(io.env, io.home)
   if (readNodeConfig(file).config.harnesses?.["claude-code"] === false) return undefined
@@ -83,7 +83,7 @@ async function daemon(io: ClaudeCodeIo): Promise<number> {
       socketPath: socketPath(io.env, io.home),
       server: credentials.server,
       token: credentials.token,
-      harnessVersion: claudeVersion(io.env.HUB_CLAUDE_BIN || "claude", io.env),
+      harnessVersion: claudeVersion(claudeBinary(io.env, io.home), io.env),
       pluginVersion: VERSION,
       directory: io.home,
       log,

@@ -3,6 +3,10 @@
 // bundle shipped in this package with the runtime running the plugin: OpenCode is a Bun-compiled binary that acts
 // as bun under BUN_BE_BUN=1, so no `bun` (or node) needs to be on PATH. Without Bun the bundle runs on `node`.
 // The CLI deletes BUN_BE_BUN from its own env at start, so nothing it starts inherits it.
+//
+// A standalone hubctl at user-bin:hubctl (~/.local/bin/hubctl, what `hubctl setup` installs) wins: the launchers exec
+// it when it is there (checked at run time), so shells, services and MCP clients all run that one stable authority
+// rather than the bundle in the plugin's install (cache) directory.
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs"
 import path from "node:path"
 
@@ -20,14 +24,20 @@ export interface LauncherOptions {
   readonly bun: boolean
   /** The CLI entry the runtime runs. */
   readonly entry: string
+  /** The standalone hubctl to prefer when it exists (standaloneHubctl(home)). */
+  readonly standalone?: string
 }
+
+/** Where `hubctl setup` installs the standalone hubctl (contract user-bin:hubctl). */
+export const standaloneHubctl = (home: string): string => path.join(home, ".local", "bin", "hubctl")
 
 /** A word quoted for sh. */
 const quote = (word: string) => `'${word.replaceAll("'", `'\\''`)}'`
 
-export function launcherScript({ execPath, bun, entry }: LauncherOptions): string {
+export function launcherScript({ execPath, bun, entry, standalone }: LauncherOptions): string {
   const command = bun ? `exec env BUN_BE_BUN=1 ${quote(execPath)} ${quote(entry)} "$@"` : `exec node ${quote(entry)} "$@"`
-  return `#!/bin/sh\n# hub CLI launcher, written by the hub OpenCode plugin at start (edits are overwritten).\n${command}\n`
+  const prefer = standalone ? `if [ -x ${quote(standalone)} ]; then exec ${quote(standalone)} "$@"; fi\n` : ""
+  return `#!/bin/sh\n# hub CLI launcher, written by the hub OpenCode plugin at start (edits are overwritten).\n${prefer}${command}\n`
 }
 
 /** The entry to run from the package at `root`: the bundle, else (Bun only) the TypeScript source. */

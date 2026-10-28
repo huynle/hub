@@ -5,12 +5,13 @@
 // arguments, its exit code passed through. On a machine that is not enrolled (no machine token) or when the service
 // cannot be started, Codex runs as usual without the hub, and the command says why.
 //
-// Settings (environment): HUB_CODEX_BIN (default `codex` on PATH); see main.ts for the service's.
+// Settings (environment): HUB_CODEX_BIN (default: the Codex `hubctl setup` installed, else `codex` on PATH); see main.ts for the service's.
 import { spawn } from "node:child_process"
 import { closeSync, openSync } from "node:fs"
 import path from "node:path"
 import { configPath } from "../../../src/config.ts"
 import { readSpokeCredentials } from "../../node/src/config.ts"
+import { codexBinary } from "../../node/src/harnesses.ts"
 import { codexStateDir, ensurePrivateDir, readServicePid } from "./paths.ts"
 
 const SERVICE_START_MS = 8000
@@ -87,7 +88,10 @@ function spawnCodex(bin: string, args: readonly string[], env: Env, stderr: (s: 
   })
 }
 
-export async function runCodex(args: readonly string[], io: CodexIo): Promise<number> {
+export async function runCodex(args: readonly string[], given: CodexIo): Promise<number> {
+  // A hub-installed Codex is what both this run and the spoke it starts use (HUB_CODEX_BIN is passed on).
+  const bin = codexBinary(given.env, given.home)
+  const io: CodexIo = path.isAbsolute(bin) && !given.env.HUB_CODEX_BIN ? { ...given, env: { ...given.env, HUB_CODEX_BIN: bin } } : given
   let hub = false
   try {
     hub = await ensureService(io)
@@ -96,5 +100,5 @@ export async function runCodex(args: readonly string[], io: CodexIo): Promise<nu
   }
   const env: Record<string, string | undefined> = { ...io.env }
   delete env.BUN_BE_BUN
-  return spawnCodex(io.env.HUB_CODEX_BIN || "codex", hub ? [...DAEMON_ARGS, ...args] : [...args], env, io.stderr)
+  return spawnCodex(bin, hub ? [...DAEMON_ARGS, ...args] : [...args], env, io.stderr)
 }

@@ -29,7 +29,9 @@ export type EvidenceKind = (typeof EVIDENCE_KINDS)[number]
 export const HARNESS_EVIDENCE: Readonly<Record<HarnessID, readonly EvidenceKind[]>> = Object.freeze({
   opencode: [],
   "claude-code": ["gpg-manifest", "macos-notarization"],
-  codex: ["sigstore"],
+  // v1.1 (HBS-13): Codex's macOS binaries are codesigned; the Codex source records only sigstore so far, so a pin may
+  // list macos-notarization only once the source checks it.
+  codex: ["sigstore", "macos-notarization"],
 })
 
 /**

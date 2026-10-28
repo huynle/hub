@@ -175,6 +175,10 @@ const threadResponse = (t: Thread) => ({ thread: threadInfo(t), approvalPolicy: 
 
 const methods: Record<string, Handler> = {
   initialize: () => ({ userAgent: "fake-codex/0.160.0", codexHome: "/fake", platformFamily: "unix", platformOs: "macos" }),
+  // The account probes `hubctl setup verify` makes (provider-auth): a ChatGPT login whose live rate-limit read answers;
+  // FAKE_CODEX_ACCOUNT=none reports no login.
+  "account/read": () => (process.env.FAKE_CODEX_ACCOUNT === "none" ? { account: null, requiresOpenaiAuth: true } : { account: { type: "chatgpt", planType: "plus" }, requiresOpenaiAuth: true }),
+  "account/rateLimits/read": () => ({ rateLimits: { primary: { usedPercent: 1, windowDurationMins: 300 } } }),
   "thread/start": (client, p) => {
     const t: Thread = { id: uuid7ish(), cwd: p?.cwd ?? process.cwd(), name: null, approvalPolicy: p?.approvalPolicy ?? "untrusted", history: [], subscribers: new Set([client]) }
     threads.set(t.id, t)

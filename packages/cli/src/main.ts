@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
-// Entry of the hub CLI bundle (`hub` / `hubctl`): the spoke's launchers run it as
-// `BUN_BE_BUN=1 <opencode binary> hub-cli.js …` (or node). See cli.ts for the program.
+// Entry of the hub CLI (`hub` / `hubctl`, one command surface): the npm bundle the spoke's launchers run as
+// `BUN_BE_BUN=1 <opencode binary> hub-cli.js …` (or node), and the standalone hubctl (`bun build --compile` of this
+// file; scripts/build-hubctl.sh). See cli.ts for the program.
 import { homedir } from "node:os"
 import { createInterface } from "node:readline"
 import { run } from "./cli"
@@ -34,8 +35,14 @@ const claudeMcp = argv[0] === "claude-code" && argv[1] === "mcp"
 // `hub codex-spoke serve` (the Codex spoke service) and `hub preset run` (until its pane ends) too.
 const codexServe = argv[0] === "codex-spoke" && argv[1] === "serve"
 const presetRun = argv[0] === "preset" && argv[1] === "run"
+// `hubctl machine enroll` polls until the code is approved: Ctrl-C cancels it (exit 4, nothing stored). `hubctl setup
+// apply` / `recover` pass the signal to their probes and the verification launch, so Ctrl-C fails the running step and
+// the transaction rolls back, instead of the process dying between a write and its journal entry.
+const enroll = argv[0] === "machine" && argv[1] === "enroll"
+const applying = argv[0] === "setup" && (argv[1] === "apply" || argv[1] === "recover")
 const controller = new AbortController()
-if (argv[0] === "watch" || argv[0] === "mcp" || nodeRun || claudeDaemon || claudeMcp || codexServe || presetRun) for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => controller.abort())
+if (argv[0] === "watch" || argv[0] === "mcp" || nodeRun || claudeDaemon || claudeMcp || codexServe || presetRun || enroll || applying)
+  for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => controller.abort())
 
 process.exitCode = await run(argv, {
   env: process.env,

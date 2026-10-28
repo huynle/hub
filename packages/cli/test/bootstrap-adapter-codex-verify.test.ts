@@ -180,8 +180,9 @@ describe("real fixed-argv probes", () => {
     expect(missing.exitCode).toBeNull()
   })
 
-  test("the stdio launcher starts the app-server; a server without account/read is not ready", async () => {
-    const launcher = stdioAppServerLauncher({ argsBefore: [fakeServer] })
+  test("the stdio launcher starts the app-server; a server with no login is not ready", async () => {
+    const stdio = stdioAppServerLauncher({ argsBefore: [fakeServer] })
+    const launcher = { start: (binary: string, env: Record<string, string>) => stdio.start(binary, { ...env, FAKE_CODEX_ACCOUNT: "none" }) }
     const { p } = probes()
     const v = await verifyCodex(ctx, { ...p, binary: () => process.execPath, appServer: launcher, runner: { run: async () => ({ exitCode: 0, stdout: "codex-cli 0.165.0" }) } })
     expect(kindsOk(v)).toMatchObject({ "api-health": true, "provider-auth": false })
