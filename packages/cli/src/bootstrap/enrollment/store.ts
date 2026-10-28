@@ -6,7 +6,7 @@ import { randomBytes } from "node:crypto"
 import { closeSync, lstatSync, mkdirSync, openSync, rmSync } from "node:fs"
 import { hostname } from "node:os"
 import path from "node:path"
-import { normalize, readRawConfig, updateRawConfig } from "../../../../../src/config.ts"
+import { configPath, normalize, prepareConfigPath, readRawConfig, updateRawConfig } from "../../../../../src/config.ts"
 import type { CredentialStore, MachineCredential } from "../contracts/index.ts"
 
 export type CredentialStoreFailure = "symlink" | "not_object" | "invalid" | "io"
@@ -130,4 +130,13 @@ export class ConfigCredentialStore implements CredentialStore {
       throw ioError(this.location, "write", cause)
     }
   }
+}
+
+/**
+ * The machine's credential store: $HUB_SPOKE_CONFIG, else ~/.config/hub/config.json (the file the spoke and
+ * `hub node` read). With `migrate` (for enroll), a legacy config is copied to the default location first, as the
+ * spoke does; status reads without side effects.
+ */
+export function credentialStoreFor(env: Readonly<Record<string, string | undefined>>, home: string, options: { migrate?: boolean } = {}): ConfigCredentialStore {
+  return new ConfigCredentialStore(options.migrate ? prepareConfigPath(env, home) : configPath(env, home))
 }
