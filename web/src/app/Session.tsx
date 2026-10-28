@@ -1,6 +1,7 @@
 // One session: top bar, transcript (history + live), permission/question cards, Voice bar, composer, right rail
 // and diff viewer. Works whether Voice is on or off; Voice mode turns Voice on first when needed.
 import { jobsBadge, retryText, runningJobs } from "../core/jobs-core"
+import { sessionHistory } from "../core/session-history"
 import { For, Match, Show, Switch, batch, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack } from "solid-js"
 import { blockersOf } from "../core/browser-core"
 import { reconcileSay, statusNotes, type StatusLike } from "../core/conversation-core"
@@ -62,6 +63,13 @@ export function SessionView(props: { id: string }) {
   /** The root of the session's tree: itself, or (for a subagent session) the session that spawned the tree. */
   const treeRoot = () => (typeof found()?.session.rootID === "string" ? (found()!.session.rootID as string) : id)
   const isChild = () => treeRoot() !== id
+  // Native mobile swipe-back must follow the session tree, not sidebar visit order.
+  createEffect(() => {
+    const session = found()?.session
+    if (!isPhone() || !session) return
+    const root = treeRoot() !== id ? treeRoot() : session.parentID
+    sessionHistory(window.history, location.pathname + location.search + location.hash, typeof root === "string" ? root : undefined)
+  })
   /** This session and the subagent sessions below it. */
   const tree = createMemo(() => subtree(status() as ReadonlyArray<{ id?: string; parentID?: string }> | undefined, id))
   /** Live events of the tree root that belong on this page (a subagent page shows only its own subtree). */
