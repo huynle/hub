@@ -360,3 +360,49 @@ export const codexDiscoveredAt = (version: string, base: DiscoverySnapshot = COD
 })
 
 export const PROFILE_CODEX: Profile = { ...PROFILE_SESSION_ONLY, harnesses: ["codex"] }
+
+// ---------- fake app-server channels and probe doubles ----------
+
+export type RpcHandler = (params: unknown) => unknown | { readonly error: { readonly code: number; readonly message: string } }
+
+/** An in-memory Codex app-server: answers each request with its handler (method-not-found otherwise). */
+export function fakeAppServerChannel(handlers: Record<string, RpcHandler>) {
+  const calls: { method: string; params: unknown }[] = []
+  let onMessage: (text: string) => void = () => {}
+  let onClose: (reason: string) => void = () => {}
+  let closed = false
+  const channel = {
+    send(text: string) {
+      const msg = JSON.parse(text) as { id?: number; method?: string; params?: unknown }
+      if (msg.method === undefined || msg.id === undefined) return
+      calls.push({ method: msg.method, params: msg.params })
+      const handler = handlers[msg.method]
+      const out = handler ? handler(msg.params) : { error: { code: -32601, message: `unknown method ${msg.method}` } }
+      queueMicrotask(() => {
+        if (closed) return
+        if (out && typeof out === "object" && "error" in (out as object)) onMessage(JSON.stringify({ id: msg.id, error: (out as { error: unknown }).error }))
+        else onMessage(JSON.stringify({ id: msg.id, result: out ?? null }))
+      })
+    },
+    close() {
+      if (closed) return
+      closed = true
+      onClose("closed")
+    },
+    onMessage(cb: (text: string) => void) {
+      onMessage = cb
+    },
+    onClose(cb: (reason: string) => void) {
+      onClose = cb
+    },
+  }
+  return { channel, calls, get closed() {
+    return closed
+  } }
+}
+
+export const CHATGPT_HANDLERS: Record<string, RpcHandler> = {
+  initialize: () => ({ userAgent: "codex_cli_rs/0.165.0", codexHome: "/home/dev/.codex", platformFamily: "unix", platformOs: "linux" }),
+  "account/read": () => ({ account: { type: "chatgpt", email: "dev@example.com", planType: "plus" }, requiresOpenaiAuth: true }),
+  "account/rateLimits/read": () => ({ rateLimits: { primary: { usedPercent: 3 } } }),
+}
