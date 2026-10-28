@@ -1,7 +1,7 @@
 // A real standalone hubctl build for this host's target (scripts/hubctl-release.ts build): the binary runs with no
 // bun or node on PATH and no repository beside it, prints the CLI's version, and behaves the same when invoked as
 // `hub` (the alias is one command surface, contracts §1). Cross-compiling the other targets happens in the release
-// workflow.
+// workflow. The first run of a freshly built binary can take seconds (the OS scans it), hence the timeouts.
 import { describe, expect, test } from "bun:test"
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, symlinkSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -13,8 +13,10 @@ const version = JSON.parse(readFileSync(path.join(repo, "packages/cli/package.js
 const host = targetOf(process.platform, process.arch, process.platform === "linux" ? "glibc" : "none")
 const supported = supportedTarget(host) !== undefined
 
+/** Runs with PATH set to an empty directory: no bun, node or anything else to fall back on. */
+const emptyPath = mkdtempSync(path.join(tmpdir(), "hubctl-empty-path-"))
 function exec(argv: string[], cwd: string) {
-  const r = Bun.spawnSync(argv, { cwd, env: { PATH: "/usr/bin:/bin", HOME: cwd }, stdout: "pipe", stderr: "pipe" })
+  const r = Bun.spawnSync(argv, { cwd, env: { PATH: emptyPath, HOME: cwd }, stdout: "pipe", stderr: "pipe" })
   return { code: r.exitCode, stdout: r.stdout.toString(), stderr: r.stderr.toString() }
 }
 
@@ -41,16 +43,16 @@ describe.skipIf(!supported)(`standalone hubctl (${host})`, () => {
     const r = exec([bin, "--version"], cwd)
     expect(r.code).toBe(0)
     expect(r.stdout.trim()).toBe(version)
-  })
+  }, 60_000)
 
   test("--help prints the command surface", () => {
     const r = exec([bin, "--help"], cwd)
     expect(r.code).toBe(0)
     expect(r.stdout).toContain("Exit codes")
-  })
+  }, 60_000)
 
   test("`hub` (a link to the same binary) is the same command surface", () => {
     const hub = path.join(cwd, "hub")
     for (const args of [["--version"], ["--help"]]) expect(exec([hub, ...args], cwd)).toEqual(exec([bin, ...args], cwd))
-  })
+  }, 60_000)
 })
