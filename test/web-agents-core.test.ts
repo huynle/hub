@@ -161,7 +161,7 @@ describe("grant form", () => {
 
   test("the hub's validation messages map to the field they are about", () => {
     expect(hubErrorField("holder is @@role, @name, ses_… or app:<token id>")).toBe("holder")
-    expect(hubErrorField("A role holder must be a reserved role (orchestrator…, concierge…)")).toBe("holder")
+    expect(hubErrorField("A role holder must be a reserved role (orchestrator…)")).toBe("holder")
     expect(hubErrorField("A grant's holder cannot change: revoke it and create another")).toBe("holder")
     expect(hubErrorField("No app token 0123456789abcdef")).toBe("holder")
     expect(hubErrorField("scope.projects: x is not an absolute project directory")).toBe("projects")

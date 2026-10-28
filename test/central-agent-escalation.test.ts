@@ -29,7 +29,7 @@ const HOUR = 3_600_000
 const U = "u1"
 
 const orchestrator: AgentActor = { kind: "session", userID: U, machineID: "m1", sessionID: "ses_o", via: "act" } as AgentActor
-const app: AgentActor = { kind: "app", userID: U, tokenID: "tok_1", scopes: ["sessions:act"], label: "concierge" }
+const app: AgentActor = { kind: "app", userID: U, tokenID: "tok_1", scopes: ["sessions:act"], label: "assistant-app" }
 const cookieUser: UserActor = { kind: "user", userID: U, deviceID: "d1", via: "cookie" }
 const tokenUser: UserActor = { kind: "user", userID: U, deviceID: "d2", via: "device-token" }
 
@@ -156,7 +156,7 @@ describe("opening", () => {
     const s = setup()
     const { decisionID } = await s.escalations.escalate(escalation({ actor: app }))
     expect((await s.decisions.get(U, decisionID!))!.from).toMatchObject({ kind: "app", tokenID: "tok_1" })
-    expect(s.recommended[0]![1].by).toBe("app concierge")
+    expect(s.recommended[0]![1].by).toBe("app assistant-app")
   })
 })
 

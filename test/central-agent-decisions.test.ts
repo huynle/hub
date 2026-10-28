@@ -172,7 +172,7 @@ describe("opening a Decision (ask @me)", () => {
 
   test("about: the sessions it concerns (the push opens the first); an app asking needs no session", async () => {
     const s = setup()
-    const app: AgentActor = { kind: "app", userID: U, tokenID: "tok_1", scopes: ["messages:send"], label: "concierge" }
+    const app: AgentActor = { kind: "app", userID: U, tokenID: "tok_1", scopes: ["messages:send"], label: "assistant-app" }
     const { decision } = await s.decisions.ask(U, app, { question: "Restart @beta?", about: ["ses_b"], tier: "tap" })
     expect(decision).toMatchObject({ from: { kind: "app", tokenID: "tok_1" }, about: ["ses_b"], sessionID: "ses_b", tier: "tap" })
     const none = await s.decisions.ask(U, app, { question: "Anything?" })

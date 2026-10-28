@@ -285,7 +285,7 @@ const nameTools: readonly Tool[] = [
   },
   {
     name: "role_claim",
-    description: `Claim a role for a session; exclusive fails while another session holds it. Reserved roles (orchestrator…, concierge…) are the user's to assign. ${MANAGE_NOTE}, plus a grant allowing roles on the session's project.`,
+    description: `Claim a role for a session; exclusive fails while another session holds it. Reserved roles (orchestrator…) are the user's to assign. ${MANAGE_NOTE}, plus a grant allowing roles on the session's project.`,
     properties: { addr: TARGET, role: ROLE, project: ROLE_PROJECT, exclusive: { type: "boolean", description: "Be the only holder." } },
     required: ["role"],
     readOnly: false,
