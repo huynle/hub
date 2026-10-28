@@ -555,8 +555,8 @@ describe("install-harness action", () => {
   test("accepts the pinned installs", () => {
     for (const a of [F.ACTIONS["install-harness"], F.INSTALL_CLAUDE, F.INSTALL_CODEX]) expectValid(validateAction(a))
   })
-  test("evidence each harness may offer: none for OpenCode, GPG + notarization for Claude Code, sigstore for Codex", () => {
-    expect(HARNESS_EVIDENCE).toEqual({ opencode: [], "claude-code": ["gpg-manifest", "macos-notarization"], codex: ["sigstore"] })
+  test("evidence each harness may offer: none for OpenCode, GPG + notarization for Claude Code, sigstore + notarization for Codex", () => {
+    expect(HARNESS_EVIDENCE).toEqual({ opencode: [], "claude-code": ["gpg-manifest", "macos-notarization"], codex: ["sigstore", "macos-notarization"] })
   })
 })
 threatSuite("install-harness", F.HARNESS_ACTION_INVALID, validateAction)

@@ -307,7 +307,7 @@ export const ACTIONS: Record<Action["kind"], Action> = {
     format: "json",
     owner: "harness:opencode",
     precondition: { exists: true, sha256: DIGEST.d },
-    set: [{ pointer: "/plugin/-", value: "@huynle/hub" }],
+    set: [{ pointer: "/plugins/-", value: "@huynle/hub" }],
     preserveUnknown: true,
   },
   "register-mcp-server": {
@@ -582,8 +582,8 @@ export const MANIFEST_UNSIGNED: Omit<ArtifactManifest, "signatures"> = {
       harness: "codex",
       version: "0.165.0",
       target: "linux-x64",
-      url: "https://github.com/openai/codex/releases/download/rust-v0.165.0/codex-x86_64-unknown-linux-musl.tar.gz",
-      file: "codex-x86_64-unknown-linux-musl.tar.gz",
+      url: "https://github.com/openai/codex/releases/download/rust-v0.165.0/codex-package-x86_64-unknown-linux-musl.tar.gz",
+      file: "codex-package-x86_64-unknown-linux-musl.tar.gz",
       size: 30_000_000,
       sha256: DIGEST.b,
       evidence: ["sigstore"],
@@ -830,7 +830,7 @@ export const INSTALL_CODEX: Action = {
   harness: "codex",
   version: "0.165.0",
   target: "linux-x64",
-  source: { manifest: "0.8.0", url: "https://github.com/openai/codex/releases/download/rust-v0.165.0/codex-x86_64-unknown-linux-musl.tar.gz", file: "codex-x86_64-unknown-linux-musl.tar.gz" },
+  source: { manifest: "0.8.0", url: "https://github.com/openai/codex/releases/download/rust-v0.165.0/codex-package-x86_64-unknown-linux-musl.tar.gz", file: "codex-package-x86_64-unknown-linux-musl.tar.gz" },
   size: 30_000_000,
   sha256: DIGEST.b,
   evidence: ["sigstore"],
@@ -948,7 +948,7 @@ export const MANUAL_EDIT_MERGE: ManualEdit = {
   format: "json",
   owner: "harness:opencode",
   precondition: { exists: true, sha256: DIGEST.d },
-  change: { op: "merge", set: [{ pointer: "/plugin/-", value: "@huynle/hub" }] },
+  change: { op: "merge", set: [{ pointer: "/plugins/-", value: "@huynle/hub" }] },
 }
 
 export const MANUAL_EDIT_MCP: ManualEdit = {

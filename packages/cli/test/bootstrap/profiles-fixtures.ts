@@ -109,7 +109,7 @@ const plan = (actions: Action[]): SetupPlan => ({
 
 /** What an earlier apply did: the hub plugin, a "session" mode, the mcp registration and node.json v1. */
 export const APPLIED_PLAN: SetupPlan = plan([
-  merge([{ pointer: "/plugin/-", value: "@huynle/hub" }, { pointer: "/hub/mode", value: "session" }], D.opencodeOriginal),
+  merge([{ pointer: "/plugins/-", value: "@huynle/hub" }, { pointer: "/hub/mode", value: "session" }], D.opencodeOriginal),
   register(D.opencodeMerged),
   nodeJSON(D.nodeV1),
 ])
@@ -118,7 +118,7 @@ export const APPLIED_PLAN: SetupPlan = plan([
 export const FRESH_PLAN: SetupPlan = plan([
   merge(
     [
-      { pointer: "/plugin/-", value: "@huynle/hub" },
+      { pointer: "/plugins/-", value: "@huynle/hub" },
       { pointer: "/hub/mode", value: "launch" },
       { pointer: "/hub/launchMaxS", value: 3600 },
     ],

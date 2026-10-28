@@ -140,7 +140,7 @@ export function memoryProbe(spec: HostSpec): RecordingProbe {
 const MAC_HOME = "/Users/dev"
 const LINUX_HOME = "/home/dev"
 
-const OPENCODE_CONFIG = JSON.stringify({ $schema: "https://opencode.ai/config.json", plugin: [] }, null, 2)
+const OPENCODE_CONFIG = JSON.stringify({ $schema: "https://opencode.ai/config.json", plugins: [] }, null, 2)
 
 /** macOS, arm64, native OpenCode in ~/.opencode/bin, Homebrew, launchd. */
 export const MAC_NATIVE: HostSpec = {

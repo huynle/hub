@@ -15,7 +15,7 @@ const value = <T>(r: { ok: true; value: T } | { ok: false; issues: readonly unkn
   return r.value
 }
 const K = {
-  plugin: "config:opencode/opencode.json#/plugin/-",
+  plugin: "config:opencode/opencode.json#/plugins/-",
   mode: "config:opencode/opencode.json#/hub/mode",
   bound: "config:opencode/opencode.json#/hub/launchMaxS",
   mcp: "mcp:opencode/hub",
@@ -46,7 +46,7 @@ describe("detectDrift", () => {
   })
 
   test("user-changed hub fields are reported, never repaired; user values appear only as digests", () => {
-    const observed = observe({ "/plugin": ["@huynle/hub", "their-plugin"], "/hub/mode": USER_SECRET, "/hub/launchMaxS": undefined }, "ours")
+    const observed = observe({ "/plugins": ["@huynle/hub", "their-plugin"], "/hub/mode": USER_SECRET, "/hub/launchMaxS": undefined }, "ours")
     const snapshot = snapshotWith(D.opencodeUserEdited, D.nodeUserEdited)
     const report = value(detectDrift({ desired: FRESH_PLAN, snapshot, applied, observed }))
     expect(statuses(report)).toEqual({ [K.plugin]: "in-sync", [K.mode]: "user-changed", [K.bound]: "missing", [K.mcp]: "in-sync", [K.node]: "user-changed" })
@@ -65,7 +65,7 @@ describe("detectDrift", () => {
   })
 
   test("a user edit to unrelated fields is preserved: hub's fields still repair, losslessly, on top of it", () => {
-    const observed = observe({ "/plugin": ["@huynle/hub"], "/hub/mode": "session", "/hub/launchMaxS": undefined }, "ours")
+    const observed = observe({ "/plugins": ["@huynle/hub"], "/hub/mode": "session", "/hub/launchMaxS": undefined }, "ours")
     const snapshot = snapshotWith(D.opencodeUserEdited, D.nodeV1)
     const report = value(detectDrift({ desired: FRESH_PLAN, snapshot, applied, observed }))
     expect(statuses(report)).toEqual({ [K.plugin]: "in-sync", [K.mode]: "outdated", [K.bound]: "missing", [K.mcp]: "in-sync", [K.node]: "outdated" })
@@ -83,7 +83,7 @@ describe("detectDrift", () => {
   })
 
   test("what the user removed stays removed", () => {
-    const observed = observe({ "/plugin": ["their-plugin"], "/hub/mode": "session", "/hub/launchMaxS": 3600 }, "absent")
+    const observed = observe({ "/plugins": ["their-plugin"], "/hub/mode": "session", "/hub/launchMaxS": 3600 }, "absent")
     const report = value(detectDrift({ desired: FRESH_PLAN, snapshot: snapshotWith(D.opencodeUserEdited, null), applied, observed }))
     expect(statuses(report)).toEqual({ [K.plugin]: "user-changed", [K.mode]: "outdated", [K.bound]: "in-sync", [K.mcp]: "user-changed", [K.node]: "user-changed" })
     const repairs = driftRepairs(report, FRESH_PLAN, snapshotWith(D.opencodeUserEdited, null))
@@ -92,19 +92,19 @@ describe("detectDrift", () => {
   })
 
   test("never applied: pre-existing user values are the user's; absent fields are missing", () => {
-    const observed = observe({ "/plugin": undefined, "/hub/mode": "mine", "/hub/launchMaxS": undefined }, "foreign")
+    const observed = observe({ "/plugins": undefined, "/hub/mode": "mine", "/hub/launchMaxS": undefined }, "foreign")
     const snapshot = snapshotWith(D.opencodeOriginal, null)
     const report = value(detectDrift({ desired: FRESH_PLAN, snapshot, observed }))
     expect(statuses(report)).toEqual({ [K.plugin]: "missing", [K.mode]: "user-changed", [K.bound]: "missing", [K.mcp]: "user-changed", [K.node]: "missing" })
     const repairs = driftRepairs(report, FRESH_PLAN, snapshot)
     expect(repairs.map((a) => a.kind)).toEqual(["merge-config", "write-file"])
-    expect((repairs[0] as MergeConfig).set.map((s) => s.pointer)).toEqual(["/plugin/-", "/hub/launchMaxS"])
+    expect((repairs[0] as MergeConfig).set.map((s) => s.pointer)).toEqual(["/plugins/-", "/hub/launchMaxS"])
     expect((repairs[0] as MergeConfig).precondition).toEqual({ exists: true, sha256: D.opencodeOriginal })
   })
 
   test("a rolled-back apply owns nothing", () => {
     const journal = { ...APPLIED_JOURNAL, state: "rolled-back" as const, entries: APPLIED_JOURNAL.entries.map((e) => ({ ...e, status: "undone" as const })) }
-    const observed = observe({ "/plugin": undefined, "/hub/mode": "session", "/hub/launchMaxS": undefined }, "absent")
+    const observed = observe({ "/plugins": undefined, "/hub/mode": "session", "/hub/launchMaxS": undefined }, "absent")
     const report = value(detectDrift({ desired: FRESH_PLAN, snapshot: snapshotWith(D.opencodeOriginal, null), applied: { plan: APPLIED_PLAN, journal }, observed }))
     // "session" was hub's value, but that apply was undone: whatever is there now is the user's.
     expect(statuses(report)[K.mode]).toBe("user-changed")
@@ -121,7 +121,7 @@ describe("detectDrift", () => {
   test("a field hub no longer sets is retired, not removed; an outdated array entry is reported, not appended twice", () => {
     const desired = clone(FRESH_PLAN)
     const merge = desired.actions[0] as unknown as { set: { pointer: string; value: unknown }[] }
-    merge.set = [{ pointer: "/plugin/-", value: "@huynle/hub@2" }]
+    merge.set = [{ pointer: "/plugins/-", value: "@huynle/hub@2" }]
     const report = value(detectDrift({ desired, snapshot: snapshotWith(D.opencodeApplied, D.nodeV2), applied }))
     expect(report.fields.find((f) => f.key === K.mode)).toMatchObject({ status: "retired", repairable: false })
     expect(report.fields.find((f) => f.key === K.plugin)).toMatchObject({ status: "outdated", repairable: false })
