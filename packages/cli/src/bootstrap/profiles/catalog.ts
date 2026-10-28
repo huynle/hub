@@ -1,6 +1,7 @@
 // The built-in profiles hubctl offers, as contract Profile documents. The catalog has a revision: a later hubctl may
 // ship different defaults under a new revision (profile upgrades then keep every field the user chose; see
 // upgrade.ts). Defaults are always the safe ones: no escalation, OpenShell only when asked for, launches bounded.
+// v1.1: every catalog profile records the revision it comes from (Profile.revision), so a rebase knows its base.
 import { fail, HARNESS_ORDER, HARNESS_SERVICE, PROFILE_IDS, validateProfile, type HarnessID, type Profile, type ProfileID, type Result, type ServiceID } from "../contracts/index.ts"
 
 export interface ProfileCatalog {
@@ -11,7 +12,7 @@ export interface ProfileCatalog {
 /** The bound on a launch when the user chose none. */
 export const DEFAULT_LAUNCH_S = 3600
 
-const base = { schema: "hub.bootstrap-profile", version: 2, runtimes: [], escalation: "never" } as const
+const base = { schema: "hub.bootstrap-profile", version: 2, revision: 1, runtimes: [], escalation: "never" } as const
 
 export const PROFILE_CATALOG: ProfileCatalog = Object.freeze({
   revision: 1,

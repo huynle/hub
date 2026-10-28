@@ -4,10 +4,10 @@
 // runs it; checkReadOnly lets that applier prove, before it starts, that an audit plan writes nothing.
 import {
   Checker,
-  digestOf,
   ok,
   PLAN_SCHEMA,
   PLAN_VERSION,
+  snapshotDigest,
   validateSetupPlan,
   type ActionKind,
   type DiscoverySnapshot,
@@ -62,7 +62,7 @@ export function auditProfile(profile: unknown, snapshotDoc: unknown): Result<Aud
     schema: PLAN_SCHEMA,
     version: PLAN_VERSION,
     hostFingerprint: snapshot.host.fingerprint,
-    snapshotDigest: digestOf(snapshot),
+    snapshotDigest: snapshotDigest(snapshot),
     target: desired.value.target,
     profile: desired.value.profile,
     requiresEscalation: false,

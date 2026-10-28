@@ -2,14 +2,18 @@
 //
 // Profiles. planProfileChange compares two profiles as sets of capabilities (harnesses, runtimes, services,
 // launching, escalation). Adding is an upgrade. Removing anything is a downgrade and needs explicit consent
-// (downgrade_rejected otherwise, like --allow-downgrade for artifacts). The v1 action union has no uninstall or
-// deactivate action, so removed capabilities are reported as retained: left in place until a rollback (history.ts)
-// or the user removes them.
+// (downgrade_rejected otherwise, like --allow-downgrade for artifacts). v1.1: given the host's service manager and
+// the units hub installed (installedServiceUnits), a removed service is planned as typed deactivate-service and
+// remove-service actions (the unit only while it is exactly what hub installed). Everything else removed (harnesses,
+// runtimes, launching, escalation) has no typed uninstall and is reported as retained: left in place until a
+// rollback (history.ts) or the user removes it.
 //
 // Catalog revisions. rebaseProfile moves a profile from the defaults it was made from (base) to a newer catalog's
 // (next), field by field: a field still equal to the old default follows the new one; a field the user changed is
 // kept and reported. New defaults never raise escalation or opt in to a runtime (OpenShell is opt-in): such changes
-// are refused and reported. A rebase that would produce an invalid profile fails instead of guessing.
+// are refused and reported. A rebase that would produce an invalid profile fails instead of guessing. v1.1: the base
+// is found by the profile's own `revision` in the catalogs given (or checked against it when passed explicitly), a
+// rebase never goes to an older revision, and the result records the new revision.
 //
 // Harness versions. planHarnessVersions decides, per desired harness, against the pins of a verified manifest and
 // the versions hub installed (from the history), with decideHarnessInstall: nothing below the security floor,
@@ -21,17 +25,22 @@ import {
   Checker,
   canonicalJSON,
   decideHarnessInstall,
+  EMBEDDED_ASSETS,
   fail,
   HARNESS_ORDER,
   ok,
   validateProfile,
   type HarnessID,
+  type Action,
   type InstallHarness,
   type InstallKind,
   type Profile,
   type Result,
+  type ServiceID,
+  type ServiceManagerID,
   type VerifiedManifest,
 } from "../contracts/index.ts"
+import { PROFILE_CATALOG, type ProfileCatalog } from "./catalog.ts"
 import type { DesiredState } from "./desired.ts"
 import type { InstalledHarness } from "./history.ts"
 
@@ -44,8 +53,41 @@ export interface ProfileChange {
   readonly direction: "same" | "upgrade" | "downgrade"
   readonly adds: readonly Capability[]
   readonly removes: readonly Capability[]
-  /** Removed capabilities hub leaves in place (no typed uninstall in v1): undo them with a rollback. */
+  /** Removed capabilities hub leaves in place (no typed uninstall): undo them with a rollback. */
   readonly retained: readonly Capability[]
+  /** v1.1: the typed steps that remove what can be removed (services), in execution order. */
+  readonly actions: readonly Action[]
+}
+
+/** v1.1: what planProfileChange needs to plan removing services. */
+export interface ServiceFacts {
+  /** The host's user service manager. */
+  readonly manager: ServiceManagerID
+  /** The digest of each unit hub installed and still owns (installedServiceUnits). */
+  readonly installed: Partial<Record<ServiceID, string>>
+}
+
+const UNIT_ROOT: Readonly<Record<ServiceManagerID, "launch-agents" | "systemd-user">> = { launchd: "launch-agents", "systemd-user": "systemd-user" }
+
+/** Deactivates, then removes (when hub knows the unit it installed), one service of a removed component. */
+function removeServiceActions(service: ServiceID, facts: ServiceFacts): Action[] {
+  const actions: Action[] = [
+    { id: `deactivate-${service}`, kind: "deactivate-service", escalation: "user", summary: `Unload the hub ${service} service (profile downgrade)`, service, manager: facts.manager },
+  ]
+  const asset = EMBEDDED_ASSETS[`service/${facts.manager}/${service}`]
+  const sha256 = facts.installed[service]
+  if (asset && sha256)
+    actions.push({
+      id: `remove-${service}`,
+      kind: "remove-service",
+      escalation: "user",
+      summary: `Remove the hub ${service} ${facts.manager} unit (profile downgrade)`,
+      service,
+      manager: facts.manager,
+      path: { root: UNIT_ROOT[facts.manager], rel: asset.installAs },
+      sha256,
+    })
+  return actions
 }
 
 function capabilities(p: Profile): Capability[] {
@@ -58,7 +100,7 @@ function capabilities(p: Profile): Capability[] {
   ]
 }
 
-export function planProfileChange(fromDoc: unknown, toDoc: unknown, options: { readonly allowDowngrade?: boolean } = {}): Result<ProfileChange> {
+export function planProfileChange(fromDoc: unknown, toDoc: unknown, options: { readonly allowDowngrade?: boolean; readonly services?: ServiceFacts } = {}): Result<ProfileChange> {
   const c = new Checker()
   const from = validateProfile(fromDoc)
   const to = validateProfile(toDoc)
@@ -72,10 +114,23 @@ export function planProfileChange(fromDoc: unknown, toDoc: unknown, options: { r
   const direction = removes.length > 0 ? "downgrade" : adds.length > 0 ? "upgrade" : "same"
   if (direction === "downgrade" && !options.allowDowngrade)
     return fail("/to", "downgrade_rejected", `${to.value.id} removes ${removes.join(", ")}; pass --allow-downgrade to change to it`)
-  return ok({ from: from.value.id, to: to.value.id, direction, adds, removes, retained: removes })
+  const actions: Action[] = []
+  const removed = new Set<Capability>()
+  if (options.services)
+    for (const capability of removes) {
+      if (!capability.startsWith("service:")) continue
+      const service = capability.slice("service:".length) as ServiceID
+      const planned = removeServiceActions(service, options.services)
+      actions.push(...planned)
+      // A service is gone only once its unit is removed too; a deactivated unit hub never recorded stays.
+      if (planned.some((a) => a.kind === "remove-service")) removed.add(capability)
+    }
+  // Deactivate everything first, then remove the units (the plan rule: a service is deactivated before it is removed).
+  actions.sort((a, b) => Number(a.kind === "remove-service") - Number(b.kind === "remove-service"))
+  return ok({ from: from.value.id, to: to.value.id, direction, adds, removes, retained: removes.filter((x) => !removed.has(x)), actions })
 }
 
-const REBASED_FIELDS = ["harnesses", "runtimes", "services", "launch", "escalation"] as const
+const REBASED_FIELDS = ["harnesses", "runtimes", "services", "launch", "escalation", "enrollment"] as const
 export type RebasedField = (typeof REBASED_FIELDS)[number]
 
 export interface RebasedProfile {
@@ -88,19 +143,42 @@ export interface RebasedProfile {
   readonly refused: readonly RebasedField[]
 }
 
-const same = (a: unknown, b: unknown) => canonicalJSON(a) === canonicalJSON(b)
+// An absent optional field (enrollment) compares as null.
+const same = (a: unknown, b: unknown) => canonicalJSON(a ?? null) === canonicalJSON(b ?? null)
 
-export function rebaseProfile(input: { readonly current: unknown; readonly base: unknown; readonly next: unknown }): Result<RebasedProfile> {
+export interface RebaseInput {
+  readonly current: unknown
+  /** The defaults `current` was made from. Optional when `current.revision` names one of `catalogs`. */
+  readonly base?: unknown
+  readonly next: unknown
+  /** v1.1: catalogs (any revisions) to find the base in by `current.revision`; default: this hubctl's catalog. */
+  readonly catalogs?: readonly ProfileCatalog[]
+}
+
+export function rebaseProfile(input: RebaseInput): Result<RebasedProfile> {
   const c = new Checker()
   const current = validateProfile(input.current)
-  const base = validateProfile(input.base)
   const next = validateProfile(input.next)
   c.merge("/current", current)
-  c.merge("/base", base)
   c.merge("/next", next)
-  if (!current.ok || !base.ok || !next.ok) return c.result(undefined)
+  if (!current.ok || !next.ok) return c.result(undefined)
+  let baseDoc = input.base
+  const revision = current.value.revision
+  if (baseDoc === undefined) {
+    if (revision === undefined) return fail("/current/revision", "missing_field", "the profile records no catalog revision; pass the defaults it was made from as base")
+    const catalog = (input.catalogs ?? [PROFILE_CATALOG]).find((k) => k.revision === revision)
+    if (!catalog) return fail("/current/revision", "invalid_value", `this hubctl does not know catalog revision ${revision}`)
+    baseDoc = catalog.profiles[current.value.id]
+  }
+  const base = validateProfile(baseDoc)
+  c.merge("/base", base)
+  if (!base.ok) return c.result(undefined)
   const [cur, old, neu] = [current.value, base.value, next.value]
   if (cur.id !== old.id || cur.id !== neu.id) return fail("/next/id", "invalid_value", "a rebase keeps the profile; change profiles with planProfileChange")
+  if (revision !== undefined && old.revision !== undefined && old.revision !== revision)
+    return fail("/base/revision", "inconsistent", `the profile was made from catalog revision ${revision}, not ${old.revision}`)
+  if (revision !== undefined && neu.revision !== undefined && neu.revision < revision)
+    return fail("/next/revision", "downgrade_rejected", `catalog revision ${neu.revision} is older than the profile's ${revision}`)
 
   const result: Record<string, unknown> = { ...cur }
   const kept: RebasedField[] = []
@@ -119,6 +197,7 @@ export function rebaseProfile(input: { readonly current: unknown; readonly base:
       updated.push(field)
     }
   }
+  if (neu.revision !== undefined) result.revision = neu.revision
   const profile = validateProfile(result)
   if (!profile.ok) return profile
   return ok({ profile: profile.value, kept, updated, refused })

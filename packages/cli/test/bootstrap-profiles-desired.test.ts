@@ -25,9 +25,10 @@ describe("profile catalog", () => {
   })
 
   test("the defaults match the documented profiles", () => {
-    expect(value(defaultProfile("session-only"))).toEqual(PROFILE_SESSION_ONLY)
-    expect(value(defaultProfile("launch-node"))).toEqual(PROFILE_LAUNCH_NODE)
-    expect(value(defaultProfile("full-harness"))).toEqual({ ...PROFILE_FULL_HARNESS, runtimes: [], escalation: "never" })
+    // v1.1: each records the catalog revision it comes from.
+    expect(value(defaultProfile("session-only"))).toEqual({ ...PROFILE_SESSION_ONLY, revision: 1 })
+    expect(value(defaultProfile("launch-node"))).toEqual({ ...PROFILE_LAUNCH_NODE, revision: 1 })
+    expect(value(defaultProfile("full-harness"))).toEqual({ ...PROFILE_FULL_HARNESS, runtimes: [], escalation: "never", revision: 1 })
   })
 
   test("chosen harnesses are put in harness order, and full-harness runs exactly their spokes", () => {
@@ -84,7 +85,7 @@ describe("desiredState", () => {
 
   test("services on a host without a user service manager fail explicitly", () => {
     const r = desiredState({ ...PROFILE_LAUNCH_NODE, harnesses: ["claude-code"] }, DISCOVERY_LINUX_CONTAINER)
-    expect(codes(r)).toEqual(["unsupported_platform"])
+    expect(codes(r)).toEqual(["no_service_manager"])
   })
 
   test("an unsupported host is refused", () => {

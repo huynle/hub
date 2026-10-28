@@ -13,6 +13,7 @@
 // changes to that file are kept as conflicts too. The plan itself writes nothing.
 import {
   Checker,
+  EMBEDDED_ASSETS,
   fail,
   ok,
   planDigest,
@@ -26,6 +27,8 @@ import {
   type InstallHarness,
   type JournalEntry,
   type SelectHarnessVersion,
+  type ServiceID,
+  type ServiceManagerID,
   type PathRef,
   type RecoveryDecision,
   type Result,
@@ -165,6 +168,27 @@ export function installedHarnesses(history: readonly TransactionRecord[]): Parti
     for (const h of tx.harnesses) if (h.status === "done") installed[h.harness] = { version: h.version, sha256: h.sha256, txID: tx.txID }
   }
   return installed
+}
+
+/**
+ * v1.1: the digest of each service unit hub installed and still owns for `manager`, from committed transactions
+ * (newest wins; a later removal drops it). Profile downgrades remove a unit only while it is exactly this.
+ */
+export function installedServiceUnits(history: readonly TransactionRecord[], manager: ServiceManagerID): Partial<Record<ServiceID, string>> {
+  const byFile = new Map(Object.values(EMBEDDED_ASSETS).filter((a) => a.manager === manager).map((a) => [a.installAs, a.service]))
+  const root = manager === "launchd" ? "launch-agents" : "systemd-user"
+  const units: Partial<Record<ServiceID, string>> = {}
+  for (const tx of history) {
+    if (tx.outcome !== "committed") continue
+    for (const change of tx.changes) {
+      if (change.status !== "done" || change.path?.root !== root) continue
+      const service = byFile.get(change.path.rel)
+      if (!service) continue
+      if (change.kind === "install-service" && change.after?.exists && change.after.sha256) units[service] = change.after.sha256
+      if (change.kind === "remove-service") delete units[service]
+    }
+  }
+  return units
 }
 
 export interface RollbackStep {
