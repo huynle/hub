@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { configPath, isExposed, prepareConfigPath, normalize, readConfig, setSession, withServer, writeConfig } from "../src/config"
+import { configPath, isExposed, prepareConfigPath, normalize, readConfig, readRawConfig, setSession, updateRawConfig, withServer, writeConfig } from "../src/config"
 
 describe("config", () => {
   test("defaults to off with the local server", () => {
@@ -172,5 +172,70 @@ describe("model refs", () => {
     expect(parseModelRef("openrouter/anthropic/x#high")).toEqual({ providerID: "openrouter", id: "anthropic/x", variant: "high" })
     expect(formatModelRef({ providerID: "openrouter", id: "anthropic/x", variant: "high" })).toBe("openrouter/anthropic/x#high")
     expect(formatModelRef({ providerID: "anthropic", id: "claude-opus-5-5", variant: "default" })).toBe("anthropic/claude-opus-5-5")
+  })
+})
+
+describe("lossless persistence (I4)", () => {
+  const dir = () => mkdtempSync(path.join(tmpdir(), "vcfg-raw-"))
+  const raw = (file: string) => JSON.parse(readFileSync(file, "utf8"))
+
+  test("writeConfig keeps keys it does not know and drops known keys the config no longer has", () => {
+    const file = path.join(dir(), "config.json")
+    writeFileSync(file, JSON.stringify({ server: "https://a.example", token: "t", machineID: "m1", futureKey: { nested: [1, 2] }, other: "x" }))
+    const read = readConfig(file, "mac")
+    const { token: _t, machineID: _m, ...rest } = read
+    writeConfig(file, { ...rest, mode: "always" })
+    const after = raw(file)
+    expect(after.futureKey).toEqual({ nested: [1, 2] })
+    expect(after.other).toBe("x")
+    expect(after.mode).toBe("always")
+    expect(after.token).toBeUndefined()
+    expect(after.machineID).toBeUndefined()
+    expect(readConfig(file, "mac")).toEqual({ ...rest, mode: "always" })
+  })
+
+  test("writeConfig still replaces a file that is not a JSON object", () => {
+    const file = path.join(dir(), "config.json")
+    writeFileSync(file, "{not json")
+    writeConfig(file, normalize({ mode: "always" }, "mac"))
+    expect(raw(file).mode).toBe("always")
+  })
+
+  test("updateRawConfig merges into the raw JSON atomically with 0600 and leaves no temp file", () => {
+    const base = dir()
+    const file = path.join(base, "sub", "config.json")
+    expect(readRawConfig(file)).toBeUndefined()
+    updateRawConfig(file, (r) => ({ ...r, server: "https://a.example" }))
+    writeFileSync(file, JSON.stringify({ ...raw(file), unknown: true }))
+    updateRawConfig(file, (r) => ({ ...r, token: "t" }))
+    expect(raw(file)).toEqual({ server: "https://a.example", unknown: true, token: "t" })
+    expect(statSync(file).mode & 0o777).toBe(0o600)
+    expect(statSync(path.dirname(file)).mode & 0o777).toBe(0o700)
+    expect(readdirSync(path.dirname(file))).toEqual(["config.json"])
+  })
+
+  test("updateRawConfig refuses a file that is not a JSON object and leaves it untouched", () => {
+    const file = path.join(dir(), "config.json")
+    for (const content of ["{not json", "[1,2]", "null"]) {
+      writeFileSync(file, content)
+      expect(() => updateRawConfig(file, (r) => ({ ...r, token: "t" }))).toThrow(/not a JSON object/)
+      expect(readFileSync(file, "utf8")).toBe(content)
+      expect(() => readRawConfig(file)).toThrow(/not a JSON object/)
+    }
+  })
+
+  test("a failed write leaves the previous file intact and no temp file behind", () => {
+    if (process.getuid?.() === 0) return
+    const base = dir()
+    const file = path.join(base, "config.json")
+    writeFileSync(file, JSON.stringify({ keep: 1 }))
+    chmodSync(base, 0o500)
+    try {
+      expect(() => updateRawConfig(file, (r) => ({ ...r, token: "t" }))).toThrow()
+    } finally {
+      chmodSync(base, 0o700)
+    }
+    expect(raw(file)).toEqual({ keep: 1 })
+    expect(readdirSync(base)).toEqual(["config.json"])
   })
 })

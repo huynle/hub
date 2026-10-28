@@ -1,6 +1,7 @@
 // Per-machine spoke configuration, shared by every OpenCode process on the machine and edited
 // from the /hub dialog. Holds the machine token, so it is written with mode 0600.
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { randomBytes } from "node:crypto"
+import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
 import { hubEnv, type Env } from "./env"
@@ -142,13 +143,75 @@ export function readConfig(file: string, machineName: string): VoiceConfig {
   }
 }
 
-/** Atomic write with 0600 permissions. */
-export function writeConfig(file: string, config: VoiceConfig): void {
+/** The keys VoiceConfig owns in config.json; every other key belongs to someone else and is preserved. */
+const CONFIG_KEYS = ["server", "mode", "sessions", "machineName", "subagent", "autoStartLocalHub", "herdr", "list", "voiceModel", "workModel", "machineID", "token"] as const satisfies readonly (keyof VoiceConfig)[]
+
+type RawConfig = Record<string, unknown>
+
+const isObject = (v: unknown): v is RawConfig => typeof v === "object" && v !== null && !Array.isArray(v)
+
+/** The raw JSON object in `file` (every key, known or not); undefined when the file does not exist. */
+export function readRawConfig(file: string): RawConfig | undefined {
+  let text: string
+  try {
+    text = readFileSync(file, "utf8")
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return undefined
+    throw cause
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    parsed = undefined
+  }
+  if (!isObject(parsed)) throw new Error(`${file} is not a JSON object; fix or remove it first`)
+  return parsed
+}
+
+/** Writes `content` to `file` atomically (a private temp file in the same directory, fsync, rename), mode 0600. */
+function writePrivate(file: string, content: string): void {
   mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
-  const tmp = `${file}.${process.pid}.tmp`
-  writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 })
-  chmodSync(tmp, 0o600)
-  renameSync(tmp, file)
+  const tmp = `${file}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`
+  let fd: number | undefined
+  try {
+    fd = openSync(tmp, "wx", 0o600)
+    writeSync(fd, content)
+    fsyncSync(fd)
+    closeSync(fd)
+    fd = undefined
+    chmodSync(tmp, 0o600)
+    renameSync(tmp, file)
+  } catch (cause) {
+    if (fd !== undefined) closeSync(fd)
+    rmSync(tmp, { force: true })
+    throw cause
+  }
+}
+
+const serialize = (raw: RawConfig) => `${JSON.stringify(raw, null, 2)}\n`
+
+/**
+ * Lossless read-modify-write of config.json: `update` gets the raw object (every key, {} for a missing file) and
+ * returns the next one, written atomically with 0600. Refuses (throws, file untouched) when the file is not a JSON
+ * object, so a hand-edited config is never replaced.
+ */
+export function updateRawConfig(file: string, update: (raw: RawConfig) => RawConfig): void {
+  writePrivate(file, serialize(update(readRawConfig(file) ?? {})))
+}
+
+/**
+ * Atomic write with 0600 permissions. Lossless: keys config.json holds that VoiceConfig does not know are kept; the
+ * known keys come from `config` (a known key it lacks is removed). A file that is not a JSON object is replaced.
+ */
+export function writeConfig(file: string, config: VoiceConfig): void {
+  let previous: RawConfig = {}
+  try {
+    previous = readRawConfig(file) ?? {}
+  } catch {}
+  const next: RawConfig = { ...previous }
+  for (const key of CONFIG_KEYS) delete next[key]
+  writePrivate(file, serialize({ ...next, ...config }))
 }
 
 /** Changing the server URL drops the machine credentials, which belong to the old server. */
