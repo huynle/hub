@@ -1,6 +1,7 @@
 // Lossless JSON config merging for merge-config (packages/cli/src/bootstrap/transaction/json-merge.ts): only the
 // listed pointers change, every other key (known or not) survives in order, and anything the merge could not
-// carry through exactly (comments, duplicate keys, unsafe integers, TOML) is refused instead of silently dropped.
+// carry through exactly (duplicate keys, TOML, unparseable text) is refused instead of silently dropped. v1.1: the
+// merge edits text in place, so comments and big integers survive (see bootstrap-transaction-jsonc.test.ts).
 import { describe, expect, test } from "bun:test"
 import { mergeConfigText } from "../src/bootstrap/transaction/json-merge.ts"
 
@@ -48,14 +49,18 @@ describe("mergeConfigText", () => {
     expect(r.ok && JSON.parse(r.value)).toEqual({ l: [0, 9], "a/b": { "c~d": 1 } })
   })
 
-  test("refuses what it cannot carry through losslessly", () => {
+  test("refuses what it cannot carry through losslessly (v1.1: as a manual edit)", () => {
     const set = [{ pointer: "/a", value: 1 }] as const
-    expect(code(mergeConfigText('{"a":1, // comment\n}', "jsonc", set))).toBe("conflict")
-    expect(code(mergeConfigText('{"a":1,"a":2}', "json", set))).toBe("conflict")
-    expect(code(mergeConfigText('{"big":12345678901234567890}', "json", set))).toBe("conflict")
-    expect(code(mergeConfigText("a = 1\n", "toml", set))).toBe("conflict")
-    expect(code(mergeConfigText("not json", "json", set))).toBe("conflict")
+    expect(code(mergeConfigText('{"a":1,"a":2}', "json", set))).toBe("manual_edit_required")
+    expect(code(mergeConfigText("a = 1\n", "toml", set))).toBe("manual_edit_required")
+    expect(code(mergeConfigText("not json", "json", set))).toBe("manual_edit_required")
     expect(code(mergeConfigText("[1,2]", "json", set))).toBe("conflict")
+  })
+
+  test("v1.1: comments and integers beyond 2^53 survive, because only the set value's text changes", () => {
+    const set = [{ pointer: "/b", value: 2 }] as const
+    expect(mergeConfigText('{"a":1, // comment\n}', "jsonc", set)).toEqual({ ok: true, value: '{"a":1, // comment\n"b":2,\n}' })
+    expect(mergeConfigText('{"big":12345678901234567890}', "json", set)).toEqual({ ok: true, value: '{"big":12345678901234567890, "b":2}' })
   })
 
   test("a plain-JSON jsonc file (no comments) merges", () => {

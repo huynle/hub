@@ -1,4 +1,4 @@
-// `machine status`: configured / verified / revoked / offline / unconfigured from the stored credential and a real
+// `machine status`: configured / verified / revoked / offline / unconfigured / insecure (v1.1) from the stored credential and a real
 // check against a local fake hub; the output (envelope and text) never carries a credential.
 import { afterEach, describe, expect, test } from "bun:test"
 import { mkdirSync, writeFileSync } from "node:fs"
@@ -100,7 +100,7 @@ describe("machine status", () => {
     expect(target.requests).toHaveLength(0)
   })
 
-  test("never sends the credential to a plain-http, non-loopback hub; reports it as invalid", async () => {
+  test("never sends the credential to a plain-http, non-loopback hub; reports it as insecure (v1.1)", async () => {
     let called = 0
     const token = testToken("lan")
     const r = await machineStatus({
@@ -113,11 +113,10 @@ describe("machine status", () => {
     })
     expect(called).toBe(0)
     expectSecretFree(r, token)
-    // The status contract only carries https (or loopback http) hub URLs, so this is an error without a status.
-    expect(r.exit).toBe(BOOTSTRAP_EXIT.usage)
-    expect(r.envelope).toMatchObject({ ok: false, error: { code: "invalid" } })
-    expect(r.envelope.data).toBeUndefined()
-    expect(r.envelope.error?.message).toContain("https")
+    // v1.1: reported as insecure, with a warning, instead of an error; the credential is never sent.
+    expect(r.exit).toBe(0)
+    expect(r.envelope).toMatchObject({ ok: true, data: { state: "insecure", server: "http://192.168.1.10:4097" } })
+    expect(r.envelope.warnings?.[0]).toContain("https")
   })
 
   test("a broken config.json is reported as a conflict without its contents", async () => {

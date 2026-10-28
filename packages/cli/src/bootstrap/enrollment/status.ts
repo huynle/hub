@@ -2,8 +2,9 @@
 // The check is a GET /spoke/ws with the machine token and no WebSocket upgrade: the hub authenticates before it
 // upgrades, so it answers 426 (Expected a WebSocket upgrade) to a token it accepts and 401 to one it rejects. No
 // central change is needed; nothing is opened. The token goes only to a hub URL that passes checkServerURL, never
-// across a redirect, and never into the output.
-import { enrollmentStatusFrom, validateEnrollmentStatus, type CredentialProbe, type CredentialStore, type EnrollmentStatus, type MachineCredential } from "../contracts/index.ts"
+// across a redirect, and never into the output. v1.1: a credential already stored for a plain-http hub that is not on
+// loopback is reported as `insecure`, with a warning, and never sent there (a new enrollment to it stays refused).
+import { enrollmentStatusFrom, isInsecureHubURL, validateEnrollmentStatus, type CredentialProbe, type CredentialStore, type EnrollmentStatus, type MachineCredential } from "../contracts/index.ts"
 import { checkServerURL } from "./policy.ts"
 import { failure, line, success, type MachineResult } from "./result.ts"
 import { CredentialStoreError, type StoreContents } from "./store.ts"
@@ -96,6 +97,13 @@ export async function machineStatus(options: MachineStatusOptions): Promise<Mach
   if (!credential) {
     const detail = contents?.state === "incomplete" ? `${store.location} has no machine ID for its credential; run hubctl machine enroll --reenroll` : undefined
     return success(COMMAND, statusOf(undefined, undefined, now(), detail))
+  }
+  if (isInsecureHubURL(credential.server)) {
+    const status = statusOf(credential, undefined, now())
+    if (!validateEnrollmentStatus(status).ok) return failure(COMMAND, "internal", `${store.location} holds a machine identity this hubctl cannot report`)
+    return success(COMMAND, status, [
+      `the stored hub URL ${line(credential.server, 300)} is plain http and not on loopback, so the credential was not checked (it is never sent over plain http); enroll again with an https hub URL: hubctl machine enroll --server https://<hub> --reenroll`,
+    ])
   }
   if (!checkServerURL(credential.server)) {
     return failure(COMMAND, "invalid", `The stored hub URL ${line(credential.server, 300)} is not https (plain http is allowed only for a loopback hub), so it was not checked`, {

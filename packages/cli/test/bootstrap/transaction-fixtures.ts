@@ -216,6 +216,8 @@ export interface WorldOptions {
   readonly failedEvidence?: boolean
   /** verify-harness fails (harness_not_ready). */
   readonly verifyFails?: boolean
+  /** v1.1: build the executors without a service manager client (deactivate-service then cannot run). */
+  readonly noServiceControl?: boolean
 }
 
 /** A fake host: a sandbox with seeded user files, a signed manifest, the built-in executors and fakes for the rest. */
@@ -258,6 +260,7 @@ export class World {
       { ...(ACTIONS["write-file"] as Extract<Action, { kind: "write-file" }>), sha256: digestOfText(NODE_JSON) },
       { ...(ACTIONS["merge-config"] as Extract<Action, { kind: "merge-config" }>), precondition },
       { ...(ACTIONS["install-harness"] as Extract<Action, { kind: "install-harness" }>), size: enc(HARNESS_ARCHIVE).byteLength, sha256: digestOfText(HARNESS_ARCHIVE) },
+      ACTIONS["select-harness-version"],
       ACTIONS["verify-harness"],
       { ...(ACTIONS["install-service"] as Extract<Action, { kind: "install-service" }>), sha256: digestOfText(SERVICE_UNIT) },
       ACTIONS["enroll-machine"],
@@ -271,7 +274,7 @@ export class World {
       hostFingerprint: HOST,
       snapshotDigest: SNAPSHOT_DIGEST,
       target: "darwin-arm64",
-      profile: { id: "launch-node", version: 1 },
+      profile: { id: "launch-node", version: 2 },
       requiresEscalation: actions.some((a) => a.escalation === "elevated"),
       activatesServices: actions.some((a) => a.kind === "activate-service"),
       actions,
@@ -305,6 +308,14 @@ export class World {
         }),
         unpack: async () => txOk(HARNESS_FILES.map((f) => ({ rel: f.rel, bytes: enc(f.text), mode: f.mode }))),
       },
+      ...(this.options.noServiceControl
+        ? {}
+        : {
+            services: {
+              deactivate: async (service, manager) => (world.calls.push(`deactivate ${service} ${manager}`), txOk(undefined)),
+              activate: async (service, manager) => (world.calls.push(`reactivate ${service} ${manager}`), txOk(undefined)),
+            },
+          }),
     })
     const enroll: ActionExecutor<"enroll-machine"> = {
       kind: "enroll-machine",

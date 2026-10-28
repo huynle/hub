@@ -1,7 +1,7 @@
 // Executables on PATH: where a command is, whether it is a native binary, a wrapper script or a shim into a
 // container (docker/podman exec), what it resolves to, and how (and at which version) a harness was installed,
 // read from the install layout. A harness is never run to find out.
-import { SEMVER, type HarnessID, type InstallMethod, type RootMapping, type Shim, type ShimKind } from "../contracts/index.ts"
+import { rootPathIn, SEMVER, type ExecutionContext, type HarnessID, type InstallMethod, type RootMapping, type Shim, type ShimKind } from "../contracts/index.ts"
 import type { DiscoveryProbe } from "./probe.ts"
 import { decode, join, normalizeAbs } from "./util.ts"
 
@@ -102,15 +102,21 @@ function packageVersion(probe: DiscoveryProbe, real: string): string | undefined
 }
 
 /** How a harness was installed, and its version when the install layout states it (never by running it). */
-export function installOf(probe: DiscoveryProbe, id: HarnessID, shim: Shim, roots: readonly RootMapping[]): { installMethod: InstallMethod; version?: string } {
+export function installOf(probe: DiscoveryProbe, id: HarnessID, shim: Shim, roots: readonly RootMapping[], context: ExecutionContext = "host"): { installMethod: InstallMethod; version?: string } {
   if (shim.kind === "container-shim") return { installMethod: "unknown" }
   const real = shim.kind === "host" || shim.kind === "wrapper" ? (shim.resolvesTo ?? shim.path) : shim.path
   const semver = (v: string | undefined) => (v && SEMVER.test(v) ? v : undefined)
-  // Paths are read in this (possibly container) view of each root.
-  const local = (root: string) => roots.find((r) => r.id === root)?.containerPath ?? roots.find((r) => r.id === root)?.path
+  // Paths are read in this (possibly container) view of each root (v1.1 rootPathIn).
+  const local = (root: string) => {
+    const r = roots.find((x) => x.id === root)
+    return r ? rootPathIn(r, context) : undefined
+  }
   const data = local("data")
   const home = local("home")
-  const hub = data ? new RegExp(`^${escape(data)}/hub/harnesses/${escape(id)}/([^/]+)(?:/|$)`).exec(real) : null
+  const hubLayout = data ? new RegExp(`^${escape(data)}/hub/harnesses/${escape(id)}/([^/]+)(?:/|$)`) : undefined
+  let hub = hubLayout?.exec(real) ?? null
+  // v1.1 layout: `current` is a link to the version directory in use; the version is where it leads.
+  if (hub?.[1] === "current") hub = hubLayout!.exec(normalizeAbs(probe.realpath(real)) ?? "") ?? null
   if (hub && semver(hub[1])) return { installMethod: "hub", version: hub[1] }
   const brew = /\/(?:Cellar|Caskroom)\/[^/]+\/([^/]+)\//.exec(real)
   if (brew) return { installMethod: "brew", ...(semver(brew[1]) ? { version: brew[1] } : {}) }

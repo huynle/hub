@@ -6,7 +6,14 @@
 //   write-file         an embedded/rendered asset whose bytes must match the plan's digest; never overwrites
 //   merge-config       a lossless JSON merge, only if the file is still as previewed (precondition digest)
 //   link-executable    the hub ↔ hubctl alias symlink (an existing entry is backed up and replaced)
+//   select-harness-version  v1.1: the harness's `current` link, switched atomically to an installed version
+//                      directory (relative, so it reads the same inside and outside a container); the previous
+//                      link is backed up, so a rollback makes the previous version current again
 //   install-service    the rendered unit, whose bytes must match the plan's digest
+//   deactivate-service v1.1: unloads a hub service through the injected ServiceControl (an external effect; its
+//                      undo loads it again)
+//   remove-service     v1.1: removes the unit, only while it is still exactly the one hub installed (backed up, so
+//                      a rollback restores it)
 //   install-artifact   hubctl from a verified manifest: exact target, pinned digest, downgrade policy, bytes checked
 //   install-harness    a harness pinned by the verified manifest: checkHarnessPin, downgrade policy, the pinned
 //                      digest of the download first, then the upstream evidence, then the adapter's unpacker
@@ -26,6 +33,8 @@ import {
   type HarnessID,
   type InstallHarness,
   type InstallService,
+  type ServiceID,
+  type ServiceManagerID,
   type VerifiedManifest,
 } from "../contracts/index.ts"
 import type { ActionExecutor, ExecutorMap, StepContext, TreeFile } from "./executor.ts"
@@ -57,6 +66,16 @@ export interface HarnessSource {
   readonly allowDowngrade?: boolean
 }
 
+/**
+ * v1.1: the typed client for the user's service manager (launchd / systemd --user), supplied by the integrator
+ * (HBS-13). It names a service and manager, never a command; how it reaches the manager is its own business.
+ */
+export interface ServiceControl {
+  deactivate(service: ServiceID, manager: ServiceManagerID): Promise<TxResult<void>>
+  /** Loads a service again (the undo of a deactivation). */
+  activate(service: ServiceID, manager: ServiceManagerID): Promise<TxResult<void>>
+}
+
 export interface BuiltinDeps {
   /** Embedded or rendered assets by id (write-file). */
   readonly assets?: (asset: string) => Uint8Array | undefined
@@ -64,6 +83,8 @@ export interface BuiltinDeps {
   readonly renderService?: (action: InstallService) => Uint8Array | undefined
   readonly hubctl?: HubctlSource
   readonly harness?: HarnessSource
+  /** v1.1: deactivate-service (and its undo). Without it, deactivation is refused at preflight. */
+  readonly services?: ServiceControl
 }
 
 const ok = txOk(undefined)
@@ -124,6 +145,18 @@ export const linkExecutableExecutor = (): ActionExecutor<"link-executable"> => (
   },
 })
 
+export const selectHarnessVersionExecutor = (): ActionExecutor<"select-harness-version"> => ({
+  kind: "select-harness-version",
+  plan: (action) => ({ class: "link", path: action.path, resolve: { finalMayBeSymlink: true } }),
+  change: async (action, ctx) => {
+    const dir = ctx.resolve(action.target)
+    if (!dir.ok) return dir
+    if (ctx.fs.lstat(dir.value)?.kind !== "directory") return txFail("not_found", `${action.harness} ${action.version} is not installed (${dir.value} is not a directory)`)
+    // `current` and the version directory are siblings (contract harnessCurrentRef / harnessVersionRef).
+    return txOk({ type: "symlink", target: action.version, replace: "backup" })
+  },
+})
+
 export const installServiceExecutor = (render: BuiltinDeps["renderService"] = () => undefined): ActionExecutor<"install-service"> => ({
   kind: "install-service",
   plan: (action) => ({ class: "service", path: action.path }),
@@ -135,6 +168,24 @@ export const installServiceExecutor = (render: BuiltinDeps["renderService"] = ()
     const r = pinned(render(action), action.sha256, `the ${action.service} ${action.manager} unit`)
     return r.ok ? txOk({ type: "file", bytes: r.value, mode: 0o644, replace: "backup" }) : r
   },
+})
+
+export const deactivateServiceExecutor = (services?: ServiceControl): ActionExecutor<"deactivate-service"> => ({
+  kind: "deactivate-service",
+  plan: () => ({ class: "external" }),
+  check: async () => (services ? ok : missing("service manager")),
+  change: async (action) => (services ? txOk({ type: "effect", perform: () => services.deactivate(action.service, action.manager) }) : missing("service manager")),
+  undo: async (action) => (services ? services.activate(action.service, action.manager) : missing("service manager")),
+})
+
+export const removeServiceExecutor = (): ActionExecutor<"remove-service"> => ({
+  kind: "remove-service",
+  plan: (action) => ({ class: "service", path: action.path }),
+  check: async (action, ctx) =>
+    !ctx.original.exists || (ctx.original.sha256 === action.sha256 && !ctx.original.symlink)
+      ? ok
+      : txFail("conflict", `${ctx.target} is not the ${action.service} unit hub installed (it changed since); nothing was removed`),
+  change: async (action, ctx) => (ctx.current.exists ? txOk({ type: "remove" }) : txOk({ type: "none", reason: `the ${action.service} unit is already gone` })),
 })
 
 const missing = (what: string) => txFail("internal", `this hubctl was built without a ${what} source`)
@@ -222,7 +273,10 @@ export function builtinExecutors(deps: BuiltinDeps): ExecutorMap {
     "write-file": writeFileExecutor(deps.assets),
     "merge-config": mergeConfigExecutor(),
     "link-executable": linkExecutableExecutor(),
+    "select-harness-version": selectHarnessVersionExecutor(),
     "install-service": installServiceExecutor(deps.renderService),
+    "deactivate-service": deactivateServiceExecutor(deps.services),
+    "remove-service": removeServiceExecutor(),
     "install-artifact": installArtifactExecutor(deps.hubctl),
     "install-harness": installHarnessExecutor(deps.harness),
   }

@@ -25,7 +25,10 @@ describe("loadProfile", () => {
     if (!r.ok) return
     expect(r.value.profile).toEqual(PROFILE_V0_MIGRATED)
     expect(r.value.from).toBe(0)
-    expect(r.value.steps).toEqual([{ from: 0, to: 1 }])
+    expect(r.value.steps).toEqual([
+      { from: 0, to: 1 },
+      { from: 1, to: 2 },
+    ])
     expect(raw).toEqual(PROFILE_V0)
   })
 
@@ -42,7 +45,7 @@ describe("loadProfile", () => {
   })
 
   test("a migrated document is validated like any other", () => {
-    const broken = { 0: (raw: Record<string, unknown>) => ({ ...(MIGRATIONS_FROM_V0[0]!(raw) as object), services: ["node"] }) }
+    const broken = { ...MIGRATIONS_FROM_V0, 0: (raw: Record<string, unknown>) => ({ ...(MIGRATIONS_FROM_V0[0]!(raw) as object), services: ["node"] }) }
     expect(codes(loadProfile(PROFILE_V0, broken))).toContain("inconsistent")
   })
 
@@ -53,26 +56,27 @@ describe("loadProfile", () => {
 })
 
 describe("supportedProfileVersions", () => {
-  test("this hubctl reads only the current version by default", () => {
-    expect(supportedProfileVersions()).toEqual([PROFILE_VERSION])
+  test("this hubctl reads the current version and, through its 1 → 2 migration (v1.1), version 1", () => {
+    expect(supportedProfileVersions()).toEqual([1, PROFILE_VERSION])
   })
 
   test("a version is readable only through an unbroken chain of migrations", () => {
-    expect(supportedProfileVersions(MIGRATIONS_FROM_V0)).toEqual([0, 1])
-    // -1 → 0 is registered, but 0 → 1 is not: neither is readable.
-    expect(supportedProfileVersions({ [-1]: (raw) => ({ ...raw, version: 0 }) })).toEqual([1])
+    expect(supportedProfileVersions(MIGRATIONS_FROM_V0)).toEqual([0, 1, 2])
+    // -1 → 0 is registered, but 0 → 1 and 1 → 2 are not: none of them is readable.
+    expect(supportedProfileVersions({ [-1]: (raw) => ({ ...raw, version: 0 }) })).toEqual([PROFILE_VERSION])
   })
 })
 
 describe("negotiateProfileVersion", () => {
   test("picks the highest version both sides understand", () => {
-    expect(negotiateProfileVersion([1, 2, 3])).toEqual({ ok: true, value: 1 })
+    expect(negotiateProfileVersion([1, 2, 3])).toEqual({ ok: true, value: 2 })
+    expect(negotiateProfileVersion([1])).toEqual({ ok: true, value: 1 })
     expect(negotiateProfileVersion([0], MIGRATIONS_FROM_V0)).toEqual({ ok: true, value: 0 })
     expect(negotiateProfileVersion([0, 1], MIGRATIONS_FROM_V0)).toEqual({ ok: true, value: 1 })
   })
 
   test("only newer versions on offer: this hubctl must be upgraded", () => {
-    expect(codes(negotiateProfileVersion([2, 3]))).toEqual(["unsupported_version"])
+    expect(codes(negotiateProfileVersion([3, 4]))).toEqual(["unsupported_version"])
   })
 
   test("only older, unmigratable versions on offer", () => {

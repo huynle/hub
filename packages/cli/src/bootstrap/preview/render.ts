@@ -13,9 +13,10 @@ export function renderPreview(preview: SetupPreview, home?: string): string[] {
   if (plan.activatesServices) lines.push("Apply needs --confirm-activation: it loads user services.")
   for (const e of preview.evidence) lines.push(`Evidence ${e.kind} for ${e.actionID}: ${e.status}`)
   if (preview.blockers.length > 0) {
-    lines.push(`${preview.blockers.length} change(s) must be made by hand, because the config is a symbolic link:`)
+    lines.push(`${preview.blockers.length} change(s) must be made by hand, because hubctl will not write the config itself:`)
     for (const b of preview.blockers) {
-      lines.push(`  - in ${tilde(b.resolvedPath, home)} (linked from ${tilde(b.linkPath, home)}, ${ref(b.path)}):`)
+      const why = b.linkPath ? `linked from ${tilde(b.linkPath, home)}` : "hubctl cannot edit this format losslessly"
+      lines.push(`  - in ${tilde(b.resolvedPath, home)} (${why}, ${ref(b.path)}):`)
       const c = b.change
       if (c.op === "merge") for (const s of c.set) lines.push(`      set ${s.pointer} = ${JSON.stringify(s.value)}`)
       else if (c.op === "register-mcp-server") lines.push(`      register the hub MCP server "${c.name}" for ${c.harness} (hubctl mcp)`)

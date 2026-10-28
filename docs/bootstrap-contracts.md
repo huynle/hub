@@ -1,8 +1,11 @@
-# Bootstrap contracts (v1)
+# Bootstrap contracts (v1, amendment v1.1)
 
 Status: **frozen v1** (amended on 2026-10-28, before any release, with the user's decisions on the open
-questions: pinned harness installs, manual edits for symlinked configs, and release signing; see §8). Code: `packages/cli/src/bootstrap/contracts/`. Tests: `packages/cli/test/bootstrap-contracts.test.ts`.
-Shared fixtures: `packages/cli/test/bootstrap/fixtures.ts`.
+questions: pinned harness installs, manual edits for symlinked configs, and release signing; see §8), then
+**amendment v1.1** (2026-10-28, still before any release; `CONTRACT_AMENDMENT = "1.1"`), a coordinated change to the
+contracts and every merged bootstrap module. Each v1.1 change is marked "v1.1" below, and §9 lists them all.
+Code: `packages/cli/src/bootstrap/contracts/`. Tests: `packages/cli/test/bootstrap-contracts.test.ts` and
+`packages/cli/test/bootstrap-contracts-v11.test.ts`. Shared fixtures: `packages/cli/test/bootstrap/fixtures.ts`.
 
 This document defines the contracts for bootstrapping a machine into Hub with a standalone `hubctl`, which is
 installed before any harness and then installs pinned harnesses itself: the documents each layer exchanges, the rules that validate them, the threat model they
@@ -10,7 +13,11 @@ defend against, and the edits needed to integrate them into the CLI. It holds no
 planning, applying or enrollment; later tasks build those on these contracts.
 
 Changing a contract means a new schema version, plus a migration wherever documents persist (see `migrateProfile`).
-The meaning of an existing version never changes in place.
+The meaning of an existing version never changes in place. v1.1 follows this rule: the profile, the only
+user-authored document that persists, becomes version 2, with a migration from version 1. The other v1.1 changes are
+additive: new action kinds, codes, an enrollment state and a manual-edit reason. Every v1 document is still valid
+v1.1, so their schema versions stay. A v1.0 hubctl refuses v1.1 additions as `invalid_value`/`unknown_field`, never
+misreads them.
 
 ## 1. Shape of the bootstrap
 
@@ -41,16 +48,16 @@ The meaning of an existing version never changes in place.
 | `canonical.ts` | `canonicalJSON` (sorted keys, no `undefined`, refuses NaN/∞/non-plain objects), `digestOf` (`sha256:<hex>`), `hostFingerprint`. |
 | `secrets.ts` | `findSecrets`: credential-named keys and credential-shaped values (`hat_`, `hst1.`, `hlt1`, `mt_`, `sk-`, GitHub/Slack tokens, PEM private keys, `Bearer`). |
 | `platform.ts` | `SUPPORTED_TARGETS`, `UNSUPPORTED_TARGETS` (with reasons), `targetOf`, `checkTarget`. |
-| `paths.ts` | `PathRef` (named root + safe relative path), `resolvePathRef`, `checkNoSymlinkEscape`, `ELEVATED_ROOTS`. |
+| `paths.ts` | `PathRef` (named root + safe relative path), `resolvePathRef`, `checkNoSymlinkEscape`, `ELEVATED_ROOTS`. v1.1: `ExecutionContext`, `rootPathIn`, and a context argument for `resolvePathRef`. |
 | `exec.ts` | Executable/argv contract: `programLayout`, `serviceArgv`, `SERVICE_COMMANDS`, `EMBEDDED_ASSETS`. |
 | `harness.ts` | `HarnessAdapter` (discover/plan/verify), `Probe`, `REQUIRED_PROBES`, `isHarnessReady`, `createAdapterRegistry`, `EVIDENCE_KINDS`, `HARNESS_EVIDENCE`. |
-| `actions.ts` | Typed `Action` union (13 kinds), `ACTION_FIELDS`/`ACTION_OPTIONAL`, `EXEC_KEYS`, `validateAction`. |
-| `discovery.ts` | `DiscoverySnapshot`, `validateDiscoverySnapshot`. |
-| `profile.ts` | `Profile`, `validateProfile`, `migrateProfile` + `PROFILE_MIGRATIONS` hook. |
+| `actions.ts` | Typed `Action` union (16 kinds; v1.1 adds `select-harness-version`, `deactivate-service` and `remove-service`), `ACTION_FIELDS`/`ACTION_OPTIONAL`, `EXEC_KEYS`, `validateAction`. v1.1: `harnessVersionRef` and `harnessCurrentRef`. |
+| `discovery.ts` | `DiscoverySnapshot`, `validateDiscoverySnapshot`. v1.1: `snapshotDigest`, `executionContextOf`. |
+| `profile.ts` | `Profile` (v1.1: version 2, with `revision?` and `enrollment?`), `validateProfile`, `migrateProfile` + `PROFILE_MIGRATIONS` (1 → 2), `ENROLLMENT_MODES`, `enrollmentModeOf`, `PLAN_PROFILE_VERSIONS`. |
 | `plan.ts` | `SetupPlan`, `planDigest`, `PreviewToken`, `revalidatePreview`. |
-| `preview.ts` | `SetupPreview` (the plan output), `ManualEdit` blocker, `manualEditFor`, `previewApplicable`. |
+| `preview.ts` | `SetupPreview` (the plan output), `ManualEdit` blocker (v1.1: `MANUAL_EDIT_REASONS`), `manualEditFor`, `unmergeableEditFor` (v1.1), `previewApplicable`. |
 | `artifact.ts` | `ArtifactManifest` (+ `HarnessPin`s), `VerifiedManifest`, `TrustRoot`, `verifyManifest`, `rotateTrustRoot`, `selectArtifact`, `checkArtifactBytes`, `compareVersions`, `decideInstall`, `checkHarnessPin`, `checkHarnessEvidence`, `decideHarnessInstall`. |
-| `credentials.ts` | `CredentialStore`, `MachineEnrollment`, `MachineCredential`, secret-free `EnrollmentStatus`, `enrollmentStatusFrom`. |
+| `credentials.ts` | `CredentialStore`, `MachineEnrollment`, `MachineCredential`, secret-free `EnrollmentStatus` (v1.1: the `insecure` state), `enrollmentStatusFrom`. |
 | `journal.ts` | `TransactionJournal`, `JournalEntry` (ownership records), `recoveryDecision`/`recoveryPlan`, `JournalHooks`, `ApplyLock`, `lockState`. |
 | `envelope.ts` | `ResultEnvelope` (`--json`), `ERROR_CODES`, `BOOTSTRAP_EXIT`, `exitFor`. |
 
@@ -80,20 +87,57 @@ managers, harnesses, OpenShell presence, the config files the plan might touch (
 contents), and root mappings (`home`, `config`, `state`, `data`, `user-bin`, `launch-agents`, `systemd-user`,
 `system-bin`, each with an optional `containerPath`).
 
+**v1.1 container roots.** A root's `path` is always the **host's** view of it. `containerPath` is what a process
+inside the container sees. Discovery records `containerPath` only when it runs inside a container whose mount table
+maps the root to a host directory. Code resolves a path for the **execution context** it runs in (`ExecutionContext`:
+`host` | `container`):
+
+| Context | A root resolves to |
+|---|---|
+| `host` (default) | `path` |
+| `container` (hubctl runs inside the container) | `containerPath ?? path` |
+
+`rootPathIn(root, context)` and `resolvePathRef(ref, roots, context)` are the only implementations. The context of
+a plan is the one discovery ran in, `executionContextOf(snapshot)`: `container` unless `topology.container` is `none`.
+Discovery, link inspection, manual-edit paths and the applier all use it.
+
+**v1.1 snapshot digest.** `snapshotDigest(snapshot)` is `digestOf` of the snapshot with `capturedAt` removed, so
+rediscovering an unchanged host gives the same digest. It is the only digest plans, preview tokens, audits, apply
+revalidation and the Ansible vars pin for a snapshot (§3.4).
+
+Discovery reports a harness reached through `data:hub/harnesses/<harness>/current` (§3.6.1) as
+`installMethod: "hub"`, with the version of the directory the link resolves to (v1.1).
+
 Harness entries keep **presence apart from health**. `installed: true` means the harness was found. Its
 `health.state` stays `unverified` until probes run. `verified` requires at least one passing non-`presence` probe
 and no failing ones. A harness that is not installed has no path, version or verified health.
 
 ### 3.3 Actions (typed, closed union)
 
-`ensure-directory`, `install-artifact` (hubctl only), `install-harness` (a pinned harness artifact, §3.6.1),
-`link-executable` (the hub ↔ hubctl alias), `write-file`
-(an embedded or rendered asset pinned by digest, `onConflict: "refuse"` only), `merge-config` (lossless:
-`preserveUnknown: true` only, precondition digest, JSON-pointer sets), `register-mcp-server` (registers *this*
-hubctl's `mcp` subcommand and never carries a command), `install-service` (an embedded template for that service and
-manager, in that manager's root), `activate-service` (`confirm: "explicit"` only), `enroll-machine` (server URL +
-machine name, never a credential), `verify-harness` (real probes only), `verify-runtime` (OpenShell, opt-in),
-`launch-session` (bounded: 1 s to 24 h).
+- `ensure-directory`
+- `install-artifact`: hubctl only.
+- `install-harness`: a pinned harness artifact (§3.6.1). v1.1: into exactly `harnessVersionRef(harness, version)`.
+- `select-harness-version` (v1.1): `{harness, version, path, target, previous?}`. It switches the `current` link
+  `path` = `harnessCurrentRef(harness)` atomically to `target` = `harnessVersionRef(harness, version)` (`inconsistent`
+  otherwise). Journal class `link`: the previous link is backed up, so a rollback makes the previous version current
+  again.
+- `link-executable`: the hub ↔ hubctl alias.
+- `write-file`: an embedded or rendered asset pinned by digest, `onConflict: "refuse"` only.
+- `merge-config`: lossless (`preserveUnknown: true` only, precondition digest, JSON-pointer sets). v1.1: `json` and
+  `jsonc` files may have comments and trailing commas, and are edited in place without losing either (§3.12.1).
+  `toml` is never merged; the planner turns it into an `unmergeable-format` manual edit (§3.12).
+- `register-mcp-server`: registers *this* hubctl's `mcp` subcommand and never carries a command.
+- `install-service`: an embedded template for that service and manager, in that manager's root.
+- `activate-service`: `confirm: "explicit"` only.
+- `deactivate-service` (v1.1): `{service, manager}`. It unloads a hub service when a profile downgrade removes it
+  (`--allow-downgrade`). An external effect whose undo loads the service again.
+- `remove-service` (v1.1): `{service, manager, path, sha256}`. It removes the unit in that manager's root, only
+  while it is exactly the unit hub installed (`sha256`); a changed unit is a conflict. Backed up, so a rollback
+  restores it.
+- `enroll-machine`: server URL + machine name, never a credential.
+- `verify-harness`: real probes only.
+- `verify-runtime`: OpenShell, opt-in.
+- `launch-session`: bounded, 1 s to 24 h.
 
 There is **no generic "run command" action**, and no action has a field that could carry one:
 
@@ -115,12 +159,28 @@ defined outcome: the planner replaces the action with a `ManualEdit` blocker (§
 ### 3.4 SetupPlan (`hub.setup-plan` v1) and preview
 
 A plan is a pure function of (snapshot, profile). It has no timestamps and no randomness, so `planDigest` (the
-digest of its canonical JSON) is deterministic. It records `hostFingerprint`, `snapshotDigest`, `target`,
-`profile {id, version}`, the actions in execution order, and two flags that must be exactly right:
-`requiresEscalation` (some action is elevated) and `activatesServices` (some action activates a service). Order
-rules: a service is installed before it is activated; a harness is verified before a session is launched on it;
-every installed harness is verified later in the plan (install is not readiness); the machine is enrolled at most
-once; at most 256 actions.
+digest of its canonical JSON) is deterministic. It records `hostFingerprint`, `snapshotDigest` (v1.1: always
+`snapshotDigest(snapshot)` from §3.2, which excludes `capturedAt`), `target`, `profile {id, version}` (v1.1: profile
+version 1 or 2, so a plan journaled by a v1.0 hubctl still resumes), the actions in execution order, and two flags
+that must be exactly right: `requiresEscalation` (some action is elevated) and `activatesServices` (some action
+activates a service).
+
+Order rules:
+
+- A service is installed before it is activated.
+- A harness is verified before a session is launched on it.
+- Every installed harness is verified later in the plan (install is not readiness).
+- v1.1: an installed version is made current (`select-harness-version` of the same version) after it is installed
+  and before the harness is verified.
+- v1.1: a service is deactivated before it is removed.
+- The machine is enrolled at most once.
+- At most 256 actions.
+
+**v1.1 enrollment mode.** Plans either enroll inline or leave enrollment to `hubctl machine enroll` (`enrollment:
+"inline" | "separate"`). The mode comes from the planner option, else the profile's `enrollment`, else `inline`.
+`separate` leaves out every `enroll-machine` action. So a direct preview with `separate` and the Ansible path (whose
+rendered profile is always `separate`, §3.13) plan the same actions and the same digest. Apply must re-plan with the
+same mode, or the digests differ (`preview_stale`).
 
 `PreviewToken` (`hub.preview-token` v1) holds `{planDigest, hostFingerprint, snapshotDigest, issuedAt, expiresAt,
 nonce}`, with a lifetime of at most 15 minutes and a nonce of 16–128 url-safe characters.
@@ -141,7 +201,16 @@ if nothing changed. For this reason the token is deliberately unsigned and has n
 
 ### 3.5 Profile (`hub.bootstrap-profile` v1)
 
-`{id, harnesses (in HARNESS_ORDER), runtimes, services, launch {enabled, maxDurationS}, escalation: never|explicit}`.
+`{id, harnesses (in HARNESS_ORDER), runtimes, services, launch {enabled, maxDurationS}, escalation: never|explicit,
+revision?, enrollment?}`. **v1.1: profile version 2.**
+
+- `revision` is the built-in catalog revision the profile was made from (an integer ≥ 1). Catalog profiles always
+  carry it. `rebaseProfile` uses it to find the defaults a profile was made from, refuses an explicit base of another
+  revision (`inconsistent`) and a move to an older revision (`downgrade_rejected`), and records the new revision.
+- `enrollment` is `inline` (default) or `separate` (§3.4).
+- `PROFILE_MIGRATIONS[1]` upgrades a version-1 document by setting `version: 2`. The new fields are optional and mean
+  what version 1 meant: unknown revision, inline enrollment.
+
 `session-only` has no services and no launch. `launch-node` and `full-harness` need the `node` service. Launching
 needs `node` and a bound duration. A spoke service needs its harness (`claude-code` → `claude-code`, `codex` →
 `codex-spoke`). `migrateProfile(raw, migrations)` upgrades a document one version at a time through
@@ -199,8 +268,12 @@ hubctl (`unsupported_version`).
   | Codex | sha256 pinned in hub's signed manifest | sigstore bundle where upstream publishes one (`sigstore`) |
 - `decideHarnessInstall(pin, {installed, floor, allowDowngrade})` applies the same downgrade policy as hubctl,
   with the pin's `minimumVersion` as the harness floor.
-- Rollback: the journal class `harness` is backed up before it changes. Recovery restores the previous
-  binary/version (`restore-backup`), or removes a fresh install (`remove-created`).
+- Rollback (v1.1 layout): each version is installed once into its own immutable directory
+  `data:hub/harnesses/<harness>/<version>`, so an install creates a fresh `harness` entry, which recovery removes
+  (`remove-created`). `data:hub/harnesses/<harness>/current` is a relative symlink that `select-harness-version`
+  switches. It is journal class `link` and is backed up, so recovery restores the previous link (`restore-backup`):
+  the previous version is current again. A v1.0 journal that installed into place is still recovered by the same
+  rules.
 - Discovery reports harnesses installed this way as `installMethod: "hub"`.
 
 ### 3.7 Executable and argv contract
@@ -225,8 +298,16 @@ has no field that can carry a credential, and its validator also scans values fo
 - `verified`: the hub accepted it, at `checkedAt`.
 - `revoked`: the hub rejected it.
 - `offline`: the hub could not be reached.
+- `insecure` (v1.1): stored for a plain-http hub that is not on loopback. It is reported with a warning (`machine
+  status` succeeds) and is **never probed**: the token is never sent over plain http. Only this state may name such
+  a server, and it has no `checkedAt`. A **new** enrollment over plain http to a non-loopback hub stays refused
+  (`usage`).
 
-`enrollmentStatusFrom(credential, probe, now)` derives the state.
+`enrollmentStatusFrom(credential, probe, now)` derives the state; it ignores any probe for an insecure hub.
+
+v1.1 error codes: a denied device code is `enrollment_denied` (exit 5); an expired one, whether the hub or the
+client's own deadline expired it, is `enrollment_expired` (exit 4); an aborted enrollment is `cancelled` (exit 4).
+These are the exits those outcomes already had.
 
 ### 3.9 Transaction journal, ownership and lock
 
@@ -234,13 +315,15 @@ has no field that can carry a credential, and its validator also scans values fo
   entry per change, numbered 1…n. Each entry has a class, a path, `before`/`after` file states (digest and mode
   only, **never contents**), a backup reference, and a status.
 - Existing files of class file/config/service/artifact/harness/link are backed up before they change. Credentials are
-  **never** backed up.
+  **never** backed up. v1.1: `validateJournal` exempts `status: "skipped"` entries (nothing changed, so there is
+  nothing to back up).
 - `recoveryDecision(entry, now)`:
 
   | Entry | File now | Decision |
   |---|---|---|
   | undone / skipped / external | any | `nothing-to-do` |
   | pending | equals `before` | `nothing-to-do` (never started) |
+  | pending credential, no `after` (v1.1) | differs from `before` | `clear-credential` (the interrupted enrollment stored its credential; the store writes atomically) |
   | any | differs from `after` | `keep-user-edit` (reported as a conflict, never overwritten) |
   | credential | equals `after` | `clear-credential` (the stale previous credential is never restored) |
   | existed before | equals `after` | `restore-backup` |
@@ -288,6 +371,11 @@ The other codes map to existing exits: `unsupported_platform`/`offline` → 7, `
 4, `revoked`/`unauthorized` → 9, `usage`/`invalid` → 2, `not_found` → 3, `forbidden` → 5, `internal` → 1.
 Exit codes 10–15 are approved (decision Q9).
 
+v1.1 adds error codes for outcomes that already had an exit, so the exits do not change: `no_service_manager` → 7,
+`enrollment_denied` → 5, `enrollment_expired` → 4, `cancelled` → 4. The planner's issue codes `escalation_required`
+(an elevated action the profile never allows; it was `inconsistent`) and `no_service_manager` (the profile installs
+services, but the host has no user service manager; it was `inconsistent`) are also error codes of the same name.
+
 ### 3.12 SetupPreview (`hub.setup-preview` v1) and manual edits
 
 `hubctl setup preview` outputs `{plan, planDigest, token, blockers[], evidence[]}`. The validator checks that
@@ -300,6 +388,11 @@ Exit codes 10–15 are approved (decision Q9).
   linked into a dotfiles repository. The planner replaces the action with a `ManualEdit` blocker (`manualEditFor`):
   - It has `{reason: "symlinked-config", actionID, path, linkPath, resolvedPath, format?, owner?, precondition?,
     change}`.
+  - v1.1: a second reason, `unmergeable-format`. A config hubctl cannot edit losslessly (TOML) gets the same exact,
+    structured edit for the file itself (`unmergeableEditFor`, with `resolvedPath` in the execution context), and
+    no bare conflict. It has no `linkPath`; `symlinked-config` requires one. At apply, a JSON/JSONC file that turns
+    out to be unparseable (or has duplicate keys) is refused with `manual_edit_required` (exit 10) for the same
+    reason.
   - `change` is the exact structured edit: `merge {set[]}`, `register-mcp-server {harness, name}` (the command is
     implied, as in the action) or `write-file {asset, sha256, mode}`.
   - It is validated like an action: no command-shaped keys, no secrets, absolute normalized paths.
@@ -307,6 +400,30 @@ Exit codes 10–15 are approved (decision Q9).
 - **Apply gate.** `previewApplicable` refuses while any blocker remains (`manual_edit_required`, exit 10) or any
   evidence failed (`evidence_failed`, exit 11). Once the user has made the edit in their dotfiles, a new preview
   sees the changed config, so it has a new digest and no blocker.
+
+#### 3.12.1 Lossless JSONC edits (v1.1)
+
+OpenCode configs are often JSONC, and the plan must preserve the user's config structurally. `merge-config`
+therefore never re-serializes a file:
+
+- The applier parses JSON/JSONC (comments, trailing commas; duplicate keys are refused) into a syntax tree with the
+  offsets of every value. It decides the change on the plain value with the same pointer rules as before: `-`
+  appends unless the value is already there, missing containers are created, and a scalar in the way is a
+  conflict.
+- It then splices only the text of the value it replaces, or the member or item it inserts. Inserts use the
+  container's indentation, comma style and separator, and never separate a value from its same-line comment.
+- Every other byte stays as it was: comments, trailing commas, order, whitespace, and numbers and strings exactly as
+  written. A merge that changes nothing returns the bytes unchanged.
+- The result is parsed again and must equal the intended value, otherwise the merge is refused with
+  `manual_edit_required`.
+- Implemented in-house (`transaction/json-merge.ts`, `parseJsonc`, `mergeConfigText`), with no dependency.
+
+### 3.13 Ansible vars (v1.1 notes)
+
+The renderer (`ansible/render.ts`) always renders the profile with `enrollment: "separate"`, so hubctl plans without
+`enroll-machine` on the host and the role's plan digest equals the direct path's. It still refuses a plan that
+enrolls. When given the snapshot a plan was made from, it checks `snapshotDigest(snapshot) === plan.snapshotDigest`
+(else `preview_stale`).
 
 ## 4. Threat model
 
@@ -327,10 +444,10 @@ careless logging.
 | T7 | Concurrent apply | O_EXCL apply lock; `held` refuses; another host's lock is never broken | `ApplyLock > …` |
 | T8 | Crash mid-apply | Journal written before each action; recovery decides per entry from on-disk state | `TransactionJournal > a pending entry interrupted mid-write…`, `recoveryPlan walks entries newest first…` |
 | T9 | Secret leakage (plans, journals, logs, status, Ansible) | No credential field in any contract except `MachineCredential`; `findSecrets` scan in every validator; journals record digests only; credentials never backed up | `findSecrets > …`, `…secretInConfig / secretValueInConfig / credentialInEnroll`, `EnrollmentStatus rejects threat cases`, `JOURNAL_INVALID contentInJournal / secretInJournal`, `ENVELOPE_INVALID leakedToken`, `DISCOVERY_INVALID secretInSnapshot` |
-| T10 | Conflicting user edits / lossy config rewrite | `write-file` refuses conflicts; `merge-config` is lossless with a digest precondition; recovery keeps user edits | `Action rejects threat cases > silentOverwrite / lossyMerge`, `an intervening user edit is never overwritten` |
+| T10 | Conflicting user edits / lossy config rewrite | `write-file` refuses conflicts; `merge-config` is lossless with a digest precondition; recovery keeps user edits; v1.1: JSONC is edited in place (comments, trailing commas, formatting kept), formats that cannot be edited that way become manual edits | `Action rejects threat cases > silentOverwrite / lossyMerge`, `an intervening user edit is never overwritten`, `mergeConfigText on JSONC > …` (`bootstrap-transaction-jsonc.test.ts`), `v1.1 unmergeable-format manual edits > …` |
 | T11 | Stale credential restored on rollback | Credential entries are cleared, never restored from a backup | `a stale credential is never restored`, `JOURNAL_INVALID credentialBackup` |
 | T12 | Central (or a plan) asking for command execution | No command-capable action kind or field, at any depth or in the types; `register-mcp-server` implies its command | `Action union > no action kind declares…`, `…accepts a smuggled command…`, `the type system has no command-shaped field either`, `runCommandKind / shellKind / nestedCommandInConfig` |
-| T13 | Silent privilege escalation / persistence | `escalation` exact per action; plan flags `requiresEscalation` and `activatesServices` must be exact; activation needs `confirm: "explicit"` | `systemPathWithoutEscalation / needlessEscalation / implicitActivation`, `PLAN_INVALID hiddenEscalation / hiddenActivation` |
+| T13 | Silent privilege escalation / persistence | `escalation` exact per action; plan flags `requiresEscalation` and `activatesServices` must be exact; activation needs `confirm: "explicit"`; v1.1: the planner refuses escalation a profile never allows with `escalation_required`, and a downgrade removes a component's persistence through typed `deactivate-service`/`remove-service` (consent still required) | `systemPathWithoutEscalation / needlessEscalation / implicitActivation`, `PLAN_INVALID hiddenEscalation / hiddenActivation`, `v1.1 planner codes > …`, `v1.1 downgrades plan typed service removal > …` |
 | T14 | "Installed" mistaken for healthy (incl. container shims) | Presence ≠ health; readiness needs fresh, passing real probes | `harness readiness and adapters > …`, `DISCOVERY_INVALID verifiedWithoutProbes / verifiedByPresenceOnly` |
 | T15 | Unsupported host half-configured | Explicit matrix; plans for unsupported targets refused | `supported platform matrix > …`, `PLAN_INVALID unsupportedTarget` |
 | T16 | Executable name used as authority | `hub` / `hubctl` resolve to one surface | `executable argv contract > hub and hubctl are one command surface` |
@@ -338,9 +455,13 @@ careless logging.
 | T18 | Profile from a newer hubctl misread | Versioned profile; future versions refused; migrations explicit | `migrateProfile refuses…` |
 | T19 | Unpinned or mismatched harness artifact (substituted URL, other version, other bytes, other hub release, unsupported target) | Harness pins in hub's **signed** manifest (transitive trust); `checkHarnessPin` needs a `VerifiedManifest`; exact version/target/source/size/sha256; mandatory digest check of the bytes | `harness pins in the signed hub manifest > …` (`unpinnedTarget`, `unpinnedVersion`, `otherHubRelease` → `unpinned_artifact`; `digestMismatch`, `sourceMismatch` → `integrity_mismatch`; tampered pin → `signature_invalid`), `the pinned digest is always checked first (never neither)` |
 | T20 | Upstream evidence failing or skipped (bad GPG signature, failed notarization or sigstore) | A failed check rejects the artifact; evidence the pin lists must be attempted; the outcome is recorded in the preview and the install report | `failed evidence rejects the artifact…`, `HARNESS_PIN_INVALID evidenceSkipped`, `SetupPreview > failed evidence blocks apply` |
-| T21 | Harness installer used as an exec channel (install scripts, post-install hooks) | `install-harness` has no installer/script/hook field; https only; plain file names | `install-harness rejects threat cases > installerScript / plainHttp / pathInFile`, smuggled-command tests (cover all 13 kinds) |
-| T22 | Harness downgrade or failed install leaving a broken harness | Pin `minimumVersion` floor + explicit downgrade consent; `harness` journal class backed up; rollback restores the previous version | `harness downgrade policy > …`, `harness rollback > …` |
+| T21 | Harness installer used as an exec channel (install scripts, post-install hooks) | `install-harness` has no installer/script/hook field; https only; plain file names | `install-harness rejects threat cases > installerScript / plainHttp / pathInFile`, smuggled-command tests (cover all 16 kinds) |
+| T22 | Harness downgrade or failed install leaving a broken harness | Pin `minimumVersion` floor + explicit downgrade consent; v1.1: immutable version directories and an atomically switched, backed-up `current` link; rollback makes the previous version current again and removes only the new directory | `harness downgrade policy > …`, `harness rollback > …`, `v1.1 harness layout > …`, `v1.1 select-harness-version > …`, `PLAN_HARNESS_INVALID installWithoutSelect / selectBeforeInstall / verifyBeforeSelect` |
 | T23 | Writing through a symlinked config into another repository | Refused; replaced by a structured, secret-free `ManualEdit`; apply blocked until resolved | `manual edits for symlinked configs > …`, `ManualEdit rejects threat cases`, `SetupPreview > a symlinked config blocks apply…` |
+| T24 (v1.1) | Writing to the wrong directory from inside a container (host path vs container path confusion) | `path` is the host's view, `containerPath` the container's; one resolver for the execution context (`rootPathIn`), used by discovery, links, manual edits and apply | `v1.1 container roots > …`, `v1.1 execution context > …` (`bootstrap-transaction-v11.test.ts`) |
+| T25 (v1.1) | A stored credential sent to a plain-http hub on the network | `insecure` status: reported with a warning, never probed; new plain-http, non-loopback enrollments refused | `v1.1 codes > an existing credential for a plain-http, non-loopback hub is insecure…`, `EnrollmentStatus rejects threat cases > verifiedOverPlainHttp / insecureHttps / insecureChecked`, `v1.1 insecure stored credentials > …` |
+| T26 (v1.1) | A stale preview applied because a re-discovery's capture time hid a change, or a change hid behind it | One canonical `snapshotDigest` (excluding only `capturedAt`) everywhere; apply compares a fresh snapshot against the plan when given | `v1.1 snapshotDigest > …`, `v1.1 snapshot digest at apply > …`, `v1.1 canonical snapshot digest > …` |
+| T27 (v1.1) | A removed service's unit that the user changed is deleted | `remove-service` only while the unit is exactly the one hub installed (digest from the history); backed up for rollback | `v1.1 service deactivation and removal > a unit the user changed is never removed`, `… a later failure restores the unit and reactivates the service` |
 
 ### 4.1 Requirement → acceptance mapping
 
@@ -366,6 +487,14 @@ careless logging.
 | Ownership journal, recovery, no stale credentials, no overwrite of user edits | journal.ts | T8, T10, T11 |
 | Linux + macOS enumerated, others fail explicitly | platform.ts | T15 |
 | Lossless config merging (src/config.ts drops unknown keys) | `CredentialStore` contract, `preserveUnknown: true` | integration item I4 |
+| v1.1: preserve user config structurally (JSONC with comments) | `merge-config` on `json`/`jsonc`, §3.12.1; `unmergeable-format` manual edits | T10 |
+| v1.1: one snapshot digest across preview, apply, audit and Ansible | `snapshotDigest` | T26 |
+| v1.1: correct paths inside containers | `ExecutionContext`, `rootPathIn` | T24 |
+| v1.1: the same plan digest on the direct and Ansible paths | profile/planner `enrollment: "separate"`, Ansible renderer | `v1.1 separate enrollment > …`, `v1.1 the Ansible path enrolls separately > …` |
+| v1.1: immutable, versioned harness installs with atomic switching and rollback | `harnessVersionRef`, `harnessCurrentRef`, `select-harness-version` | T22 |
+| v1.1: profile downgrades remove what they can, with consent | `deactivate-service`, `remove-service`, `planProfileChange({services})` | T13, T27 |
+| v1.1: rebase profiles from the catalog revision they came from | `Profile.revision` (profile v2), `rebaseProfile` | `v1.1 profile revisions > …` |
+| v1.1: precise outcomes for enrollment and planning | `enrollment_denied`, `enrollment_expired`, `cancelled`, `escalation_required`, `no_service_manager`, `insecure` | `v1.1 codes > …`, `v1.1 enrollment error codes > …` |
 
 ## 5. Installer-source authenticity per harness
 
@@ -396,24 +525,28 @@ and the GitHub releases API. The release process that writes the pins (I5) re-ch
 
 - Discovery: `DISCOVERY_DARWIN`, `DISCOVERY_LINUX_CONTAINER` (a shim plus a verified harness),
   `DISCOVERY_UNSUPPORTED`, and `DISCOVERY_INVALID`.
-- Profiles: `PROFILE_SESSION_ONLY`, `PROFILE_LAUNCH_NODE`, `PROFILE_FULL_HARNESS`, `PROFILE_V0` (for the migration
-  hook), and `PROFILE_INVALID`.
+- Profiles (v1.1: version 2): `PROFILE_SESSION_ONLY`, `PROFILE_LAUNCH_NODE`, `PROFILE_FULL_HARNESS`,
+  `PROFILE_SEPARATE_ENROLLMENT`, `PROFILE_V1` (migrated by `PROFILE_MIGRATIONS[1]`), `PROFILE_V0` (for an injected
+  migration), and `PROFILE_INVALID`.
 - Actions and plans: `ACTIONS` (one valid action per kind), `EXEC_SMUGGLING`, `ACTION_INVALID`,
   `PLAN_LAUNCH_NODE`, `PLAN_ELEVATED`, and `PLAN_INVALID`.
 - Previews: `PREVIEW`, `PREVIEW_INVALID`.
 - Artifacts: `MANIFEST_UNSIGNED`, `TRUST_ROOT_TEMPLATE`, `MANIFEST_INVALID`. Tests sign manifests with an
   **ephemeral** ed25519 key generated at test time; no key material is committed.
-- Enrollment: `ENROLLMENT_VERIFIED`, `ENROLLMENT_UNCONFIGURED`, `ENROLLMENT_INVALID`.
+- Enrollment: `ENROLLMENT_VERIFIED`, `ENROLLMENT_UNCONFIGURED`, `ENROLLMENT_INSECURE` (v1.1), `ENROLLMENT_INVALID`.
 - Journal and lock: `JOURNAL_APPLYING` (directory, config, credential and pending-file entries), `JOURNAL_INVALID`,
-  `LOCK`.
+  `JOURNAL_SKIPPED_ENTRY` and `JOURNAL_PENDING_CREDENTIAL` (v1.1), `LOCK`.
 - Readiness: `VERIFICATION_READY`, `VERIFICATION_INSTALLED_ONLY`.
 - Pinned harness installs:
   - `HARNESS_PINS` (in `MANIFEST_UNSIGNED.harnesses`), and the install actions `ACTIONS["install-harness"]`
     (OpenCode), `INSTALL_CLAUDE` and `INSTALL_CODEX`.
-  - `PLAN_HARNESS_INSTALL` (install → verify).
+  - `PLAN_HARNESS_INSTALL` (v1.1: install → select → verify), `SELECT_CLAUDE`, and the new kinds in `ACTIONS`
+    (`select-harness-version`, `deactivate-service`, `remove-service`).
   - Threat cases: `HARNESS_ACTION_INVALID`, `HARNESS_PIN_INVALID`, `PLAN_HARNESS_INVALID`.
-  - Rollback: `HARNESS_JOURNAL_ENTRY`.
-- Symlinked configs: `SYMLINK`, `MANUAL_EDIT_MERGE`, `MANUAL_EDIT_MCP`, `MANUAL_EDIT_INVALID`.
+  - Rollback (v1.1 layout): `HARNESS_INSTALL_JOURNAL_ENTRY` (a fresh version directory: removed) and
+    `HARNESS_JOURNAL_ENTRY` (the `current` link: restored from its backup).
+- Manual edits: `SYMLINK`, `MANUAL_EDIT_MERGE`, `MANUAL_EDIT_MCP`, `MANUAL_EDIT_TOML` (v1.1, `unmergeable-format`),
+  `MANUAL_EDIT_INVALID`.
 - Envelopes: `ENVELOPE_OK`, `ENVELOPE_ERROR`, `ENVELOPE_INVALID`.
 
 Note: `scripts/test-ci.sh` runs `packages/*/test/*.test.ts` (one directory level). Dependent tests belong in
@@ -463,6 +596,16 @@ This task does not edit these files. These are the edits needed to wire the cont
   - Sign it with a detached ed25519 signature, from the single release key held as a GitHub Actions secret (e.g.
     `HUB_RELEASE_SIGNING_KEY`) and readable only by the release job (decision Q5). Never commit a key.
   - Smoke test `hubctl --version` and `hubctl machine status --json` on linux-x64.
+- **I7 v1.1 wiring (HBS-13)**
+  - `createApplier({context})`: pass `executionContextOf(snapshot)` from the discovery that produced the plan, and the
+    `snapshot` in each `FreshPlan` (apply then checks `snapshotDigest`).
+  - `builtinExecutors({services})`: supply a typed `ServiceControl` (`deactivate`/`activate` for launchd /
+    systemd --user). Without it, `deactivate-service` is refused at preflight.
+  - `setup preview`/`apply`: add `--enrollment inline|separate` (default: the profile's, else inline) and pass the
+    same value to `previewSetup` and `revalidateApply`.
+  - Map the new error codes through `exitFor`; render `insecure` status warnings; render `unmergeable-format`
+    blockers (no link, the file itself).
+  - Read profiles with `migrateProfile`/`loadProfile` (version 1 documents migrate to 2).
 - **I6 shipped trust root**
   - hubctl embeds the `TrustRoot` (public keys only) at build time: v1 has one active key, threshold 1. Rotation
     documents are published next to releases and accepted through `rotateTrustRoot`.
@@ -496,3 +639,31 @@ Open items carried to later tasks:
 - HBS-06: the OpenCode 2.x upstream source.
 - The Claude Code adapter's choice of OpenPGP verifier when one is available.
 - The release job's harness pin list and its review process (I5).
+
+Resolved by amendment v1.1 (review findings on the merged modules, §9): the duplicated snapshot digest, container
+path resolution, enrollment in Ansible-comparable plans, imprecise planner and enrollment codes, an existing
+plain-http credential reported as an error, the recovery of an interrupted enrollment, backups for skipped entries,
+the harness `current` layout and `HARNESS_JOURNAL_ENTRY`, JSONC configs refused as conflicts, service removal on
+downgrade, and rebases without a recorded catalog revision. None of the three open items above is affected.
+
+## 9. Amendment v1.1 (2026-10-28)
+
+| # | Amendment | Contract | Modules | Tests |
+|---|---|---|---|---|
+| 1 | Canonical snapshot digest, excluding `capturedAt` | `snapshotDigest` (§3.2, §3.4) | preview (re-exports it), transaction (`FreshPlan.snapshot`), profiles (audit), ansible (`snapshot` input) | `bootstrap-contracts-v11`, `-preview-v11`, `-transaction-v11`, `-profiles-v11`, `-ansible-v11` |
+| 2 | Container roots: `path` = host view, `containerPath` = container view | `ExecutionContext`, `rootPathIn`, `resolvePathRef(…, context)`, `executionContextOf` (§3.2) | discovery, preview links and manual edits, transaction (`createApplier({context})`, store, parents) | `v1.1 container roots`, `v1.1 execution context` |
+| 3 | Enrollment inline/separate | `Profile.enrollment`, `ENROLLMENT_MODES` (§3.4, §3.5) | planner option `enrollment`, previewSetup/revalidateApply, Ansible renderer sets `separate` | `v1.1 separate enrollment`, `v1.1 the Ansible path enrolls separately` |
+| 4 | Codes: `escalation_required`, `no_service_manager`, `enrollment_denied`, `enrollment_expired`, `cancelled`; `insecure` status | `IssueCode`, `ERROR_CODES`/`exitFor`, `ENROLLMENT_STATES` (§3.8, §3.11) | planner, profiles (desired), enrollment (enroll, status) | `v1.1 codes`, `v1.1 planner codes`, `v1.1 enrollment error codes`, `v1.1 insecure stored credentials` |
+| 5 | Journal: pending credential without `after` is cleared; skipped entries need no backup | `recoveryDecision`, `validateJournal` (§3.9) | transaction engine relies on the contract rule | `v1.1 journal` |
+| 6 | Versioned harness layout and `select-harness-version` | `harnessVersionRef`, `harnessCurrentRef`, action + plan rules, fixtures (§3.3, §3.4, §3.6.1) | transaction executor, discovery (`current`), profiles history (`restores` from the select) | `v1.1 harness layout`, `v1.1 select-harness-version`, history tests |
+| 7 | Lossless JSONC edits; `unmergeable-format` manual edits | `MANUAL_EDIT_REASONS`, `unmergeableEditFor` (§3.12, §3.12.1) | transaction json-merge, planner (TOML) | `bootstrap-transaction-jsonc`, `v1.1 unmergeable-format manual edits` |
+| 8 | `deactivate-service`, `remove-service` | actions + plan rule (§3.3, §3.4) | transaction executors (`ServiceControl`, `remove` change), profiles downgrade (`planProfileChange({services})`, `installedServiceUnits`) | `v1.1 service deactivation and removal`, `v1.1 downgrades plan typed service removal` |
+| 9 | `Profile.revision`, profile version 2 + migration | `PROFILE_VERSION = 2`, `PROFILE_MIGRATIONS[1]`, `PLAN_PROFILE_VERSIONS` (§3.5) | catalog (revision on every profile), `rebaseProfile({catalogs})` | `v1.1 profile v2`, `v1.1 profile revisions` |
+
+Choices made in v1.1:
+
+- `remove-service` removes the unit as a journaled, backed-up file change, and is not an opaque external effect, so
+  a rollback can restore exactly the unit it removed. `deactivate-service` is an external effect with an undo.
+- The new error codes keep the exits those outcomes already had (5 and 4), so scripts keyed on exit codes keep
+  working.
+- Only the profile changes schema version. The other documents gain additive fields or values and keep theirs.

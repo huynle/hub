@@ -50,7 +50,7 @@ describe("machine enroll against the real hub", () => {
     expect(JSON.stringify(revoked.envelope)).not.toContain(credential.token)
   })
 
-  test("deny on the hub → forbidden, nothing stored", async () => {
+  test("deny on the hub → enrollment_denied (exit 5), nothing stored", async () => {
     h = await harness()
     const central = h
     const store = new ConfigCredentialStore(tempConfig())
@@ -61,7 +61,7 @@ describe("machine enroll against the real hub", () => {
       minIntervalMs: 0,
       onPrompt: (prompt) => void central.api(`/api/enrollments/${prompt.userCode}/deny`, { method: "POST" }),
     })
-    expect(result.envelope.error?.code).toBe("forbidden")
+    expect(result.envelope.error?.code).toBe("enrollment_denied")
     expect(await store.read()).toBeUndefined()
   })
 })

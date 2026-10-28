@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test"
 import { recoveryDecision } from "../src/bootstrap/contracts/index.ts"
 import { installedHarnesses, rollbackHistory, rollbackTo } from "../src/bootstrap/profiles/history.ts"
-import { DIGEST, HARNESS_JOURNAL_ENTRY, HOST, JOURNAL_APPLYING, OTHER_HOST } from "./bootstrap/fixtures.ts"
+import { DIGEST, HARNESS_INSTALL_JOURNAL_ENTRY, HARNESS_JOURNAL_ENTRY, HOST, JOURNAL_APPLYING, OTHER_HOST } from "./bootstrap/fixtures.ts"
 import { clone, D, deepFreeze, HOUR, JOURNAL_ONE, JOURNAL_TWO, PLAN_ONE, PLAN_TWO, stateAfterTwo } from "./bootstrap/profiles-fixtures.ts"
 
 const codes = (r: { ok: boolean; issues?: readonly { code: string }[] }) => (r.ok ? [] : r.issues!.map((i) => i.code))
@@ -24,7 +24,8 @@ describe("rollbackHistory", () => {
       ["tx_two", "committed"],
     ])
     expect(history[1]!.changes.map((c) => [c.actionID, c.class, c.backup])).toEqual([
-      ["install-claude", "harness", true],
+      ["install-claude", "harness", false],
+      ["select-claude", "link", true],
       ["verify-claude", "external", false],
       ["node-json", "file", false],
     ])
@@ -73,12 +74,15 @@ describe("installedHarnesses", () => {
 describe("rollbackTo", () => {
   test("rolling back to tx_one undoes tx_two newest first and restores the previous harness version", () => {
     const plan = value(rollbackTo([JOURNAL_ONE, JOURNAL_TWO], "tx_one", stateAfterTwo(), context))
+    // v1.1: the `current` link is restored (the previous version is current again); the new version's own directory is removed.
     expect(plan.steps.map((s) => [s.txID, s.seq, s.actionID, s.decision])).toEqual([
-      ["tx_two", 3, "node-json", "remove-created"],
-      ["tx_two", 2, "verify-claude", "nothing-to-do"],
-      ["tx_two", 1, "install-claude", "restore-backup"],
+      ["tx_two", 4, "node-json", "remove-created"],
+      ["tx_two", 3, "verify-claude", "nothing-to-do"],
+      ["tx_two", 2, "select-claude", "restore-backup"],
+      ["tx_two", 1, "install-claude", "remove-created"],
     ])
     expect(plan.steps[2]!.restores).toEqual({ harness: "claude-code", version: "2.1.85", sha256: DIGEST.c })
+    expect(plan.steps[3]!.restores).toBeUndefined()
     expect(plan.conflicts).toEqual([])
     expect(plan.complete).toBe(true)
     expect(plan.writes).toBe(0)
@@ -89,8 +93,10 @@ describe("rollbackTo", () => {
     expect(plan.steps.map((s) => [s.txID, s.actionID, s.decision])).toEqual([
       ["tx_two", "node-json", "remove-created"],
       ["tx_two", "verify-claude", "nothing-to-do"],
-      ["tx_two", "install-claude", "restore-backup"],
+      ["tx_two", "select-claude", "restore-backup"],
+      ["tx_two", "install-claude", "remove-created"],
       ["tx_one", "verify-claude", "nothing-to-do"],
+      ["tx_one", "select-claude", "remove-created"],
       ["tx_one", "install-claude", "remove-created"],
       ["tx_one", "opencode-hub", "restore-backup"],
     ])
@@ -98,8 +104,10 @@ describe("rollbackTo", () => {
 
   test("the decisions are the contract's recovery rules", () => {
     const plan = value(rollbackTo([JOURNAL_TWO], undefined, stateAfterTwo(), context))
+    const select = plan.steps.find((s) => s.actionID === "select-claude")!
+    expect(select.decision).toBe(recoveryDecision(HARNESS_JOURNAL_ENTRY, HARNESS_JOURNAL_ENTRY.after!))
     const install = plan.steps.find((s) => s.actionID === "install-claude")!
-    expect(install.decision).toBe(recoveryDecision(HARNESS_JOURNAL_ENTRY, { exists: true, sha256: DIGEST.f, mode: 0o755 }))
+    expect(install.decision).toBe(recoveryDecision(HARNESS_INSTALL_JOURNAL_ENTRY, HARNESS_INSTALL_JOURNAL_ENTRY.after!))
   })
 
   test("a user edit is kept and reported; older changes to that file are kept too", () => {

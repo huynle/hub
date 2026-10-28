@@ -1,7 +1,7 @@
 // Audit-only verification: checks a host against a profile and never writes. Its plan holds only read-only probe
 // actions (verify-harness, verify-runtime), is a valid contract plan, needs no escalation and activates nothing.
 import { describe, expect, test } from "bun:test"
-import { digestOf, validateSetupPlan } from "../src/bootstrap/contracts/index.ts"
+import { snapshotDigest, validateSetupPlan } from "../src/bootstrap/contracts/index.ts"
 import { auditProfile, checkReadOnly, READ_ONLY_KINDS } from "../src/bootstrap/profiles/audit.ts"
 import { DISCOVERY_DARWIN, DISCOVERY_LINUX_CONTAINER, DISCOVERY_UNSUPPORTED, PLAN_LAUNCH_NODE, PROFILE_FULL_HARNESS, PROFILE_SESSION_ONLY } from "./bootstrap/fixtures.ts"
 import { clone, deepFreeze } from "./bootstrap/profiles-fixtures.ts"
@@ -33,9 +33,9 @@ describe("auditProfile", () => {
     expect(validateSetupPlan(report.plan).ok).toBe(true)
     expect(report.plan.requiresEscalation).toBe(false)
     expect(report.plan.activatesServices).toBe(false)
-    expect(report.plan.snapshotDigest).toBe(digestOf(DARWIN_WITH_SHELL))
+    expect(report.plan.snapshotDigest).toBe(snapshotDigest(DARWIN_WITH_SHELL))
     expect(report.plan.hostFingerprint).toBe(DARWIN_WITH_SHELL.host.fingerprint)
-    expect(report.plan.profile).toEqual({ id: "full-harness", version: 1 })
+    expect(report.plan.profile).toEqual({ id: "full-harness", version: 2 })
   })
 
   test("a verified harness is reported verified (readiness still needs fresh probes at run time)", () => {

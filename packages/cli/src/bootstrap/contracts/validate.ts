@@ -32,6 +32,10 @@ export type IssueCode =
   | "unpinned_artifact"
   | "evidence_failed"
   | "manual_edit_required"
+  /** v1.1: an action needs escalation the profile never allows (was `inconsistent`). */
+  | "escalation_required"
+  /** v1.1: the profile installs services, but the host has no user service manager. */
+  | "no_service_manager"
 
 export interface Issue {
   /** JSON pointer of the offending value ("" for the document itself). */
@@ -181,12 +185,25 @@ export function httpsURL(c: Checker, path: string, value: unknown): value is str
   return false
 }
 
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"])
+
+/** v1.1: whether `value` is a plain-http URL of a non-loopback host, without credentials (an insecure hub). */
+export function isInsecureHubURL(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 2048) return false
+  try {
+    const url = new URL(value)
+    return url.protocol === "http:" && !LOOPBACK_HOSTS.has(url.hostname) && !url.username && !url.password
+  } catch {
+    return false
+  }
+}
+
 /** http(s) URL; plain http only for loopback hubs (a local hub on 127.0.0.1). */
 export function hubURL(c: Checker, path: string, value: unknown): value is string {
   if (typeof value === "string" && value.length <= 2048) {
     try {
       const url = new URL(value)
-      const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]"
+      const loopback = LOOPBACK_HOSTS.has(url.hostname)
       if ((url.protocol === "https:" || (url.protocol === "http:" && loopback)) && !url.username && !url.password) return true
     } catch {}
   }

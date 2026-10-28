@@ -100,7 +100,9 @@ export function validateJournal(value: unknown): Result<TransactionJournal> {
     }
     const before = isRecord(e.before) ? e.before : {}
     if (e.class === "credential" && e.backup !== undefined) c.add(pointer(p, "backup"), "inconsistent", "credentials are never backed up (a stale credential is never restored)")
-    if (BACKED_UP.includes(e.class as EntryClass) && before.exists === true && e.backup === undefined) c.add(pointer(p, "backup"), "inconsistent", "an existing file is backed up before it is changed")
+    // v1.1: a skipped entry changed nothing, so it has nothing to back up.
+    if (BACKED_UP.includes(e.class as EntryClass) && before.exists === true && e.backup === undefined && e.status !== "skipped")
+      c.add(pointer(p, "backup"), "inconsistent", "an existing file is backed up before it is changed")
     if ((e.status === "done" || e.status === "undone") && e.after === undefined && e.class !== "external") c.add(pointer(p, "after"), "inconsistent", "a done entry records the state it left")
   })
   for (const p of findSecrets(value)) c.add(p, "secret", "journals never carry credentials")
@@ -120,6 +122,9 @@ export function recoveryDecision(entry: JournalEntry, current: FileState): Recov
   if (entry.status === "undone" || entry.status === "skipped" || entry.class === "external") return "nothing-to-do"
   const ours = entry.after !== undefined && sameState(current, entry.after)
   if (entry.status === "pending" && sameState(current, entry.before)) return "nothing-to-do"
+  // v1.1: an enrollment interrupted before it was journaled done records no `after`. The credential store writes
+  // atomically, so a changed file means the interrupted enrollment stored its credential: clear it (never restore).
+  if (entry.class === "credential" && entry.status === "pending" && entry.after === undefined) return "clear-credential"
   if (!ours) return "keep-user-edit"
   if (entry.class === "credential") return "clear-credential"
   if (entry.before.exists) return entry.backup ? "restore-backup" : "keep-user-edit"

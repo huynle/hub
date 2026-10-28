@@ -72,8 +72,9 @@ describe("renderRoleVars from a profile", () => {
     const { vars } = rendered()
     expect(vars.hub_bootstrap_vars_schema).toBe(ANSIBLE_VARS_SCHEMA)
     expect(vars.hub_bootstrap_vars_version).toBe(1)
-    expect(vars.hub_bootstrap_profile).toEqual(F.PROFILE_LAUNCH_NODE)
-    expect(vars.hub_bootstrap_profile_digest).toBe(digestOf(F.PROFILE_LAUNCH_NODE))
+    // v1.1: the role always plans with a separate enrollment.
+    expect(vars.hub_bootstrap_profile).toEqual({ ...F.PROFILE_LAUNCH_NODE, enrollment: "separate" })
+    expect(vars.hub_bootstrap_profile_digest).toBe(digestOf({ ...F.PROFILE_LAUNCH_NODE, enrollment: "separate" }))
     expect(vars.hub_bootstrap_expected_plan).toBeNull()
   })
 
@@ -153,7 +154,10 @@ describe("renderRoleVars from a previewed plan", () => {
     const plan = F.PLAN_HARNESS_INSTALL
     expect(rendered({ profile: F.PROFILE_SESSION_ONLY, plan }).vars.hub_bootstrap_expected_plan?.planDigest).toBe(planDigest(plan))
     for (const [label, code] of [["digestMismatch", "integrity_mismatch"], ["unpinnedVersion", "unpinned_artifact"], ["otherHubRelease", "unpinned_artifact"]] as const) {
-      const bad = { ...plan, actions: plan.actions.map((a) => (a.id === "install-opencode" ? F.HARNESS_PIN_INVALID[label]!.value : a)) }
+      const install = F.HARNESS_PIN_INVALID[label]!.value as Extract<Action, { kind: "install-harness" }>
+      // v1.1: the version an install puts in place is the one made current.
+      const select = { ...F.ACTIONS["select-harness-version"], version: install.version, target: { root: "data", rel: `hub/harnesses/opencode/${install.version}` } }
+      const bad = { ...plan, actions: plan.actions.map((a) => (a.id === "install-opencode" ? install : a.id === "select-opencode" ? select : a)) }
       refused({ profile: F.PROFILE_SESSION_ONLY, plan: bad }, code)
     }
   })
@@ -183,7 +187,7 @@ describe("direct and rendered paths have the same plan semantics", () => {
     const back = (Bun.YAML.parse(yaml) as RoleVars).hub_bootstrap_profile
     const checked = validateProfile(back)
     expect(checked.ok).toBe(true)
-    expect(digestOf(back)).toBe(digestOf(F.PROFILE_LAUNCH_NODE))
+    expect(digestOf(back)).toBe(digestOf({ ...F.PROFILE_LAUNCH_NODE, enrollment: "separate" }))
   })
 
   test("the role's commands are the direct commands, with consent only as asked", () => {

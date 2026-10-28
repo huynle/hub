@@ -67,7 +67,7 @@ export function desiredState(profileDoc: unknown, snapshotDoc: unknown): Result<
   if (!snapshot.host.supported) return fail("/snapshot/host/target", "unsupported_platform", `cannot set up ${snapshot.host.target}`)
   const manager = snapshot.managers.service
   if (profile.services.length > 0 && manager === "none")
-    c.add("/profile/services", "unsupported_platform", `${profile.id} runs services, but this host has no user service manager (launchd or systemd --user)`)
+    c.add("/profile/services", "no_service_manager", `${profile.id} runs services, but this host has no user service manager (launchd or systemd --user)`)
   const runtimes = profile.runtimes.map((id, i): DesiredRuntime => {
     const found = snapshot.runtimes.find((r) => r.id === id)
     if (!found) c.add(`/profile/runtimes/${i}`, "unsupported_platform", `discovery did not check ${id}; it is verified only after discovery finds it`)

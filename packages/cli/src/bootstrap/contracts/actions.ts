@@ -67,11 +67,33 @@ export interface InstallHarness extends Base<"install-harness"> {
   readonly sha256: string
   /** Upstream evidence to attempt: exactly the kinds the pin lists as available. */
   readonly evidence: readonly EvidenceKind[]
-  /** The install root (a versioned directory under a named root). */
+  /** The install root: v1.1, exactly harnessVersionRef(harness, version), an immutable versioned directory. */
   readonly path: PathRef
   readonly owner: "hub"
   readonly rollback: "restore-previous"
   /** The version it replaces, as discovery found it (restored on rollback). */
+  readonly previous?: { readonly version: string; readonly sha256: string }
+}
+
+/**
+ * v1.1 harness layout. Every pinned version installs into its own immutable directory
+ * data:hub/harnesses/<harness>/<version> (install-harness), and data:hub/harnesses/<harness>/current is a symlink to
+ * the version in use. select-harness-version switches that link atomically (stage, rename); its rollback restores
+ * the previous link from its backup, so the previous version is current again, and a rolled-back install removes
+ * only its own fresh directory.
+ */
+export const harnessVersionRef = (harness: HarnessID, version: string): PathRef => ({ root: "data", rel: `hub/harnesses/${harness}/${version}` })
+export const harnessCurrentRef = (harness: HarnessID): PathRef => ({ root: "data", rel: `hub/harnesses/${harness}/current` })
+
+/** Points harnessCurrentRef(harness) at harnessVersionRef(harness, version). */
+export interface SelectHarnessVersion extends Base<"select-harness-version"> {
+  readonly harness: HarnessID
+  readonly version: string
+  /** The `current` link: harnessCurrentRef(harness). */
+  readonly path: PathRef
+  /** The version directory it points to: harnessVersionRef(harness, version). */
+  readonly target: PathRef
+  /** The version `current` pointed at before, as discovery found it (current again after a rollback). */
   readonly previous?: { readonly version: string; readonly sha256: string }
 }
 
@@ -132,6 +154,23 @@ export interface ActivateService extends Base<"activate-service"> {
   readonly confirm: "explicit"
 }
 
+/** v1.1: unloads a hub user service (a profile downgrade; needs --allow-downgrade). Rollback loads it again. */
+export interface DeactivateService extends Base<"deactivate-service"> {
+  readonly service: ServiceID
+  readonly manager: ServiceManagerID
+}
+
+/**
+ * v1.1: removes a hub service unit (a profile downgrade; needs --allow-downgrade), only while it is still exactly
+ * the unit hub installed (`sha256`); a unit the user changed is a conflict, never removed. Rollback restores it.
+ */
+export interface RemoveService extends Base<"remove-service"> {
+  readonly service: ServiceID
+  readonly manager: ServiceManagerID
+  readonly path: PathRef
+  readonly sha256: string
+}
+
 /** Device-code enrollment of this machine (the user approves it on the hub); carries no credential. */
 export interface EnrollMachine extends Base<"enroll-machine"> {
   readonly server: string
@@ -159,12 +198,15 @@ export type Action =
   | EnsureDirectory
   | InstallArtifact
   | InstallHarness
+  | SelectHarnessVersion
   | LinkExecutable
   | WriteFile
   | MergeConfig
   | RegisterMcpServer
   | InstallService
   | ActivateService
+  | DeactivateService
+  | RemoveService
   | EnrollMachine
   | VerifyHarness
   | VerifyRuntime
@@ -179,12 +221,15 @@ export const ACTION_FIELDS: Readonly<Record<ActionKind, readonly string[]>> = Ob
   "ensure-directory": [...COMMON, "path", "mode"],
   "install-artifact": [...COMMON, "artifact", "version", "target", "sha256", "path"],
   "install-harness": [...COMMON, "harness", "version", "target", "source", "size", "sha256", "evidence", "path", "owner", "rollback"],
+  "select-harness-version": [...COMMON, "harness", "version", "path", "target"],
   "link-executable": [...COMMON, "path", "target"],
   "write-file": [...COMMON, "path", "asset", "sha256", "mode", "onConflict"],
   "merge-config": [...COMMON, "path", "format", "owner", "precondition", "set", "preserveUnknown"],
   "register-mcp-server": [...COMMON, "harness", "path", "name", "precondition"],
   "install-service": [...COMMON, "service", "manager", "path", "asset", "sha256"],
   "activate-service": [...COMMON, "service", "manager", "confirm"],
+  "deactivate-service": [...COMMON, "service", "manager"],
+  "remove-service": [...COMMON, "service", "manager", "path", "sha256"],
   "enroll-machine": [...COMMON, "server", "machineName"],
   "verify-harness": [...COMMON, "harness", "probes"],
   "verify-runtime": [...COMMON, "runtime"],
@@ -192,7 +237,7 @@ export const ACTION_FIELDS: Readonly<Record<ActionKind, readonly string[]>> = Ob
 })
 
 /** Optional fields per kind. */
-export const ACTION_OPTIONAL: Readonly<Partial<Record<ActionKind, readonly string[]>>> = Object.freeze({ "install-harness": ["previous"] })
+export const ACTION_OPTIONAL: Readonly<Partial<Record<ActionKind, readonly string[]>>> = Object.freeze({ "install-harness": ["previous"], "select-harness-version": ["previous"] })
 
 export const ACTION_KINDS = Object.keys(ACTION_FIELDS) as ActionKind[]
 
@@ -221,6 +266,21 @@ export function findExecKeys(value: unknown, base = ""): string[] {
 }
 
 const mode = (c: Checker, path: string, v: unknown) => int(c, path, v, 0, 0o7777)
+const sameRef = (v: unknown, ref: PathRef) => isRecord(v) && v.root === ref.root && v.rel === ref.rel
+
+function checkPrevious(c: Checker, path: string, v: unknown) {
+  if (v === undefined) return
+  const prev = shape(c, path, v, ["version", "sha256"])
+  if (!prev) return
+  semver(c, pointer(path, "version"), prev.version)
+  digest(c, pointer(path, "sha256"), prev.sha256)
+}
+
+function checkServiceUnitPath(c: Checker, at: (key: string) => string, r: Record<string, unknown>) {
+  const p = r.path as PathRef | undefined
+  const root = typeof r.manager === "string" ? SERVICE_ROOT[r.manager as ServiceManagerID] : undefined
+  if (root && p && root !== p.root) c.add(at("path"), "inconsistent", `${String(r.manager)} units go in the ${root} root`)
+}
 
 export function checkPrecondition(c: Checker, path: string, v: unknown) {
   const r = shape(c, path, v, ["exists"], ["sha256"])
@@ -257,7 +317,7 @@ export function checkConfigSets(c: Checker, path: string, v: unknown) {
 export function actionPaths(action: Action): PathRef[] {
   const refs: PathRef[] = []
   if ("path" in action) refs.push(action.path)
-  if (action.kind === "link-executable") refs.push(action.target)
+  if (action.kind === "link-executable" || action.kind === "select-harness-version") refs.push(action.target)
   if (action.kind === "launch-session") refs.push(action.workspace)
   return refs
 }
@@ -309,13 +369,21 @@ export function checkAction(c: Checker, path: string, value: unknown): void {
       ref("path")
       if (r.owner !== "hub") c.add(at("owner"), "invalid_value", "harness installs are owned by hub (recorded in the journal)")
       if (r.rollback !== "restore-previous") c.add(at("rollback"), "invalid_value", "harness installs roll back by restoring the previous version")
-      if (r.previous !== undefined) {
-        const prev = shape(c, at("previous"), r.previous, ["version", "sha256"])
-        if (prev) {
-          semver(c, pointer(at("previous"), "version"), prev.version)
-          digest(c, pointer(at("previous"), "sha256"), prev.sha256)
-        }
-      }
+      checkPrevious(c, at("previous"), r.previous)
+      if (harnessOK && typeof r.version === "string" && r.path !== undefined && !sameRef(r.path, harnessVersionRef(r.harness as HarnessID, r.version)))
+        c.add(at("path"), "inconsistent", `a harness version installs into its own directory data:${harnessVersionRef(r.harness as HarnessID, r.version).rel}`)
+      break
+    }
+    case "select-harness-version": {
+      const harnessOK = oneOf(c, at("harness"), r.harness, HARNESS_ORDER)
+      const versionOK = semver(c, at("version"), r.version)
+      ref("path")
+      ref("target")
+      checkPrevious(c, at("previous"), r.previous)
+      if (harnessOK && r.path !== undefined && !sameRef(r.path, harnessCurrentRef(r.harness as HarnessID)))
+        c.add(at("path"), "inconsistent", `the current version is the link data:${harnessCurrentRef(r.harness as HarnessID).rel}`)
+      if (harnessOK && versionOK && r.target !== undefined && !sameRef(r.target, harnessVersionRef(r.harness as HarnessID, r.version as string)))
+        c.add(at("target"), "inconsistent", `the link points at the version directory data:${harnessVersionRef(r.harness as HarnessID, r.version as string).rel}`)
       break
     }
     case "link-executable":
@@ -351,10 +419,20 @@ export function checkAction(c: Checker, path: string, value: unknown): void {
       const asset = typeof r.asset === "string" ? EMBEDDED_ASSETS[r.asset] : undefined
       if (!asset) c.add(at("asset"), "invalid_value", "expected an embedded service template")
       else if (asset.service !== r.service || asset.manager !== r.manager) c.add(at("asset"), "inconsistent", "the template is for another service or manager")
-      const p = r.path as PathRef | undefined
-      if (typeof r.manager === "string" && p && SERVICE_ROOT[r.manager as ServiceManagerID] !== p.root) c.add(at("path"), "inconsistent", `${r.manager} units go in the ${SERVICE_ROOT[r.manager as ServiceManagerID]} root`)
+      checkServiceUnitPath(c, at, r)
       break
     }
+    case "deactivate-service":
+      oneOf(c, at("service"), r.service, SERVICE_IDS)
+      oneOf(c, at("manager"), r.manager, ["launchd", "systemd-user"] as const)
+      break
+    case "remove-service":
+      oneOf(c, at("service"), r.service, SERVICE_IDS)
+      oneOf(c, at("manager"), r.manager, ["launchd", "systemd-user"] as const)
+      ref("path")
+      digest(c, at("sha256"), r.sha256)
+      checkServiceUnitPath(c, at, r)
+      break
     case "activate-service":
       oneOf(c, at("service"), r.service, SERVICE_IDS)
       oneOf(c, at("manager"), r.manager, ["launchd", "systemd-user"] as const)

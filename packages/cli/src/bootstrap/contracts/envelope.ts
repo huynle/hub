@@ -51,6 +51,11 @@ export const ERROR_CODES = [
   "offline",
   "not_found",
   "harness_not_ready",
+  // v1.1
+  "no_service_manager",
+  "enrollment_denied",
+  "enrollment_expired",
+  "cancelled",
   "internal",
 ] as const
 export type ErrorCode = (typeof ERROR_CODES)[number]
@@ -85,6 +90,11 @@ const EXIT_OF: Readonly<Record<ErrorCode, number>> = {
   offline: EXIT.unavailable,
   not_found: EXIT.notFound,
   harness_not_ready: BOOTSTRAP_EXIT.notReady,
+  // v1.1: specific codes for outcomes that already had these exits (the exits are unchanged).
+  no_service_manager: EXIT.unavailable,
+  enrollment_denied: EXIT.forbidden,
+  enrollment_expired: EXIT.needsUser,
+  cancelled: EXIT.needsUser,
   internal: EXIT.other,
 }
 

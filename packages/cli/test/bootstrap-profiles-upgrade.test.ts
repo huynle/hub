@@ -63,7 +63,7 @@ describe("planProfileChange", () => {
   })
 
   test("invalid profiles are rejected", () => {
-    expect(codes(planProfileChange(PROFILE_SESSION_ONLY, { ...PROFILE_SESSION_ONLY, version: 2 }))).toEqual(["unsupported_version"])
+    expect(codes(planProfileChange(PROFILE_SESSION_ONLY, { ...PROFILE_SESSION_ONLY, version: 3 }))).toEqual(["unsupported_version"])
   })
 })
 

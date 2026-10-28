@@ -12,7 +12,7 @@
 // Executors never write files themselves (except an effect, through its own typed client such as the
 // CredentialStore), never receive a shell, and never see the journal's internals. Adapter tasks supply the
 // harness, MCP-registration, service-activation, enrollment and verification executors through this interface.
-import type { Action, ActionKind, EntryClass, EvidenceResult, FileState, PathRef, RootMapping } from "../contracts/index.ts"
+import type { Action, ActionKind, EntryClass, EvidenceResult, ExecutionContext, FileState, PathRef, RootMapping } from "../contracts/index.ts"
 import type { TxFs } from "./fs.ts"
 import type { ResolveOptions } from "./resolve.ts"
 import type { TxResult } from "./result.ts"
@@ -40,6 +40,11 @@ export type Change =
   | { readonly type: "symlink"; readonly target: string; readonly replace: "refuse" | "backup" }
   /** A fresh, immutable tree (a versioned install root). An existing different tree is a conflict. */
   | { readonly type: "tree"; readonly files: readonly TreeFile[]; readonly mode: number }
+  /**
+   * v1.1: remove the target file (a service unit of a removed component). The engine backs it up, journals it and
+   * unlinks it; a rollback restores the backup. A missing target is skipped.
+   */
+  | { readonly type: "remove" }
   /** A step without a file to stage. The engine journals the target's state before and after `perform`. */
   | { readonly type: "effect"; readonly perform: () => Promise<TxResult<void>> }
   /** Already exactly as wanted: journaled as skipped. */
@@ -55,6 +60,8 @@ export interface StepPlan {
 export interface StepContext {
   readonly fs: TxFs
   readonly roots: readonly RootMapping[]
+  /** v1.1: where apply runs; paths resolve for it. */
+  readonly context: ExecutionContext
   readonly host: HostInfo
   readonly now: () => number
   /** The resolved, symlink-checked absolute path of the step's target (when it has one). */
@@ -75,6 +82,7 @@ export interface StepContext {
 export interface UndoContext {
   readonly fs: TxFs
   readonly roots: readonly RootMapping[]
+  readonly context: ExecutionContext
   readonly host: HostInfo
   readonly now: () => number
   readonly target?: string
