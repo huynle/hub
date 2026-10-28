@@ -10,7 +10,9 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, 
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { harness, spoke, type Harness } from "../../../test/central-harness.ts"
-import { validateEnvelope, type ResultEnvelope } from "../src/bootstrap/contracts/index.ts"
+import { canonicalJSON, validateEnvelope, type ResultEnvelope } from "../src/bootstrap/contracts/index.ts"
+import { tarGz, zip } from "./bootstrap/opencode-adapter-fixtures.ts"
+import { bytesInfo, ephemeralKey, fakeBinary, releaseBody, rootOf, signWith } from "./bootstrap/release-fixtures.ts"
 import { run, type Io } from "../src/cli"
 
 let h: Harness | undefined
@@ -239,5 +241,78 @@ describe("hubctl setup (launch-node, fake service manager)", () => {
     const refused = await cli(home, ["setup", "apply", "--preview", file, "--json"], { seen })
     expect(refused.code).toBe(4)
     expect(seen.calls).toEqual([])
+  })
+})
+
+describe("hubctl setup with a signed release manifest (pinned installs)", () => {
+  test("installs hubctl and the pinned OpenCode, a rerun plans no install, verify is ready, rollback removes them", async () => {
+    h = await harness()
+    const home = tempHome()
+    rmSync(path.join(home, "bin", "opencode")) // no OpenCode on PATH: hub installs the pinned one
+    const target = `${process.platform}-${process.arch}`
+    const key = ephemeralKey()
+    const archive = process.platform === "darwin" ? { file: `opencode-${target}.zip`, bytes: zip([{ name: "opencode", content: FAKE_OPENCODE }]) } : { file: `opencode-${target}.tar.gz`, bytes: tarGz([{ name: "opencode", content: FAKE_OPENCODE }]) }
+    const pin = { harness: "opencode" as const, version: "2.2.0", target, url: `https://github.com/anomalyco/opencode/releases/download/v2.2.0/${archive.file}`, file: archive.file, ...bytesInfo(archive.bytes), evidence: [] }
+    const manifest = signWith(releaseBody("0.8.0", "0.7.0", [pin]), key)
+    const manifestFile = path.join(home, "hubctl-manifest.json")
+    writeFileSync(manifestFile, JSON.stringify(manifest))
+    const hubctl = fakeBinary(target)
+    const downloads: string[] = []
+    const bootstrap = {
+      machineID: "test-machine-id",
+      trustRoot: canonicalJSON(rootOf(key)),
+      ports: {
+        uid: 501,
+        hubctlBytes: () => hubctl,
+        opencodeDownload: async (url: string) => (downloads.push(url), archive.bytes),
+        serviceRunner: async () => ({ exitCode: 1 }),
+      },
+    }
+    const with_ = async (argv: string[]) => {
+      let stdout = ""
+      let stderr = ""
+      const code = await run(argv, { env: { HOME: home, PATH: `${home}/bin:/usr/bin:/bin` }, home, stdout: (s) => (stdout += s), stderr: (s) => (stderr += s), program: { execPath: process.execPath, entry: ENTRY }, bootstrap })
+      return { code, stderr, envelope: JSON.parse(stdout) as ResultEnvelope<any> }
+    }
+    expect((await enroll(home, h)).code).toBe(0)
+    const client = await spoke(h, { machine: { token: machineToken(home) }, hello: { harness: "opencode" } })
+
+    const file = path.join(home, "preview.json")
+    const preview = await with_(["setup", "preview", "--profile", "session-only", "--manifest", manifestFile, "--out", file, "--json"])
+    expect(preview.envelope.error).toBeUndefined()
+    expect(preview.code).toBe(0)
+    expect(preview.envelope.data.plan.actions.map((a: { id: string }) => a.id)).toEqual(["state-dir", "install-hubctl", "link-hub", "install-opencode", "select-opencode", "opencode-plugin", "opencode-mcp", "verify-opencode"])
+
+    const applied = await with_(["setup", "apply", "--preview", file, "--manifest", manifestFile, "--json"])
+    expect(applied.envelope.error).toBeUndefined()
+    expect(applied.code).toBe(0)
+    expect(downloads).toEqual([pin.url])
+    expect(readFileSync(path.join(home, ".local", "bin", "hubctl"))).toEqual(Buffer.from(hubctl))
+    expect(lstatSync(path.join(home, ".local", "bin", "hub")).isSymbolicLink()).toBe(true)
+    expect(existsSync(path.join(home, ".local", "share", "hub", "harnesses", "opencode", "current", "bin", "opencode"))).toBe(true)
+    const state = JSON.parse(readFileSync(path.join(home, ".local", "state", "hub", "bootstrap", "state.json"), "utf8"))
+    expect(state).toMatchObject({ profile: { id: "session-only" }, catalogRevision: 1, floors: { hubctl: "0.7.0" } })
+
+    // Rerun: the hub-installed OpenCode is discovered (off PATH), so nothing is installed again.
+    const again = await with_(["setup", "preview", "--profile", "session-only", "--manifest", manifestFile, "--json"])
+    expect(again.envelope.error).toBeUndefined()
+    expect(again.code).toBe(0)
+    expect(again.envelope.data.plan.actions.map((a: { kind: string }) => a.kind)).not.toContain("install-harness")
+
+    expect((await with_(["setup", "verify", "--profile", "session-only", "--json"])).code).toBe(0)
+    client.close()
+
+    const rolled = await with_(["setup", "rollback", "--json"])
+    expect(rolled.code).toBe(0)
+    for (const p of [".local/bin/hubctl", ".local/bin/hub", ".local/share/hub/harnesses/opencode/current", ".config/opencode/opencode.json"]) expect(existsSync(path.join(home, p))).toBe(false)
+  }, 30_000)
+
+  test("a manifest this hubctl's trust root did not sign is refused (exit 11)", async () => {
+    const home = tempHome()
+    const manifest = signWith(releaseBody(), ephemeralKey())
+    writeFileSync(path.join(home, "m.json"), JSON.stringify(manifest))
+    const r = await cli(home, ["setup", "preview", "--manifest", path.join(home, "m.json"), "--json"])
+    expect(r.code).toBe(11)
+    expect(r.envelope?.error?.code).toBe("signature_invalid")
   })
 })

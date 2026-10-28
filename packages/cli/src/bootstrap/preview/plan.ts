@@ -112,6 +112,10 @@ const verifyHarness = (harness: HarnessID): Action => ({
   probes: REQUIRED_PROBES[harness].filter((p): p is Exclude<typeof p, "presence"> => p !== "presence"),
 })
 
+/** link-executable and select-harness-version replace their own final symlink atomically: it is not written through. */
+const replacesFinalLink = (action: Action) => action.kind === "link-executable" || action.kind === "select-harness-version"
+const parentOf = (ref: PathRef): PathRef | undefined => (ref.rel.includes("/") ? { root: ref.root, rel: ref.rel.slice(0, ref.rel.lastIndexOf("/")) } : undefined)
+
 export const issuesAt = (prefix: string, r: Result<unknown>): Issue[] => (r.ok ? [] : r.issues.map((i) => ({ ...i, path: `${prefix}${i.path}` })))
 const failed = <T>(issues: readonly Issue[]): Result<T> => ({ ok: false, issues: [...issues] })
 
@@ -175,7 +179,13 @@ export function planSetup(input: { readonly snapshot: DiscoverySnapshot; readonl
       issues.push({ path: `/actions/${action.id}`, code: "unmapped_root", message: `this host has no ${unmapped.root} root` })
       continue
     }
-    const link = "path" in action ? input.links(action.path) : undefined
+    const link = "path" in action ? input.links(replacesFinalLink(action) ? parentOf(action.path) ?? action.path : action.path) : undefined
+    if (replacesFinalLink(action) && !parentOf(action.path)) {
+      // A link directly in its root: only the root itself could be a link (the applier refuses that), not the
+      // link the action replaces.
+      kept.push(action)
+      continue
+    }
     if (!link && action.kind === "merge-config" && action.format === "toml") {
       // v1.1: hubctl cannot edit TOML losslessly; the user gets the exact edit for the file as this hubctl sees it.
       const where = resolvePathRef(action.path, snapshot.roots, executionContextOf(snapshot))
