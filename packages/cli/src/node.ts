@@ -1,21 +1,26 @@
 // `hub node run | install | uninstall | status` (design §6.3; decision znbg8xa5 #6): `run` is the node daemon
-// (packages/node runNode) until SIGINT/SIGTERM. `install` fills in the service templates shipped in scripts/ (a
-// launchd agent on macOS, a systemd user unit on Linux) with the real runtime and CLI entry running this command,
-// writes the file, and prints the launchctl / systemctl commands that load it. Nothing here starts a process:
+// (packages/node runNode) until SIGINT/SIGTERM. `install` renders the service template embedded in this program (a
+// launchd agent on macOS, a systemd user unit on Linux; renderServiceUnit, the same renderer `hubctl setup` uses)
+// with the argv of what runs this command (programLayout: the standalone hubctl itself, or the runtime and the CLI
+// entry), writes the file, and prints the launchctl / systemctl commands that load it. Nothing here starts a process:
 // loading, unloading and inspecting the service are always left to the user (printed, never run). --dry-run
 // prints the file instead of writing it. The same machinery (ServiceSpec) installs the harness spokes' services
 // (spoke-services.ts: `hub claude-code install`, `hub codex-spoke install`).
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import { nodeConfigPath, readNodeConfig, readSpokeCredentials, runNode } from "../../node/src/index.ts"
+import { renderServiceUnit } from "./bootstrap/adapters/node-services/render.ts"
+import { isAbsolutePath, programLayout, type ServiceID, type ServiceManagerID } from "./bootstrap/contracts/index.ts"
 import type { Env } from "./credentials"
 import { CliError, EXIT } from "./http"
 
 export const NODE_LABEL = "io.github.huynle.hub-node"
 export const NODE_UNIT = "hub-node.service"
 
-/** A per-user hub service installed from the templates in scripts/ (hub node, and the harness spokes' services). */
+/** A per-user hub service installed from the embedded templates (hub node, and the harness spokes' services). */
 export interface ServiceSpec {
+  /** The service (its embedded template and the subcommand the unit runs). */
+  readonly service: ServiceID
   /** The CLI command that installs it ("hub node"), for the written files' header and messages. */
   readonly command: string
   /** The launchd label; the macOS template is scripts/<label>.plist. */
@@ -31,6 +36,7 @@ export interface ServiceSpec {
 }
 
 export const NODE_SERVICE: ServiceSpec = {
+  service: "node",
   command: "hub node",
   label: NODE_LABEL,
   unit: NODE_UNIT,
@@ -69,7 +75,12 @@ export interface NodeService {
   readonly unload: readonly string[]
   /** How to see its state and logs. */
   readonly check: readonly string[]
+  /** Settings this shell has that the unit cannot carry (not an absolute path). */
+  readonly skipped: readonly string[]
 }
+
+/** Extra settings a service's unit carries beyond the shell's (spoke-services.ts: the hub-installed Codex). */
+export type ExtraEnvironment = (io: NodeIo) => Readonly<Record<string, string>>
 
 /** This process as a Program: the runtime and the real path of the entry it runs. */
 export function currentProgram(): Program {
@@ -81,38 +92,40 @@ export function currentProgram(): Program {
   return { execPath: process.execPath, entry: real }
 }
 
-/** scripts/ of the package: three levels up from packages/cli/src (source) and packages/cli/dist (the bundle). */
-const templateDir = () => path.join(path.dirname(new URL(import.meta.url).pathname), "..", "..", "..", "scripts")
-
 /** A path quoted for sh (printed commands). */
 const sh = (word: string) => `'${word.replaceAll("'", `'\\''`)}'`
 
-const xml = (text: string) => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&apos;")
-
-/** A word for a systemd command line or assignment: % and $ escaped, quoted when not plain. */
-const sd = (word: string) => {
-  const escaped = word.replaceAll("%", "%%").replaceAll("$", "$$$$")
-  return /^[A-Za-z0-9_./:@+=,-]+$/.test(escaped) ? escaped : `"${escaped.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`
+/** The settings this shell has that the unit carries (absolute, single-line paths only), and those it cannot. */
+function carried(spec: ServiceSpec, io: NodeIo, extra?: ExtraEnvironment): { environment: Record<string, string>; skipped: string[] } {
+  const environment: Record<string, string> = { ...(extra?.(io) ?? {}) }
+  const skipped: string[] = []
+  for (const key of spec.carried) {
+    const value = io.env[key]
+    if (!value) continue
+    if (isAbsolutePath(value)) environment[key] = value
+    else skipped.push(key)
+  }
+  return { environment, skipped }
 }
 
-const carried = (spec: ServiceSpec, env: Env) => spec.carried.flatMap((key) => (env[key] ? [[key, env[key]!] as const] : []))
+/** The unit's text: the embedded template rendered with this program's argv (one word per <string> / ExecStart word). */
+function render(spec: ServiceSpec, io: NodeIo, manager: ServiceManagerID, extra?: ExtraEnvironment): { content: string; skipped: string[] } {
+  const { environment, skipped } = carried(spec, io, extra)
+  const r = renderServiceUnit({ service: spec.service, manager, layout: programLayout(io.program), home: io.home, environment, writtenBy: spec.command })
+  if (!r.ok) throw new CliError(EXIT.usage, `cannot write the ${spec.command} service: ${r.issues.map((i) => `${i.path ? `${i.path}: ` : ""}${i.message}`).join("; ")}`)
+  return { content: r.value.text, skipped }
+}
 
-function launchd(spec: ServiceSpec, io: NodeIo): NodeService {
-  const template = `${spec.label}.plist`
-  const file = path.join(io.home, "Library", "LaunchAgents", template)
+function launchd(spec: ServiceSpec, io: NodeIo, extra?: ExtraEnvironment): NodeService {
+  const file = path.join(io.home, "Library", "LaunchAgents", `${spec.label}.plist`)
   const domain = `gui/${io.uid}`
-  let content = readFileSync(path.join(templateDir(), template), "utf8")
-    .replace(/<!--[\s\S]*?-->/, `<!-- Written by ${spec.command} install from scripts/${template}; ${spec.command} uninstall removes it. -->`)
-    .replaceAll("__RUNTIME__", xml(io.program.execPath))
-    .replaceAll("__ENTRY__", xml(io.program.entry))
-    .replaceAll("__HOME__", xml(io.home))
-  const extra = carried(spec, io.env).map(([key, value]) => `\n    <key>${key}</key>\n    <string>${xml(value)}</string>`)
-  content = content.replace(/(<key>PATH<\/key>\s*<string>[^<]*<\/string>)/, `$1${extra.join("")}`)
+  const { content, skipped } = render(spec, io, "launchd", extra)
   const log = path.join(io.home, ".local", "state", "hub")
   return {
     kind: "launchd",
     file,
     content,
+    skipped,
     dirs: [log],
     load: [`launchctl bootout ${domain}/${spec.label} 2>/dev/null || true`, `launchctl bootstrap ${domain} ${sh(file)}`],
     unload: [`launchctl bootout ${domain}/${spec.label}`],
@@ -120,21 +133,16 @@ function launchd(spec: ServiceSpec, io: NodeIo): NodeService {
   }
 }
 
-function systemd(spec: ServiceSpec, io: NodeIo): NodeService {
+function systemd(spec: ServiceSpec, io: NodeIo, extra?: ExtraEnvironment): NodeService {
   const unit = spec.unit
   const dir = path.join(io.env.XDG_CONFIG_HOME || path.join(io.home, ".config"), "systemd", "user")
   const file = path.join(dir, unit)
-  const template = readFileSync(path.join(templateDir(), unit), "utf8")
-  const body = template.slice(template.indexOf("[Unit]"))
-  let content = `# Written by \`${spec.command} install\` from scripts/${unit}; \`${spec.command} uninstall\` removes it.\n${body}`
-    .replace("ExecStart=__RUNTIME__ __ENTRY__", `ExecStart=${sd(io.program.execPath)} ${sd(io.program.entry)}`)
-    .replaceAll("__HOME__", io.home.replaceAll("%", "%%"))
-  const extra = carried(spec, io.env).map(([key, value]) => `\nEnvironment=${sd(`${key}=${value}`)}`)
-  content = content.replace(/(Environment=PATH=[^\n]*)/, `$1${extra.join("")}`)
+  const { content, skipped } = render(spec, io, "systemd-user", extra)
   return {
     kind: "systemd",
     file,
     content,
+    skipped,
     dirs: [],
     load: ["systemctl --user daemon-reload", `systemctl --user enable --now ${unit}`, `systemctl --user restart ${unit}   # when it was already running`, 'loginctl enable-linger "$USER"   # optional: keep it running while you are logged out'],
     unload: [`systemctl --user stop ${unit}`, `rm -f ${sh(path.join(dir, "default.target.wants", unit))}`, "systemctl --user daemon-reload"],
@@ -143,9 +151,9 @@ function systemd(spec: ServiceSpec, io: NodeIo): NodeService {
 }
 
 /** `spec`'s service for this platform; unsupported (exit 7) elsewhere. */
-export function serviceFor(spec: ServiceSpec, io: NodeIo): NodeService {
-  if (io.platform === "darwin") return launchd(spec, io)
-  if (io.platform === "linux") return systemd(spec, io)
+export function serviceFor(spec: ServiceSpec, io: NodeIo, extra?: ExtraEnvironment): NodeService {
+  if (io.platform === "darwin") return launchd(spec, io, extra)
+  if (io.platform === "linux") return systemd(spec, io, extra)
   throw new CliError(EXIT.unavailable, `${spec.command} install supports macOS (launchd) and Linux (systemd), not ${io.platform}`, spec.elsewhere)
 }
 
@@ -163,7 +171,7 @@ const readText = (file: string): string | undefined => {
 /** Why the installed service would not do anything yet (never the token). */
 export function readinessProblems(env: Env, home: string): string[] {
   const problems: string[] = []
-  if (!readSpokeCredentials(env, home)) problems.push("this machine is not enrolled with a hub yet (no machine token in config.json): enrol it with the OpenCode plugin's /hub dialog")
+  if (!readSpokeCredentials(env, home)) problems.push("this machine is not enrolled with a hub yet (no machine token in config.json): enroll it with `hubctl machine enroll --server <hub URL>`")
   const file = nodeConfigPath(env, home)
   const { config, problems: found } = readNodeConfig(file)
   problems.push(...found.map((p) => `${file}: ${p}`))
@@ -184,8 +192,9 @@ export function installNode(io: NodeIo, options: { readonly dryRun: boolean }): 
 }
 
 /** Writes `spec`'s service file (or prints it, dry run) and prints the commands that load it; `warnings` go to stderr. */
-export function installService(spec: ServiceSpec, io: NodeIo, options: { readonly dryRun: boolean }, warnings: readonly string[]): NodeCommandOutput {
-  const service = serviceFor(spec, io)
+export function installService(spec: ServiceSpec, io: NodeIo, options: { readonly dryRun: boolean }, given: readonly string[], extra?: ExtraEnvironment): NodeCommandOutput {
+  const service = serviceFor(spec, io, extra)
+  const warnings = [...given, ...service.skipped.map((key) => `${key} is not an absolute path, so the service does not carry it`)]
   const load = commands(`Load it ${NOT_RUN}:`, service.load)
   if (options.dryRun) return { stdout: `would write ${service.file}:\n\n${service.content}\n${load}`, warnings }
   const current = readText(service.file)
@@ -213,9 +222,9 @@ export function uninstallService(spec: ServiceSpec, io: NodeIo, options: { reado
 export type ServiceState = { readonly kind: ServiceKind; readonly file: string; readonly installed: boolean; readonly current: boolean; readonly check: readonly string[] } | { readonly kind: "unsupported"; readonly platform: string }
 
 /** Whether `spec`'s service file is there and is what install would write now. */
-export function serviceState(spec: ServiceSpec, io: NodeIo): ServiceState {
+export function serviceState(spec: ServiceSpec, io: NodeIo, extra?: ExtraEnvironment): ServiceState {
   try {
-    const s = serviceFor(spec, io)
+    const s = serviceFor(spec, io, extra)
     const text = readText(s.file)
     return { kind: s.kind, file: s.file, installed: text !== undefined, current: text === s.content, check: s.check }
   } catch {
@@ -254,7 +263,7 @@ export function nodeStatus(io: NodeIo): NodeStatus {
 export function nodeStatusText(status: NodeStatus): string {
   const s = status.service
   const lines: string[] = [serviceStateLine(NODE_SERVICE, s)]
-  lines.push(status.enrolled ? `machine: enrolled with ${status.enrolled.server}${status.enrolled.machineID ? ` as ${status.enrolled.machineID}` : ""}` : "machine: not enrolled (enrol it with the OpenCode plugin's /hub dialog)")
+  lines.push(status.enrolled ? `machine: enrolled with ${status.enrolled.server}${status.enrolled.machineID ? ` as ${status.enrolled.machineID}` : ""}` : "machine: not enrolled (enroll it with `hubctl machine enroll --server <hub URL>`)")
   const c = status.config
   lines.push(`node.json: ${c.file}`, `  workspace roots: ${c.workspaceRoots.length ? c.workspaceRoots.join(", ") : "none (the node would exit 78)"}`, `  slots: ${c.slots}`)
   const labels = Object.entries(c.labels).map(([k, v]) => `${k}=${v}`)

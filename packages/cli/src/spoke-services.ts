@@ -1,15 +1,16 @@
 // `hub claude-code install | uninstall | status` and `hub codex-spoke install | uninstall | status`: the harness
 // spokes' per-user services (`hub claude-code daemon`, `hub codex-spoke serve`) as a launchd agent (macOS) or a
-// systemd user unit (Linux), written from the templates in scripts/ the way `hub node install` writes the node's
-// (node.ts). `hub claude` and `hub codex` start these processes on demand; installed, they keep running, so the hub
+// systemd user unit (Linux), rendered from the templates embedded in this program the way `hub node install` writes
+// the node's (node.ts). `hub claude` and `hub codex` start these processes on demand; installed, they keep running, so the hub
 // can place claude-code and codex launches on the machine without a wrapper run first. Like `hub node install`,
 // nothing here starts a process: loading, unloading and inspecting the service are printed for the user, never run.
-import { findExecutable } from "../../node/src/harnesses.ts"
+import path from "node:path"
+import { claudeBinary, codexBinary, findExecutable } from "../../node/src/harnesses.ts"
 import { readSpokeCredentials } from "../../node/src/config.ts"
 import { socketPath } from "../../claude-code/src/paths.ts"
 import { daemonSocketPath, readServicePid } from "../../codex/src/paths.ts"
 import type { Env } from "./credentials"
-import { installService, serviceCheckLines, serviceState, serviceStateLine, uninstallService, type NodeCommandOutput, type NodeIo, type ServiceSpec, type ServiceState } from "./node"
+import { installService, serviceCheckLines, serviceState, serviceStateLine, uninstallService, type ExtraEnvironment, type NodeCommandOutput, type NodeIo, type ServiceSpec, type ServiceState } from "./node"
 
 /** The subcommands `hub claude-code` and `hub codex-spoke` take for their service (the others are the spokes' own). */
 export const SERVICE_VERBS = ["install", "uninstall", "status"] as const
@@ -20,6 +21,7 @@ export const isServiceVerb = (verb: string | undefined): verb is ServiceVerb => 
 const HUB_PLACES = ["HUB_SPOKE_CONFIG", "XDG_CONFIG_HOME", "HUB_STATE_DIR"] as const
 
 export const CLAUDE_CODE_SERVICE: ServiceSpec = {
+  service: "claude-code",
   command: "hub claude-code",
   label: "io.github.huynle.hub-claude-code",
   unit: "hub-claude-code.service",
@@ -30,6 +32,7 @@ export const CLAUDE_CODE_SERVICE: ServiceSpec = {
 }
 
 export const CODEX_SPOKE_SERVICE: ServiceSpec = {
+  service: "codex-spoke",
   command: "hub codex-spoke",
   label: "io.github.huynle.hub-codex-spoke",
   unit: "hub-codex-spoke.service",
@@ -40,16 +43,23 @@ export const CODEX_SPOKE_SERVICE: ServiceSpec = {
 }
 
 const SPECS = { "claude-code": CLAUDE_CODE_SERVICE, "codex-spoke": CODEX_SPOKE_SERVICE } as const
+
+/** The codex-spoke unit runs the Codex `hubctl setup` installed (HUB_CODEX_BIN), unless the shell names another. */
+const codexEnvironment: ExtraEnvironment = (io): Record<string, string> => {
+  const bin = codexBinary(io.env, io.home)
+  return path.isAbsolute(bin) && !io.env.HUB_CODEX_BIN ? { HUB_CODEX_BIN: bin } : {}
+}
+const EXTRA: Partial<Record<keyof typeof SPECS, ExtraEnvironment>> = { "codex-spoke": codexEnvironment }
 export type SpokeServiceName = keyof typeof SPECS
 export const spokeServiceSpec = (name: SpokeServiceName): ServiceSpec => SPECS[name]
 
 /** Why the installed service would not do anything yet (never the token). */
 function readiness(env: Env, home: string): string[] {
-  return readSpokeCredentials(env, home) ? [] : ["this machine is not enrolled with a hub yet (no machine token in config.json): enrol it with the OpenCode plugin's /hub dialog; until then the service exits and is restarted"]
+  return readSpokeCredentials(env, home) ? [] : ["this machine is not enrolled with a hub yet (no machine token in config.json): enroll it with `hubctl machine enroll --server <hub URL>`; until then the service exits and is restarted"]
 }
 
 export function installSpokeService(name: SpokeServiceName, io: NodeIo, options: { readonly dryRun: boolean }): NodeCommandOutput {
-  return installService(SPECS[name], io, options, readiness(io.env, io.home))
+  return installService(SPECS[name], io, options, readiness(io.env, io.home), EXTRA[name])
 }
 
 export function uninstallSpokeService(name: SpokeServiceName, io: NodeIo, options: { readonly dryRun: boolean }): NodeCommandOutput {
@@ -70,10 +80,10 @@ export interface SpokeServiceStatus {
 
 export function spokeServiceStatus(name: SpokeServiceName, io: NodeIo): SpokeServiceStatus {
   const credentials = readSpokeCredentials(io.env, io.home)
-  const bin = name === "claude-code" ? io.env.HUB_CLAUDE_BIN || "claude" : io.env.HUB_CODEX_BIN || "codex"
+  const bin = name === "claude-code" ? claudeBinary(io.env, io.home) : codexBinary(io.env, io.home)
   const found = findExecutable(bin, io.env)
   const base = {
-    service: serviceState(SPECS[name], io),
+    service: serviceState(SPECS[name], io, EXTRA[name]),
     ...(credentials ? { enrolled: { server: credentials.server, ...(credentials.machineID ? { machineID: credentials.machineID } : {}) } } : {}),
     harness: { bin, ...(found ? { found } : {}) },
   }
@@ -86,7 +96,7 @@ export function spokeServiceStatus(name: SpokeServiceName, io: NodeIo): SpokeSer
 export function spokeServiceStatusText(name: SpokeServiceName, status: SpokeServiceStatus): string {
   const spec = SPECS[name]
   const lines = [serviceStateLine(spec, status.service)]
-  lines.push(status.enrolled ? `machine: enrolled with ${status.enrolled.server}${status.enrolled.machineID ? ` as ${status.enrolled.machineID}` : ""}` : "machine: not enrolled (enrol it with the OpenCode plugin's /hub dialog)")
+  lines.push(status.enrolled ? `machine: enrolled with ${status.enrolled.server}${status.enrolled.machineID ? ` as ${status.enrolled.machineID}` : ""}` : "machine: not enrolled (enroll it with `hubctl machine enroll --server <hub URL>`)")
   const what = name === "claude-code" ? "Claude Code CLI" : "Codex CLI"
   lines.push(status.harness.found ? `${what}: ${status.harness.found}` : `${what}: ${status.harness.bin} not found on this shell's PATH (no hub launches${name === "claude-code" ? "" : " of new threads"} until it is)`)
   if (status.socket) lines.push(`daemon socket: ${status.socket}`)

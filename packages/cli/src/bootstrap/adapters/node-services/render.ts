@@ -43,6 +43,8 @@ export interface RenderInput {
   readonly home: string
   /** Settings to carry, from SERVICE_ENVIRONMENT[service] only. */
   readonly environment?: Readonly<Record<string, string>>
+  /** The command that writes the unit by hand ("hub node"): its header then names its install/uninstall (default: hubctl setup). */
+  readonly writtenBy?: string
 }
 
 export interface RenderedUnit {
@@ -80,7 +82,8 @@ const sd = (word: string) => {
 const SYSTEMD_HOME = /^\/[A-Za-z0-9_./@+,:-]*$/
 const PLACEHOLDER = /__[A-Z]+__/
 
-const header = (asset: string) => `Written by hubctl setup from the embedded asset ${asset}; hubctl removes it only while it is unchanged.`
+const header = (asset: string, by?: string) =>
+  by ? `Written by ${by} install from the embedded asset ${asset}; ${by} uninstall removes it.` : `Written by hubctl setup from the embedded asset ${asset}; hubctl removes it only while it is unchanged.`
 
 function checkEnvironment(c: Checker, service: ServiceID, environment: Readonly<Record<string, string>>): [string, string][] {
   const allowed = SERVICE_ENVIRONMENT[service]
@@ -96,19 +99,19 @@ function checkEnvironment(c: Checker, service: ServiceID, environment: Readonly<
   return out
 }
 
-function renderSystemd(c: Checker, asset: string, template: string, argv: readonly string[], command: readonly string[], home: string, env: [string, string][]): string {
+function renderSystemd(c: Checker, asset: string, template: string, argv: readonly string[], command: readonly string[], home: string, env: [string, string][], by?: string): string {
   const execLine = /^ExecStart=(.*)$/m
   const found = template.match(execLine)?.[1]
   if (found !== "__ARGV__" && found !== `__RUNTIME__ __ENTRY__ ${command.join(" ")}`) c.add("/asset", "inconsistent", `${asset} does not start the ${command.join(" ")} command`)
   const body = template.slice(Math.max(0, template.indexOf("[Unit]")))
   const extra = env.map(([key, value]) => `\nEnvironment=${sd(`${key}=${value}`)}`).join("")
-  return `# ${header(asset)}\n${body}`
+  return `# ${header(asset, by)}\n${body}`
     .replace(execLine, () => `ExecStart=${argv.map(sd).join(" ")}`)
     .replaceAll("__HOME__", home.replaceAll("%", "%%"))
     .replace(/(Environment=PATH=[^\n]*)/, (line) => `${line}${extra}`)
 }
 
-function renderLaunchd(c: Checker, asset: string, template: string, argv: readonly string[], command: readonly string[], home: string, env: [string, string][]): string {
+function renderLaunchd(c: Checker, asset: string, template: string, argv: readonly string[], command: readonly string[], home: string, env: [string, string][], by?: string): string {
   const programArguments = /(<key>ProgramArguments<\/key>\s*<array>)([\s\S]*?)(\n\s*<\/array>)/
   const match = template.match(programArguments)
   const words = [...(match?.[2] ?? "").matchAll(/<string>([^<]*)<\/string>/g)].map((m) => m[1])
@@ -117,7 +120,7 @@ function renderLaunchd(c: Checker, asset: string, template: string, argv: readon
   const indent = (match?.[2] ?? "").match(/\n(\s*)<string>/)?.[1] ?? "    "
   const extra = env.map(([key, value]) => `\n${indent}<key>${key}</key>\n${indent}<string>${xml(value)}</string>`).join("")
   return template
-    .replace(/<!--[\s\S]*?-->/, () => `<!-- ${header(asset)} -->`)
+    .replace(/<!--[\s\S]*?-->/, () => `<!-- ${header(asset, by)} -->`)
     .replace(programArguments, (_all, open: string, _words: string, close: string) => `${open}${argv.map((w) => `\n${indent}<string>${xml(w)}</string>`).join("")}${close}`)
     .replaceAll("__HOME__", xml(home))
     .replace(/(<key>PATH<\/key>\s*<string>[^<]*<\/string>)/, (line) => `${line}${extra}`)
@@ -146,7 +149,9 @@ export function renderServiceUnit(input: RenderInput): Result<RenderedUnit> {
 
   const command = SERVICE_COMMANDS[input.service]
   const text =
-    input.manager === "systemd-user" ? renderSystemd(c, asset, template, argv, command, input.home, env) : renderLaunchd(c, asset, template, argv, command, input.home, env)
+    input.manager === "systemd-user"
+      ? renderSystemd(c, asset, template, argv, command, input.home, env, input.writtenBy)
+      : renderLaunchd(c, asset, template, argv, command, input.home, env, input.writtenBy)
   if (PLACEHOLDER.test(text)) c.add("/asset", "inconsistent", `${asset} has a placeholder this hubctl does not fill`)
   if (isSecretValue(text)) c.add("/environment", "secret", "service units never carry credentials")
   if (c.issues.length > 0) return c.result(undefined)
