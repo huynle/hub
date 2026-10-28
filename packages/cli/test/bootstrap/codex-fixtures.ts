@@ -4,7 +4,8 @@
 // process from ephemeral keys, so no key, certificate or digest of a real release is committed.
 import { createHash, generateKeyPairSync, sign, type KeyObject } from "node:crypto"
 import { gzipSync } from "node:zlib"
-import { MINUTE, T0 } from "./fixtures.ts"
+import { manifestPayload, verifyManifest, type ArtifactManifest, type HarnessPin, type VerifiedManifest } from "../../src/bootstrap/contracts/index.ts"
+import { MANIFEST_UNSIGNED, MINUTE, T0, TRUST_ROOT_TEMPLATE } from "./fixtures.ts"
 
 // ---------- tar archives ----------
 
@@ -257,4 +258,68 @@ export function sigstoreWorld(): SigstoreWorld {
   }
   cachedSigstore = { trustedRoot, bundle }
   return cachedSigstore
+}
+
+// ---------- a signed hub manifest pinning test Codex archives ----------
+
+export const CODEX_VERSION = "0.165.0"
+export const CODEX_RELEASE_BASE = `https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}`
+/** The test archives (the upstream package layout); their digests are what the test manifest pins. */
+export const CODEX_ARCHIVE_LINUX = tgz(PACKAGE_ENTRIES)
+export const CODEX_ARCHIVE_DARWIN = tgz(PACKAGE_ENTRIES.filter((e) => !e.name.startsWith("codex-resources")))
+const digestOf = (b: Uint8Array) => `sha256:${createHash("sha256").update(b).digest("hex")}`
+
+export const CODEX_PINS: readonly HarnessPin[] = [
+  {
+    harness: "codex",
+    version: CODEX_VERSION,
+    target: "linux-x64",
+    url: `${CODEX_RELEASE_BASE}/codex-package-x86_64-unknown-linux-musl.tar.gz`,
+    file: "codex-package-x86_64-unknown-linux-musl.tar.gz",
+    size: CODEX_ARCHIVE_LINUX.byteLength,
+    sha256: digestOf(CODEX_ARCHIVE_LINUX),
+    evidence: ["sigstore"],
+    minimumVersion: "0.160.0",
+  },
+  {
+    harness: "codex",
+    version: CODEX_VERSION,
+    target: "darwin-arm64",
+    url: `${CODEX_RELEASE_BASE}/codex-package-aarch64-apple-darwin.tar.gz`,
+    file: "codex-package-aarch64-apple-darwin.tar.gz",
+    size: CODEX_ARCHIVE_DARWIN.byteLength,
+    sha256: digestOf(CODEX_ARCHIVE_DARWIN),
+    evidence: [],
+  },
+]
+
+let cachedCodexManifest: VerifiedManifest | undefined
+
+/** MANIFEST_UNSIGNED with CODEX_PINS instead of its codex pin, signed once per process by an ephemeral key. */
+export function codexManifest(): VerifiedManifest {
+  if (cachedCodexManifest) return cachedCodexManifest
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519")
+  const body: Omit<ArtifactManifest, "signatures"> = { ...MANIFEST_UNSIGNED, harnesses: [...MANIFEST_UNSIGNED.harnesses.filter((h) => h.harness !== "codex"), ...CODEX_PINS] }
+  const manifest: ArtifactManifest = { ...body, signatures: [{ keyID: "hub-release-1", algorithm: "ed25519", value: sign(null, Buffer.from(manifestPayload(body)), privateKey).toString("base64") }] }
+  const root = { ...TRUST_ROOT_TEMPLATE, keys: [{ ...TRUST_ROOT_TEMPLATE.keys[0]!, publicKey: publicKey.export({ format: "der", type: "spki" }).toString("base64") }] }
+  const verified = verifyManifest(manifest, root)
+  if (!verified.ok) throw new Error(JSON.stringify(verified.issues))
+  cachedCodexManifest = verified.value
+  return verified.value
+}
+
+/** A fake https downloader: url → bytes (absent: 404), recording every request. */
+export function fakeDownloads(files: Record<string, Uint8Array | "error">) {
+  const requests: string[] = []
+  return {
+    requests,
+    get: async (url: string, options: { readonly maxBytes: number }) => {
+      requests.push(url)
+      const f = files[url]
+      if (f === undefined) return { status: "missing" as const }
+      if (f === "error") return { status: "error" as const, detail: "connection reset" }
+      if (f.byteLength > options.maxBytes) return { status: "error" as const, detail: "too large" }
+      return { status: "ok" as const, bytes: f }
+    },
+  }
 }
