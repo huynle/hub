@@ -29,9 +29,12 @@ import {
   recoveryDecision,
   revalidatePreview,
   SETUP_PREVIEW_SCHEMA,
+  snapshotDigest,
   validateSetupPlan,
   type Action,
   type ApplyLock,
+  type DiscoverySnapshot,
+  type ExecutionContext,
   type ErrorCode,
   type EvidenceResult,
   type FileState,
@@ -49,7 +52,7 @@ import {
 import type { ActionExecutor, Change, ExecutorMap, HostInfo, StepContext, StepPlan, TreeFile } from "./executor.ts"
 import { nodeFs, type TxFs } from "./fs.ts"
 import { breakStaleLock, releaseLock, renewLock, tryAcquireLock, type LockIO } from "./lock.ts"
-import { resolveTarget, type ResolveOptions } from "./resolve.ts"
+import { resolveTarget, rootDir, type ResolveOptions } from "./resolve.ts"
 import { errnoOf, fromResult, TxError, txFail, txOk, type TxFailure, type TxResult } from "./result.ts"
 import { fileState, sameState, sha256Of, treeDigestOfFiles } from "./state.ts"
 import { TxStore } from "./store.ts"
@@ -57,6 +60,11 @@ import { TxStore } from "./store.ts"
 export interface ApplierConfig {
   /** The roots discovery mapped on this host. */
   readonly roots: readonly RootMapping[]
+  /**
+   * v1.1: where this apply runs. "container": inside the container discovery found itself in, so every root
+   * resolves to containerPath ?? path (contract rootPathIn); "host" (default): to path.
+   */
+  readonly context?: ExecutionContext
   /** This host, computed fresh (hostFingerprint, targetOf). */
   readonly host: HostInfo
   readonly executors: ExecutorMap
@@ -80,6 +88,8 @@ export interface Consent {
 /** What a fresh discovery + plan produced: apply compares it against the token and refuses blockers. */
 export interface FreshPlan {
   readonly plan: SetupPlan
+  /** v1.1: the fresh snapshot the plan was made from; when given, its canonical digest must be the plan's. */
+  readonly snapshot?: DiscoverySnapshot
   readonly blockers?: readonly PlanBlocker[]
   readonly evidence?: readonly PreviewEvidence[]
 }
@@ -179,6 +189,7 @@ export function createApplier(config: ApplierConfig): Applier {
   const isAlive = config.isAlive ?? defaultIsAlive
   const newID = config.newID ?? randomTxID
   const hooks = config.hooks ?? {}
+  const context: ExecutionContext = config.context ?? "host"
 
   const lockIO = (store: TxStore): LockIO => ({ fs, path: store.lockPath, hostFingerprint: config.host.fingerprint, pid, now, isAlive })
 
@@ -194,7 +205,7 @@ export function createApplier(config: ApplierConfig): Applier {
   async function locked<T extends { ok: boolean }>(txID: string, forRecovery: boolean, body: (store: TxStore, lock: { current: ApplyLock }) => Promise<T | TxFailure>): Promise<T | TxFailure> {
     let store: TxStore
     try {
-      store = new TxStore(fs, config.roots)
+      store = new TxStore(fs, config.roots, context)
       store.init()
     } catch (error) {
       return failureOf(error)
@@ -249,6 +260,7 @@ export function createApplier(config: ApplierConfig): Applier {
       const checked = fromResult(validateSetupPlan(fresh.plan), "the fresh plan is invalid")
       if (!checked.ok) return checked
       const plan = checked.value
+      if (fresh.snapshot && snapshotDigest(fresh.snapshot) !== plan.snapshotDigest) return txFail("preview_stale", "the fresh plan was not made from the fresh snapshot; run the preview again")
       const usedNonces = new Set(store.journals().map((j) => j.nonce))
       const token = revalidatePreview(request.token, { now: now(), hostFingerprint: config.host.fingerprint, plan, usedNonces })
       if (!token.ok) {
@@ -331,7 +343,7 @@ export function createApplier(config: ApplierConfig): Applier {
     }
 
     private resolve(ref: PathRef, options?: ResolveOptions): TxResult<string> {
-      return resolveTarget(ref, config.roots, fs, options)
+      return resolveTarget(ref, config.roots, fs, { ...options, context })
     }
 
     // ---------- preflight ----------
@@ -363,6 +375,7 @@ export function createApplier(config: ApplierConfig): Applier {
       return txOk({
         fs,
         roots: config.roots,
+        context,
         host: config.host,
         now,
         target,
@@ -479,7 +492,7 @@ export function createApplier(config: ApplierConfig): Applier {
     /** Creates the missing directories above `ref`, each journaled as its own owned change. */
     private async parents(action: Action, ref: PathRef): Promise<void> {
       const parts = ref.rel.split("/").slice(0, -1)
-      const root = config.roots.find((r) => r.id === ref.root)!.path
+      const root = rootDir(ref.root, config.roots, context)!
       if (!fs.lstat(root)) fs.mkdirp(root, PARENT_MODE)
       for (let i = 1; i <= parts.length; i++) {
         const rel = parts.slice(0, i).join("/")
@@ -511,6 +524,18 @@ export function createApplier(config: ApplierConfig): Applier {
       switch (change.type) {
         case "none":
           return this.skip()
+        case "remove": {
+          if (!current.exists) return this.skip()
+          if (kind !== "file") return conflict("is not a file")
+          const seq = this.journal.entries.length + 1
+          const backup = this.backup(seq, target!, current)
+          const entry = await this.append({ actionID: action.id, kind: action.kind, class: step.class, path: path!, before: current, after: { exists: false }, ...(backup ? { backup } : {}), status: "pending" })
+          this.recheck(action, step)
+          fs.unlink(target!)
+          fs.fsyncDir(dirname(target!))
+          await this.settle(entry, { status: "done", after: fileState(fs, target!) })
+          return txOk("applied")
+        }
         case "effect": {
           const entry = await this.append({ actionID: action.id, kind: action.kind, class: step.class, ...(path ? { path } : {}), before: current, status: "pending" })
           if (path) this.recheck(action, step)
@@ -683,7 +708,7 @@ export function createApplier(config: ApplierConfig): Applier {
       const exec = action ? this.executor(action) : undefined
       if (entry.class === "external") {
         if (entry.status === "done" && action && exec?.undo) {
-          const r = await exec.undo(action as never, { fs, roots: config.roots, host: config.host, now, reason: "revert-external" })
+          const r = await exec.undo(action as never, { fs, roots: config.roots, context, host: config.host, now, reason: "revert-external" })
           if (!r.ok) await this.conflict(entry, undefined, `could not be reverted: ${r.message}`)
         }
         await this.mark(entry, "undone")
@@ -754,7 +779,7 @@ export function createApplier(config: ApplierConfig): Applier {
             await this.conflict(entry, target, "holds a credential this hubctl cannot clear; remove it with `hubctl machine` commands", current)
             return "keep-user-edit"
           }
-          const r = await exec.undo(action as never, { fs, roots: config.roots, host: config.host, now, target, reason: "clear-credential" })
+          const r = await exec.undo(action as never, { fs, roots: config.roots, context, host: config.host, now, target, reason: "clear-credential" })
           if (!r.ok) {
             await this.conflict(entry, target, `the credential could not be cleared: ${r.message}`, current)
             return "keep-user-edit"

@@ -13,6 +13,7 @@ import {
   planDigest,
   validateJournal,
   validateSetupPlan,
+  type ExecutionContext,
   type RootMapping,
   type SetupPlan,
   type TransactionJournal,
@@ -33,8 +34,9 @@ export class TxStore {
   constructor(
     private readonly fs: TxFs,
     roots: readonly RootMapping[],
+    context: ExecutionContext = "host",
   ) {
-    const lock = resolveTarget(LOCK_PATH, roots, fs)
+    const lock = resolveTarget(LOCK_PATH, roots, fs, { context })
     if (!lock.ok) throw new TxError(lock.code === "conflict" ? "conflict" : "invalid", `the bootstrap state directory is unusable: ${lock.message}`)
     this.lockPath = lock.value
     this.base = lock.value.slice(0, lock.value.lastIndexOf("/"))

@@ -216,6 +216,8 @@ export interface WorldOptions {
   readonly failedEvidence?: boolean
   /** verify-harness fails (harness_not_ready). */
   readonly verifyFails?: boolean
+  /** v1.1: build the executors without a service manager client (deactivate-service then cannot run). */
+  readonly noServiceControl?: boolean
 }
 
 /** A fake host: a sandbox with seeded user files, a signed manifest, the built-in executors and fakes for the rest. */
@@ -306,6 +308,14 @@ export class World {
         }),
         unpack: async () => txOk(HARNESS_FILES.map((f) => ({ rel: f.rel, bytes: enc(f.text), mode: f.mode }))),
       },
+      ...(this.options.noServiceControl
+        ? {}
+        : {
+            services: {
+              deactivate: async (service, manager) => (world.calls.push(`deactivate ${service} ${manager}`), txOk(undefined)),
+              activate: async (service, manager) => (world.calls.push(`reactivate ${service} ${manager}`), txOk(undefined)),
+            },
+          }),
     })
     const enroll: ActionExecutor<"enroll-machine"> = {
       kind: "enroll-machine",
