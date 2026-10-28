@@ -7,8 +7,10 @@
 //     bytes, and refuses downgrades unless explicitly allowed; nothing goes below the security floor.
 import { createPublicKey, verify } from "node:crypto"
 import { canonicalJSON } from "./canonical.ts"
+import type { InstallHarness } from "./actions.ts"
+import { HARNESS_EVIDENCE, HARNESS_ORDER, type EvidenceKind, type HarnessID } from "./harness.ts"
 import { checkTarget } from "./platform.ts"
-import { Checker, digest, fail, header, instant, int, isRecord, list, ok, oneOf, pointer, semver, SEMVER, shape, text, type Result } from "./validate.ts"
+import { Checker, digest, fail, FILE_NAME, header, httpsURL, instant, int, isRecord, list, ok, oneOf, pointer, semver, SEMVER, shape, subset, text, type Result } from "./validate.ts"
 
 export const MANIFEST_SCHEMA = "hub.artifact-manifest"
 export const MANIFEST_VERSION = 1
@@ -20,6 +22,26 @@ export interface ArtifactEntry {
   readonly file: string
   readonly size: number
   readonly sha256: string
+}
+
+/**
+ * A harness artifact pinned by hub's signed manifest: hub vouches for exactly this upstream file (transitive
+ * trust), so even an upstream that publishes no signature (OpenCode) is installed only if its bytes match.
+ */
+export interface HarnessPin {
+  readonly harness: HarnessID
+  /** Exact version; never a range or channel. */
+  readonly version: string
+  readonly target: string
+  /** The upstream download (https). */
+  readonly url: string
+  readonly file: string
+  readonly size: number
+  readonly sha256: string
+  /** Upstream evidence available for this file (attempted at install, recorded, never required). */
+  readonly evidence: readonly EvidenceKind[]
+  /** This harness's security floor: no install below it, even with --allow-downgrade. */
+  readonly minimumVersion?: string
 }
 
 export interface Signature {
@@ -39,8 +61,14 @@ export interface ArtifactManifest {
   readonly minimumVersion: string
   readonly issuedAt: number
   readonly artifacts: readonly ArtifactEntry[]
+  /** Harness artifacts this release pins, per harness and target (covered by the signatures). */
+  readonly harnesses: readonly HarnessPin[]
   readonly signatures: readonly Signature[]
 }
+
+declare const VERIFIED: unique symbol
+/** A manifest whose signatures verifyManifest checked; only it can produce one. */
+export type VerifiedManifest = ArtifactManifest & { readonly [VERIFIED]: true }
 
 export interface TrustKey {
   readonly keyID: string
@@ -59,7 +87,6 @@ export interface TrustRoot {
 }
 
 const KEY_ID = /^[A-Za-z0-9._-]{1,64}$/
-const FILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/
 
 function checkSignatures(c: Checker, path: string, v: unknown) {
@@ -74,7 +101,7 @@ function checkSignatures(c: Checker, path: string, v: unknown) {
 
 export function validateArtifactManifest(value: unknown): Result<ArtifactManifest> {
   const c = new Checker()
-  const r = shape(c, "", value, ["schema", "version", "product", "release", "channel", "minimumVersion", "issuedAt", "artifacts", "signatures"])
+  const r = shape(c, "", value, ["schema", "version", "product", "release", "channel", "minimumVersion", "issuedAt", "artifacts", "harnesses", "signatures"])
   if (!r) return c.result(value)
   header(c, "", r, MANIFEST_SCHEMA, MANIFEST_VERSION)
   if (r.product !== "hubctl") c.add("/product", "invalid_value", "expected product hubctl")
@@ -88,12 +115,28 @@ export function validateArtifactManifest(value: unknown): Result<ArtifactManifes
     const e = shape(c, p, a, ["target", "file", "size", "sha256"])
     if (!e) return
     if (typeof e.target !== "string" || !checkTarget(e.target).ok) c.add(pointer(p, "target"), "unsupported_platform", `${String(e.target)} is not a supported target`)
-    if (typeof e.file !== "string" || !FILE.test(e.file)) c.add(pointer(p, "file"), "invalid_path", "expected a plain file name")
+    if (typeof e.file !== "string" || !FILE_NAME.test(e.file)) c.add(pointer(p, "file"), "invalid_path", "expected a plain file name")
     int(c, pointer(p, "size"), e.size, 1, 2 ** 40)
     digest(c, pointer(p, "sha256"), e.sha256)
   }, (a) => (isRecord(a) && typeof a.target === "string" ? a.target : undefined))
+  list(c, "/harnesses", r.harnesses, 64, (p, h) => checkHarnessPinShape(c, p, h), (h) => (isRecord(h) ? `${String(h.harness)}@${String(h.target)}` : undefined))
   checkSignatures(c, "/signatures", r.signatures)
   return c.result(value)
+}
+
+function checkHarnessPinShape(c: Checker, p: string, v: unknown) {
+  const h = shape(c, p, v, ["harness", "version", "target", "url", "file", "size", "sha256", "evidence"], ["minimumVersion"])
+  if (!h) return
+  const harnessOK = oneOf(c, pointer(p, "harness"), h.harness, HARNESS_ORDER)
+  const versionOK = semver(c, pointer(p, "version"), h.version)
+  if (typeof h.target !== "string" || !checkTarget(h.target).ok) c.add(pointer(p, "target"), "unsupported_platform", `${String(h.target)} is not a supported target`)
+  httpsURL(c, pointer(p, "url"), h.url)
+  if (typeof h.file !== "string" || !FILE_NAME.test(h.file)) c.add(pointer(p, "file"), "invalid_path", "expected a plain file name")
+  int(c, pointer(p, "size"), h.size, 1, 2 ** 40)
+  digest(c, pointer(p, "sha256"), h.sha256)
+  if (harnessOK) subset(c, pointer(p, "evidence"), h.evidence, HARNESS_EVIDENCE[h.harness as HarnessID])
+  if (h.minimumVersion !== undefined && semver(c, pointer(p, "minimumVersion"), h.minimumVersion) && versionOK && compareVersions(h.minimumVersion as string, h.version as string) > 0)
+    c.add(pointer(p, "minimumVersion"), "inconsistent", "the harness floor cannot be above the pinned version")
 }
 
 export function validateTrustRoot(value: unknown): Result<TrustRoot> {
@@ -143,14 +186,14 @@ function countSigners(payload: string, signatures: readonly Signature[], root: T
   return signed.size
 }
 
-export function verifyManifest(manifest: unknown, root: TrustRoot, verifier: SignatureVerifier = ed25519Verify): Result<ArtifactManifest> {
+export function verifyManifest(manifest: unknown, root: TrustRoot, verifier: SignatureVerifier = ed25519Verify): Result<VerifiedManifest> {
   const m = validateArtifactManifest(manifest)
-  if (!m.ok) return m
+  if (!m.ok) return m as Result<VerifiedManifest>
   const r = validateTrustRoot(root)
   if (!r.ok) return fail("/signatures", "signature_invalid", `no usable trust root: ${r.issues.map((i) => i.message).join("; ")}`)
   const signers = countSigners(manifestPayload(m.value), m.value.signatures, root, verifier)
   if (signers < root.threshold) return fail("/signatures", "signature_invalid", `the manifest needs ${root.threshold} valid signature(s) from trusted keys, found ${signers}`)
-  return m
+  return ok(m.value as VerifiedManifest)
 }
 
 /** Accepts `next` only if it is newer and signed (over its canonical JSON) by `threshold` active keys of `current`. */
@@ -227,4 +270,54 @@ export function decideInstall(input: InstallDecisionInput): Result<InstallKind> 
   if (order > 0) return ok("upgrade")
   if (order === 0) return installed.sha256 === candidate.sha256 ? ok("reinstall") : fail("/sha256", "integrity_mismatch", `${candidate.release} is already installed with different bytes`)
   return input.allowDowngrade ? ok("downgrade") : fail("/release", "downgrade_rejected", `${candidate.release} is older than the installed ${installed.version}; pass --allow-downgrade to install it`)
+}
+
+// ---------- pinned harness installs ----------
+
+const sameSet = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((x) => b.includes(x))
+
+/**
+ * An install-harness action against the verified manifest it names: the pin for exactly this harness and target
+ * must exist at exactly this version (else unpinned_artifact), with the same source, size and digest (else
+ * integrity_mismatch), and the action must attempt exactly the upstream evidence the pin lists (inconsistent).
+ */
+export function checkHarnessPin(manifest: VerifiedManifest, action: InstallHarness): Result<HarnessPin> {
+  if (action.source.manifest !== manifest.release) return fail("/source/manifest", "unpinned_artifact", `the install names hub ${action.source.manifest}, but the verified manifest is ${manifest.release}`)
+  const pin = manifest.harnesses.find((h) => h.harness === action.harness && h.target === action.target)
+  if (!pin) return fail("", "unpinned_artifact", `hub ${manifest.release} pins no ${action.harness} for ${action.target}`)
+  if (pin.version !== action.version) return fail("/version", "unpinned_artifact", `hub ${manifest.release} pins ${action.harness} ${pin.version}, not ${action.version}`)
+  if (pin.url !== action.source.url || pin.file !== action.source.file) return fail("/source", "integrity_mismatch", "the download source differs from the pinned one")
+  if (pin.sha256 !== action.sha256 || pin.size !== action.size) return fail("/sha256", "integrity_mismatch", "the digest or size differs from the pinned one")
+  if (!sameSet(pin.evidence, action.evidence)) return fail("/evidence", "inconsistent", `the install attempts exactly the available evidence (${pin.evidence.join(", ") || "none"})`)
+  return ok(pin)
+}
+
+/** The result of one evidence check on a downloaded harness artifact. */
+export interface EvidenceResult {
+  readonly kind: EvidenceKind | "sha256-pin"
+  readonly status: "verified" | "unavailable" | "failed"
+  /** One line ("no gpg on PATH", "Good signature"); never a credential. */
+  readonly detail?: string
+}
+
+/**
+ * Checks the downloaded bytes against the pinned digest first (mandatory: there is always at least this
+ * evidence), then folds in the upstream checks: any failure rejects the artifact (evidence_failed), a planned check
+ * that did not run is "unavailable", and a check nobody planned is refused. Returns the report to record.
+ */
+export function checkHarnessEvidence(action: InstallHarness, bytes: { readonly sha256: string; readonly size: number }, results: readonly EvidenceResult[]): Result<EvidenceResult[]> {
+  if (bytes.sha256 !== action.sha256 || bytes.size !== action.size) return fail("/sha256", "integrity_mismatch", "the download does not match the pinned digest")
+  for (const result of results) {
+    if (result.kind === "sha256-pin" || !action.evidence.includes(result.kind)) return fail("/evidence", "inconsistent", `${result.kind} was not planned for this install`)
+    if (result.status === "failed") return fail("/evidence", "evidence_failed", `${result.kind} verification failed${result.detail ? `: ${result.detail}` : ""}`)
+  }
+  return ok([{ kind: "sha256-pin", status: "verified" }, ...action.evidence.map((kind): EvidenceResult => results.find((r) => r.kind === kind) ?? { kind, status: "unavailable" })])
+}
+
+/** The downgrade policy for a pinned harness (decideInstall with the pin's floor). */
+export function decideHarnessInstall(
+  pin: HarnessPin,
+  options: { readonly installed?: { readonly version: string; readonly sha256: string }; readonly floor?: string; readonly allowDowngrade?: boolean },
+): Result<InstallKind> {
+  return decideInstall({ candidate: { release: pin.version, minimumVersion: pin.minimumVersion ?? "0.0.0", sha256: pin.sha256 }, ...options })
 }

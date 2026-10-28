@@ -12,7 +12,10 @@ import type {
   ArtifactManifest,
   DiscoverySnapshot,
   EnrollmentStatus,
+  HarnessPin,
   HarnessVerification,
+  JournalEntry,
+  ManualEdit,
   PreviewToken,
   Profile,
   ResultEnvelope,
@@ -328,6 +331,22 @@ export const ACTIONS: Record<Action["kind"], Action> = {
     server: "https://hub.example",
     machineName: "dev-mac",
   },
+  "install-harness": {
+    id: "install-opencode",
+    kind: "install-harness",
+    escalation: "user",
+    summary: "Install OpenCode 2.0.26 for darwin-arm64 (pinned by hub 0.8.0)",
+    harness: "opencode",
+    version: "2.0.26",
+    target: "darwin-arm64",
+    source: { manifest: "0.8.0", url: "https://github.com/anomalyco/opencode/releases/download/v2.0.26/opencode-darwin-arm64.zip", file: "opencode-darwin-arm64.zip" },
+    size: 40_000_000,
+    sha256: DIGEST.e,
+    evidence: [],
+    path: { root: "data", rel: "hub/harnesses/opencode/2.0.26" },
+    owner: "hub",
+    rollback: "restore-previous",
+  },
   "verify-harness": {
     id: "verify-opencode",
     kind: "verify-harness",
@@ -484,6 +503,39 @@ export const MANIFEST_UNSIGNED: Omit<ArtifactManifest, "signatures"> = {
     { target: "darwin-x64", file: "hubctl-darwin-x64", size: 64_000_000, sha256: DIGEST.b },
     { target: "linux-x64", file: "hubctl-linux-x64", size: 99_000_000, sha256: DIGEST.c },
     { target: "linux-arm64", file: "hubctl-linux-arm64", size: 98_000_000, sha256: DIGEST.d },
+  ],
+  harnesses: [
+    {
+      harness: "opencode",
+      version: "2.0.26",
+      target: "darwin-arm64",
+      url: "https://github.com/anomalyco/opencode/releases/download/v2.0.26/opencode-darwin-arm64.zip",
+      file: "opencode-darwin-arm64.zip",
+      size: 40_000_000,
+      sha256: DIGEST.e,
+      evidence: [],
+    },
+    {
+      harness: "claude-code",
+      version: "2.1.90",
+      target: "darwin-arm64",
+      url: "https://downloads.claude.ai/claude-code-releases/2.1.90/darwin-arm64/claude",
+      file: "claude",
+      size: 200_000_000,
+      sha256: DIGEST.f,
+      evidence: ["gpg-manifest", "macos-notarization"],
+      minimumVersion: "2.1.89",
+    },
+    {
+      harness: "codex",
+      version: "0.165.0",
+      target: "linux-x64",
+      url: "https://github.com/openai/codex/releases/download/rust-v0.165.0/codex-x86_64-unknown-linux-musl.tar.gz",
+      file: "codex-x86_64-unknown-linux-musl.tar.gz",
+      size: 30_000_000,
+      sha256: DIGEST.b,
+      evidence: ["sigstore"],
+    },
   ],
 }
 
@@ -656,4 +708,141 @@ export const ENVELOPE_INVALID: Record<string, ThreatCase> = {
   failureWithoutError: { value: { ...ENVELOPE_ERROR, error: undefined }, code: "inconsistent" },
   unknownCode: { value: { ...ENVELOPE_ERROR, error: { code: "oops", message: "x" } }, code: "invalid_value" },
   leakedToken: { value: { ...ENVELOPE_OK, data: { machineToken: "abc123" } }, code: "secret" },
+}
+
+// ---------- pinned harness installs ----------
+
+export const HARNESS_PINS: readonly HarnessPin[] = MANIFEST_UNSIGNED.harnesses
+
+export const INSTALL_CLAUDE: Action = {
+  id: "install-claude",
+  kind: "install-harness",
+  escalation: "user",
+  summary: "Install Claude Code 2.1.90 for darwin-arm64 (pinned by hub 0.8.0)",
+  harness: "claude-code",
+  version: "2.1.90",
+  target: "darwin-arm64",
+  source: { manifest: "0.8.0", url: "https://downloads.claude.ai/claude-code-releases/2.1.90/darwin-arm64/claude", file: "claude" },
+  size: 200_000_000,
+  sha256: DIGEST.f,
+  evidence: ["gpg-manifest", "macos-notarization"],
+  path: { root: "data", rel: "hub/harnesses/claude-code/2.1.90" },
+  owner: "hub",
+  rollback: "restore-previous",
+  previous: { version: "2.1.85", sha256: DIGEST.c },
+}
+
+export const INSTALL_CODEX: Action = {
+  id: "install-codex",
+  kind: "install-harness",
+  escalation: "user",
+  summary: "Install Codex 0.165.0 for linux-x64 (pinned by hub 0.8.0)",
+  harness: "codex",
+  version: "0.165.0",
+  target: "linux-x64",
+  source: { manifest: "0.8.0", url: "https://github.com/openai/codex/releases/download/rust-v0.165.0/codex-x86_64-unknown-linux-musl.tar.gz", file: "codex-x86_64-unknown-linux-musl.tar.gz" },
+  size: 30_000_000,
+  sha256: DIGEST.b,
+  evidence: ["sigstore"],
+  path: { root: "data", rel: "hub/harnesses/codex/0.165.0" },
+  owner: "hub",
+  rollback: "restore-previous",
+}
+
+const VERIFY_CLAUDE: Action = { ...ACTIONS["verify-harness"], id: "verify-claude", harness: "claude-code", summary: "Verify Claude Code really runs" } as Action
+
+/** Installs then verifies (install is never readiness). */
+export const PLAN_HARNESS_INSTALL: SetupPlan = {
+  ...PLAN_LAUNCH_NODE,
+  profile: { id: "session-only", version: 1 },
+  requiresEscalation: false,
+  activatesServices: false,
+  actions: [ACTIONS["install-harness"], ACTIONS["verify-harness"], INSTALL_CLAUDE, VERIFY_CLAUDE],
+}
+
+const harnessWith = (patch: Record<string, unknown>) => ({ ...ACTIONS["install-harness"], ...patch })
+
+export const HARNESS_ACTION_INVALID: Record<string, ThreatCase> = {
+  plainHttp: { value: harnessWith({ source: { ...(ACTIONS["install-harness"] as any).source, url: "http://github.com/x/opencode.zip" } }), code: "invalid_value" },
+  floatingVersion: { value: harnessWith({ version: "latest" }), code: "invalid_value" },
+  noDigest: { value: harnessWith({ sha256: undefined }), code: "missing_field" },
+  foreignEvidence: { value: harnessWith({ evidence: ["sigstore"] }), code: "invalid_value" },
+  notOwned: { value: harnessWith({ owner: "user" }), code: "invalid_value" },
+  noRollback: { value: harnessWith({ rollback: "none" }), code: "invalid_value" },
+  pathInFile: { value: harnessWith({ source: { ...(ACTIONS["install-harness"] as any).source, file: "../opencode" } }), code: "invalid_path" },
+  installerScript: { value: harnessWith({ source: { ...(ACTIONS["install-harness"] as any).source, installer: "https://opencode.ai/install" } }), code: "unknown_field" },
+  systemWithoutEscalation: { value: harnessWith({ path: { root: "system-bin", rel: "opencode" } }), code: "inconsistent" },
+  unsupportedTarget: { value: harnessWith({ target: "linux-x64-musl" }), code: "unsupported_platform" },
+}
+
+/** install-harness actions checked against the signed manifest's pins, with the outcome code. */
+export const HARNESS_PIN_INVALID: Record<string, ThreatCase> = {
+  unpinnedTarget: { value: harnessWith({ target: "linux-arm64" }), code: "unpinned_artifact" },
+  unpinnedVersion: { value: harnessWith({ version: "2.0.27" }), code: "unpinned_artifact" },
+  digestMismatch: { value: harnessWith({ sha256: DIGEST.a }), code: "integrity_mismatch" },
+  sourceMismatch: {
+    value: harnessWith({ source: { manifest: "0.8.0", url: "https://evil.example/opencode-darwin-arm64.zip", file: "opencode-darwin-arm64.zip" } }),
+    code: "integrity_mismatch",
+  },
+  otherHubRelease: { value: harnessWith({ source: { ...(ACTIONS["install-harness"] as any).source, manifest: "0.7.9" } }), code: "unpinned_artifact" },
+  /** Upstream evidence the pin says is available (Codex sigstore) must be attempted. */
+  evidenceSkipped: { value: { ...INSTALL_CODEX, evidence: [] }, code: "inconsistent" },
+}
+
+export const PLAN_HARNESS_INVALID: Record<string, ThreatCase> = {
+  installWithoutVerify: { value: { ...PLAN_HARNESS_INSTALL, actions: [ACTIONS["install-harness"]] }, code: "inconsistent" },
+  verifyBeforeInstall: { value: { ...PLAN_HARNESS_INSTALL, actions: [ACTIONS["verify-harness"], ACTIONS["install-harness"]] }, code: "inconsistent" },
+}
+
+/** A harness binary replaced by an install; rollback restores the previous version from its backup. */
+export const HARNESS_JOURNAL_ENTRY: JournalEntry = {
+  seq: 1,
+  actionID: "install-claude",
+  kind: "install-harness",
+  class: "harness",
+  path: { root: "data", rel: "hub/harnesses/claude-code/current" },
+  before: { exists: true, sha256: DIGEST.c, mode: 0o755 },
+  after: { exists: true, sha256: DIGEST.f, mode: 0o755 },
+  backup: { id: "bk_0001" },
+  status: "done",
+}
+
+// ---------- symlinked configs: manual edits ----------
+
+/** The OpenCode config is a symlink into the user's dotfiles: hubctl refuses to write it and emits this edit. */
+export const SYMLINK = { linkPath: "/Users/dev/.config/opencode", resolvedPath: "/Users/dev/dot/config/opencode/opencode.json" } as const
+
+export const MANUAL_EDIT_MERGE: ManualEdit = {
+  kind: "manual-edit",
+  reason: "symlinked-config",
+  actionID: "opencode-plugin",
+  path: { root: "config", rel: "opencode/opencode.json" },
+  linkPath: SYMLINK.linkPath,
+  resolvedPath: SYMLINK.resolvedPath,
+  format: "json",
+  owner: "harness:opencode",
+  precondition: { exists: true, sha256: DIGEST.d },
+  change: { op: "merge", set: [{ pointer: "/plugin/-", value: "@huynle/hub" }] },
+}
+
+export const MANUAL_EDIT_MCP: ManualEdit = {
+  kind: "manual-edit",
+  reason: "symlinked-config",
+  actionID: "opencode-mcp",
+  path: { root: "config", rel: "opencode/opencode.json" },
+  linkPath: SYMLINK.linkPath,
+  resolvedPath: SYMLINK.resolvedPath,
+  precondition: { exists: true, sha256: DIGEST.d },
+  change: { op: "register-mcp-server", harness: "opencode", name: "hub" },
+}
+
+const editWith = (patch: Record<string, unknown>) => ({ ...MANUAL_EDIT_MERGE, ...patch })
+
+export const MANUAL_EDIT_INVALID: Record<string, ThreatCase> = {
+  secretValue: { value: editWith({ change: { op: "merge", set: [{ pointer: "/server", value: "hat_0123456789abcdef" }] } }), code: "secret" },
+  secretPointer: { value: editWith({ change: { op: "merge", set: [{ pointer: "/provider/apiKey", value: "x" }] } }), code: "secret" },
+  commandInEdit: { value: editWith({ change: { op: "merge", set: [{ pointer: "/mcp/x", value: { command: ["sh", "-c", "id"] } }] } }), code: "exec_field" },
+  relativeResolved: { value: editWith({ resolvedPath: "dot/config/opencode/opencode.json" }), code: "invalid_path" },
+  unknownReason: { value: editWith({ reason: "felt-like-it" }), code: "invalid_value" },
+  shellOp: { value: editWith({ change: { op: "shell", script: "echo hi >> ~/.zshrc" } }), code: "invalid_value" },
 }

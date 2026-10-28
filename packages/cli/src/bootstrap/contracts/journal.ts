@@ -14,8 +14,8 @@ import { bool, Checker, digest, header, instant, int, isRecord, list, oneOf, poi
 export const JOURNAL_SCHEMA = "hub.transaction-journal"
 export const JOURNAL_STATES = ["prepared", "applying", "committed", "rolling-back", "rolled-back", "failed"] as const
 export type JournalState = (typeof JOURNAL_STATES)[number]
-export const ENTRY_CLASSES = ["file", "config", "credential", "service", "artifact", "link", "directory", "external"] as const
-/** external: a step with no local file (verify, launch, service activation); nothing to undo on disk. */
+export const ENTRY_CLASSES = ["file", "config", "credential", "service", "artifact", "harness", "link", "directory", "external"] as const
+/** harness: an installed harness binary/version (rollback restores the previous one). external: a step with no local file (verify, launch, service activation); nothing to undo on disk. */
 export type EntryClass = (typeof ENTRY_CLASSES)[number]
 
 export interface FileState {
@@ -54,7 +54,7 @@ export interface TransactionJournal {
 }
 
 /** Classes whose previous content must be backed up before they are changed. */
-const BACKED_UP: readonly EntryClass[] = ["file", "config", "service", "artifact", "link"]
+const BACKED_UP: readonly EntryClass[] = ["file", "config", "service", "artifact", "harness", "link"]
 const TX_ID = /^tx_[A-Za-z0-9]{1,64}$/
 const BACKUP_ID = /^bk_[A-Za-z0-9]{1,64}$/
 const NONCE = /^[A-Za-z0-9_-]{16,128}$/

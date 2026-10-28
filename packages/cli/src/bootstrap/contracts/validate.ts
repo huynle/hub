@@ -29,6 +29,9 @@ export type IssueCode =
   | "preview_not_yet_valid"
   | "preview_replayed"
   | "preview_stale"
+  | "unpinned_artifact"
+  | "evidence_failed"
+  | "manual_edit_required"
 
 export interface Issue {
   /** JSON pointer of the offending value ("" for the document itself). */
@@ -161,6 +164,21 @@ export function list(c: Checker, path: string, value: unknown, max: number, item
 /** A list of distinct strings drawn from `options`. */
 export function subset<T extends string>(c: Checker, path: string, value: unknown, options: readonly T[]): value is T[] {
   return list(c, path, value, options.length, (p, v) => oneOf(c, p, v, options), (v) => (typeof v === "string" ? v : undefined))
+}
+
+/** A plain file name (no directories). */
+export const FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+
+/** An https URL without credentials (download sources: never plain http, not even for loopback). */
+export function httpsURL(c: Checker, path: string, value: unknown): value is string {
+  if (typeof value === "string" && value.length <= 2048) {
+    try {
+      const url = new URL(value)
+      if (url.protocol === "https:" && !url.username && !url.password) return true
+    } catch {}
+  }
+  if (value !== undefined) c.add(path, "invalid_value", "expected an https URL without credentials")
+  return false
 }
 
 /** http(s) URL; plain http only for loopback hubs (a local hub on 127.0.0.1). */

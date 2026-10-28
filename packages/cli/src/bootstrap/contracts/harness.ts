@@ -16,6 +16,23 @@ export const RUNTIME_IDS = ["openshell"] as const
 export type RuntimeID = (typeof RUNTIME_IDS)[number]
 
 /**
+ * Upstream authenticity evidence a pinned harness download may carry beyond hub's signed digest pin. It is always
+ * optional extra evidence (recorded as verified, unavailable or deferred); the pin itself is mandatory.
+ *   gpg-manifest        Claude Code's GPG-signed per-release manifest.json
+ *   macos-notarization  Apple notarization / codesign of the macOS binary
+ *   sigstore            a sigstore bundle published next to the asset (Codex, where available)
+ */
+export const EVIDENCE_KINDS = ["gpg-manifest", "macos-notarization", "sigstore"] as const
+export type EvidenceKind = (typeof EVIDENCE_KINDS)[number]
+
+/** Which evidence each harness's upstream can offer. OpenCode offers none: only hub's pinned digest vouches for it. */
+export const HARNESS_EVIDENCE: Readonly<Record<HarnessID, readonly EvidenceKind[]>> = Object.freeze({
+  opencode: [],
+  "claude-code": ["gpg-manifest", "macos-notarization"],
+  codex: ["sigstore"],
+})
+
+/**
  * presence: found on PATH / at a known location (never sufficient). version-exec: executed on the host and printed
  * a version. provider-auth: a real request to its model provider succeeded with the configured credentials.
  * api-health: the harness's local server answered its health endpoint. spoke-connected: the hub sees its spoke.

@@ -13,6 +13,7 @@ import {
   EMBEDDED_ASSETS,
   ERROR_CODES,
   EXEC_KEYS,
+  HARNESS_EVIDENCE,
   HARNESS_ORDER,
   PREVIEW_MAX_TTL_MS,
   SERVICE_COMMANDS,
@@ -20,11 +21,14 @@ import {
   UNSUPPORTED_TARGETS,
   canonicalJSON,
   checkArtifactBytes,
+  checkHarnessEvidence,
+  checkHarnessPin,
   checkNoSymlinkEscape,
   checkTarget,
   commandSurface,
   compareVersions,
   createAdapterRegistry,
+  decideHarnessInstall,
   decideInstall,
   digestOf,
   enrollmentStatusFrom,
@@ -34,8 +38,10 @@ import {
   isHarnessReady,
   lockState,
   manifestPayload,
+  manualEditFor,
   migrateProfile,
   planDigest,
+  previewApplicable,
   programLayout,
   recoveryDecision,
   recoveryPlan,
@@ -52,9 +58,11 @@ import {
   validateEnrollmentStatus,
   validateEnvelope,
   validateJournal,
+  validateManualEdit,
   validatePreviewToken,
   validateProfile,
   validateSetupPlan,
+  validateSetupPreview,
   validateTrustRoot,
   verifyManifest,
   type Action,
@@ -540,3 +548,154 @@ describe("ResultEnvelope and exit codes", () => {
   })
 })
 threatSuite("ResultEnvelope", F.ENVELOPE_INVALID, validateEnvelope)
+
+// ---------- pinned harness installs (Q1–Q4) ----------
+
+describe("install-harness action", () => {
+  test("accepts the pinned installs", () => {
+    for (const a of [F.ACTIONS["install-harness"], F.INSTALL_CLAUDE, F.INSTALL_CODEX]) expectValid(validateAction(a))
+  })
+  test("evidence each harness may offer: none for OpenCode, GPG + notarization for Claude Code, sigstore for Codex", () => {
+    expect(HARNESS_EVIDENCE).toEqual({ opencode: [], "claude-code": ["gpg-manifest", "macos-notarization"], codex: ["sigstore"] })
+  })
+})
+threatSuite("install-harness", F.HARNESS_ACTION_INVALID, validateAction)
+
+describe("harness pins in the signed hub manifest", () => {
+  const k = keys()
+  const root = rootWith(k)
+  const verified = verifyManifest(signManifest(F.MANIFEST_UNSIGNED, [k]), root)
+  if (!verified.ok) throw new Error(JSON.stringify(verified.issues))
+  const manifest = verified.value
+  test("the manifest validates with its harness pins, and the pins are covered by the signature", () => {
+    expect(manifest.harnesses).toEqual(F.HARNESS_PINS)
+    const tamperedPin = { ...manifest, harnesses: manifest.harnesses.map((h) => (h.harness === "opencode" ? { ...h, sha256: F.DIGEST.a } : h)) }
+    expectRejected(verifyManifest(tamperedPin, root), "signature_invalid")
+  })
+  test("rejects malformed pins", () => {
+    const pin = F.HARNESS_PINS[0]!
+    const bad = (patch: Record<string, unknown>) => ({ ...F.MANIFEST_UNSIGNED, signatures: [], harnesses: [{ ...pin, ...patch }] })
+    expectRejected(validateArtifactManifest(bad({ url: "http://github.com/x" })), "invalid_value")
+    expectRejected(validateArtifactManifest(bad({ target: "windows-x64" })), "unsupported_platform")
+    expectRejected(validateArtifactManifest(bad({ evidence: ["gpg-manifest"] })), "invalid_value")
+    expectRejected(validateArtifactManifest({ ...F.MANIFEST_UNSIGNED, signatures: [], harnesses: [pin, pin] }), "duplicate")
+    expectRejected(validateArtifactManifest(bad({ version: "2.0.26", minimumVersion: "2.1.0" })), "inconsistent")
+  })
+  test("an install matching its pin exactly is accepted", () => {
+    for (const a of [F.ACTIONS["install-harness"], F.INSTALL_CLAUDE, F.INSTALL_CODEX]) expectValid(checkHarnessPin(manifest, a as never))
+  })
+  describe("unpinned or mismatched installs are rejected", () => {
+    for (const [label, threat] of Object.entries(F.HARNESS_PIN_INVALID)) test(`${label} → ${threat.code}`, () => expectRejected(checkHarnessPin(manifest, threat.value as never), threat.code))
+  })
+})
+
+describe("harness download evidence", () => {
+  const bytes = { sha256: F.DIGEST.f, size: 200_000_000 }
+  const claude = F.INSTALL_CLAUDE as never
+  test("the pinned digest is always checked first (never neither)", () => {
+    expectRejected(checkHarnessEvidence(claude, { ...bytes, sha256: F.DIGEST.a }, []), "integrity_mismatch")
+  })
+  test("optional evidence is recorded as verified or unavailable, never required", () => {
+    const report = checkHarnessEvidence(claude, bytes, [{ kind: "gpg-manifest", status: "verified" }])
+    expect(report).toEqual({
+      ok: true,
+      value: [
+        { kind: "sha256-pin", status: "verified" },
+        { kind: "gpg-manifest", status: "verified" },
+        { kind: "macos-notarization", status: "unavailable" },
+      ],
+    })
+    const codex = checkHarnessEvidence(F.INSTALL_CODEX as never, { sha256: F.DIGEST.b, size: 30_000_000 }, [{ kind: "sigstore", status: "unavailable", detail: "no sigstore verifier" }])
+    expect(codex.ok && codex.value.map((e) => [e.kind, e.status])).toEqual([["sha256-pin", "verified"], ["sigstore", "unavailable"]])
+  })
+  test("failed evidence rejects the artifact; evidence that was not planned is refused", () => {
+    expectRejected(checkHarnessEvidence(claude, bytes, [{ kind: "macos-notarization", status: "failed" }]), "evidence_failed")
+    expectRejected(checkHarnessEvidence(claude, bytes, [{ kind: "sigstore", status: "verified" }]), "inconsistent")
+  })
+})
+
+describe("harness downgrade policy", () => {
+  const pin = F.HARNESS_PINS[1]! // claude-code 2.1.90, floor 2.1.89
+  test("installs and upgrades are allowed", () => {
+    expectValid(decideHarnessInstall(pin, {}))
+    expectValid(decideHarnessInstall(pin, { installed: { version: "2.1.85", sha256: F.DIGEST.c } }))
+  })
+  test("downgrades need consent and never go below the floor", () => {
+    const installed = { version: "2.1.95", sha256: F.DIGEST.c }
+    expectRejected(decideHarnessInstall(pin, { installed }), "downgrade_rejected")
+    expectValid(decideHarnessInstall(pin, { installed, allowDowngrade: true }))
+    expectRejected(decideHarnessInstall(pin, { installed, allowDowngrade: true, floor: "2.1.91" }), "below_security_floor")
+  })
+})
+
+describe("plans with harness installs", () => {
+  test("install is followed by verification (install is not readiness)", () => expectValid(validateSetupPlan(F.PLAN_HARNESS_INSTALL)))
+})
+threatSuite("SetupPlan (harness installs)", F.PLAN_HARNESS_INVALID, validateSetupPlan)
+
+describe("harness rollback", () => {
+  test("a replaced harness binary is restored from its backup; a new one is removed", () => {
+    const e = F.HARNESS_JOURNAL_ENTRY
+    expectValid(validateJournal({ ...F.JOURNAL_APPLYING, entries: [e] }))
+    expect(recoveryDecision(e, e.after!)).toBe("restore-backup")
+    expect(recoveryDecision({ ...e, before: { exists: false }, backup: undefined }, e.after!)).toBe("remove-created")
+    expectRejected(validateJournal({ ...F.JOURNAL_APPLYING, entries: [{ ...e, backup: undefined }] }), "inconsistent")
+  })
+})
+
+// ---------- symlinked configs (Q8) ----------
+
+describe("manual edits for symlinked configs", () => {
+  test("validate", () => {
+    expectValid(validateManualEdit(F.MANUAL_EDIT_MERGE))
+    expectValid(validateManualEdit(F.MANUAL_EDIT_MCP))
+  })
+  test("manualEditFor turns a refused config action into the exact edit, without a command or secret", () => {
+    expect(manualEditFor(F.ACTIONS["merge-config"], F.SYMLINK)).toEqual(F.MANUAL_EDIT_MERGE)
+    expect(manualEditFor(F.ACTIONS["register-mcp-server"], F.SYMLINK)).toEqual(F.MANUAL_EDIT_MCP)
+    const write = manualEditFor(F.ACTIONS["write-file"], F.SYMLINK)
+    expect(write?.change).toEqual({ op: "write-file", asset: "config/node.json", sha256: F.DIGEST.d, mode: 0o600 })
+    expect(manualEditFor(F.ACTIONS["enroll-machine"], F.SYMLINK)).toBeUndefined()
+  })
+})
+threatSuite("ManualEdit", F.MANUAL_EDIT_INVALID, validateManualEdit)
+
+describe("SetupPreview (plan output)", () => {
+  const plan = F.PLAN_HARNESS_INSTALL
+  const digest = planDigest(plan)
+  const preview = {
+    schema: "hub.setup-preview",
+    version: 1,
+    plan,
+    planDigest: digest,
+    token: { ...F.PREVIEW, planDigest: digest },
+    blockers: [],
+    evidence: [
+      { actionID: "install-claude", kind: "gpg-manifest", status: "verified" },
+      { actionID: "install-claude", kind: "macos-notarization", status: "deferred" },
+    ],
+  }
+  test("a preview without blockers or failed evidence can be applied", () => {
+    expectValid(validateSetupPreview(preview))
+    expectValid(previewApplicable(preview as never))
+  })
+  test("a symlinked config blocks apply until the user makes the edit and previews again (the edit replaces its action)", () => {
+    const blocked = { ...preview, blockers: [F.MANUAL_EDIT_MERGE] }
+    expectValid(validateSetupPreview(blocked))
+    expectRejected(previewApplicable(blocked as never), "manual_edit_required")
+    expect(exitFor("manual_edit_required")).toBe(BOOTSTRAP_EXIT.conflict)
+  })
+  test("failed evidence blocks apply", () => {
+    const failed = { ...preview, evidence: [{ actionID: "install-claude", kind: "gpg-manifest", status: "failed" }] }
+    expectRejected(previewApplicable(failed as never), "evidence_failed")
+    expect(exitFor("evidence_failed")).toBe(BOOTSTRAP_EXIT.artifactRejected)
+    expect(exitFor("unpinned_artifact")).toBe(BOOTSTRAP_EXIT.artifactRejected)
+  })
+  test("rejects previews that do not match their plan, or report evidence nobody planned", () => {
+    expectRejected(validateSetupPreview({ ...preview, planDigest: F.DIGEST.a }), "inconsistent")
+    expectRejected(validateSetupPreview({ ...preview, token: F.PREVIEW }), "inconsistent")
+    expectRejected(validateSetupPreview({ ...preview, evidence: [{ actionID: "install-opencode", kind: "sigstore", status: "verified" }] }), "inconsistent")
+    // A manual edit replaces its action; a plan that still has the refused action is inconsistent.
+    expectRejected(validateSetupPreview({ ...preview, blockers: [{ ...F.MANUAL_EDIT_MERGE, actionID: "install-opencode" }] }), "inconsistent")
+  })
+})

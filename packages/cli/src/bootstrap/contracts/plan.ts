@@ -54,15 +54,21 @@ export function validateSetupPlan(value: unknown): Result<SetupPlan> {
   if (r.activatesServices !== activates) c.add("/activatesServices", "inconsistent", "activatesServices must say exactly whether a service is activated")
   const installed = new Set<string>()
   const verified = new Set<string>()
+  const unverifiedInstalls = new Map<string, number>()
   let enrollments = 0
   actions.forEach((a, i) => {
     const at = `/actions/${i}`
     if (a.kind === "install-service") installed.add(`${String(a.service)}@${String(a.manager)}`)
-    if (a.kind === "verify-harness") verified.add(String(a.harness))
+    if (a.kind === "install-harness") unverifiedInstalls.set(String(a.harness), i)
+    if (a.kind === "verify-harness") {
+      verified.add(String(a.harness))
+      unverifiedInstalls.delete(String(a.harness))
+    }
     if (a.kind === "activate-service" && !installed.has(`${String(a.service)}@${String(a.manager)}`)) c.add(at, "inconsistent", "a service is installed before it is activated")
     if (a.kind === "launch-session" && !verified.has(String(a.harness))) c.add(at, "inconsistent", "a harness is verified before a session is launched on it")
     if (a.kind === "enroll-machine" && ++enrollments > 1) c.add(at, "duplicate", "a plan enrolls the machine at most once")
   })
+  for (const i of unverifiedInstalls.values()) c.add(`/actions/${i}`, "inconsistent", "an installed harness is verified afterwards (install is not readiness)")
   return c.result(value)
 }
 

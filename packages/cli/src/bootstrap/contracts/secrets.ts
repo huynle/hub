@@ -28,8 +28,12 @@ export function isSecretKey(key: string): boolean {
 
 export const isSecretValue = (value: string): boolean => SECRET_VALUES.some((re) => re.test(value))
 
-/** JSON pointers of every credential-named key (with a value) and every credential-shaped string in `value`. */
-export function findSecrets(value: unknown, base = ""): string[] {
+/**
+ * JSON pointers of every credential-named key (with a value) and every credential-shaped string in `value`.
+ * `allowKeys` exempts exact pointers whose key name only looks like a credential (a preview's `/token`); their
+ * values are still scanned.
+ */
+export function findSecrets(value: unknown, base = "", allowKeys: ReadonlySet<string> = new Set()): string[] {
   const found: string[] = []
   const walk = (v: unknown, path: string) => {
     if (typeof v === "string") {
@@ -39,7 +43,7 @@ export function findSecrets(value: unknown, base = ""): string[] {
       for (const [key, item] of Object.entries(v)) {
         if (item === undefined) continue
         const p = pointer(path, key)
-        if (isSecretKey(key)) found.push(p)
+        if (isSecretKey(key) && !allowKeys.has(p)) found.push(p)
         else walk(item, p)
       }
   }

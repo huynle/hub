@@ -17,7 +17,8 @@ export type ContainerKind = "none" | "docker" | "podman" | "lxc" | "wsl" | "unkn
 export type ShimKind = "host" | "container-shim" | "wrapper" | "unknown"
 export const PACKAGE_MANAGERS = ["brew", "npm", "bun", "apt", "dnf", "apk", "pacman", "nix"] as const
 export type PackageManager = (typeof PACKAGE_MANAGERS)[number]
-export type InstallMethod = "native" | "npm" | "brew" | "package-manager" | "unknown"
+/** hub: installed by hubctl from a pinned artifact. */
+export type InstallMethod = "native" | "npm" | "brew" | "package-manager" | "hub" | "unknown"
 
 export interface HostInfo {
   readonly fingerprint: string
@@ -106,7 +107,7 @@ function checkHarness(c: Checker, p: string, v: unknown) {
   bool(c, pointer(p, "installed"), r.installed)
   if (r.path !== undefined) absPath(c, pointer(p, "path"), r.path)
   if (r.version !== undefined) text(c, pointer(p, "version"), r.version, 64, VERSION_TEXT)
-  if (r.installMethod !== undefined) oneOf(c, pointer(p, "installMethod"), r.installMethod, ["native", "npm", "brew", "package-manager", "unknown"] as const)
+  if (r.installMethod !== undefined) oneOf(c, pointer(p, "installMethod"), r.installMethod, ["native", "npm", "brew", "package-manager", "hub", "unknown"] as const)
   if (r.installed === false && (r.path !== undefined || r.version !== undefined)) c.add(p, "inconsistent", "a harness that is not installed has no path or version")
   const h = shape(c, pointer(p, "health"), r.health, ["state", "probes"])
   if (!h) return

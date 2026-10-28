@@ -7,9 +7,9 @@ import { bool, Checker, header, list, oneOf, shape, text, type Result } from "./
 
 export const BOOTSTRAP_EXIT = Object.freeze({
   ...EXIT,
-  /** A file the plan would change was edited by someone else (or is not ours): nothing was overwritten. */
+  /** A file the plan would change was edited by someone else, is not ours, or is a symlink the user must edit themselves: nothing was overwritten. */
   conflict: 10,
-  /** The hubctl artifact failed authentication: tampered, wrong platform, bad signature, or a refused downgrade. */
+  /** A hubctl or harness artifact failed authentication: unpinned, tampered, wrong platform, bad signature or evidence, or a refused downgrade. */
   artifactRejected: 11,
   /** The preview is stale, foreign, expired, replayed or malformed: preview again. */
   previewInvalid: 12,
@@ -31,6 +31,8 @@ export const ERROR_CODES = [
   "downgrade_rejected",
   "below_security_floor",
   "trust_root_rollback",
+  "unpinned_artifact",
+  "evidence_failed",
   "preview_invalid",
   "preview_foreign",
   "preview_expired",
@@ -39,6 +41,7 @@ export const ERROR_CODES = [
   "preview_stale",
   "locked",
   "conflict",
+  "manual_edit_required",
   "recovery_required",
   "escalation_required",
   "needs_user",
@@ -62,6 +65,8 @@ const EXIT_OF: Readonly<Record<ErrorCode, number>> = {
   downgrade_rejected: BOOTSTRAP_EXIT.artifactRejected,
   below_security_floor: BOOTSTRAP_EXIT.artifactRejected,
   trust_root_rollback: BOOTSTRAP_EXIT.artifactRejected,
+  unpinned_artifact: BOOTSTRAP_EXIT.artifactRejected,
+  evidence_failed: BOOTSTRAP_EXIT.artifactRejected,
   preview_invalid: BOOTSTRAP_EXIT.previewInvalid,
   preview_foreign: BOOTSTRAP_EXIT.previewInvalid,
   preview_expired: BOOTSTRAP_EXIT.previewInvalid,
@@ -70,6 +75,7 @@ const EXIT_OF: Readonly<Record<ErrorCode, number>> = {
   preview_stale: BOOTSTRAP_EXIT.previewInvalid,
   locked: BOOTSTRAP_EXIT.locked,
   conflict: BOOTSTRAP_EXIT.conflict,
+  manual_edit_required: BOOTSTRAP_EXIT.conflict,
   recovery_required: BOOTSTRAP_EXIT.recoveryRequired,
   escalation_required: EXIT.needsUser,
   needs_user: EXIT.needsUser,

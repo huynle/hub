@@ -3,11 +3,11 @@
 // itself (write this embedded asset there, merge these keys into that config, load this user service). A plan that
 // smuggles a command-shaped key anywhere, at any depth, is refused (exec_field), as is any unknown field or kind.
 import { EMBEDDED_ASSETS, SERVICE_IDS, type ServiceID } from "./exec.ts"
-import { HARNESS_ORDER, REAL_PROBES, RUNTIME_IDS, type HarnessID, type ProbeKind, type RuntimeID } from "./harness.ts"
+import { HARNESS_EVIDENCE, HARNESS_ORDER, REAL_PROBES, RUNTIME_IDS, type EvidenceKind, type HarnessID, type ProbeKind, type RuntimeID } from "./harness.ts"
 import { checkPathRef, ELEVATED_ROOTS, type PathRef } from "./paths.ts"
 import { supportedTarget } from "./platform.ts"
 import { findSecrets, isSecretKey } from "./secrets.ts"
-import { bool, Checker, digest, hubURL, int, isRecord, list, oneOf, pointer, semver, shape, subset, text, type Json, type Result } from "./validate.ts"
+import { bool, Checker, digest, FILE_NAME, httpsURL, hubURL, int, isRecord, list, oneOf, pointer, semver, shape, subset, text, type Json, type Result } from "./validate.ts"
 
 /** Keys that would let a document carry something to execute. No action field is named like these, at any depth. */
 export const EXEC_KEYS = ["command", "cmd", "commands", "shell", "script", "scripts", "exec", "execute", "argv", "args", "arguments", "run", "eval", "sh", "bash", "program", "spawn", "hook", "hooks"] as const
@@ -44,6 +44,35 @@ export interface InstallArtifact extends Base<"install-artifact"> {
   /** The manifest's digest for this target; the download must match it. */
   readonly sha256: string
   readonly path: PathRef
+}
+
+/**
+ * Installs a harness from an artifact pinned in hub's signed hubctl release manifest (transitive trust): exact
+ * version, target, source and digest, all of which must equal the manifest's pin (checkHarnessPin). Upstream
+ * evidence (GPG manifest, notarization, sigstore) is attempted and recorded, never a substitute for the pin. The
+ * install is owned by hub and rolls back by restoring the previous binary/version. Installing is not readiness:
+ * a plan verifies every harness it installs.
+ */
+export interface InstallHarness extends Base<"install-harness"> {
+  readonly harness: HarnessID
+  readonly version: string
+  readonly target: string
+  readonly source: {
+    /** The hub release whose signed manifest pins this artifact. */
+    readonly manifest: string
+    readonly url: string
+    readonly file: string
+  }
+  readonly size: number
+  readonly sha256: string
+  /** Upstream evidence to attempt: exactly the kinds the pin lists as available. */
+  readonly evidence: readonly EvidenceKind[]
+  /** The install root (a versioned directory under a named root). */
+  readonly path: PathRef
+  readonly owner: "hub"
+  readonly rollback: "restore-previous"
+  /** The version it replaces, as discovery found it (restored on rollback). */
+  readonly previous?: { readonly version: string; readonly sha256: string }
 }
 
 /** A symlink (the hub ↔ hubctl alias); `target` is where it points. */
@@ -129,6 +158,7 @@ export interface LaunchSession extends Base<"launch-session"> {
 export type Action =
   | EnsureDirectory
   | InstallArtifact
+  | InstallHarness
   | LinkExecutable
   | WriteFile
   | MergeConfig
@@ -148,6 +178,7 @@ const COMMON = ["id", "kind", "escalation", "summary"] as const
 export const ACTION_FIELDS: Readonly<Record<ActionKind, readonly string[]>> = Object.freeze({
   "ensure-directory": [...COMMON, "path", "mode"],
   "install-artifact": [...COMMON, "artifact", "version", "target", "sha256", "path"],
+  "install-harness": [...COMMON, "harness", "version", "target", "source", "size", "sha256", "evidence", "path", "owner", "rollback"],
   "link-executable": [...COMMON, "path", "target"],
   "write-file": [...COMMON, "path", "asset", "sha256", "mode", "onConflict"],
   "merge-config": [...COMMON, "path", "format", "owner", "precondition", "set", "preserveUnknown"],
@@ -159,6 +190,9 @@ export const ACTION_FIELDS: Readonly<Record<ActionKind, readonly string[]>> = Ob
   "verify-runtime": [...COMMON, "runtime"],
   "launch-session": [...COMMON, "harness", "workspace", "maxDurationS"],
 })
+
+/** Optional fields per kind. */
+export const ACTION_OPTIONAL: Readonly<Partial<Record<ActionKind, readonly string[]>>> = Object.freeze({ "install-harness": ["previous"] })
 
 export const ACTION_KINDS = Object.keys(ACTION_FIELDS) as ActionKind[]
 
@@ -188,7 +222,7 @@ export function findExecKeys(value: unknown, base = ""): string[] {
 
 const mode = (c: Checker, path: string, v: unknown) => int(c, path, v, 0, 0o7777)
 
-function precondition(c: Checker, path: string, v: unknown) {
+export function checkPrecondition(c: Checker, path: string, v: unknown) {
   const r = shape(c, path, v, ["exists"], ["sha256"])
   if (!r) return
   if (bool(c, pointer(path, "exists"), r.exists)) {
@@ -205,6 +239,18 @@ function jsonValue(c: Checker, path: string, v: unknown, depth = 0): void {
   if (Array.isArray(v)) return v.forEach((item, i) => jsonValue(c, pointer(path, i), item, depth + 1))
   if (isRecord(v)) return Object.entries(v).forEach(([k, item]) => jsonValue(c, pointer(path, k), item, depth + 1))
   c.add(path, "invalid_value", "not JSON")
+}
+
+/** A list of config sets: JSON pointers (never to a credential-named key) and JSON values. */
+export function checkConfigSets(c: Checker, path: string, v: unknown) {
+  if (Array.isArray(v) && v.length === 0) c.add(path, "invalid_value", "a merge sets at least one key")
+  list(c, path, v, 64, (p, item) => {
+    const s = shape(c, p, item, ["pointer", "value"])
+    if (!s) return
+    if (text(c, pointer(p, "pointer"), s.pointer, 512, JSON_POINTER) && s.pointer.split("/").some((seg) => isSecretKey(seg)))
+      c.add(pointer(p, "pointer"), "secret", "credentials are never written by a config merge")
+    jsonValue(c, pointer(p, "value"), s.value)
+  })
 }
 
 /** Path-bearing fields of an action (for escalation and ownership checks). */
@@ -224,7 +270,7 @@ export function checkAction(c: Checker, path: string, value: unknown): void {
     if (kind === undefined) c.add(pointer(path, "kind"), "missing_field", "missing kind")
     return
   }
-  const r = shape(c, path, value, ACTION_FIELDS[kind])!
+  const r = shape(c, path, value, ACTION_FIELDS[kind], ACTION_OPTIONAL[kind])!
   text(c, pointer(path, "id"), r.id, 64, ACTION_ID)
   oneOf(c, pointer(path, "escalation"), r.escalation, ["user", "elevated"] as const)
   text(c, pointer(path, "summary"), r.summary)
@@ -247,6 +293,31 @@ export function checkAction(c: Checker, path: string, value: unknown): void {
       digest(c, at("sha256"), r.sha256)
       ref("path")
       break
+    case "install-harness": {
+      const harnessOK = oneOf(c, at("harness"), r.harness, HARNESS_ORDER)
+      semver(c, at("version"), r.version)
+      if (typeof r.target !== "string" || !supportedTarget(r.target)) c.add(at("target"), "unsupported_platform", "not a supported target")
+      const src = shape(c, at("source"), r.source, ["manifest", "url", "file"])
+      if (src) {
+        semver(c, pointer(at("source"), "manifest"), src.manifest)
+        httpsURL(c, pointer(at("source"), "url"), src.url)
+        if (typeof src.file !== "string" || !FILE_NAME.test(src.file)) c.add(pointer(at("source"), "file"), "invalid_path", "expected a plain file name")
+      }
+      int(c, at("size"), r.size, 1, 2 ** 40)
+      digest(c, at("sha256"), r.sha256)
+      if (harnessOK) subset(c, at("evidence"), r.evidence, HARNESS_EVIDENCE[r.harness as HarnessID])
+      ref("path")
+      if (r.owner !== "hub") c.add(at("owner"), "invalid_value", "harness installs are owned by hub (recorded in the journal)")
+      if (r.rollback !== "restore-previous") c.add(at("rollback"), "invalid_value", "harness installs roll back by restoring the previous version")
+      if (r.previous !== undefined) {
+        const prev = shape(c, at("previous"), r.previous, ["version", "sha256"])
+        if (prev) {
+          semver(c, pointer(at("previous"), "version"), prev.version)
+          digest(c, pointer(at("previous"), "sha256"), prev.sha256)
+        }
+      }
+      break
+    }
     case "link-executable":
       ref("path")
       ref("target")
@@ -262,22 +333,15 @@ export function checkAction(c: Checker, path: string, value: unknown): void {
       ref("path")
       oneOf(c, at("format"), r.format, ["json", "jsonc", "toml"] as const)
       oneOf(c, at("owner"), r.owner, CONFIG_OWNERS)
-      precondition(c, at("precondition"), r.precondition)
+      checkPrecondition(c, at("precondition"), r.precondition)
       if (r.preserveUnknown !== true) c.add(at("preserveUnknown"), "invalid_value", "merges are always lossless")
-      if (Array.isArray(r.set) && r.set.length === 0) c.add(at("set"), "invalid_value", "a merge sets at least one key")
-      list(c, at("set"), r.set, 64, (p, item) => {
-        const s = shape(c, p, item, ["pointer", "value"])
-        if (!s) return
-        if (text(c, pointer(p, "pointer"), s.pointer, 512, JSON_POINTER) && s.pointer.split("/").some((seg) => isSecretKey(seg)))
-          c.add(pointer(p, "pointer"), "secret", "credentials are never written by a config merge")
-        jsonValue(c, pointer(p, "value"), s.value)
-      })
+      checkConfigSets(c, at("set"), r.set)
       break
     case "register-mcp-server":
       oneOf(c, at("harness"), r.harness, HARNESS_ORDER)
       ref("path")
       text(c, at("name"), r.name, 32, MCP_NAME)
-      precondition(c, at("precondition"), r.precondition)
+      checkPrecondition(c, at("precondition"), r.precondition)
       break
     case "install-service": {
       oneOf(c, at("service"), r.service, SERVICE_IDS)
