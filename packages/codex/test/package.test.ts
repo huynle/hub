@@ -14,7 +14,7 @@ const ALLOWED = [
   /^\.\/[\w-]+\.ts$/,
   /^\.\.\/package\.json$/,
   /^\.\.\/\.\.\/(protocol|sdk|spoke-sdk)\/src\//,
-  /^\.\.\/\.\.\/node\/src\/config\.ts$/,
+  /^\.\.\/\.\.\/node\/src\/(config|harnesses)\.ts$/,
   /^\.\.\/\.\.\/\.\.\/src\/(env|migrate|config)\.ts$/,
 ]
 

@@ -19,6 +19,7 @@
 import { execFile } from "node:child_process"
 import { openAppServer } from "../../../../../codex/src/app-server.ts"
 import type { Channel } from "../../../../../codex/src/jsonrpc.ts"
+import { CODEX_APP_SERVER_ARGS } from "../../../../../codex/src/spoke.ts"
 import { spawnStdioChannel } from "../../../../../codex/src/stdio.ts"
 import {
   compareVersions,
@@ -280,7 +281,7 @@ export const nodeProbeRunner: ProbeRunner = {
 /** Starts the app-server with the packages/codex stdio channel (`argsBefore`: tests run a fake server script). */
 export const stdioAppServerLauncher = (options: { readonly argsBefore?: readonly string[] } = {}): AppServerLauncher => ({
   start(binary, env) {
-    const child = spawnStdioChannel({ command: binary, args: [...(options.argsBefore ?? []), "app-server", "--listen", "stdio://"], env })
+    const child = spawnStdioChannel({ command: binary, args: [...(options.argsBefore ?? []), ...CODEX_APP_SERVER_ARGS], env })
     return { channel: child.channel, stop: () => child.channel.close() }
   },
 })

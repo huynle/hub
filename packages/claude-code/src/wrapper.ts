@@ -7,7 +7,7 @@
 // asyncRewake Stop hook would hold the run until its timeout). On a machine that is not enrolled (no machine token) or when the daemon
 // cannot be started, Claude Code runs without the hub, and the command says why.
 //
-// Settings (environment): HUB_CLAUDE_BIN (default `claude` on PATH), HUB_CLAUDE_PERMISSION_WAIT (seconds a
+// Settings (environment): HUB_CLAUDE_BIN (default: hub's claude-code.json `binary`, else `claude` on PATH), HUB_CLAUDE_PERMISSION_WAIT (seconds a
 // permission request waits for the hub, default 120; 0: report only), HUB_CLAUDE_REWAKE_TIMEOUT (seconds the
 // asyncRewake Stop hook may wait for a message, default 3600).
 import { spawn } from "node:child_process"
@@ -16,6 +16,7 @@ import { closeSync, openSync } from "node:fs"
 import path from "node:path"
 import { configPath } from "../../../src/config.ts"
 import { readSpokeCredentials } from "../../node/src/config.ts"
+import { claudeBinary } from "../../node/src/harnesses.ts"
 import pkg from "../package.json" with { type: "json" }
 import { writePlugin } from "./plugin.ts"
 import { claudeStateDir, ensurePrivateDir, socketPath } from "./paths.ts"
@@ -149,7 +150,7 @@ export async function runClaude(args: readonly string[], io: ClaudeIo): Promise<
     if (printWithoutStreamingInput(args)) env.HUB_CLAUDE_REWAKE = "off"
     await ask(socket, { v: WIRE_VERSION, kind: "launch", launch, pid: process.pid }, { timeoutMs: ASK_MS })
   }
-  const code = await spawnClaude(io.env.HUB_CLAUDE_BIN || "claude", plugin ? ["--plugin-dir", plugin, ...args] : [...args], env, io.stderr)
+  const code = await spawnClaude(claudeBinary(io.env, io.home), plugin ? ["--plugin-dir", plugin, ...args] : [...args], env, io.stderr)
   if (plugin) await ask(socket, { v: WIRE_VERSION, kind: "exit", launch }, { timeoutMs: ASK_MS })
   return code
 }

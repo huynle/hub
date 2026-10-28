@@ -17,6 +17,9 @@ import { CodexSessions, type ThreadDescription } from "./sessions.ts"
 import { spawnStdioChannel } from "./stdio.ts"
 import { connectUnixWebSocket } from "./websocket.ts"
 
+/** The words that start Codex's app-server on stdio (the spoke's own app-server, and `hubctl setup verify`). */
+export const CODEX_APP_SERVER_ARGS: readonly string[] = Object.freeze(["app-server", "--listen", "stdio://"])
+
 export const HARNESS = "codex"
 export const DEFAULT_POLL_MS = 2000
 const LIST_PAGES_MAX = 20
@@ -124,7 +127,7 @@ export function startCodexSpoke(options: CodexSpokeOptions): CodexSpoke {
     own ??= (async () => {
       const child = spawnStdioChannel({
         command: options.codexBin,
-        args: [...(options.codexBinArgs ?? []), "app-server", "--listen", "stdio://", ...(options.codexArgs ?? [])],
+        args: [...(options.codexBinArgs ?? []), ...CODEX_APP_SERVER_ARGS, ...(options.codexArgs ?? [])],
         env: options.env,
         log: (line) => log(`codex app-server: ${line}`),
       })
