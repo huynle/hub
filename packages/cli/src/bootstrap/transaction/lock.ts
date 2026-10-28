@@ -30,7 +30,9 @@ const errno = (error: unknown) => (error as NodeJS.ErrnoException | undefined)?.
 function removeQuietly(fs: TxFs, path: string) {
   try {
     if (fs.lstat(path)) fs.unlink(path)
-  } catch {}
+  } catch (error) {
+    if (!errno(error)) throw error
+  }
 }
 
 /** The lock on disk: undefined when there is none, "corrupt" when it cannot be read as a valid lock. */
@@ -66,7 +68,8 @@ export function tryAcquireLock(io: LockIO, txID: string): LockAttempt {
       io.fs.link(tmp, io.path)
       return { state: "acquired", lock }
     } catch (error) {
-      if (errno(error) !== "EEXIST") throw error
+      // ENOENT: our temporary file was swept by the holder; treat like an existing lock and look again.
+      if (errno(error) !== "EEXIST" && errno(error) !== "ENOENT") throw error
     } finally {
       removeQuietly(io.fs, tmp)
     }
@@ -113,7 +116,12 @@ export function renewLock(io: LockIO, lock: ApplyLock): ApplyLock {
   if (!current || current === "corrupt" || current.txID !== lock.txID || current.pid !== lock.pid) throw new Error("the apply lock is no longer held by this transaction")
   const renewed = newLock(io, lock.txID)
   const tmp = writeTemp(io, renewed)
-  io.fs.rename(tmp, io.path)
+  try {
+    io.fs.rename(tmp, io.path)
+  } catch (error) {
+    removeQuietly(io.fs, tmp)
+    throw error
+  }
   return renewed
 }
 

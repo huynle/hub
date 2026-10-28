@@ -35,6 +35,11 @@ describe("mergeConfigText", () => {
     expect(r.ok && JSON.parse(r.value)).toEqual({ a: { b: 1 } })
   })
 
+  test("appending to a missing key creates an array, not an object with a '-' key", () => {
+    const r = mergeConfigText('{"theme":"dark"}\n', "json", [{ pointer: "/plugin/-", value: "@huynle/hub" }])
+    expect(r.ok && JSON.parse(r.value)).toEqual({ theme: "dark", plugin: ["@huynle/hub"] })
+  })
+
   test("pointer escapes (~0, ~1) and array indexes", () => {
     const r = mergeConfigText('{"l":[0,1]}', "json", [
       { pointer: "/a~1b/c~0d", value: 1 },

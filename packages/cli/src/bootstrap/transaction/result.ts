@@ -37,3 +37,24 @@ export function fromResult<T>(result: Result<T>, context?: string): TxResult<T> 
   const code = ISSUE_TO_ERROR[issue.code] ?? (issue.code as ErrorCode)
   return txFail(code, context ? `${context}: ${issue.message}` : issue.message)
 }
+
+/** A failure thrown from deep inside a step; the engine turns it back into a TxFailure. */
+export class TxError extends Error {
+  constructor(
+    readonly code: ErrorCode,
+    message: string,
+  ) {
+    super(message)
+    this.name = "TxError"
+  }
+
+  get failure(): TxFailure {
+    return txFail(this.code, this.message)
+  }
+}
+
+/** The errno code of a filesystem error (ENOSPC, EEXIST, …), or undefined for anything else. */
+export const errnoOf = (error: unknown): string | undefined => {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code
+  return typeof code === "string" ? code : undefined
+}

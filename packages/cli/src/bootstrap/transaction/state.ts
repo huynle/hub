@@ -42,6 +42,41 @@ export function treeDigest(fs: TxFs, dir: string): string {
   return digestOf({ kind: "hub.tree", entries })
 }
 
+/**
+ * The digest treeDigest would compute for a directory holding exactly `files` (directories implied by their paths,
+ * all with `dirMode`), so the journal can record a tree's state before it is staged.
+ */
+export function treeDigestOfFiles(files: readonly { readonly rel: string; readonly bytes: Uint8Array; readonly mode: number }[], dirMode: number): string {
+  type Dir = Map<string, Dir | { readonly bytes: Uint8Array; readonly mode: number }>
+  const root: Dir = new Map()
+  for (const f of files) {
+    const parts = f.rel.split("/")
+    let dir = root
+    for (const part of parts.slice(0, -1)) {
+      let next = dir.get(part)
+      if (!(next instanceof Map)) {
+        next = new Map()
+        dir.set(part, next)
+      }
+      dir = next
+    }
+    dir.set(parts[parts.length - 1]!, { bytes: f.bytes, mode: f.mode })
+  }
+  const entries: unknown[] = []
+  const walk = (dir: Dir, rel: string) => {
+    for (const name of [...dir.keys()].sort()) {
+      const child = dir.get(name)!
+      const childRel = rel ? `${rel}/${name}` : name
+      if (child instanceof Map) {
+        entries.push({ rel: childRel, kind: "directory", mode: dirMode })
+        walk(child, childRel)
+      } else entries.push({ rel: childRel, kind: "file", mode: child.mode, sha256: sha256Of(child.bytes) })
+    }
+  }
+  walk(root, "")
+  return digestOf({ kind: "hub.tree", entries })
+}
+
 /** The journal's notion of "the same file" (recoveryDecision uses the same rule). */
 export const sameState = (a: FileState, b: FileState): boolean =>
   a.exists === b.exists &&

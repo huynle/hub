@@ -58,7 +58,8 @@ function applySet(root: Node, set: ConfigSet): TxResult<boolean> {
     } else if (isObject(current)) {
       next = Object.hasOwn(current, seg) ? current[seg] : undefined
       if (next === undefined) {
-        next = {}
+        // A missing container is created as an array when the pointer appends to it ("-"), else an object.
+        next = segs[i + 1] === "-" ? [] : {}
         current[seg] = next
       }
     }
