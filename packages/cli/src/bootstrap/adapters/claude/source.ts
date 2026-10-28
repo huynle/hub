@@ -15,11 +15,9 @@ import { createHash } from "node:crypto"
 import type { EvidenceResult, HarnessID, InstallHarness, VerifiedManifest } from "../../contracts/index.ts"
 import type { HarnessSource } from "../../transaction/builtin.ts"
 import type { TreeFile } from "../../transaction/executor.ts"
-import { txFail, txOk, type TxResult } from "../../transaction/result.ts"
+import { TxError, txFail, txOk, type TxResult } from "../../transaction/result.ts"
 import { CLAUDE_SIGNING_FINGERPRINT, verifyDetachedSignature } from "./openpgp.ts"
-import type { Downloader, ProbeRunner, Scratch } from "./ports.ts"
-
-export type { Downloader, ProbeRunner, RunOptions, RunResult, Scratch } from "./ports.ts"
+import { DownloadTooLarge, type Downloader, type ProbeRunner, type Scratch } from "./ports.ts"
 
 export const UPSTREAM_RELEASES = "https://downloads.claude.ai/claude-code-releases"
 export const UPSTREAM_KEY_URL = "https://downloads.claude.ai/keys/claude-code.asc"
@@ -134,7 +132,14 @@ export function createClaudeHarnessSource(options: ClaudeSourceOptions): Harness
     manifest: options.manifest,
     async fetch(action) {
       if (action.harness !== "claude-code") throw new Error(`the Claude Code source cannot install ${action.harness}`)
-      const bytes = await options.download.get(action.source.url, action.size)
+      // One byte more than pinned is still fetched, so a longer file is an integrity mismatch, not a download error.
+      let bytes: Uint8Array
+      try {
+        bytes = await options.download.get(action.source.url, action.size + 1)
+      } catch (error) {
+        if (error instanceof DownloadTooLarge) throw new TxError("integrity_mismatch", `${action.source.url} is larger than the pinned ${action.size} bytes`)
+        throw new TxError("offline", `${action.source.url} could not be downloaded`)
+      }
       const evidence: EvidenceResult[] = []
       for (const kind of action.evidence) {
         if (kind === "gpg-manifest") evidence.push(await gpgManifest(options, action, bytes))

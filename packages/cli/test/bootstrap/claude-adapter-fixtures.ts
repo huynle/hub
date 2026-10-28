@@ -8,7 +8,7 @@
 //              detached signatures for the threat cases (no key material is committed).
 import { createHash, generateKeyPairSync, sign, type KeyObject } from "node:crypto"
 import { manifestPayload, verifyManifest, type ArtifactManifest, type HarnessPin, type VerifiedManifest } from "../../src/bootstrap/contracts/index.ts"
-import type { Downloader, ProbeRunner, RunResult, Scratch } from "../../src/bootstrap/adapters/claude/source.ts"
+import { DownloadTooLarge, type Downloader, type ProbeRunner, type RunResult, type Scratch } from "../../src/bootstrap/adapters/claude/ports.ts"
 import { MANIFEST_UNSIGNED, TRUST_ROOT_TEMPLATE } from "./fixtures.ts"
 
 /** Upstream Claude Code release-signing material, fetched read-only on 2026-10-28 (public data, no secrets). */
@@ -237,7 +237,7 @@ export class FakeDownloads implements Downloader {
     if (body === undefined) throw new Error(`404 ${url}`)
     if (body instanceof Error) throw body
     const bytes = typeof body === "string" ? new TextEncoder().encode(body) : body
-    if (bytes.byteLength > maxBytes) throw new Error(`${url} is larger than ${maxBytes} bytes`)
+    if (bytes.byteLength > maxBytes) throw new DownloadTooLarge(url, maxBytes)
     return bytes
   }
 }

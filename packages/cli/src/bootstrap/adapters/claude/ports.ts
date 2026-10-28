@@ -2,7 +2,15 @@
 // process runner (never a shell) and a private scratch file. node.ts has the default implementations; tests
 // inject fakes.
 
-/** Fetches an https URL's body, refusing more than `maxBytes`; throws on any failure. */
+/** Thrown by a Downloader when the body is longer than allowed. */
+export class DownloadTooLarge extends Error {
+  constructor(url: string, maxBytes: number) {
+    super(`${url} is larger than ${maxBytes} bytes`)
+    this.name = "DownloadTooLarge"
+  }
+}
+
+/** Fetches an https URL's body, refusing more than `maxBytes` (DownloadTooLarge); throws on any failure. */
 export interface Downloader {
   get(url: string, maxBytes: number): Promise<Uint8Array>
 }
