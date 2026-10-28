@@ -81,8 +81,9 @@ Rendered by `hubctl setup ansible`. `meta/argument_specs.yml` validates them.
 
 ## The hubctl interface this role expects
 
-Some of these commands and flags are not wired into the CLI yet. This is the interface the role relies on.
-`packages/cli/src/bootstrap/ansible/render.ts` (`directCommands`) produces the same argv.
+These commands are wired into the CLI (`packages/cli/src/setup/commands.ts`, HBS-13). This is the interface the
+role relies on; `packages/cli/src/bootstrap/ansible/render.ts` (`directCommands`) produces the same argv. The
+`--out` file is a `hub.setup-request`: the SetupPreview with the profile and choices apply re-plans with.
 
 ```text
 hubctl setup preview --profile <file|-> --manifest <file> [--out <file>] --json

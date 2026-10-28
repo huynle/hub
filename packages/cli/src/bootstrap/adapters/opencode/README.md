@@ -122,7 +122,10 @@ invalid, so an unfilled template fails `bootstrap-release-pins.test.ts`.
 
 ## Integration requirements (HBS-13)
 
-These are the edits needed in files this task does not own:
+HBS-13 made these edits (`packages/cli/src/setup/`, docs/bootstrap-contracts.md §7): A1 at the composition layer
+(refusals become envelope errors), A2 (`setup/dispatch.ts`), the spoke probe (`GET /spoke/presence`), the launchers
+(they prefer `~/.local/bin/hubctl`) and A4 (the shared fixtures use `plugins`). A3, A5 and A6 stay open (§7.6).
+The original list:
 
 - **Construction.** `packages/cli/src/cli.ts` (setup preview, apply and recover):
   - Build `createOpencodeHarness({ probe: createNodeProbe(), manifest: <verified manifest>, pluginVersion?: <hubctl
