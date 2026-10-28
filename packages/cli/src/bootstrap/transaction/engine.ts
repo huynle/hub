@@ -21,6 +21,7 @@
 // The engine performs only the TxFs operations; it never spawns processes or runs commands.
 import { randomBytes } from "node:crypto"
 import {
+  isSecretValue,
   JOURNAL_SCHEMA,
   LOCK_MAX_MS,
   planDigest,
@@ -140,6 +141,24 @@ function defaultIsAlive(pid: number): boolean {
   }
 }
 
+/** Hooks observe: they get copies, so nothing they do reaches the journal or the plan. */
+const copy = <T>(value: T): T => structuredClone(value)
+
+/** Strings in anything the engine returns that look like a credential are withheld (defense in depth). */
+function redact<T>(value: T): T {
+  const scrub = (v: unknown): unknown => {
+    if (typeof v === "string") {
+      if (!isSecretValue(v)) return v
+      const words = v.split(/(\s+)/).map((w) => (isSecretValue(w) ? "[redacted]" : w)).join("")
+      return isSecretValue(words) ? "(details withheld: the message looked like it carried a credential)" : words
+    }
+    if (Array.isArray(v)) return v.map(scrub)
+    if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, item]) => [k, scrub(item)]))
+    return v
+  }
+  return scrub(value) as T
+}
+
 const randomTxID = () => `tx_${randomBytes(12).toString("hex")}`
 const samePath = (a?: PathRef, b?: PathRef) => (a === undefined && b === undefined) || (a !== undefined && b !== undefined && a.root === b.root && a.rel === b.rel)
 const dirname = (p: string) => p.slice(0, p.lastIndexOf("/")) || "/"
@@ -163,7 +182,13 @@ export function createApplier(config: ApplierConfig): Applier {
 
   const lockIO = (store: TxStore): LockIO => ({ fs, path: store.lockPath, hostFingerprint: config.host.fingerprint, pid, now, isAlive })
 
-  const unfinished = (store: TxStore) => store.journals().filter((j) => !FINISHED.includes(j.state))
+  /** Interrupted transactions of this host. Another host's (a shared home) are reported, never touched here. */
+  const unfinished = (store: TxStore) => {
+    const all = store.journals().filter((j) => !FINISHED.includes(j.state))
+    const foreign = all.find((j) => j.hostFingerprint !== config.host.fingerprint)
+    if (foreign) throw new TxError("recovery_required", `transaction ${foreign.txID} of another host was interrupted on this shared home; recover it on that host`)
+    return all
+  }
 
   /** Runs `body` holding the apply lock. */
   async function locked<T extends { ok: boolean }>(txID: string, forRecovery: boolean, body: (store: TxStore, lock: { current: ApplyLock }) => Promise<T | TxFailure>): Promise<T | TxFailure> {
@@ -422,14 +447,14 @@ export function createApplier(config: ApplierConfig): Applier {
     private async append(entry: Omit<JournalEntry, "seq">): Promise<JournalEntry> {
       const full: JournalEntry = { ...entry, seq: this.journal.entries.length + 1 }
       this.persist({ entries: [...this.journal.entries, full] })
-      await hooks.beforeAction?.(full, this.journal)
+      await hooks.beforeAction?.(copy(full), copy(this.journal))
       return full
     }
 
     private async settle(entry: JournalEntry, patch: Partial<Pick<JournalEntry, "status" | "after">>, observe = true): Promise<JournalEntry> {
       const next: JournalEntry = { ...entry, ...patch }
       this.persist({ entries: this.journal.entries.map((e) => (e.seq === entry.seq ? next : e)) })
-      if (observe) await hooks.afterAction?.(next, this.journal)
+      if (observe) await hooks.afterAction?.(copy(next), copy(this.journal))
       return next
     }
 
@@ -629,7 +654,7 @@ export function createApplier(config: ApplierConfig): Applier {
         }
         this.persist({ state: "rolled-back" })
         this.cleanup()
-        await hooks.onRecover?.(this.journal, decided)
+        await hooks.onRecover?.(copy(this.journal), copy(decided))
         return { ok: true, report: this.report() }
       } catch (error) {
         const f = failureOf(error)
@@ -642,7 +667,7 @@ export function createApplier(config: ApplierConfig): Applier {
 
     private async conflict(entry: JournalEntry, path: string | undefined, reason: string, current: FileState = { exists: false }) {
       this.conflicts.push({ seq: entry.seq, actionID: entry.actionID, ...(path ? { path } : {}), reason })
-      await hooks.onConflict?.(entry, current)
+      await hooks.onConflict?.(copy(entry), copy(current))
     }
 
     private async mark(entry: JournalEntry, status: "undone" | "skipped"): Promise<void> {
@@ -760,5 +785,8 @@ export function createApplier(config: ApplierConfig): Applier {
     }
   }
 
-  return { apply, recover }
+  return {
+    apply: async (request) => redact(await apply(request)),
+    recover: async (request) => redact(await recover(request)),
+  }
 }
