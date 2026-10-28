@@ -20,7 +20,7 @@ import {
 } from "../src/bootstrap/contracts/index.ts"
 import { discover } from "../src/bootstrap/discovery/discover.ts"
 import { parsePreview, planSetup, previewSetup, renderPreview, revalidateApply, snapshotDigest, type PlanContributor } from "../src/bootstrap/preview/index.ts"
-import { ACTIONS, INSTALL_CLAUDE, MINUTE, PREVIEW_INVALID, PROFILE_FULL_HARNESS, PROFILE_LAUNCH_NODE, PROFILE_SESSION_ONLY, T0 } from "./bootstrap/fixtures.ts"
+import { ACTIONS, DISCOVERY_DARWIN, DISCOVERY_INVALID, DISCOVERY_LINUX_CONTAINER, DISCOVERY_UNSUPPORTED, INSTALL_CLAUDE, MINUTE, PREVIEW_INVALID, PROFILE_FULL_HARNESS, PROFILE_LAUNCH_NODE, PROFILE_SESSION_ONLY, T0 } from "./bootstrap/fixtures.ts"
 import { dir, file, LINUX_IN_CONTAINER, LINUX_MUSL, LINUX_NATIVE, link, MAC_HOME, MAC_NATIVE, MAC_SYMLINKED_CONFIG, memoryProbe, type HostSpec } from "./bootstrap/discovery-fixtures.ts"
 
 const NONCE = "nonce-0123456789abcdef"
@@ -176,6 +176,21 @@ describe("planSetup and previewSetup", () => {
     const a = planSetup({ snapshot: s, profile: PROFILE_FULL_HARNESS, links: () => undefined })
     const b = planSetup({ snapshot: { ...s, capturedAt: T0 + 99 }, profile: PROFILE_FULL_HARNESS, links: () => undefined })
     expect(a.ok && b.ok && canonicalJSON(a.value) === canonicalJSON(b.value)).toBe(true)
+  })
+})
+
+describe("planSetup on the shared contract fixtures", () => {
+  const plan = (snapshot: unknown) => planSetup({ snapshot: snapshot as DiscoverySnapshot, profile: PROFILE_SESSION_ONLY, links: () => undefined })
+
+  test("plans for the shared supported snapshots and refuses the unsupported one", () => {
+    const darwin = plan(DISCOVERY_DARWIN)
+    expect(darwin.ok && darwin.value.plan.hostFingerprint).toBe(DISCOVERY_DARWIN.host.fingerprint)
+    expect(plan(DISCOVERY_LINUX_CONTAINER).ok).toBe(true)
+    expect(codes(plan(DISCOVERY_UNSUPPORTED))).toEqual(["unsupported_platform"])
+  })
+
+  test("an invalid snapshot is never planned for, with the contract's issue code", () => {
+    for (const [label, c] of Object.entries(DISCOVERY_INVALID)) expect({ label, reported: codes(plan(c.value)).includes(c.code) }).toEqual({ label, reported: true })
   })
 })
 
