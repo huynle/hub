@@ -204,6 +204,56 @@ describe("PUT /api/agent/sessions/:addr/archive", () => {
   })
 })
 
+describe("PUT /api/agent/sessions/:addr/pin", () => {
+  const mine = (path: string, body: unknown, token?: string) => token ? bearer(path, token, { method: "PUT", json: body }) : h.api(path, { method: "PUT", json: body })
+
+  test("a managed app pins and unpins idempotently while preserving unrelated preferences", async () => {
+    await start()
+    await h.store.setViewPrefs("local", { hiddenSessions: ["ses_2"], hiddenWorkspaces: ["/private"] })
+    expect(await json(await mine("/api/agent/sessions/ses_1/pin", { pinned: true }, MANAGE))).toEqual({ sessionID: "ses_1", pinned: true, changed: true })
+    expect(await json(await mine("/api/agent/sessions/@api-refactor/pin", { pinned: true }, MANAGE))).toEqual({ sessionID: "ses_1", pinned: true, changed: false })
+    expect(h.store.viewPrefs("local")).toMatchObject({ pinnedSessions: ["ses_1"], hiddenSessions: ["ses_2"], hiddenWorkspaces: ["/private"] })
+    expect(await json(await mine("/api/agent/sessions/ses_1/pin", { pinned: false }, MANAGE))).toEqual({ sessionID: "ses_1", pinned: false, changed: true })
+    expect(h.store.auditLog().filter((e) => e.action.startsWith("session.") && e.action.includes("pin"))).toHaveLength(2)
+  })
+
+  test("pin needs sessions:manage and foreign IDs look unknown", async () => {
+    await start()
+    expect((await mine("/api/agent/sessions/ses_1/pin", { pinned: true }, APP)).status).toBe(403)
+    expect((await mine("/api/agent/sessions/ses_1/pin", { pinned: "yes" }, MANAGE)).status).toBe(400)
+    for (const id of ["ses_unknown", "ses_bob"]) expect((await mine(`/api/agent/sessions/${id}/pin`, { pinned: true }, MANAGE)).status).toBe(404)
+  })
+})
+
+describe("POST /api/agent/sessions/archive-inactive", () => {
+  const call = (body: unknown, token = MANAGE) => bearer("/api/agent/sessions/archive-inactive", token, { method: "POST", json: body })
+
+  test("preview writes nothing; confirm archives only the exact revalidated candidates", async () => {
+    await start()
+    const old = Date.now() - 10 * 24 * 60 * 60 * 1000
+    await h.store.updateAgentData("local", (data) => {
+      ;(data.sessions ??= []).push({ sessionID: "ses_old", title: "Old offline", firstSeen: old, lastSeen: old })
+    })
+    await h.store.setViewPrefs("local", { pinnedSessions: ["ses_2"], hiddenWorkspaces: ["/keep"] })
+    const preview = await json(await call({ preview: true, inactiveFor: "7d", limit: 10 }))
+    expect(preview.candidates).toEqual(["ses_old"])
+    expect(preview.previewToken).toMatch(/^hai1_/)
+    expect(h.store.viewPrefs("local").hiddenSessions).toEqual([])
+    await h.store.setViewPrefs("local", { pinnedSessions: ["ses_old"] })
+    const applied = await json(await call({ previewToken: preview.previewToken, confirm: true }))
+    expect(applied).toEqual({ changed: [], skipped: [{ sessionID: "ses_old", reason: "pinned" }] })
+    expect(h.store.viewPrefs("local")).toMatchObject({ hiddenSessions: [], hiddenWorkspaces: ["/keep"], pinnedSessions: ["ses_old"] })
+  })
+
+  test("bounds, scope and malformed or cross-user preview tokens are rejected", async () => {
+    await start()
+    expect((await call({ preview: true, inactiveFor: "7d", limit: 10 }, APP)).status).toBe(403)
+    for (const body of [{ preview: true, inactiveFor: "nope", limit: 10 }, { preview: true, inactiveFor: "7d", limit: 0 }, { previewToken: "hai1_bad", confirm: true }]) {
+      expect((await call(body)).status).toBe(400)
+    }
+  })
+})
+
 describe("managed apps: names and roles (sessions:manage; role writes also need a roles grant)", () => {
   /** The journal's organization (manage) events for the local user after `position`, as [type, sessionID, data]. */
   const journal = async (position: string) => {

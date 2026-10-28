@@ -25,6 +25,13 @@ async function rejection(promise: Promise<unknown>): Promise<unknown> {
 }
 
 describe("requests", () => {
+  test("pin and previewed inactive archive use narrow agent routes", async () => {
+    hub.routes["PUT /api/agent/sessions/@api/pin"] = () => Response.json({ sessionID: "ses_1", pinned: true, changed: true })
+    hub.routes["POST /api/agent/sessions/archive-inactive"] = () => Response.json((hub.seen.at(-1)?.body as any)?.preview ? { candidates: ["ses_1"], previewToken: "hai1_x", expiresAt: 2 } : { changed: ["ses_1"], skipped: [] })
+    expect(await client().setPinned("@api", true)).toMatchObject({ pinned: true, changed: true })
+    expect(await client().previewArchiveInactive("7d", 10)).toMatchObject({ previewToken: "hai1_x" })
+    expect(await client().archiveInactive("hai1_x")).toEqual({ changed: ["ses_1"], skipped: [] })
+  })
   test("webhook management uses the durable agent API and delete accepts 204", async () => {
     const webhook = { id: "wh_1", url: "https://hooks.example/x", events: ["message.*"], by: "app:tok", created: 1 }
     hub.routes["POST /api/agent/webhooks"] = () => Response.json({ webhook, secret: "whsec_once" }, { status: 201 })

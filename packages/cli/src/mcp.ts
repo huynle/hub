@@ -243,6 +243,25 @@ const archiveTools = (archived: boolean): readonly Tool[] => [{
   },
 }]
 
+const pinTools = (pinned: boolean): readonly Tool[] => [{
+  name: pinned ? "pin" : "unpin",
+  description: `${pinned ? "Pin" : "Unpin"} a session in Hub views. Needs sessions:manage for an app token.`,
+  properties: { addr: ADDR }, required: ["addr"], readOnly: false, organizes: true, idempotent: true,
+  run: async (hub, args, signal) => { const addr = need(args, "addr"); const r = await hub.setPinned(addr, pinned, { signal }); return `${pinned ? "Pinned" : "Unpinned"} ${addr} (${r.sessionID})${r.changed ? "" : "; already in that state"}` },
+}]
+
+const archiveInactiveTool: Tool = {
+  name: "archive_inactive",
+  description: "Preview an exact bounded set of inactive sessions, then confirm that opaque preview token. Apply revalidates active, open, pinned and archived state. Needs sessions:manage.",
+  properties: { preview: { type: "boolean" }, inactiveFor: STRING, limit: { type: "integer", minimum: 1, maximum: 200 }, previewToken: STRING, confirm: { type: "boolean" } },
+  readOnly: false, organizes: true,
+  run: async (hub, args, signal) => {
+    if (args.preview === true) return JSON.stringify(await hub.previewArchiveInactive(need(args, "inactiveFor"), optionalInt(args, "limit", 1, 200) ?? 50, { signal }))
+    if (args.confirm === true) return JSON.stringify(await hub.archiveInactive(need(args, "previewToken"), { signal }))
+    throw new ArgError('Use preview:true with inactiveFor, then confirm:true with previewToken')
+  },
+}
+
 const TARGET = { ...ADDR, description: `${ADDR.description} Required for an app token; a session token defaults to itself.` } as const
 const ROLE = { ...STRING, description: "A role (reviewer, @@reviewer or reviewer.project)." } as const
 const ROLE_PROJECT = { ...STRING, description: "Scope the role to this project (as role.project)." } as const
@@ -350,6 +369,9 @@ const webhookTools: readonly Tool[] = [
 const TOOLS: readonly Tool[] = [
   ...archiveTools(true),
   ...archiveTools(false),
+  ...pinTools(true),
+  ...pinTools(false),
+  archiveInactiveTool,
   ...nameTools,
   eventsTool,
   ...webhookTools,
