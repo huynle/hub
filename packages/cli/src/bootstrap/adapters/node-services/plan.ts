@@ -24,7 +24,7 @@ import {
 } from "../../contracts/index.ts"
 import type { PlanContributor } from "../../preview/plan.ts"
 import { renderServiceUnit, SERVICE_ENVIRONMENT, type RenderedUnit } from "./render.ts"
-import { checkNodeSettings, serviceContextOf, type NodeSettings, type ServiceContext } from "./validate.ts"
+import { checkNodeSettings, inside, serviceContextOf, type NodeSettings, type ServiceContext } from "./validate.ts"
 
 export interface NodeServicesOptions {
   /** The hubctl the services start (programLayout of this process). */
@@ -60,7 +60,6 @@ const BIN_SETTING: Readonly<Partial<Record<HarnessID, string>>> = { "claude-code
 
 const failed = <T>(issues: readonly Issue[]): Result<T> => ({ ok: false, issues: [...issues] })
 const prefixed = (prefix: string, r: Result<unknown>): Issue[] => (r.ok ? [] : r.issues.map((i) => ({ ...i, path: `${prefix}${i.path}` })))
-const inside = (path: string, dir: string) => path === dir || path.startsWith(`${dir}/`)
 
 /** The harnesses a service serves: the node all chosen ones, a spoke its own. */
 const servedBy = (service: ServiceID, harnesses: readonly HarnessID[]): HarnessID[] => (service === "node" ? [...harnesses] : [SERVICE_HARNESS[service]!])

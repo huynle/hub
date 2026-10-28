@@ -184,3 +184,13 @@ describe("activate-service in the applier: rollback to the prior state", () => {
     expect(codeOf(r)).toBe("needs_user")
   })
 })
+
+describe("nodeServiceExecutors", () => {
+  test("adds the activate-service and launch-session executors; without their sources both refuse at preflight", async () => {
+    const { nodeServiceExecutors } = await import("../src/bootstrap/adapters/node-services/index.ts")
+    const map = nodeServiceExecutors({})
+    expect(Object.keys(map).sort()).toEqual(["activate-service", "launch-session"])
+    expect(codeOf(await map["activate-service"]!.check!(ACTIONS["activate-service"] as never, {} as never))).toBe("internal")
+    expect(codeOf(await map["launch-session"]!.check!(ACTIONS["launch-session"] as never, {} as never))).toBe("internal")
+  })
+})

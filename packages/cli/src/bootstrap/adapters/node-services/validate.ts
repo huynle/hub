@@ -52,7 +52,8 @@ export interface NodePlaces {
   readonly snapshot: Pick<DiscoverySnapshot, "roots" | "topology">
 }
 
-const inside = (path: string, dir: string) => path === dir || path.startsWith(dir === "/" ? "/" : `${dir}/`)
+/** Whether `path` is `dir` or inside it. */
+export const inside = (path: string, dir: string) => path === dir || path.startsWith(dir === "/" ? "/" : `${dir}/`)
 const parentOf = (path: string) => path.slice(0, path.lastIndexOf("/")) || "/"
 
 /** Mount prefixes as the *other* context sees them (a path under one is not valid where the service runs). */
