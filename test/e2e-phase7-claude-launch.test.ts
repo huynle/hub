@@ -77,10 +77,10 @@ beforeAll(async () => {
   const spokeConfig = path.join(configDir, "config.json")
   writeConfig(spokeConfig, { ...defaults("mbp"), server: h.url, mode: "always", token: machine.token, autoStartLocalHub: false, herdr: false })
   writeFileSync(path.join(configDir, "node.json"), JSON.stringify({ workspaceRoots: [root], slots: 2 }))
-  const env = { HUB_SPOKE_CONFIG: spokeConfig, HUB_STATE_DIR: path.join(tmp, "state"), PATH: `${path.dirname(fake.bin)}${path.delimiter}${process.env.PATH ?? ""}` }
+  const env = { HUB_SPOKE_CONFIG: spokeConfig, HUB_STATE_DIR: path.join(tmp, "state"), PATH: `${path.dirname(fake.bin)}${path.delimiter}${process.env.PATH ?? ""}`, HUB_CODEX_BIN: "/nonexistent/codex" }
 
   const { config } = readNodeConfig(nodeConfigPath(env, tmp))
-  node = new NodeDaemon({ config, credentials: readSpokeCredentials(env, tmp)!, runtimes: [new HostRuntime({ roots: config.workspaceRoots, harnesses: detectHarnesses({ env }) })] })
+  node = new NodeDaemon({ config, credentials: readSpokeCredentials(env, tmp)!, runtimes: [new HostRuntime({ roots: config.workspaceRoots, harnesses: detectHarnesses({ env, home: tmp }) })] })
   node.start()
 
   const launchOptions = daemonLaunchOptions({ env, home: tmp, program: { execPath: process.execPath, entry: path.join(tmp, "hub-cli.js") } })
