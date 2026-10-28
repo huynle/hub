@@ -134,7 +134,7 @@ describe("Grants.list, get, update and revoke", () => {
     const { grants, alice, bob, advance } = await setup()
     const first = await grants.create(alice, spec("@@orchestrator", { expires: "1h" }))
     advance(1)
-    const second = await grants.create(alice, spec("@@concierge"))
+    const second = await grants.create(alice, spec("@@orchestrator-2"))
     advance(HOUR)
     const listed = await grants.list(alice)
     expect(listed.map((g) => [g.id, g.state])).toEqual([
@@ -169,7 +169,7 @@ describe("Grants.list, get, update and revoke", () => {
   test("update cannot change the holder, and rejects invalid grants", async () => {
     const { grants, alice } = await setup()
     const grant = await grants.create(alice, spec("@@orchestrator"))
-    expect((await failure(grants.update(alice, grant.id, spec("@@concierge")))).code).toBe("invalid")
+    expect((await failure(grants.update(alice, grant.id, spec("@@orchestrator-2")))).code).toBe("invalid")
     expect((await failure(grants.update(alice, grant.id, spec("@@orchestrator", { allow: [] })))).code).toBe("invalid")
   })
 

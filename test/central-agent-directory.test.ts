@@ -431,10 +431,10 @@ describe("roles", () => {
     expect(dir.resolve(h.alice, "@@lead").sessions.map((s) => s.sessionID)).toEqual(["ses_a"])
   })
 
-  test("reserved roles (orchestrator…, concierge…) are refused for sessions, allowed for the user", async () => {
+  test("reserved roles (orchestrator…) are refused for sessions, allowed for the user", async () => {
     const h = await two()
     expect((await failure(() => h.dir.claimRole(h.alice, "ses_a", "orchestrator"))).code).toBe("forbidden")
-    expect((await failure(() => h.dir.claimRole(h.alice, "ses_a", "concierge-2"))).code).toBe("forbidden")
+    expect((await failure(() => h.dir.claimRole(h.alice, "ses_a", "orchestrator-2"))).code).toBe("forbidden")
     expect((await h.dir.claimRole(h.alice, "ses_a", "orchestrator", { byUser: true })).generation).toBe(1)
   })
 

@@ -43,7 +43,7 @@ export function withSuffix(base: string, taken: (name: string) => boolean): stri
 export const isReservedName = (name: string): boolean => name === "me"
 
 /** Roles only the user may claim in phase 1 (grants including `roles` come in phase 3). */
-const RESERVED_ROLES = ["orchestrator", "concierge"]
+const RESERVED_ROLES = ["orchestrator"]
 
 export const isReservedRole = (role: string): boolean => RESERVED_ROLES.some((prefix) => role.startsWith(prefix))
 

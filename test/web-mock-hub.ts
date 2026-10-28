@@ -904,7 +904,7 @@ const VERBS = ["approve", "deny", "answer", "prompt", "stop", "roles", "launch"]
 /** The hub's grant validation, roughly (src/central/agent/policy.ts validateGrant): a Response when invalid. */
 function grantSpec(body: Record<string, any>): Response | Record<string, any> {
   const holder = body.holder
-  if (typeof holder !== "string" || !/^(@@(orchestrator|concierge)[\w.-]*|@[a-z0-9][\w-]*|ses_\w+|app:[0-9a-f]{16})$/.test(holder)) {
+  if (typeof holder !== "string" || !/^(@@(orchestrator)[\w.-]*|@[a-z0-9][\w-]*|ses_\w+|app:[0-9a-f]{16})$/.test(holder)) {
     return agentError(400, "invalid", "holder is @@role, @name, ses_… or app:<token id>")
   }
   if (holder === "@ghost") return agentError(404, "not_found", "No session named @ghost")

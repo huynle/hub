@@ -399,9 +399,9 @@ describe("validateGrant", () => {
   })
 
   test("defaults: no permissions, 8h, the hourly cap, no always", () => {
-    const grant = validateGrant({ holder: "@@concierge", scope: { projects: ["/srv/app"] }, allow: ["prompt", "prompt"] })
+    const grant = validateGrant({ holder: "@@orchestrator-2", scope: { projects: ["/srv/app"] }, allow: ["prompt", "prompt"] })
     expect(grant).toEqual({
-      holder: "@@concierge",
+      holder: "@@orchestrator-2",
       scope: { projects: ["/srv/app"] },
       allow: ["prompt"],
       permissions: { allow: [], never: [] },
@@ -415,7 +415,7 @@ describe("validateGrant", () => {
     expect(validateGrant({ ...base, allowAlways: true }).allowAlways).toBe(true)
   })
 
-  test.each(["@@orchestrator", "@@orchestrator-2", "@@concierge.hub", "@api-refactor", "ses_abc123", "app:0123456789abcdef"])("holder %s is accepted", (holder) => {
+  test.each(["@@orchestrator", "@@orchestrator-2", "@@orchestrator.hub", "@api-refactor", "ses_abc123", "app:0123456789abcdef"])("holder %s is accepted", (holder) => {
     expect(validateGrant({ ...base, holder }).holder).toBe(holder)
   })
 

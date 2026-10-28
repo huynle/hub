@@ -19,7 +19,7 @@ const verifiers: BearerVerifier[] = [
       return sessionID ? { kind: "session", userID: USER, machineID: "mch_x", sessionID } : undefined
     },
   },
-  { kind: "app", verify: (token) => (token === APP ? { kind: "app", userID: USER, tokenID: "tok_app", scopes: ["messages:send", "messages:read"], label: "concierge" } : undefined) },
+  { kind: "app", verify: (token) => (token === APP ? { kind: "app", userID: USER, tokenID: "tok_app", scopes: ["messages:send", "messages:read"], label: "assistant-app" } : undefined) },
 ]
 
 let h: Harness

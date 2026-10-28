@@ -49,8 +49,8 @@ describe("decision pushes", () => {
   })
 
   test("an app's escalation names the app; no reason, no colon", async () => {
-    const { shown } = await push(PUSH, { ...ESCALATION, from: { kind: "app", tokenID: "tok_1", label: "concierge" }, recommendation: { option: "approve" } })
-    expect(shown[0]!.options.body).toBe("app concierge recommends Approve once")
+    const { shown } = await push(PUSH, { ...ESCALATION, from: { kind: "app", tokenID: "tok_1", label: "assistant-app" }, recommendation: { option: "approve" } })
+    expect(shown[0]!.options.body).toBe("app assistant-app recommends Approve once")
   })
 
   test("plain Decisions, closed escalations and failed fetches keep the generic body", async () => {

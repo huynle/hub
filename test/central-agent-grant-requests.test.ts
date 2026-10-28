@@ -24,7 +24,7 @@ const U = "u1"
 const TOKEN = "0123456789abcdef"
 
 const orchestrator: AgentActor = { kind: "session", userID: U, machineID: "m1", sessionID: "ses_o", via: "shell" }
-const app: AgentActor = { kind: "app", userID: U, tokenID: TOKEN, scopes: ["messages:send"], label: "concierge" }
+const app: AgentActor = { kind: "app", userID: U, tokenID: TOKEN, scopes: ["messages:send"], label: "assistant-app" }
 const cookieUser: UserActor = { kind: "user", userID: U, deviceID: "d1", via: "cookie" }
 
 const GRANT = { scope: { projects: ["/work/hub"] }, allow: ["approve", "deny"], permissions: { allow: ["read"], never: ["bash:git push*"] }, expires: "8h" }
@@ -165,7 +165,7 @@ describe("the holder", () => {
     const s = setup()
     await expect(ask(s, orchestrator, holder("ses_w"))).rejects.toMatchObject({ code: "forbidden" })
     await expect(ask(s, orchestrator, holder("@worker"))).rejects.toMatchObject({ code: "forbidden" })
-    await expect(ask(s, orchestrator, holder("@@concierge"))).rejects.toMatchObject({ code: "forbidden" })
+    await expect(ask(s, orchestrator, holder("@@orchestrator-2"))).rejects.toMatchObject({ code: "forbidden" })
     await expect(ask(s, orchestrator, holder(`app:${TOKEN}`))).rejects.toMatchObject({ code: "forbidden" })
     await expect(ask(s, app, holder("ses_o"))).rejects.toMatchObject({ code: "forbidden" })
     await expect(ask(s, app, holder("@@orchestrator"))).rejects.toMatchObject({ code: "forbidden" })

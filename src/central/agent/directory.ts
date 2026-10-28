@@ -207,7 +207,7 @@ export class Directory {
   /**
    * Claims `role` (or `role.project`) for a session. Each new holder gets the next holder generation of
    * (role, project). An exclusive claim fails (name_taken) while another live holder exists, and nobody else
-   * can claim while an exclusive holder is live. Reserved roles (orchestrator…, concierge…) need `byUser`
+   * can claim while an exclusive holder is live. Reserved roles (orchestrator…) need `byUser`
    * (grants with `roles` come in phase 3). Exclusivity and generations are per (role, project scope).
    */
   async claimRole(userID: string, sessionID: string, requested: string, options: { exclusive?: boolean; project?: string; byUser?: boolean } = {}): Promise<RoleView> {

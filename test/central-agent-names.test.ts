@@ -107,10 +107,10 @@ describe("isReservedName", () => {
 })
 
 describe("isReservedRole", () => {
-  test("roles starting with orchestrator or concierge", () => {
+  test("roles starting with orchestrator", () => {
     expect(isReservedRole("orchestrator")).toBe(true)
     expect(isReservedRole("orchestrator-2")).toBe(true)
-    expect(isReservedRole("concierge")).toBe(true)
+    expect(isReservedRole("orchestrator.project")).toBe(true)
     expect(isReservedRole("reviewer")).toBe(false)
   })
 })

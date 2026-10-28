@@ -84,7 +84,7 @@ describe("the open list", () => {
 
   test("decisionsFor: the session asked it or it is about the session", () => {
     const asked = decision({ id: "dec_asked", from: { kind: "session", sessionID: "ses_a" }, about: ["ses_b"], sessionID: "ses_b" })
-    const about = decision({ id: "dec_about", from: { kind: "app", tokenID: "tok_1", label: "concierge" }, about: ["ses_c", "ses_a"], sessionID: "ses_c" })
+    const about = decision({ id: "dec_about", from: { kind: "app", tokenID: "tok_1", label: "assistant-app" }, about: ["ses_c", "ses_a"], sessionID: "ses_c" })
     const other = decision({ id: "dec_other", from: { kind: "session", sessionID: "ses_z" }, about: ["ses_z"], sessionID: "ses_z" })
     expect(decisionsFor([asked, about, other], "ses_a").map((d) => d.id)).toEqual(["dec_asked", "dec_about"])
     expect(decisionsFor([asked, about, other], "ses_q")).toEqual([])
@@ -95,7 +95,7 @@ describe("labels", () => {
   test("askerLabel: @name, the session ID, an app's label", () => {
     expect(askerLabel(decision())).toBe("@api")
     expect(askerLabel(decision({ from: { kind: "session", sessionID: "ses_a" } }))).toBe("ses_a")
-    expect(askerLabel(decision({ from: { kind: "app", tokenID: "tok_1", label: "concierge" } }))).toBe("app concierge")
+    expect(askerLabel(decision({ from: { kind: "app", tokenID: "tok_1", label: "assistant-app" } }))).toBe("app assistant-app")
     expect(askerLabel(decision({ from: { kind: "app", tokenID: "tok_1" } }))).toBe("app tok_1")
   })
 
