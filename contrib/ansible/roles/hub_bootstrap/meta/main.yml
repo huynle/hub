@@ -1,0 +1,20 @@
+---
+galaxy_info:
+  role_name: hub_bootstrap
+  author: hub contributors
+  description: >-
+    Optional path to bootstrap a machine into Hub: stage the signed, digest-pinned hubctl, then delegate to
+    `hubctl setup preview / apply / verify` with the same canonical profile and pins as the direct path.
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: MacOSX
+      versions: [all]
+    - name: Ubuntu
+      versions: [all]
+    - name: Debian
+      versions: [all]
+    - name: EL
+      versions: [all]
+  galaxy_tags: [hub, bootstrap]
+dependencies: []

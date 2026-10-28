@@ -1,0 +1,67 @@
+---
+# Download the release's signed manifest and the hubctl pinned for this target into a per-release cache. get_url
+# refuses bytes whose sha256 differs from the pin (and skips the download when the cached file already matches), so
+# staging is idempotent. The manifest's own signature is checked by hubctl (`--manifest`) with its embedded trust
+# root; here it only has to carry the same pins the vars were rendered from.
+- name: Create the hubctl cache directory
+  ansible.builtin.file:
+    path: "{{ _hub_bootstrap_release_dir }}"
+    state: directory
+    mode: "0700"
+  check_mode: "{{ ansible_check_mode and not (hub_bootstrap_stage_in_check_mode | bool) }}"
+
+- name: Download the signed release manifest
+  ansible.builtin.get_url:
+    url: "{{ hub_bootstrap_manifest_url }}"
+    dest: "{{ _hub_bootstrap_manifest }}"
+    mode: "0600"
+    force: false
+  check_mode: "{{ ansible_check_mode and not (hub_bootstrap_stage_in_check_mode | bool) }}"
+
+- name: Download the pinned hubctl
+  ansible.builtin.get_url:
+    url: "{{ _hub_bootstrap_artifact.url }}"
+    dest: "{{ _hub_bootstrap_hubctl }}"
+    checksum: "{{ _hub_bootstrap_artifact.sha256 }}"
+    mode: "0755"
+  check_mode: "{{ ansible_check_mode and not (hub_bootstrap_stage_in_check_mode | bool) }}"
+
+- name: Note whether a staged hubctl is available
+  ansible.builtin.set_fact:
+    _hub_bootstrap_staged: "{{ not ansible_check_mode or hub_bootstrap_stage_in_check_mode | bool }}"
+
+- name: Read the downloaded manifest
+  ansible.builtin.slurp:
+    src: "{{ _hub_bootstrap_manifest }}"
+  register: _hub_bootstrap_manifest_raw
+  check_mode: false
+  when: _hub_bootstrap_staged | bool
+
+- name: Check that the manifest carries the rendered pins
+  ansible.builtin.assert:
+    that:
+      - _doc.release == hub_bootstrap_release
+      - _doc.minimumVersion == hub_bootstrap_minimum_version
+      - (_doc.artifacts | selectattr('target', 'equalto', _hub_bootstrap_target) | map(attribute='sha256') | list) == [_hub_bootstrap_artifact.sha256]
+      - (_doc.harnesses | length) == (hub_bootstrap_harness_pins | length)
+    fail_msg: >-
+      The downloaded manifest does not match the pins of hub {{ hub_bootstrap_release }}; refusing to continue.
+    quiet: true
+  vars:
+    _doc: "{{ _hub_bootstrap_manifest_raw.content | b64decode | from_json }}"
+  when: _hub_bootstrap_staged | bool
+
+- name: Check each harness pin against the manifest
+  ansible.builtin.assert:
+    that:
+      - >-
+        (_doc.harnesses | selectattr('harness', 'equalto', item.harness) | selectattr('target', 'equalto', item.target)
+        | selectattr('version', 'equalto', item.version) | selectattr('sha256', 'equalto', item.sha256) | list | length) == 1
+    fail_msg: "The manifest does not pin {{ item.harness }} {{ item.version }} for {{ item.target }} as rendered."
+    quiet: true
+  vars:
+    _doc: "{{ _hub_bootstrap_manifest_raw.content | b64decode | from_json }}"
+  loop: "{{ hub_bootstrap_harness_pins }}"
+  loop_control:
+    label: "{{ item.harness }} {{ item.version }} {{ item.target }}"
+  when: _hub_bootstrap_staged | bool

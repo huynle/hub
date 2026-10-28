@@ -1,0 +1,28 @@
+---
+# Apply exactly the previewed plan (hubctl rediscovers, re-plans and compares against the preview's digest), and
+# only when it changes something: a converged host previews no changes, so a second run applies nothing.
+- name: Apply the plan
+  ansible.builtin.command:
+    argv: >-
+      {{ [_hub_bootstrap_hubctl, 'setup', 'apply', '--preview', _hub_bootstrap_preview_file, '--manifest', _hub_bootstrap_manifest]
+      + _hub_bootstrap_consent_flags + ['--json'] }}
+  register: _hub_bootstrap_apply_run
+  changed_when: _hub_bootstrap_apply_run.rc == 0
+  failed_when: false
+  when:
+    - not ansible_check_mode
+    - _hub_bootstrap_pending | length > 0
+
+- name: Check the apply succeeded
+  ansible.builtin.assert:
+    that:
+      - _hub_bootstrap_apply_run.rc == 0
+      - (_hub_bootstrap_apply_run.stdout | from_json).ok
+    fail_msg: >-
+      hubctl setup apply failed (exit {{ _hub_bootstrap_apply_run.rc }}): {{ _hub_bootstrap_apply_run.stdout }}.
+      Exit 12 means the host changed since the preview (run again); exit 14 means an interrupted apply must be
+      recovered on the host with `hubctl setup recover` first.
+    quiet: true
+  when:
+    - not ansible_check_mode
+    - _hub_bootstrap_pending | length > 0

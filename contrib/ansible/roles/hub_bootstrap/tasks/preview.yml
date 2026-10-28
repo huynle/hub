@@ -1,0 +1,107 @@
+---
+# `hubctl setup preview` only reads the host, so it also runs in check mode. Outside check mode it keeps the preview
+# (with its single-use token) for apply. The play then refuses, before anything changes: a plan other than the one
+# the vars were rendered from, manual edits still to make, enrollment (a separate step), and elevation or service
+# activation nobody consented to. hubctl enforces the same rules again at apply.
+- name: Create the hub Ansible state directory
+  ansible.builtin.file:
+    path: "{{ hub_bootstrap_state_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: Check the profile handed to hubctl is the rendered one
+  ansible.builtin.assert:
+    that:
+      - ('sha256:' ~ (_hub_bootstrap_profile_json | hash('sha256'))) == hub_bootstrap_profile_digest
+    fail_msg: The profile is not the one the vars were rendered with (hub_bootstrap_profile_digest); render again.
+    quiet: true
+
+- name: Preview the setup plan
+  ansible.builtin.command:
+    argv: >-
+      {{ [_hub_bootstrap_hubctl, 'setup', 'preview', '--profile', '-', '--manifest', _hub_bootstrap_manifest]
+      + ([] if ansible_check_mode else ['--out', _hub_bootstrap_preview_file]) + ['--json'] }}
+    stdin: "{{ _hub_bootstrap_profile_json }}"
+  register: _hub_bootstrap_preview_run
+  check_mode: false
+  changed_when: false
+  failed_when: false
+  when: _hub_bootstrap_staged | bool
+
+- name: Read the preview
+  ansible.builtin.set_fact:
+    _hub_bootstrap_preview: >-
+      {{ (_hub_bootstrap_preview_run.stdout | from_json) if _hub_bootstrap_preview_run.stdout.startswith('{') else {'ok': false} }}
+  when: _hub_bootstrap_staged | bool
+
+- name: Check the preview succeeded
+  ansible.builtin.assert:
+    that:
+      - _hub_bootstrap_preview_run.rc == 0
+      - _hub_bootstrap_preview.ok
+    fail_msg: >-
+      hubctl setup preview failed (exit {{ _hub_bootstrap_preview_run.rc }},
+      {{ _hub_bootstrap_preview.error.code | default('no result') }}): {{ _hub_bootstrap_preview.error.message | default('') }}
+      {{ _hub_bootstrap_preview.error.hint | default('') }}
+    quiet: true
+  when: _hub_bootstrap_staged | bool
+
+- name: Collect the planned changes
+  ansible.builtin.set_fact:
+    _hub_bootstrap_plan: "{{ _hub_bootstrap_preview.data.plan }}"
+    _hub_bootstrap_pending: >-
+      {{ _hub_bootstrap_preview.data.plan.actions | rejectattr('kind', 'in', _hub_bootstrap_read_only_kinds) | list }}
+  when: _hub_bootstrap_staged | bool
+
+- name: Check the plan is the previewed one the vars were rendered from
+  ansible.builtin.assert:
+    that:
+      - _hub_bootstrap_preview.data.planDigest == hub_bootstrap_expected_plan.planDigest
+      - _hub_bootstrap_plan.hostFingerprint == hub_bootstrap_expected_plan.hostFingerprint
+      - _hub_bootstrap_plan.snapshotDigest == hub_bootstrap_expected_plan.snapshotDigest
+    fail_msg: >-
+      The host or the plan changed since the preview these vars were rendered from ({{ _hub_bootstrap_preview.data.planDigest }}
+      is not {{ hub_bootstrap_expected_plan.planDigest }}); preview again and render the vars again.
+    quiet: true
+  when:
+    - _hub_bootstrap_staged | bool
+    - hub_bootstrap_expected_plan is not none
+
+- name: Show the plan
+  ansible.builtin.debug:
+    msg: "{{ _hub_bootstrap_plan.actions | map(attribute='summary') | list }}"
+  when:
+    - _hub_bootstrap_staged | bool
+    - ansible_check_mode or ansible_diff_mode
+
+- name: Show the manual edits the plan needs
+  ansible.builtin.debug:
+    msg: "{{ _hub_bootstrap_preview.data.blockers }}"
+  when:
+    - _hub_bootstrap_staged | bool
+    - ansible_diff_mode or (_hub_bootstrap_preview.data.blockers | length > 0)
+
+- name: Report the pending changes (check mode)
+  ansible.builtin.debug:
+    msg: "{{ _hub_bootstrap_pending | length }} change(s) would be applied by hubctl setup apply"
+  changed_when: ansible_check_mode and (_hub_bootstrap_pending | length > 0)
+  when: _hub_bootstrap_staged | bool
+
+- name: Refuse what the play must not do
+  ansible.builtin.assert:
+    that:
+      - _hub_bootstrap_preview.data.blockers | length == 0
+      - _hub_bootstrap_plan.actions | selectattr('kind', 'equalto', 'enroll-machine') | list | length == 0
+      - not _hub_bootstrap_plan.requiresEscalation or hub_bootstrap_escalate | bool
+      - not _hub_bootstrap_plan.activatesServices or hub_bootstrap_confirm_activation | bool
+    fail_msg: >-
+      Not applying. Make every manual edit shown above in the file it names (resolvedPath) and run again; enroll the
+      machine yourself with `hubctl machine enroll` (a separate step); set hub_bootstrap_escalate (requiresEscalation)
+      or hub_bootstrap_confirm_activation (activatesServices) only if you consent.
+    quiet: true
+  when: _hub_bootstrap_staged | bool
+
+- name: Note that check mode skipped the preview
+  ansible.builtin.debug:
+    msg: No cached hubctl and hub_bootstrap_stage_in_check_mode is false, so check mode cannot preview this host.
+  when: not (_hub_bootstrap_staged | bool)

@@ -1,0 +1,34 @@
+---
+# Derived values (not for overriding).
+
+_hub_bootstrap_os:
+  Darwin: darwin
+  Linux: linux
+_hub_bootstrap_arch:
+  arm64: arm64
+  aarch64: arm64
+  x86_64: x64
+  amd64: x64
+
+# The host's hubctl target name (SUPPORTED_TARGETS); hubctl itself refuses musl and anything unsupported.
+_hub_bootstrap_target: >-
+  {{ _hub_bootstrap_os[ansible_facts['system']] | default(ansible_facts['system'] | lower) }}-{{
+  _hub_bootstrap_arch[ansible_facts['architecture']] | default(ansible_facts['architecture']) }}
+_hub_bootstrap_artifact: "{{ hub_bootstrap_artifacts[_hub_bootstrap_target] }}"
+_hub_bootstrap_release_dir: "{{ hub_bootstrap_cache_dir }}/{{ hub_bootstrap_release }}"
+_hub_bootstrap_hubctl: "{{ _hub_bootstrap_release_dir }}/{{ _hub_bootstrap_artifact.file }}"
+_hub_bootstrap_manifest: "{{ _hub_bootstrap_release_dir }}/hubctl-manifest.json"
+_hub_bootstrap_preview_file: "{{ hub_bootstrap_state_dir }}/preview.json"
+
+# The profile exactly as the direct path reads it: sorted keys, no whitespace (the contract's canonical JSON), so
+# its sha256 is hub_bootstrap_profile_digest. It is passed on stdin (`--profile -`), never written to disk.
+_hub_bootstrap_profile_json: "{{ hub_bootstrap_profile | to_json(sort_keys=True, separators=[',', ':']) }}"
+
+# Consent flags, in the order hubctl documents them; empty unless asked for.
+_hub_bootstrap_consent_flags: >-
+  {{ (['--escalate'] if hub_bootstrap_escalate | bool else [])
+  + (['--confirm-activation'] if hub_bootstrap_confirm_activation | bool else [])
+  + (['--allow-downgrade'] if hub_bootstrap_allow_downgrade | bool else []) }}
+
+# Plan actions that change something (the verifications only read).
+_hub_bootstrap_read_only_kinds: [verify-harness, verify-runtime]
