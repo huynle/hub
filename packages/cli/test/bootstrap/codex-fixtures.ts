@@ -79,10 +79,13 @@ export function pax(records: Record<string, string>): string {
 
 export const tgz = (entries: readonly TarEntry[], options?: { corruptChecksum?: boolean }) => new Uint8Array(gzipSync(tar(entries, options)))
 
+/** A stand-in bin/codex that really runs: `--version` prints the pinned version. */
+export const CODEX_SCRIPT = '#!/bin/sh\necho "codex-cli 0.165.0"\n'
+
 /** The upstream package layout (codex-package-<triple>.tar.gz): bin/codex plus its helpers. */
 export const PACKAGE_ENTRIES: readonly TarEntry[] = [
   { name: "bin/", type: "5" },
-  { name: "bin/codex", text: "#!codex 0.165.0", mode: 0o755 },
+  { name: "bin/codex", text: CODEX_SCRIPT, mode: 0o755 },
   { name: "bin/codex-code-mode-host", text: "#!code-mode-host", mode: 0o755 },
   { name: "codex-package.json", text: '{"version":"0.165.0"}', mode: 0o644 },
   { name: "codex-path/", type: "5" },

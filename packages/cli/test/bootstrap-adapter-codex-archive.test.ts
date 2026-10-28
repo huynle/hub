@@ -3,7 +3,7 @@
 import { describe, expect, test } from "bun:test"
 import { gzipSync } from "node:zlib"
 import { unpackCodexArchive } from "../src/bootstrap/adapters/codex/archive.ts"
-import { PACKAGE_ENTRIES, pax, tar, tgz } from "./bootstrap/codex-fixtures.ts"
+import { CODEX_SCRIPT, PACKAGE_ENTRIES, pax, tar, tgz } from "./bootstrap/codex-fixtures.ts"
 
 const text = (b: Uint8Array) => new TextDecoder().decode(b)
 
@@ -13,7 +13,7 @@ describe("unpackCodexArchive", () => {
     expect(r.ok).toBe(true)
     if (!r.ok) return
     expect(r.value.map((f) => [f.rel, f.mode, text(f.bytes)])).toEqual([
-      ["bin/codex", 0o755, "#!codex 0.165.0"],
+      ["bin/codex", 0o755, CODEX_SCRIPT],
       ["bin/codex-code-mode-host", 0o755, "#!code-mode-host"],
       ["codex-package.json", 0o644, '{"version":"0.165.0"}'],
       ["codex-path/rg", 0o755, "#!rg"],
