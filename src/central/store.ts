@@ -60,6 +60,7 @@ export interface ViewPrefs {
 export const VIEW_PREF_KEYS = ["hiddenSessions", "hiddenWorkspaces", "pinnedSessions", "pinnedWorkspaces"] as const
 /** Archived sessions accumulate for longer than the other view-preference lists. */
 export const VIEW_PREF_MAX_ARCHIVED = 5000
+export const VIEW_PREF_MAX_PINNED = 500
 
 export interface AuditEntry {
   at: number
@@ -927,6 +928,39 @@ export class Store {
       user.viewPrefs = next
       tx.touch("users", id)
       return { changed }
+    })
+  }
+
+  /** Changes one pinned session atomically while preserving every other preference list. */
+  setSessionPinned(id: string, sessionID: string, pinned: boolean): Promise<{ changed: boolean } | undefined> {
+    return this.mutate((tx) => {
+      const user = this.user(id)
+      if (!user) return undefined
+      const next = this.viewPrefs(id)
+      const listed = next.pinnedSessions.includes(sessionID)
+      const changed = pinned !== listed
+      if (!changed) return { changed }
+      if (pinned && next.pinnedSessions.length >= VIEW_PREF_MAX_PINNED) return undefined
+      next.pinnedSessions = pinned ? [...next.pinnedSessions, sessionID] : next.pinnedSessions.filter((id) => id !== sessionID)
+      user.viewPrefs = next
+      tx.touch("users", id)
+      return { changed }
+    })
+  }
+
+  /** Archives only while still unpinned, atomically against concurrent preference writes. */
+  archiveSessionIfUnpinned(id: string, sessionID: string): Promise<"changed" | "pinned" | "archived" | "full" | "not_found"> {
+    return this.mutate((tx) => {
+      const user = this.user(id)
+      if (!user) return "not_found"
+      const next = this.viewPrefs(id)
+      if (next.hiddenSessions.includes(sessionID)) return "archived"
+      if (next.pinnedSessions.includes(sessionID)) return "pinned"
+      if (next.hiddenSessions.length >= VIEW_PREF_MAX_ARCHIVED) return "full"
+      next.hiddenSessions = [...next.hiddenSessions, sessionID]
+      user.viewPrefs = next
+      tx.touch("users", id)
+      return "changed"
     })
   }
 

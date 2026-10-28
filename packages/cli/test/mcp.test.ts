@@ -91,7 +91,7 @@ describe("JSON-RPC core", () => {
   })
 })
 
-const VERBS = ["archive", "unarchive", "name", "role_claim", "role_release", "events", "webhook_create", "webhooks", "webhook_show", "webhook_delete", "whoami", "status", "sessions", "show", "log", "who", "msg", "ask", "reply", "decline", "inbox", "message_show", "mute", "unmute", "decisions", "decision_show", "approve", "deny", "answer", "prompt", "stop", "launch", "launches", "launch_show", "launch_stop"]
+const VERBS = ["archive", "unarchive", "pin", "unpin", "archive_inactive", "name", "role_claim", "role_release", "events", "webhook_create", "webhooks", "webhook_show", "webhook_delete", "whoami", "status", "sessions", "show", "log", "who", "msg", "ask", "reply", "decline", "inbox", "message_show", "mute", "unmute", "decisions", "decision_show", "approve", "deny", "answer", "prompt", "stop", "launch", "launches", "launch_show", "launch_stop"]
 
 describe("tools/list", () => {
   test("lists one tool per CLI verb, each with a description and an object input schema", async () => {
@@ -118,6 +118,22 @@ describe("events tool", () => {
   test("rejects out-of-range wait and limit before calling the hub", async () => {
     for (const args of [{ wait: 61 }, { limit: 0 }, { limit: 201 }]) expect((await call("events", args)).result.isError).toBe(true)
     expect(hub.seen).toEqual([])
+  })
+})
+
+describe("pin and inactive archive tools", () => {
+  test("pin/unpin are idempotent organization writes", async () => {
+    hub.routes["PUT /api/agent/sessions/@api/pin"] = (_r, _u, body) => Response.json({ sessionID: "ses_1", pinned: body.pinned, changed: true })
+    expect(textOf(await call("pin", { addr: "@api" }))).toContain("Pinned @api")
+    expect(textOf(await call("unpin", { addr: "@api" }))).toContain("Unpinned @api")
+    expect(hub.seen.map((s) => s.body.pinned)).toEqual([true, false])
+  })
+
+  test("archive_inactive previews or confirms, never both implicitly", async () => {
+    hub.routes["POST /api/agent/sessions/archive-inactive"] = (_r, _u, body) => Response.json(body.preview ? { candidates: ["ses_1"], previewToken: "hai1_token", expiresAt: 2 } : { changed: ["ses_1"], skipped: [] })
+    expect(JSON.parse(textOf(await call("archive_inactive", { preview: true, inactiveFor: "7d", limit: 10 })))).toMatchObject({ candidates: ["ses_1"], previewToken: "hai1_token" })
+    expect(JSON.parse(textOf(await call("archive_inactive", { previewToken: "hai1_token", confirm: true })))).toEqual({ changed: ["ses_1"], skipped: [] })
+    expect((await call("archive_inactive", { confirm: true })).result.isError).toBe(true)
   })
 })
 

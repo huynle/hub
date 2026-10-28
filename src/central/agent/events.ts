@@ -201,6 +201,8 @@ export function launchEvent(launch: Launch): EventInput {
 /** A session's archive state changed. */
 export const archiveEvent = (sessionID: string, archived: boolean): EventInput => ({ type: "session.archived", family: "manage", subject: { sessionID }, data: { archived } })
 
+export const pinnedEvent = (sessionID: string, pinned: boolean): EventInput => ({ type: "session.pinned", family: "manage", subject: { sessionID }, data: { pinned } })
+
 /** A session was explicitly named (names are validated slugs: a-z, 0-9 and -). */
 export const namedEvent = (sessionID: string, name: string): EventInput => ({ type: "session.named", family: "manage", subject: { sessionID }, data: { name } })
 

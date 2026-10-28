@@ -771,7 +771,8 @@ OpenCode (Claude Desktop, Cursor, other agents). It speaks JSON-RPC 2.0, one mes
 transport; protocol revisions `2025-06-18`, `2025-03-26` and `2024-11-05`), and answers `initialize`, `ping`,
 `tools/list` and `tools/call`; notifications (`notifications/initialized`, `notifications/cancelled`, which aborts
 the call) get no answer, other methods answer `-32601`. Its tools are the CLI's verbs: `whoami`, `status`,
-`sessions`, `show`, `log`, `who`, `msg`, `ask`, `reply`, `decline`, `inbox`, `message_show` (`id`, `wait`),
+`sessions`, `show`, `log`, `who`, `archive`, `unarchive`, `pin`, `unpin` (`addr`), `archive_inactive`
+(`preview`, `inactiveFor`, `limit`, then `previewToken`, `confirm`), `msg`, `ask`, `reply`, `decline`, `inbox`, `message_show` (`id`, `wait`),
 `mute` and `unmute` (`addr`; agent-message mutes, not console notifications), `decisions` (`state`) and
 `decision_show` (`id`) (reading the Decisions you asked; no tool answers one, only the user does), and
 `webhook_create` (`url`, `events`, `label`), `webhooks`, `webhook_show` (`id`) and `webhook_delete` (`id`). Webhooks

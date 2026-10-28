@@ -173,6 +173,27 @@ for (const variant of variants) {
       expect(b.store.viewPrefs(user.id).hiddenSessions).toEqual([])
     })
 
+    test("pin mutations preserve concurrent archive and unrelated preference writes", async () => {
+      const { a, b, settle } = await variant.make()
+      const user = await a.store.upsertUser({ email: "pin@example.test", role: "user" })
+      await a.store.setViewPrefs(user.id, { hiddenWorkspaces: ["/keep"] })
+      await settle()
+      await Promise.all([a.store.setSessionPinned(user.id, "ses_pin", true), b.store.setSessionArchived(user.id, "ses_archive", true)])
+      await settle()
+      for (const pod of [a, b]) expect(pod.store.viewPrefs(user.id)).toMatchObject({ pinnedSessions: ["ses_pin"], hiddenSessions: ["ses_archive"], hiddenWorkspaces: ["/keep"] })
+      expect(await b.store.setSessionPinned(user.id, "ses_pin", true)).toEqual({ changed: false })
+    })
+
+    test("bulk archive's final mutation never archives a concurrently pinned session", async () => {
+      const { a, b, settle } = await variant.make()
+      const user = await a.store.upsertUser({ email: "race@example.test", role: "user" })
+      await Promise.all([a.store.setSessionPinned(user.id, "ses_race", true), b.store.archiveSessionIfUnpinned(user.id, "ses_race")])
+      await settle()
+      const prefs = a.store.viewPrefs(user.id)
+      expect(prefs.pinnedSessions).toEqual(["ses_race"])
+      expect(prefs.hiddenSessions).toEqual([])
+    })
+
     test("a token B has not cached yet (store.changed lost) is found in the database", async () => {
       const { a, b } = await variant.make({ isolatedBus: true })
       const { machine, token } = await a.store.addMachine("box")

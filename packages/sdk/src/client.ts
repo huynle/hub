@@ -6,6 +6,8 @@ import type {
   Approved,
   AppTokenView,
   Archived,
+  ArchiveInactivePreview,
+  ArchiveInactiveResult,
   Asked,
   CreatedAppToken,
   Decision,
@@ -31,6 +33,7 @@ import type {
   Named,
   PromptDelivery,
   Prompted,
+  Pinned,
   Replied,
   RoleClaim,
   RoleRelease,
@@ -346,6 +349,18 @@ export class HubClient {
 
   setArchived(addr: string, archived: boolean, options: CallOptions = {}): Promise<Archived> {
     return this.call("PUT", `${AGENT}/sessions/${segment(addr)}/archive`, { body: { archived }, ...signalOf(options) })
+  }
+
+  setPinned(addr: string, pinned: boolean, options: CallOptions = {}): Promise<Pinned> {
+    return this.call("PUT", `${AGENT}/sessions/${segment(addr)}/pin`, { body: { pinned }, ...signalOf(options) })
+  }
+
+  previewArchiveInactive(inactiveFor: string, limit: number, options: CallOptions = {}): Promise<ArchiveInactivePreview> {
+    return this.call("POST", `${AGENT}/sessions/archive-inactive`, { body: { preview: true, inactiveFor, limit }, ...signalOf(options) })
+  }
+
+  archiveInactive(previewToken: string, options: CallOptions = {}): Promise<ArchiveInactiveResult> {
+    return this.call("POST", `${AGENT}/sessions/archive-inactive`, { body: { previewToken, confirm: true }, ...signalOf(options) })
   }
 
   // Naming.

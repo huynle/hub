@@ -20,15 +20,17 @@ import type { ActingSwitch } from "./acting-switch"
 import { auditOf } from "./acting"
 import type { AgentAudit, AuditDecision, AuditOutcome } from "./audit"
 import { partyFromActor } from "./envelope"
-import { type AgentEvents, archiveEvent, type EventInput, namedEvent, roleEvent } from "./events"
+import { type AgentEvents, archiveEvent, type EventInput, namedEvent, pinnedEvent, roleEvent } from "./events"
 import type { Grant, Grants } from "./grants"
 import path from "node:path"
 import type { CatalogMachine, Registry, RegistryMessage } from "../registry"
 import type { Store } from "../store"
 import { Directory, type ReportedSession, type SessionSource } from "./directory"
 import { AgentError } from "./errors"
+import { ArchiveInactive, parseInactiveFor } from "./archive-inactive"
 import { slugify } from "./names"
 import { AGENT_PREFIX, type AgentContext, type AgentRoute } from "./routes"
+import type { CursorKeys } from "./event-cursor"
 
 /** What the directory reads from the Registry. */
 export interface DirectoryRegistry {
@@ -142,13 +144,14 @@ const ok = (body: unknown) => Response.json(body, { headers: NO_STORE })
 
 export interface DirectoryRoutesDeps {
   readonly directory: Directory
-  readonly store: Pick<Store, "setSessionArchived" | "audit">
+  readonly store: Pick<Store, "setSessionArchived" | "setSessionPinned" | "archiveSessionIfUnpinned" | "viewPrefs" | "agentData" | "audit">
   readonly events?: Pick<AgentEvents, "append">
   /** App role writes: the live session (its directory, for the grant's projects). */
   readonly registry?: Pick<Registry, "sessionTenant" | "session">
   readonly grants?: Pick<Grants, "usable" | "consume">
   readonly acting?: Pick<ActingSwitch, "ensureActing">
   readonly audit?: Pick<AgentAudit, "record">
+  readonly previewKeys?: CursorKeys
 }
 
 const MANAGE = { session: true, scope: "sessions:manage" } as const
@@ -191,6 +194,50 @@ export function directoryRoutes(deps: DirectoryRoutesDeps): AgentRoute[] {
   }
 
   return [
+    ...(deps.previewKeys ? [{
+      method: "POST" as const,
+      path: `${AGENT_PREFIX}/sessions/archive-inactive`,
+      allow: { scope: "sessions:manage" },
+      async handle(context: AgentContext) {
+        const inactive = new ArchiveInactive({ secret: deps.previewKeys!.active().secret })
+        const body = await readBody(context.request)
+        const prefs = store.viewPrefs(context.user.id)
+        const entries = (store.agentData(context.user.id).sessions ?? []).map((s) => ({ sessionID: s.sessionID, online: !!deps.registry?.session(s.sessionID), ...(s.lastSeen !== undefined ? { lastSeen: s.lastSeen } : {}), roles: [] }))
+        if (body.preview === true) {
+          const limit = body.limit
+          if (!Number.isInteger(limit) || Number(limit) < 1 || Number(limit) > 200) throw new AgentError("invalid", "limit must be a whole number from 1 to 200")
+          return ok(inactive.preview(context.user.id, entries, { pinned: new Set(prefs.pinnedSessions), archived: new Set(prefs.hiddenSessions), inactiveForMs: parseInactiveFor(body.inactiveFor), limit: Number(limit) }))
+        }
+        if (body.confirm !== true || typeof body.previewToken !== "string") throw new AgentError("invalid", "Use preview:true first, then confirm:true with its previewToken")
+        const open = new Set(entries.filter((s) => deps.registry?.session(s.sessionID)?.open).map((s) => s.sessionID))
+        const active = new Set(entries.filter((s) => { const v = deps.registry?.session(s.sessionID); return !!v && (v.busy || v.status.some((x) => x.state === "working" || x.state === "blocked")) }).map((s) => s.sessionID))
+        const checked = inactive.revalidate(context.user.id, body.previewToken, entries, { pinned: new Set(prefs.pinnedSessions), archived: new Set(prefs.hiddenSessions), open, active })
+        const changedIDs: string[] = []
+        const skipped = [...checked.skipped]
+        for (const sessionID of checked.candidates) {
+          const result = await store.archiveSessionIfUnpinned(context.user.id, sessionID)
+          if (result === "changed") { changedIDs.push(sessionID); await changed(context, "session.archive", sessionID, archiveEvent(sessionID, true)) }
+          else skipped.push({ sessionID, reason: result === "pinned" ? "pinned" : result === "not_found" ? "not_found" : "archived" })
+        }
+        if (changedIDs.length) await directory.sync(context.user.id)
+        return ok({ changed: changedIDs, skipped })
+      },
+    }] : []),
+    {
+      method: "PUT",
+      path: `${AGENT_PREFIX}/sessions/:addr/pin`,
+      allow: { scope: "sessions:manage" },
+      async handle(context) {
+        const body = await readBody(context.request)
+        if (flag(body, "pinned") === undefined) throw new AgentError("invalid", "pinned must be true or false")
+        const sessionID = target(directory, context, context.params.addr)
+        const pinned = body.pinned === true
+        const result = await store.setSessionPinned(context.user.id, sessionID, pinned)
+        if (!result) throw new AgentError("not_found", `No session ${context.params.addr}`)
+        if (result.changed) await changed(context, pinned ? "session.pin" : "session.unpin", sessionID, pinnedEvent(sessionID, pinned))
+        return ok({ sessionID, pinned, changed: result.changed })
+      },
+    },
     {
       method: "PUT",
       path: `${AGENT_PREFIX}/sessions/:addr/archive`,

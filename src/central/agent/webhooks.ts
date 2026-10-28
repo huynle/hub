@@ -35,6 +35,7 @@ export const WEBHOOK_OUTBOX = "webhook-outbox"
 /** Every event type a webhook can receive (phase 4: launch changes). */
 export const CANONICAL_WEBHOOK_EVENT_TYPES: readonly string[] = [
   "session.added", "session.removed", "session.changed", "session.archived", "session.named",
+  "session.pinned",
   "blocker.opened", "blocker.closed", "machine.changed", "role.claimed", "role.released",
   "message.changed", "launch.changed",
 ]
@@ -188,7 +189,7 @@ export function webhookEventScopes(patterns: readonly string[]): string[] {
   for (const pattern of patterns) for (const type of CANONICAL_WEBHOOK_EVENT_TYPES) if (matches(pattern, type)) {
     if (type === "message.changed") scopes.add("messages:read")
     else if (type === "launch.changed") scopes.add("sessions:launch")
-    else if (["session.archived", "session.named", "role.claimed", "role.released"].includes(type)) scopes.add("sessions:manage")
+    else if (["session.archived", "session.named", "session.pinned", "role.claimed", "role.released"].includes(type)) scopes.add("sessions:manage")
     else scopes.add("sessions:read")
   }
   return [...scopes]

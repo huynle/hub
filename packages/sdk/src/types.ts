@@ -148,6 +148,16 @@ export interface Archived {
   readonly changed: boolean
 }
 
+export interface Pinned {
+  readonly sessionID: string
+  readonly pinned: boolean
+  readonly changed: boolean
+}
+
+export type ArchiveSkipReason = "active" | "pinned" | "open" | "archived" | "not_found"
+export interface ArchiveInactivePreview { readonly candidates: readonly string[]; readonly previewToken: string; readonly expiresAt: number }
+export interface ArchiveInactiveResult { readonly changed: readonly string[]; readonly skipped: readonly { readonly sessionID: string; readonly reason: ArchiveSkipReason }[] }
+
 export interface Named {
   readonly sessionID: string
   readonly name: string
