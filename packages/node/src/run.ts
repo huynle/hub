@@ -79,7 +79,7 @@ export async function runNode(options: RunNodeOptions): Promise<number> {
 
   if (options.signal.aborted) return 0
   const openshell = config.openshell?.enabled ? await setupOpenShell(config, credentials, options, env, log) : undefined
-  const harnesses = detectHarnesses({ env, ...(config.harnesses ? { overrides: config.harnesses } : {}) })
+  const harnesses = detectHarnesses({ env, home, ...(config.harnesses ? { overrides: config.harnesses } : {}) })
   const runtimes: Runtime[] = [new HostRuntime({ roots: config.workspaceRoots, harnesses }), ...(openshell ? [openshell.runtime] : [])]
 
   const daemon = new NodeDaemon({
