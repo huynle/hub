@@ -162,3 +162,116 @@ jobs:
           fi
       - if: steps.check.outputs.already != 'true'
         run: npm publish --access public ${{ contains(github.ref_name, '-') && '--tag next' || '' }}
+
+  # ---------- standalone hubctl (packages/cli/src/bootstrap/release/README.md) ----------
+  # Additive: the server binaries, image and npm package above are unchanged. Enabled by the repository variable
+  # HUBCTL_RELEASE=true once the release key exists and its public trust root is checked in
+  # (packages/cli/src/bootstrap/release/trust-root.json). hubctl is published only after the existing gates
+  # (test → binaries → release) pass, and only with a manifest that verifies against the embedded trust root.
+  hubctl:
+    needs: test
+    if: vars.HUBCTL_RELEASE == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci --no-audit --no-fund
+      # Every supported target (contracts §3.1; never Windows or musl), cross-compiled from Linux, each with the
+      # checked-in trust root embedded. Fails when there is none.
+      - run: scripts/build-hubctl.sh --require-trust-root
+      - name: Smoke test (no bun, node or repository on PATH)
+        run: |
+          smoke="$(mktemp -d)"
+          cp dist/hubctl-linux-x64 "$smoke/hubctl"
+          ln -s hubctl "$smoke/hub"
+          cd "$smoke"
+          version="$(env -i PATH=/nonexistent HOME="$smoke" ./hubctl --version)"
+          expected="$(node -p "require('$GITHUB_WORKSPACE/packages/cli/package.json').version")"
+          if [ "$version" != "$expected" ]; then
+            echo "::error::hubctl --version printed '$version', expected '$expected'"
+            exit 1
+          fi
+          env -i PATH=/nonexistent HOME="$smoke" ./hubctl --help > hubctl-help.txt
+          env -i PATH=/nonexistent HOME="$smoke" ./hub --help > hub-help.txt
+          cmp hubctl-help.txt hub-help.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hubctl-binaries
+          path: |
+            dist/hubctl-*
+            dist/HUBCTL_SHA256SUMS
+          if-no-files-found: error
+
+  hubctl-sign:
+    # The only job that can read the release signing key (decision Q5): an environment secret of
+    # `hubctl-release`. It installs no npm dependencies, so no third-party code runs next to the key.
+    needs: hubctl
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: hubctl-release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.5
+      - uses: actions/download-artifact@v4
+        with:
+          name: hubctl-binaries
+          path: dist
+      # Re-downloads and digests every reviewed harness pin; refuses on any mismatch.
+      - name: Manifest
+        env:
+          MINIMUM_VERSION: ${{ vars.HUBCTL_MINIMUM_VERSION || '0.0.0' }}
+        run: |
+          issued="$(( $(git log -1 --format=%ct) * 1000 ))"
+          bun scripts/hubctl-release.ts manifest --dist dist --minimum-version "$MINIMUM_VERSION" --issued-at "$issued" --out "$RUNNER_TEMP/hubctl-manifest.unsigned.json"
+      - name: Sign
+        env:
+          HUB_RELEASE_SIGNING_KEY: ${{ secrets.HUB_RELEASE_SIGNING_KEY }}
+        run: bun scripts/hubctl-release.ts sign --in "$RUNNER_TEMP/hubctl-manifest.unsigned.json" --out dist/hubctl-manifest.json
+      - name: Verify every artifact against the embedded trust root
+        run: bun scripts/hubctl-release.ts verify --manifest dist/hubctl-manifest.json --dist dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hubctl-release
+          path: |
+            dist/hubctl-*
+            dist/HUBCTL_SHA256SUMS
+          if-no-files-found: error
+
+  hubctl-publish:
+    # After the existing release job (so after test and the server binaries) and the verified signature.
+    needs: [release, hubctl-sign]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.5
+      - uses: actions/download-artifact@v4
+        with:
+          name: hubctl-release
+          path: dist
+      # The files about to be published, checked again against the trust root the binaries embed.
+      - run: bun scripts/hubctl-release.ts verify --manifest dist/hubctl-manifest.json --dist dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/hubctl-*
+            dist/HUBCTL_SHA256SUMS
+          prerelease: ${{ contains(github.ref_name, '-') }}
