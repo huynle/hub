@@ -7,6 +7,7 @@ import type { ActionExecutor } from "../../transaction/executor.ts"
 import { claudeVerifyExecutor } from "./verify.ts"
 
 export * from "./adapter.ts"
+export * from "./node.ts"
 export * from "./openpgp.ts"
 export * from "./ports.ts"
 export * from "./source.ts"
