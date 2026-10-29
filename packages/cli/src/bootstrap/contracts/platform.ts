@@ -16,14 +16,18 @@ export interface SupportedTarget {
   readonly libc: Libc
   /** The per-user service manager services are installed for on this target. */
   readonly serviceManager: ServiceManager
-  /** The `bun build --compile --target` the release builds this target's hubctl with. */
+  /**
+   * The `bun build --compile --target` the release builds this target's hubctl with. x64 targets use Bun's
+   * `-baseline` runtime: the default x64 runtime needs AVX2 and dies with SIGILL (exit 132) on CPUs without it,
+   * including QEMU's default kvm64 model, before hubctl can even print --version.
+   */
   readonly bunTarget: string
 }
 
 export const SUPPORTED_TARGETS: readonly SupportedTarget[] = Object.freeze([
   { target: "darwin-arm64", platform: "darwin", arch: "arm64", libc: "none", serviceManager: "launchd", bunTarget: "bun-darwin-arm64" },
-  { target: "darwin-x64", platform: "darwin", arch: "x64", libc: "none", serviceManager: "launchd", bunTarget: "bun-darwin-x64" },
-  { target: "linux-x64", platform: "linux", arch: "x64", libc: "glibc", serviceManager: "systemd-user", bunTarget: "bun-linux-x64" },
+  { target: "darwin-x64", platform: "darwin", arch: "x64", libc: "none", serviceManager: "launchd", bunTarget: "bun-darwin-x64-baseline" },
+  { target: "linux-x64", platform: "linux", arch: "x64", libc: "glibc", serviceManager: "systemd-user", bunTarget: "bun-linux-x64-baseline" },
   { target: "linux-arm64", platform: "linux", arch: "arm64", libc: "glibc", serviceManager: "systemd-user", bunTarget: "bun-linux-arm64" },
 ] as const)
 

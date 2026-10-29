@@ -71,9 +71,15 @@ callers and tests match on the code, never on the message.
 | Target | Platform | Arch | libc | Services | Bun build target |
 |---|---|---|---|---|---|
 | `darwin-arm64` | macOS | arm64 | — | launchd (user agent) | `bun-darwin-arm64` |
-| `darwin-x64` | macOS | x64 | — | launchd (user agent) | `bun-darwin-x64` |
-| `linux-x64` | Linux | x64 | glibc | systemd `--user` | `bun-linux-x64` |
+| `darwin-x64` | macOS | x64 | — | launchd (user agent) | `bun-darwin-x64-baseline` |
+| `linux-x64` | Linux | x64 | glibc | systemd `--user` | `bun-linux-x64-baseline` |
 | `linux-arm64` | Linux | arm64 | glibc | systemd `--user` | `bun-linux-arm64` |
+
+The x64 targets build against Bun's `-baseline` runtime. The default x64 runtime requires AVX2 and dies with
+`SIGILL` (exit 132) on CPUs without it, before hubctl can print `--version`: older Intel/AMD hosts and QEMU guests
+with the default `kvm64`/`qemu64` CPU model. The artifact names stay `hubctl-<target>`. Harness pins for x64 targets
+should likewise use the upstream baseline builds where one is published (for OpenCode,
+`opencode-<os>-x64-baseline.*`; see `packages/cli/src/bootstrap/adapters/opencode/README.md`).
 
 Explicitly unsupported, with the reason reported: `windows-x64`, `windows-arm64` (Windows bootstrap is out of
 scope), `linux-x64-musl`, `linux-arm64-musl` (no musl build). Any other target fails with `unsupported_platform`.

@@ -73,6 +73,15 @@ describe("build", () => {
     expect(hubctlBuildArgv("darwin-x64", { bun: "bun", outdir: "d" }).some((w) => w.startsWith(TRUST_ROOT_DEFINE))).toBe(false)
   })
 
+  test("x64 targets compile against Bun's baseline runtime (no AVX2: older CPUs, QEMU kvm64)", () => {
+    const words = (target: string) => hubctlBuildArgv(target, { bun: "bun", outdir: "d" })
+    expect(words("linux-x64")).toContain("--target=bun-linux-x64-baseline")
+    expect(words("darwin-x64")).toContain("--target=bun-darwin-x64-baseline")
+    expect(words("linux-x64").at(-1)).toBe(path.join("d", "hubctl-linux-x64"))
+    expect(words("darwin-x64").at(-1)).toBe(path.join("d", "hubctl-darwin-x64"))
+    for (const t of SUPPORTED_TARGETS) if (t.arch === "x64") expect(t.bunTarget).toEndWith("-baseline")
+  })
+
   test("builds every supported target by default (never Windows or musl)", async () => {
     const h = harness()
     expect(await runRelease(["build", "--outdir", "/tmp/out", "--trust-root", "/nonexistent/root.json"], h.io)).toBe(0)
