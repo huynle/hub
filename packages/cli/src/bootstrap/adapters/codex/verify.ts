@@ -24,6 +24,7 @@ import { spawnStdioChannel } from "../../../../../codex/src/stdio.ts"
 import {
   compareVersions,
   executionContextOf,
+  harnessReadiness,
   isHarnessReady,
   isSecretValue,
   PROBE_MAX_AGE_MS,
@@ -37,6 +38,7 @@ import {
 } from "../../contracts/index.ts"
 import type { ActionExecutor } from "../../transaction/executor.ts"
 import { txFail, txOk } from "../../transaction/result.ts"
+import { passesAsPending, type ReadinessGate } from "../readiness.ts"
 
 export interface ProbeResult {
   /** null: it could not be started (or was killed). */
@@ -235,13 +237,19 @@ export function codexBinaryPath(snapshot: DiscoverySnapshot, options: { readonly
   return shim?.resolvesTo ?? found.path
 }
 
-/** The verify-harness executor for Codex: runs verify and refuses (harness_not_ready) unless Codex is advertised ready. */
-export function codexVerifyExecutor(options: {
-  readonly verify: (ctx: AdapterContext) => Promise<HarnessVerification>
-  readonly context: () => AdapterContext
-  /** Receives each verification (the capability advertisement, the apply report). */
-  readonly onVerified?: (verification: HarnessVerification) => void
-}): ActionExecutor<"verify-harness"> {
+/**
+ * The verify-harness executor for Codex: passes when Codex is advertised ready, or (without requireReady) when it
+ * only waits on the user (contract v1.2); refuses (harness_not_ready) otherwise. The app-server (api-health) is
+ * always required: it is an integrity probe.
+ */
+export function codexVerifyExecutor(
+  options: {
+    readonly verify: (ctx: AdapterContext) => Promise<HarnessVerification>
+    readonly context: () => AdapterContext
+    /** Receives each verification (the capability advertisement, the apply report). */
+    readonly onVerified?: (verification: HarnessVerification) => void
+  } & ReadinessGate,
+): ActionExecutor<"verify-harness"> {
   const notCodex = (harness: string) => txFail("internal", `the Codex verifier cannot verify ${harness}`)
   return {
     kind: "verify-harness",
@@ -256,7 +264,10 @@ export function codexVerifyExecutor(options: {
               const ctx = options.context()
               const v = await options.verify(ctx)
               options.onVerified?.(v)
+              const readiness = harnessReadiness(v, ctx.now(), [...action.probes, ...(action.probes.includes("api-health") ? [] : ["api-health" as const])])
+              options.onReadiness?.(structuredClone(readiness))
               if (codexCapabilities(v, ctx.now()).ready) return txOk(undefined)
+              if (v.harness === "codex" && passesAsPending(readiness, options)) return txOk(undefined)
               const failing = v.probes.filter((x) => !x.ok).map((x) => `${x.kind}: ${x.detail ?? "failed"}`)
               return txFail("harness_not_ready", `Codex is not ready (${failing.join("; ") || "a probe is missing or stale"})`)
             },

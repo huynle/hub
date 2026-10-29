@@ -9,10 +9,14 @@
 //                        at apply (config.ts) and spliced in by the lossless JSONC merge; only while the file is as
 //                        previewed (precondition); a foreign "hub" server is a conflict. Journal class config: backed up,
 //                        so a rollback restores it unless the user changed it since.
-//   verify-harness       runs the adapter's real probes; anything short of isHarnessReady fails the apply
-//                        (harness_not_ready), which rolls the transaction back.
+//   verify-harness       runs the adapter's real probes and classifies them (contract v1.2, harnessReadiness): an
+//                        integrity failure (the binary is missing, does not run, is not the pinned version) fails
+//                        the apply (harness_not_ready), which rolls the transaction back; with requireReady (the
+//                        default) so does anything short of isHarnessReady; without it, a harness that only waits on
+//                        the user (provider login, spoke) passes as "installed, not ready" (onReadiness).
 import {
   checkHarnessPin,
+  harnessReadiness,
   isHarnessReady,
   PROBE_MAX_AGE_MS,
   type AdapterContext,
@@ -27,6 +31,7 @@ import type { HarnessSource } from "../../transaction/builtin.ts"
 import type { ActionExecutor, ExecutorMap, StepContext } from "../../transaction/executor.ts"
 import { mergeConfigText } from "../../transaction/json-merge.ts"
 import { txFail, txOk } from "../../transaction/result.ts"
+import { passesAsPending, type ReadinessGate } from "../readiness.ts"
 import { unpackOpencodeArchive } from "./archive.ts"
 import { mcpServerSets } from "./config.ts"
 import { checkAuthority, DEFAULT_AUTHORITY } from "./plan.ts"
@@ -147,13 +152,16 @@ export function opencodeMcpExecutor(options: { readonly authority?: PathRef } = 
   }
 }
 
-/** verify-harness for OpenCode: the adapter's real probes must make it ready (isHarnessReady), else the apply fails. */
-export function opencodeVerifyExecutor(options: {
-  readonly adapter: HarnessAdapter
-  readonly context: () => AdapterContext
-  /** Sees every verification (for the apply report); cannot change it. */
-  readonly onVerification?: (verification: HarnessVerification) => void
-}): ActionExecutor<"verify-harness"> {
+
+/** verify-harness for OpenCode: ready (isHarnessReady), or only waiting on the user without requireReady; else it fails. */
+export function opencodeVerifyExecutor(
+  options: {
+    readonly adapter: HarnessAdapter
+    readonly context: () => AdapterContext
+    /** Sees every verification (for the apply report); cannot change it. */
+    readonly onVerification?: (verification: HarnessVerification) => void
+  } & ReadinessGate,
+): ActionExecutor<"verify-harness"> {
   return {
     kind: "verify-harness",
     plan: () => ({ class: "external" }),
@@ -166,9 +174,12 @@ export function opencodeVerifyExecutor(options: {
           const verification = await options.adapter.verify(context)
           options.onVerification?.(structuredClone(verification))
           const now = context.now()
+          const readiness = harnessReadiness(verification, now, action.probes)
+          options.onReadiness?.(structuredClone(readiness))
           // Every required probe (isHarnessReady) and every probe the action asks for: present, passing, fresh.
           const missing = action.probes.filter((kind) => !passing(verification, kind, now))
           if (verification.harness === "opencode" && isHarnessReady(verification, now) && missing.length === 0) return txOk(undefined)
+          if (verification.harness === "opencode" && passesAsPending(readiness, options)) return txOk(undefined)
           const failed = verification.probes.filter((p) => !p.ok)
           const why = [
             ...failed.map((p) => `${p.kind}${p.detail ? ` (${p.detail})` : ""}`),
@@ -195,7 +206,7 @@ export function opencodeExecutors(options: {
   readonly context: () => AdapterContext
   readonly authority?: PathRef
   readonly onVerification?: (verification: HarnessVerification) => void
-}): Pick<ExecutorMap, "register-mcp-server" | "verify-harness"> {
+} & ReadinessGate): Pick<ExecutorMap, "register-mcp-server" | "verify-harness"> {
   return {
     "register-mcp-server": opencodeMcpExecutor(options.authority ? { authority: options.authority } : {}),
     "verify-harness": opencodeVerifyExecutor(options),
