@@ -1,13 +1,12 @@
 // Streaming readers for the release archives harness adapters unpack (OpenCode's tar.gz and zip, Codex's tar.gz),
-// so an archive and what it unpacks to are never in memory whole: gzip and raw deflate through node:zlib streams,
-// tar parsed block by block from the inflated stream, zip members located through the central directory and
-// inflated by offset. Each reader only reports what the archive says; the adapters decide what is acceptable
+// so an archive and what it unpacks to are never in memory whole: gzip and raw deflate through hub's own streaming
+// decoder (inflate.ts), tar parsed block by block from the inflated stream, zip members located through the central
+// directory and inflated by offset. Each reader only reports what the archive says; the adapters decide what is acceptable
 // (names, types, layout) before a member's body is written anywhere. Limits are enforced while streaming: the
 // inflated total (a gzip bomb stops at `maxBytes`), and a zip member never inflates past its recorded size.
-// No dependency beyond node:zlib.
-import { Readable } from "node:stream"
-import { createGunzip, createInflateRaw } from "node:zlib"
+// No dependency.
 import type { ByteReader } from "../transaction/stream.ts"
+import { gunzipChunks, InflateError, inflateRawChunks } from "./inflate.ts"
 
 /** Why an archive was refused (the adapters phrase it). */
 export class ArchiveError extends Error {
@@ -49,7 +48,7 @@ class Pull {
   private at = 0
   private total = 0
   constructor(
-    private readonly source: AsyncIterator<Uint8Array>,
+    private readonly source: Iterator<Uint8Array>,
     private readonly maxBytes: number,
     private readonly overLimit: string,
     private readonly damaged: string,
@@ -58,9 +57,10 @@ class Pull {
   private async more(): Promise<boolean> {
     let next: IteratorResult<Uint8Array>
     try {
-      next = await this.source.next()
-    } catch {
-      throw new ArchiveError(this.damaged)
+      next = this.source.next()
+    } catch (error) {
+      if (error instanceof InflateError) throw new ArchiveError(`${this.damaged} (${error.message})`)
+      throw error
     }
     if (next.done) return false
     this.total += next.value.byteLength
@@ -129,8 +129,7 @@ export interface TarMember {
  * `maxBytes` bounds the inflated stream, and the limit is enforced as it inflates.
  */
 export async function readTarGz(reader: ByteReader, options: { readonly maxBytes: number }, visit: (member: TarMember) => Promise<void>): Promise<void> {
-  const gunzip = Readable.from(reader.stream()).pipe(createGunzip())
-  const iterator = gunzip[Symbol.asyncIterator]() as AsyncIterator<Uint8Array>
+  const iterator = gunzipChunks(reader)
   const pull = new Pull(iterator, options.maxBytes, `it inflates beyond ${options.maxBytes} bytes`, "it is not a gzip stream (or it is damaged)")
   try {
     for (;;) {
@@ -169,8 +168,7 @@ export async function readTarGz(reader: ByteReader, options: { readonly maxBytes
       await pull.skip((BLOCK - (size % BLOCK)) % BLOCK)
     }
   } finally {
-    await iterator.return?.().catch(() => {})
-    gunzip.destroy()
+    iterator.return(undefined)
   }
 }
 
@@ -253,35 +251,26 @@ export async function* zipMemberData(reader: ByteReader, member: ZipMember): Asy
   if (header.byteLength < 30 || hv.getUint32(0, true) !== 0x04034b50) throw new ArchiveError("a damaged zip member")
   const start = member.local + 30 + hv.getUint16(26, true) + hv.getUint16(28, true)
   if (start + member.compressedSize > reader.size) throw new ArchiveError("a truncated zip")
-  const raw = reader.stream(start, start + member.compressedSize)
   let produced = 0
   const wrongSize = () => new ArchiveError(`${member.name} does not have its recorded size`)
   if (member.method === 0) {
-    for await (const chunk of raw) {
+    for await (const chunk of reader.stream(start, start + member.compressedSize)) {
       produced += chunk.byteLength
       yield chunk
     }
     if (produced !== member.size) throw wrongSize()
     return
   }
-  const inflate = Readable.from(raw).pipe(createInflateRaw())
-  const iterator = inflate[Symbol.asyncIterator]() as AsyncIterator<Uint8Array>
   try {
-    for (;;) {
-      let next: IteratorResult<Uint8Array>
-      try {
-        next = await iterator.next()
-      } catch {
-        throw new ArchiveError(`${member.name} does not decompress`)
-      }
-      if (next.done) break
-      produced += next.value.byteLength
+    for (const chunk of inflateRawChunks(reader, start, start + member.compressedSize).chunks) {
+      produced += chunk.byteLength
       if (produced > member.size) throw wrongSize()
-      yield next.value
+      yield chunk
     }
-  } finally {
-    await iterator.return?.().catch(() => {})
-    inflate.destroy()
+  } catch (error) {
+    if (error instanceof InflateError) throw new ArchiveError(`${member.name} does not decompress (${error.message})`)
+    throw error
   }
   if (produced !== member.size) throw wrongSize()
 }
+
