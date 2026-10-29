@@ -3,12 +3,15 @@
 //
 //   nodeRunner       spawn(file, args) with shell: false, exactly the given environment, stdin closed, stderr
 //                    dropped, stdout capped, and a hard timeout (SIGKILL). The only process starter here.
-//   httpsDownloader  https only (also after redirects), non-2xx refused, the body capped (DownloadTooLarge).
-//   tempScratch      a 0700 directory under the system temp dir with one 0600 file, removed afterwards.
+//   httpsDownloader  https only (also after redirects), non-2xx refused, the body streamed and capped
+//                    (DownloadTooLarge, as soon as it runs past the limit).
+//   tempScratch      a 0700 directory under the system temp dir with one 0600 file (written as its content
+//                    streams), removed afterwards.
 import { spawn } from "node:child_process"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { closeSync, mkdtempSync, openSync, rmSync, writeSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { chunksOf, responseChunks } from "../../transaction/stream.ts"
 import { DownloadTooLarge, type Downloader, type ProbeRunner, type RunResult, type Scratch } from "./ports.ts"
 
 export function nodeRunner(): ProbeRunner {
@@ -70,38 +73,23 @@ export function httpsDownloader(options: DownloaderOptions = {}): Downloader {
       if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`)
       const declared = Number(response.headers.get("content-length") ?? NaN)
       if (Number.isFinite(declared) && declared > maxBytes) throw new DownloadTooLarge(url, maxBytes)
-      const reader = response.body?.getReader()
-      if (!reader) return new Uint8Array()
-      const chunks: Uint8Array[] = []
-      let size = 0
-      for (;;) {
-        const { done, value } = await reader.read()
-        if (done) break
-        size += value.byteLength
-        if (size > maxBytes) {
-          await reader.cancel().catch(() => {})
-          throw new DownloadTooLarge(url, maxBytes)
-        }
-        chunks.push(value)
-      }
-      const out = new Uint8Array(size)
-      let at = 0
-      for (const c of chunks) {
-        out.set(c, at)
-        at += c.byteLength
-      }
-      return out
+      return responseChunks(response, maxBytes, () => new DownloadTooLarge(url, maxBytes))
     },
   }
 }
 
 export function tempScratch(base: string = tmpdir()): Scratch {
   return {
-    async withFile(bytes, use) {
+    async withFile(content, use) {
       const dir = mkdtempSync(join(base, "hubctl-claude-"))
       try {
         const file = join(dir, "claude")
-        writeFileSync(file, bytes, { mode: 0o600, flag: "wx" })
+        const fd = openSync(file, "wx", 0o600)
+        try {
+          for await (const chunk of chunksOf(content)) for (let at = 0; at < chunk.byteLength; ) at += writeSync(fd, chunk, at)
+        } finally {
+          closeSync(fd)
+        }
         return await use(file)
       } finally {
         rmSync(dir, { recursive: true, force: true })

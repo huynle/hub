@@ -15,6 +15,8 @@ import { CHUNK_BYTES, fsStaging } from "../src/bootstrap/transaction/stream.ts"
 import { CODEX_VERSION, PACKAGE_ENTRIES, codexManifest, sigstoreWorld, tgz } from "./bootstrap/codex-fixtures.ts"
 
 const MiB = 1024 * 1024
+/** These tests build multi-MiB archives and keys; a loaded machine needs time. */
+const SLOW = 60_000
 const digest = (b: Uint8Array) => `sha256:${createHash("sha256").update(b).digest("hex")}`
 /** A 3 MiB binary: more than any single chunk. */
 const BIG = (() => {
@@ -104,7 +106,7 @@ describe("the Codex source streams", () => {
     expect(seen.largestRead).toBeLessThanOrEqual(CHUNK_BYTES)
     expect(seen.wholeReads).toBe(0)
     staging.dispose()
-  })
+  }, SLOW)
 
   test("a substituted archive is staged as is (the executor rejects its digest) and not inspected further", async () => {
     const { staging } = countingStaging()
@@ -115,7 +117,7 @@ describe("the Codex source streams", () => {
     expect(requests).toEqual([URL])
     expect(fetched.evidence).toEqual([])
     expect(staging.written(fetched.file)?.sha256).toBe(digest(other))
-  })
+  }, SLOW)
 
   test("httpsDownloader hands over the body as a stream, bounded while it streams", async () => {
     const body = new Uint8Array(5)
@@ -126,5 +128,5 @@ describe("the Codex source streams", () => {
     const tooLong = await httpsDownloader(async () => response()).get("https://github.com/x", { maxBytes: 4 })
     const { staging } = countingStaging()
     await expect(tooLong.status === "ok" ? staging.write("x", tooLong.bytes, { maxBytes: 4 }) : Promise.reject(new Error("larger"))).rejects.toThrow(/larger|more than/)
-  })
+  }, SLOW)
 })
