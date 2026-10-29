@@ -71,9 +71,15 @@ callers and tests match on the code, never on the message.
 | Target | Platform | Arch | libc | Services | Bun build target |
 |---|---|---|---|---|---|
 | `darwin-arm64` | macOS | arm64 | — | launchd (user agent) | `bun-darwin-arm64` |
-| `darwin-x64` | macOS | x64 | — | launchd (user agent) | `bun-darwin-x64` |
-| `linux-x64` | Linux | x64 | glibc | systemd `--user` | `bun-linux-x64` |
+| `darwin-x64` | macOS | x64 | — | launchd (user agent) | `bun-darwin-x64-baseline` |
+| `linux-x64` | Linux | x64 | glibc | systemd `--user` | `bun-linux-x64-baseline` |
 | `linux-arm64` | Linux | arm64 | glibc | systemd `--user` | `bun-linux-arm64` |
+
+The x64 targets build against Bun's `-baseline` runtime. The default x64 runtime requires AVX2 and dies with
+`SIGILL` (exit 132) on CPUs without it, before hubctl can print `--version`: older Intel/AMD hosts and QEMU guests
+with the default `kvm64`/`qemu64` CPU model. The artifact names stay `hubctl-<target>`. Harness pins for x64 targets
+should likewise use the upstream baseline builds where one is published (for OpenCode,
+`opencode-<os>-x64-baseline.*`; see `packages/cli/src/bootstrap/adapters/opencode/README.md`).
 
 Explicitly unsupported, with the reason reported: `windows-x64`, `windows-arm64` (Windows bootstrap is out of
 scope), `linux-x64-musl`, `linux-arm64-musl` (no musl build). Any other target fails with `unsupported_platform`.
@@ -197,6 +203,9 @@ nonce}`, with a lifetime of at most 15 minutes and a nonce of 16–128 url-safe 
 5. The nonce is not in any earlier journal (`preview_replayed`).
 6. Apply **rediscovers and re-plans**. The fresh snapshot digest and the fresh plan digest must both equal the
    token's (`preview_stale`).
+
+A refused apply writes nothing, not even the applier's state directories under `state:hub/bootstrap`: the engine
+runs these checks (and the consent checks) once before it takes the apply lock, and again under the lock.
 
 The token is not an authority: apply only compares it against values it just computed itself. A forged token can
 at most cause a plan the user could have previewed anyway to be applied, and even then only on this host and only

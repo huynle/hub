@@ -4,15 +4,19 @@
 //   build [TARGET…] [--outdir dist] [--trust-root FILE] [--require-trust-root]
 //       Compiles packages/cli/src/main.ts into dist/hubctl-<target> for the supported targets (all by default),
 //       embedding the trust root (public keys only). --require-trust-root refuses a build without one.
-//   manifest --minimum-version V --out FILE [--dist dist] [--pins FILE] [--release V] [--issued-at MS]
+//   manifest --minimum-version V --out FILE [--dist dist] [--pins FILE] [--release V] [--issued-at MS] [--targets T,…]
 //       Writes the unsigned manifest body: every dist/hubctl-<target> with its size and sha256, and the reviewed
 //       harness pins after re-downloading and digesting every pinned file.
-//   sign --in FILE --out FILE [--trust-root FILE] [--key-id ID]
+//   sign --in FILE --out FILE [--trust-root FILE] [--key-id ID] [--targets T,…]
 //       Signs the body with the key in $HUB_RELEASE_SIGNING_KEY (never printed) and verifies the result against
 //       the trust root the binaries embed. Writes nothing unless it verifies.
-//   verify --manifest FILE [--trust-root FILE] (--dist DIR | --target T --file BIN)
+//   verify --manifest FILE [--trust-root FILE] (--dist DIR [--targets T,…] | --target T --file BIN)
 //          [--installed V --installed-sha256 D] [--floor V] [--allow-downgrade]
 //       Runs the installer's checks (verify.ts) on one or every artifact.
+//
+// --targets (comma-separated) makes a partial release: exactly the listed targets, each still required and checked
+// in full. Without it every supported target is required. sign needs the same list to sign a partial body, so a
+// partial release is never signed by accident.
 //   trust-root [--key-id ID]
 //       Prints the v1 trust root (public key only) for the key in $HUB_RELEASE_SIGNING_KEY, for the maintainer
 //       who sets up the release key (README.md next to this file).
@@ -139,6 +143,20 @@ function signingKey(io: ReleaseIo) {
   }
 }
 
+/** The --targets list: supported targets, each named once; undefined when not given (every supported target). */
+function targetsArg(p: Parsed): string[] | undefined {
+  const text = p.values.get("--targets")
+  if (text === undefined) return undefined
+  const list = text.split(",").map((t) => t.trim())
+  if (list.some((t) => t === "")) throw new Usage("--targets takes a comma-separated list of targets (e.g. linux-x64,darwin-arm64)")
+  for (const target of list) {
+    const r = checkTarget(target)
+    if (!r.ok) throw new Usage(r.issues[0]!.message)
+  }
+  if (new Set(list).size !== list.length) throw new Usage("--targets names a target twice")
+  return SUPPORTED_TARGETS.map((t) => t.target).filter((t) => list.includes(t))
+}
+
 /** The `bun build --compile` words for one target's hubctl. */
 export function hubctlBuildArgv(target: string, options: { readonly bun: string; readonly outdir: string; readonly root?: TrustRoot }): string[] {
   const t = supportedTarget(target)
@@ -182,7 +200,9 @@ async function build(argv: readonly string[], io: ReleaseIo): Promise<number> {
 }
 
 async function manifest(argv: readonly string[], io: ReleaseIo): Promise<number> {
-  const p = parseArgs(argv, ["--dist", "--pins", "--minimum-version", "--release", "--issued-at", "--out"], [])
+  const p = parseArgs(argv, ["--dist", "--pins", "--minimum-version", "--release", "--issued-at", "--out", "--targets"], [])
+  const listed = targetsArg(p)
+  const targets = listed ?? SUPPORTED_TARGETS.map((t) => t.target)
   const minimumVersion = required(p, "--minimum-version")
   const out = path.resolve(io.cwd, required(p, "--out"))
   const dist = path.resolve(io.cwd, p.values.get("--dist") ?? "dist")
@@ -190,26 +210,30 @@ async function manifest(argv: readonly string[], io: ReleaseIo): Promise<number>
   const issuedAt = issuedText === undefined ? io.now() : Number(issuedText)
   if (!Number.isSafeInteger(issuedAt) || issuedAt < 0) throw new Usage("--issued-at takes milliseconds since the epoch")
   const pins = unwrap(validatePinList(readJSON(path.resolve(io.cwd, p.values.get("--pins") ?? PIN_LIST_FILE), "pin list")), "the pin list is invalid")
-  const artifacts = SUPPORTED_TARGETS.map((t) => {
-    const file = `hubctl-${t.target}`
+  const artifacts = targets.map((target) => {
+    const file = `hubctl-${target}`
     let bytes: Uint8Array
     try {
       bytes = readFileSync(path.join(dist, file))
     } catch {
-      throw new Failure(`missing ${path.join(dist, file)}: build every supported target first`, EXIT_OTHER)
+      throw new Failure(`missing ${path.join(dist, file)}: build ${listed ? "every listed target" : "every supported target (or name a subset with --targets)"} first`, EXIT_OTHER)
     }
-    return { target: t.target, file, ...digestBytes(bytes) }
+    return { target, file, ...digestBytes(bytes) }
   })
   io.stderr(`re-downloading ${pins.pins.length} pinned harness file(s)\n`)
   const harnesses = unwrap(await verifyPinDownloads(pins, io.download), "a pinned harness file does not match its pin")
-  const body = unwrap(buildManifestBody({ release: p.values.get("--release") ?? HUBCTL_VERSION, minimumVersion, issuedAt, artifacts, harnesses }), "the manifest is invalid")
+  const body = unwrap(
+    buildManifestBody({ release: p.values.get("--release") ?? HUBCTL_VERSION, minimumVersion, issuedAt, artifacts, harnesses, ...(listed ? { targets: listed } : {}) }),
+    "the manifest is invalid",
+  )
   writeFileSync(out, `${canonicalJSON(body)}\n`)
-  io.stdout(`${out}: hubctl ${body.release} (${body.channel}), ${body.artifacts.length} artifacts, ${body.harnesses.length} harness pins\n`)
+  io.stdout(`${out}: hubctl ${body.release} (${body.channel}), ${body.artifacts.length} artifacts (${body.artifacts.map((a) => a.target).join(", ")}), ${body.harnesses.length} harness pins\n`)
   return 0
 }
 
 async function sign(argv: readonly string[], io: ReleaseIo): Promise<number> {
-  const p = parseArgs(argv, ["--in", "--out", "--trust-root", "--key-id"], [])
+  const p = parseArgs(argv, ["--in", "--out", "--trust-root", "--key-id", "--targets"], [])
+  const listed = targetsArg(p)
   const input = path.resolve(io.cwd, required(p, "--in"))
   const out = path.resolve(io.cwd, required(p, "--out"))
   const root = loadTrustRoot(path.resolve(io.cwd, p.values.get("--trust-root") ?? TRUST_ROOT_FILE))
@@ -222,8 +246,9 @@ async function sign(argv: readonly string[], io: ReleaseIo): Promise<number> {
       issuedAt: body.issuedAt as number,
       artifacts: body.artifacts as never,
       harnesses: body.harnesses as never,
+      ...(listed ? { targets: listed } : {}),
     }),
-    "the manifest body is invalid",
+    "the manifest body is invalid (a partial release needs --targets naming its targets)",
   )
   if (canonicalJSON(rebuilt) !== canonicalJSON(body)) throw new Failure(`${input} is not a manifest body as \`manifest\` writes it`, EXIT_OTHER)
   const privateKey = signingKey(io)
@@ -236,12 +261,14 @@ async function sign(argv: readonly string[], io: ReleaseIo): Promise<number> {
 }
 
 async function verify(argv: readonly string[], io: ReleaseIo): Promise<number> {
-  const p = parseArgs(argv, ["--manifest", "--trust-root", "--dist", "--target", "--file", "--installed", "--installed-sha256", "--floor"], ["--allow-downgrade"])
+  const p = parseArgs(argv, ["--manifest", "--trust-root", "--dist", "--target", "--file", "--installed", "--installed-sha256", "--floor", "--targets"], ["--allow-downgrade"])
+  const listed = targetsArg(p)
   const root = loadTrustRoot(path.resolve(io.cwd, p.values.get("--trust-root") ?? TRUST_ROOT_FILE))
   const document = readJSON(path.resolve(io.cwd, required(p, "--manifest")), "manifest")
   const dist = p.values.get("--dist")
+  if (listed && !dist) throw new Usage("--targets goes with --dist")
   const jobs: { target: string; file: string }[] = dist
-    ? SUPPORTED_TARGETS.map((t) => ({ target: t.target, file: path.resolve(io.cwd, dist, `hubctl-${t.target}`) }))
+    ? (listed ?? SUPPORTED_TARGETS.map((t) => t.target)).map((target) => ({ target, file: path.resolve(io.cwd, dist, `hubctl-${target}`) }))
     : [{ target: required(p, "--target"), file: path.resolve(io.cwd, required(p, "--file")) }]
   const installedVersion = p.values.get("--installed")
   const installedSha = p.values.get("--installed-sha256")

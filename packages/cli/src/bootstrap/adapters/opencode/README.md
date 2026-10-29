@@ -76,9 +76,14 @@ modules. Every capability is injected.
 | Target | Asset | Format |
 |---|---|---|
 | `darwin-arm64` | `opencode-darwin-arm64.zip` | zip (deflate) |
-| `darwin-x64` | `opencode-darwin-x64.zip` (the `-baseline` build is for CPUs without AVX2; see the open questions) | zip (deflate) |
-| `linux-x64` (glibc) | `opencode-linux-x64.tar.gz` | tar.gz |
+| `darwin-x64` | `opencode-darwin-x64-baseline.zip` | zip (deflate) |
+| `linux-x64` (glibc) | `opencode-linux-x64-baseline.tar.gz` | tar.gz |
 | `linux-arm64` (glibc) | `opencode-linux-arm64.tar.gz` | tar.gz |
+
+**Use the `-baseline` assets on x64.** The non-baseline x64 builds require AVX2 and die with `SIGILL` (exit 132)
+on CPUs without it: older Intel/AMD hosts and QEMU guests with the default `kvm64` CPU model. hubctl itself is built
+for the same baseline (`bun-<os>-x64-baseline`, contracts §3.1), so a host that runs hubctl can run the harness it
+installs. The baseline build runs on AVX2 CPUs too, at a small speed cost.
 
 The musl and Windows assets are out of scope (decision Q7, §3.1). The URL is
 `https://github.com/anomalyco/opencode/releases/download/v<version>/<asset>`. `evidence` is always `[]`.
@@ -102,7 +107,8 @@ The musl and Windows assets are out of scope (decision Q7, §3.1). The URL is
 }
 ```
 
-Repeat the entry for `darwin-x64` (`opencode-darwin-x64.zip`), `linux-x64` (`opencode-linux-x64.tar.gz`) and
+Repeat the entry for `darwin-x64` (`opencode-darwin-x64-baseline.zip`), `linux-x64`
+(`opencode-linux-x64-baseline.tar.gz`) and
 `linux-arm64` (`opencode-linux-arm64.tar.gz`). `size` must be an integer. The placeholders above are deliberately
 invalid, so an unfilled template fails `bootstrap-release-pins.test.ts`.
 
@@ -180,7 +186,6 @@ The original list:
 
 - Should the plugin default to being pinned to hubctl's own version? Today it is unpinned unless `pluginVersion` is
   passed, and an existing unpinned entry is kept as the user's choice.
-- On `darwin-x64`, should hubctl pin the `-baseline` build (it works on every Intel Mac) or the AVX2 build?
 - `OPENCODE_CONFIG` / `OPENCODE_CONFIG_DIR` and project-level configs are not considered: discovery reports only
   `config:opencode/opencode.json(c)`.
 - Is `opencode models` strong enough as `provider-auth`, or should HBS-13 inject a one-token completion probe that

@@ -120,7 +120,7 @@ export function planNodeServices(input: PlanInput, options: NodeServicesOptions)
   const issues: Issue[] = []
   let settings: NodeSettings | undefined
   if (profile.services.includes("node")) {
-    if (options.node === undefined) issues.push({ path: "/node", code: "missing_field", message: "a launch node needs its workspace roots (node.json workspaceRoots)" })
+    if (options.node === undefined) issues.push({ path: "/node", code: "missing_field", message: "a launch node needs its workspace roots: pass --workspace-root <dir> (repeat it for more than one), or list them in node.json workspaceRoots" })
     else {
       const checked = checkNodeSettings(options.node, { snapshot: input.snapshot })
       if (!checked.ok) issues.push(...prefixed("/node", checked))

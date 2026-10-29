@@ -33,6 +33,12 @@ export interface ManifestInput {
   readonly artifacts: readonly { readonly target: string; readonly file: string; readonly size: number; readonly sha256: string }[]
   /** The manifest's harness pins (verifyPinDownloads / harnessPins). */
   readonly harnesses: readonly HarnessPin[]
+  /**
+   * The targets this release ships, listed explicitly (a partial release, e.g. one target for testing): each must
+   * be supported and have exactly one artifact, and no artifact may be for another target. Default: every
+   * supported target.
+   */
+  readonly targets?: readonly string[]
 }
 
 export interface SigningKey {
@@ -49,7 +55,10 @@ const rank = (target: string) => {
   return i < 0 ? ORDER.length : i
 }
 
-/** The unsigned manifest for a release: validated, every supported target present, artifacts in matrix order. */
+/**
+ * The unsigned manifest for a release: validated, every supported target (or every listed target) present and
+ * nothing else, artifacts in matrix order.
+ */
 export function buildManifestBody(input: ManifestInput): Result<ManifestBody> {
   const body: ManifestBody = {
     schema: "hub.artifact-manifest",
@@ -64,7 +73,14 @@ export function buildManifestBody(input: ManifestInput): Result<ManifestBody> {
   }
   const c = new Checker()
   c.merge("", validateArtifactManifest({ ...body, signatures: [] }))
-  for (const target of ORDER) if (!body.artifacts.some((a) => a.target === target)) c.add("/artifacts", "missing_field", `the release has no hubctl for ${target}`)
+  const targets = input.targets ?? ORDER
+  if (input.targets) {
+    if (targets.length === 0) c.add("/artifacts", "invalid_value", "a release lists at least one target")
+    if (new Set(targets).size !== targets.length) c.add("/artifacts", "duplicate", "a target is listed twice")
+    for (const target of targets) if (!ORDER.includes(target)) c.add("/artifacts", "unsupported_platform", `${target} is not a supported target`)
+    for (const a of body.artifacts) if (ORDER.includes(a.target) && !targets.includes(a.target)) c.add("/artifacts", "inconsistent", `the release has a hubctl for ${a.target}, which is not one of the listed targets (${targets.join(", ")})`)
+  }
+  for (const target of targets) if (!body.artifacts.some((a) => a.target === target)) c.add("/artifacts", "missing_field", `the release has no hubctl for ${target}`)
   return c.result(body)
 }
 

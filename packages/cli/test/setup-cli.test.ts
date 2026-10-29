@@ -201,12 +201,38 @@ describe("hubctl setup (session-only, against a real hub)", () => {
     const noRoots = await cli(home, ["setup", "preview", "--profile", "launch-node", "--json"])
     if (noRoots.envelope?.error?.code !== "no_service_manager") {
       expect(noRoots.code).toBe(2)
-      expect(noRoots.envelope?.error?.message).toContain("workspace")
+      expect(noRoots.envelope?.error?.message).toContain("--workspace-root")
     }
     expect((await cli(home, ["setup", "preview", "--profile", "nope", "--json"])).code).toBe(2)
     writeFileSync(path.join(home, "bad.json"), "{}")
     const bad = await cli(home, ["setup", "apply", "--preview", path.join(home, "bad.json"), "--json"])
     expect(bad.code).toBe(12)
+  })
+
+  test("a refused apply (stale preview) leaves no new filesystem entries under HOME", async () => {
+    const home = tempHome()
+    const file = path.join(home, "preview.json")
+    expect((await cli(home, ["setup", "preview", "--profile", "session-only", "--out", file])).code).toBe(0)
+    // The host changes after the preview: the saved preview is stale.
+    mkdirSync(path.join(home, ".config", "opencode"), { recursive: true })
+    writeFileSync(path.join(home, ".config", "opencode", "opencode.json"), '{"theme":"light"}\n')
+    const entries = () => {
+      const out: string[] = []
+      const walk = (dir: string) => {
+        for (const name of readdirSync(dir).sort()) {
+          const p = path.join(dir, name)
+          out.push(path.relative(home, p))
+          if (lstatSync(p).isDirectory()) walk(p)
+        }
+      }
+      walk(home)
+      return out
+    }
+    const before = entries()
+    const refused = await cli(home, ["setup", "apply", "--preview", file, "--json"])
+    expect(refused.envelope?.error?.code).toBe("preview_stale")
+    expect(refused.code).toBe(12)
+    expect(entries()).toEqual(before)
   })
 
   test("a profile from stdin (the Ansible role's `--profile -`), and setup recover with nothing to recover", async () => {
