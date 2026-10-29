@@ -24,6 +24,25 @@ import { ACTIONS, HOST, MINUTE, PREVIEW, T0 } from "./fixtures.ts"
 import { signedManifest } from "./opencode-adapter-fixtures.ts"
 import { sandbox } from "./transaction-fixtures.ts"
 
+
+/** A response body that streams `path` from disk in 64 KiB reads (a web stream pulled on demand). */
+function fileBody(path: string): ReadableStream<Uint8Array> {
+  let fd: number | undefined
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      fd ??= openSync(path, "r")
+      const chunk = new Uint8Array(64 * 1024)
+      const n = readSync(fd, chunk, 0, chunk.byteLength, null)
+      if (n > 0) return controller.enqueue(chunk.subarray(0, n))
+      closeSync(fd)
+      controller.close()
+    },
+    cancel() {
+      if (fd !== undefined) closeSync(fd)
+    },
+  })
+}
+
 const MiB = 1024 * 1024
 const VERSION = "9.9.9"
 
@@ -182,7 +201,7 @@ async function install(archive: string): Promise<void> {
       actions: [action, { ...ACTIONS["select-harness-version"], version: VERSION, target: { root: "data", rel: `hub/harnesses/opencode/${VERSION}` } } as Action, { ...ACTIONS["verify-harness"], probes: ["version-exec"] } as Action],
     }
     // The real https download, over a fetch that streams the archive from disk.
-    const fetchImpl = async () => new Response(Readable.toWeb(createReadStream(archive, { highWaterMark: 64 * 1024 })) as unknown as ReadableStream, { headers: { "content-length": String(size) } })
+    const fetchImpl = async () => new Response(fileBody(archive), { headers: { "content-length": String(size) } })
     const source = createOpencodeHarnessSource({ manifest, download: httpsDownload(fetchImpl) })
     const now = T0 + MINUTE
     // Readiness is not what this measures: the verification step passes.

@@ -10,10 +10,9 @@
 //                  whole-file buffering);
 //   HUB_MEMORY_TEST=1  300 MiB releases, the size of the real thing: growth stays well under 1 GB (it was ~2 GB).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { createReadStream, mkdtempSync, rmSync, statSync } from "node:fs"
+import { closeSync, mkdtempSync, openSync, readSync, rmSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Readable } from "node:stream"
 import { createOpencodeHarnessSource, httpsDownload } from "../src/bootstrap/adapters/opencode/apply.ts"
 import { planDigest, type Action, type SetupPlan } from "../src/bootstrap/contracts/index.ts"
 import { builtinExecutors } from "../src/bootstrap/transaction/builtin.ts"
@@ -24,6 +23,25 @@ import { txOk } from "../src/bootstrap/transaction/result.ts"
 import { ACTIONS, HOST, MINUTE, PREVIEW, T0 } from "./bootstrap/fixtures.ts"
 import { sha256Of, signedManifest } from "./bootstrap/opencode-adapter-fixtures.ts"
 import { sandbox } from "./bootstrap/transaction-fixtures.ts"
+
+
+/** A response body that streams `path` from disk in 64 KiB reads (a web stream pulled on demand). */
+function fileBody(path: string): ReadableStream<Uint8Array> {
+  let fd: number | undefined
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      fd ??= openSync(path, "r")
+      const chunk = new Uint8Array(64 * 1024)
+      const n = readSync(fd, chunk, 0, chunk.byteLength, null)
+      if (n > 0) return controller.enqueue(chunk.subarray(0, n))
+      closeSync(fd)
+      controller.close()
+    },
+    cancel() {
+      if (fd !== undefined) closeSync(fd)
+    },
+  })
+}
 
 const MiB = 1024 * 1024
 const PROBE = join(import.meta.dir, "bootstrap/memory-probe.ts")
@@ -102,7 +120,7 @@ describe("installing a harness keeps memory bounded", () => {
         ],
       }
       const passes: ActionExecutor<"verify-harness"> = { kind: "verify-harness", plan: () => ({ class: "external" }), change: async () => txOk({ type: "effect", perform: async () => txOk(undefined) }) }
-      const fetchImpl = async () => new Response(Readable.toWeb(createReadStream(archive, { highWaterMark: 64 * 1024 })) as unknown as ReadableStream)
+      const fetchImpl = async () => new Response(fileBody(archive))
       const source = createOpencodeHarnessSource({ manifest, download: httpsDownload(fetchImpl) })
       const now = T0 + MINUTE
       const applier = createApplier({ roots: box.roots, host: { fingerprint: HOST, target: "linux-x64" }, fs: counting, executors: { ...builtinExecutors({ harness: source }), "verify-harness": passes }, now: () => now, pid: process.pid, isAlive: () => true })

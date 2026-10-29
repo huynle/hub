@@ -12,6 +12,7 @@
 //
 // Nothing here runs a shell: processes are started only by the adapters' fixed-argv runners and the service
 // manager's fixed-call runner. Every capability that reaches outside is a port the tests replace.
+import { realpathSync } from "node:fs"
 import {
   createAdapterRegistry,
   executionContextOf,
@@ -283,9 +284,12 @@ export function createSetupRuntime(deps: RuntimeDeps): SetupRuntime {
     return {
       manifest,
       fetch: async () => {
-        const bytes = ports.hubctlBytes?.() ?? (deps.layout.kind === "standalone" ? new Uint8Array(fs.readFile(deps.layout.executable)) : undefined)
-        if (!bytes) throw new Error("this hubctl is not the standalone release binary; run the hubctl you downloaded from the release to install it")
-        return bytes
+        const bytes = ports.hubctlBytes?.()
+        if (bytes) return bytes
+        // The standalone executable itself (~105 MB): the executor digests it and the engine copies it in chunks,
+        // checking the digest again while it copies; it is never read whole.
+        if (deps.layout.kind === "standalone") return { path: realpathSync(deps.layout.executable) }
+        throw new Error("this hubctl is not the standalone release binary; run the hubctl you downloaded from the release to install it")
       },
       ...(floors.hubctl ? { floor: floors.hubctl } : {}),
     }
