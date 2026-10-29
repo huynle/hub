@@ -631,6 +631,26 @@ integration is and what is still open.
   backups a restore is a conflict, never a guess.
 - `planSetup` no longer treats the final symlink of `link-executable` / `select-harness-version` as written through
   (they replace it atomically); a symlinked directory above them is still refused.
+- **Bounded memory (HBS-12).** A 4 GB host was OOM-killed installing OpenCode 2.2.0 (a 116 MB tar.gz holding a
+  ~350 MB binary): the download, the inflated tar, each member, the tree change and the staging writes each held a
+  whole copy. Large content now never passes through memory whole:
+  - `TxFs` writes and reads in chunks (`createExclusive`, `readRange`); file and tree states are digested, backups
+    taken and restored, in chunks (`transaction/stream.ts`, `CHUNK_BYTES` = 1 MiB).
+  - Each step gets a `StagingArea` (`StepContext.staging`, `state:hub/bootstrap/staging/<txID>`, owner-only): a
+    `HarnessSource` streams its download into it (`fetch(action, staging)`), and the staging area records the
+    sha256 and size of what it wrote. `install-harness` checks the pin (and the upstream evidence) against that
+    digest, never one a source reports, before `unpack(action, file, staging)` streams the archive's members into
+    staging files (`adapters/archive-stream.ts`: gzip and raw deflate through `node:zlib` streams, a block-by-block
+    tar reader, zip members by offset from the central directory). Limits hold while inflating: the inflated total,
+    and a zip member never past its recorded size. Every member is judged before its body is read.
+  - A `tree` change, and a `file` change, may name a `StagedFile` instead of bytes. The engine moves a file its
+    staging area wrote into the staged tree (copying across filesystems), and copies any other file (hubctl's own
+    executable for `install-artifact`) in chunks, checking the digest while it copies (`integrity_mismatch`,
+    nothing replaced). The staging directory is removed after each step and swept under the lock; it is never
+    needed for recovery or resume.
+  - Measured (synthetic 300 MiB binary, real engine and OpenCode source, `test/bootstrap/memory-probe.ts`): peak
+    RSS growth fell from 1.97 GB (tar.gz) and 1.70 GB (zip) to about 50 MB. `bootstrap-install-memory.test.ts`
+    keeps it so (32 MiB always, 300 MiB with `HUB_MEMORY_TEST=1`).
 
 ### 7.3 Spoke presence (central)
 
@@ -649,6 +669,8 @@ spoke is. In cluster mode it answers from the pod's registry catalog, like `GET 
   `minimumVersion` for this target), which only rise and feed the downgrade policy.
 - `state:hub/bootstrap/requests/<hex>.json`: the request each applied plan was made from (resume and rollback
   re-plan with it).
+- `state:hub/bootstrap/staging/<txID>/` is scratch space only (§7.2, bounded memory): it holds a step's download
+  and unpacked members while the step runs and never outlives it.
 - The drift `Observation` is read fresh by `setup drift` from the files the desired plan manages (never persisted:
   it must describe the files now). A field the adapters no longer plan because it is converged is taken from the
   applied plan, so it reads as in sync, not retired.

@@ -9,8 +9,8 @@ modules. Every capability is injected.
 | `config.ts` | Reads an OpenCode 2 config (JSONC) and classifies the Hub plugin entry and the `hub` MCP server: absent, registered, drift, or a refusal. It computes the exact JSON-pointer sets for the lossless merge. |
 | `plan.ts` | `planOpencode` and `createOpencodeAdapter`. The pinned `install-harness` comes first, then `select-harness-version`, `merge-config` (plugin), `register-mcp-server` and `verify-harness`. The planner is pure and deterministic. |
 | `verify.ts` | Real readiness probes through a fixed-argv `ProcessRunner` (no shell). `locateOpencodeBinary` finds the binary that really runs. |
-| `archive.ts` | A pure unpacker for the upstream zip and tar.gz. It accepts exactly one regular file, `opencode`, and writes it to `bin/opencode` with mode 0755. |
-| `apply.ts` | The `HarnessSource` (the pinned URL only, https only, bounded by the pinned size), the `register-mcp-server` and `verify-harness` executors, and `httpsDownload`. |
+| `archive.ts` | A streaming unpacker for the upstream zip and tar.gz (`../archive-stream.ts`). It accepts exactly one regular file, `opencode`, streams it into the step's staging area and installs it as `bin/opencode` with mode 0755. `unpackOpencodeArchive` is the in-memory form for small fixtures. |
+| `apply.ts` | The `HarnessSource` (the pinned URL only, https only, bounded by the pinned size, streamed into the staging area), the `register-mcp-server` and `verify-harness` executors, and `httpsDownload` (the body as chunks). |
 | `index.ts` | `createOpencodeHarness`, the single entry point for the integrator. |
 
 ## Behaviour
