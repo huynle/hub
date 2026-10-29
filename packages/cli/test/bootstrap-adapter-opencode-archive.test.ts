@@ -67,4 +67,21 @@ describe("unpackOpencodeArchive", () => {
     expect(lying.ok).toBe(false)
     if (!lying.ok) expect(lying.message).toMatch(/recorded size/)
   })
+
+  test("a zip member is checked against its CRC-32 while it streams (stored or deflated)", async () => {
+    for (const store of [false, true]) {
+      const good = zip([{ name: "opencode", content: FAKE_BINARY }], { store })
+      expect((await unpackOpencodeArchive("o.zip", good)).ok).toBe(true)
+      const bad = good.slice()
+      const view = new DataView(bad.buffer)
+      for (let at = bad.byteLength - 22; at >= 0; at--)
+        if (view.getUint32(at, true) === 0x02014b50) {
+          view.setUint32(at + 16, view.getUint32(at + 16, true) ^ 1, true)
+          break
+        }
+      const r = await unpackOpencodeArchive("o.zip", bad)
+      expect(r.ok).toBe(false)
+      if (!r.ok) expect(r.message).toMatch(/CRC/)
+    }
+  })
 })

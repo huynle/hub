@@ -6,7 +6,7 @@
 // inflated total (a gzip bomb stops at `maxBytes`), and a zip member never inflates past its recorded size.
 // No dependency.
 import type { ByteReader } from "../transaction/stream.ts"
-import { gunzipChunks, InflateError, inflateRawChunks } from "./inflate.ts"
+import { crc32, gunzipChunks, InflateError, inflateRawChunks } from "./inflate.ts"
 
 /** Why an archive was refused (the adapters phrase it). */
 export class ArchiveError extends Error {
@@ -181,6 +181,8 @@ export interface ZipMember {
   readonly method: number
   readonly compressedSize: number
   readonly size: number
+  /** The CRC-32 the directory records for the member's data. */
+  readonly crc32: number
   /** The local header's offset. */
   readonly local: number
 }
@@ -212,6 +214,7 @@ export function zipMembers(reader: ByteReader, options: { readonly maxBytes: num
     if (at + 46 > cd.byteLength || view.getUint32(at, true) !== 0x02014b50) throw new ArchiveError("a damaged zip directory")
     const flags = view.getUint16(at + 8, true)
     const method = view.getUint16(at + 10, true)
+    const crc = view.getUint32(at + 16, true)
     const compressedSize = view.getUint32(at + 20, true)
     const size = view.getUint32(at + 24, true)
     const nameLen = view.getUint16(at + 28, true)
@@ -234,14 +237,15 @@ export function zipMembers(reader: ByteReader, options: { readonly maxBytes: num
       total += size
       if (total > options.maxBytes) throw new ArchiveError(`it unpacks to more than ${options.maxBytes} bytes`)
     }
-    members.push({ name, kind, encrypted: (flags & 0x1) !== 0, method, compressedSize, size, local })
+    members.push({ name, kind, encrypted: (flags & 0x1) !== 0, method, compressedSize, size, crc32: crc, local })
   }
   return members
 }
 
 /**
  * One zip member's data, inflated as it streams, in chunks; ArchiveError if it is damaged, uses an unsupported
- * method, or does not inflate to exactly its recorded size (it is cut off at that size, never past it).
+ * method, does not inflate to exactly its recorded size (it is cut off at that size, never past it), or does not
+ * have its recorded CRC-32 (checked once the last chunk is out: the caller discards what it wrote).
  */
 export async function* zipMemberData(reader: ByteReader, member: ZipMember): AsyncGenerator<Uint8Array> {
   if (member.encrypted) throw new ArchiveError(`${member.name} is encrypted`)
@@ -252,19 +256,14 @@ export async function* zipMemberData(reader: ByteReader, member: ZipMember): Asy
   const start = member.local + 30 + hv.getUint16(26, true) + hv.getUint16(28, true)
   if (start + member.compressedSize > reader.size) throw new ArchiveError("a truncated zip")
   let produced = 0
+  let crc = 0
   const wrongSize = () => new ArchiveError(`${member.name} does not have its recorded size`)
-  if (member.method === 0) {
-    for await (const chunk of reader.stream(start, start + member.compressedSize)) {
-      produced += chunk.byteLength
-      yield chunk
-    }
-    if (produced !== member.size) throw wrongSize()
-    return
-  }
   try {
-    for (const chunk of inflateRawChunks(reader, start, start + member.compressedSize).chunks) {
+    const chunks = member.method === 0 ? reader.stream(start, start + member.compressedSize) : inflateRawChunks(reader, start, start + member.compressedSize).chunks
+    for await (const chunk of chunks) {
       produced += chunk.byteLength
       if (produced > member.size) throw wrongSize()
+      crc = crc32(crc, chunk)
       yield chunk
     }
   } catch (error) {
@@ -272,5 +271,6 @@ export async function* zipMemberData(reader: ByteReader, member: ZipMember): Asy
     throw error
   }
   if (produced !== member.size) throw wrongSize()
+  if (crc !== member.crc32) throw new ArchiveError(`${member.name} does not have its recorded CRC-32`)
 }
 
