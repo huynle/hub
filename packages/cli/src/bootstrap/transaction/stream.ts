@@ -59,6 +59,30 @@ export async function collect(source: ByteSource, maxBytes: number): Promise<Uin
   return out
 }
 
+/**
+ * A response body as chunks, cancelled (and failing with tooLarge()) as soon as it runs past `maxBytes`: what the
+ * https downloaders hand to a staging area.
+ */
+export async function* responseChunks(response: Response, maxBytes: number, tooLarge: () => Error): AsyncGenerator<Uint8Array> {
+  const reader = response.body?.getReader()
+  if (!reader) return
+  let total = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) return
+      total += value.byteLength
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {})
+        throw tooLarge()
+      }
+      yield value
+    }
+  } finally {
+    reader.releaseLock()
+  }
+}
+
 /** A file in a staging area (or, for hubctl's own executable, a file elsewhere), with its digest and size. */
 export interface StagedFile {
   readonly path: string

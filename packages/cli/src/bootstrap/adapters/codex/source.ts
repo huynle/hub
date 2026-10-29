@@ -1,6 +1,7 @@
 // The Codex HarnessSource for the install-harness executor (transaction/builtin.ts). It never runs anything: it
-// downloads the pinned archive over https through an injected Downloader, attempts the upstream evidence the pin
-// lists, and unpacks verified bytes in memory.
+// downloads the pinned archive over https through an injected Downloader, streaming it into the step's staging area,
+// attempts the upstream evidence the pin lists over the staged file, and unpacks it member by member into staging
+// files (HBS-12: the package inflates to ~0.5 GB; nothing is held whole).
 //
 //   fetch   the pinned file (at most the pinned size). Where the pin lists sigstore (openai/codex publishes
 //           `<asset>.sigstore` for its Linux assets), the bundle is fetched from beside the asset and verified
@@ -8,15 +9,15 @@
 //           returned untouched for the executor to reject (integrity_mismatch) and are never inspected further.
 //           A missing bundle, a bundle that cannot be fetched, or no trusted root is "unavailable", never a
 //           blocker: hub's pinned digest is the mandatory evidence (contract §5, Q4).
-//   unpack  the archive into the version directory's tree (archive.ts: bin/codex and its helpers).
-import { createHash } from "node:crypto"
+//   unpack  the archive into the version directory's tree (archive.ts: bin/codex and its helpers, streamed).
 import type { EvidenceResult, HarnessID, InstallHarness, VerifiedManifest } from "../../contracts/index.ts"
 import type { HarnessSource } from "../../transaction/builtin.ts"
-import { collect } from "../../transaction/stream.ts"
-import { unpackCodexArchive } from "./archive.ts"
+import { collect, responseChunks, type ByteReader, type ByteSource } from "../../transaction/stream.ts"
+import { unpackCodexFile } from "./archive.ts"
 import { codexSigstoreIdentity, verifySigstoreBundle, type SigstoreTrust } from "./sigstore.ts"
 
-export type DownloadResult = { readonly status: "ok"; readonly bytes: Uint8Array } | { readonly status: "missing" } | { readonly status: "error"; readonly detail: string }
+/** `bytes`: the body, whole (small things, fakes) or as chunks as they arrive. */
+export type DownloadResult = { readonly status: "ok"; readonly bytes: ByteSource } | { readonly status: "missing" } | { readonly status: "error"; readonly detail: string }
 
 /** An https GET of one fixed URL, bounded in size. The only way the Codex source reaches the network. */
 export interface Downloader {
@@ -39,14 +40,18 @@ export interface CodexSourceOptions {
 /** Sigstore bundles are a few KB; anything larger is not one. */
 const MAX_BUNDLE_BYTES = 256 * 1024
 
-const digestOf = (bytes: Uint8Array) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`
-
-async function sigstoreEvidence(action: InstallHarness, bytes: Uint8Array, options: CodexSourceOptions): Promise<EvidenceResult> {
+async function sigstoreEvidence(action: InstallHarness, artifact: ByteReader, options: CodexSourceOptions): Promise<EvidenceResult> {
   if (!options.trust) return { kind: "sigstore", status: "unavailable", detail: "sigstore: this hubctl carries no sigstore trusted root" }
   const bundle = await options.download.get(`${action.source.url}.sigstore`, { maxBytes: MAX_BUNDLE_BYTES })
   if (bundle.status === "missing") return { kind: "sigstore", status: "unavailable", detail: "sigstore: upstream publishes no bundle for this asset" }
   if (bundle.status === "error") return { kind: "sigstore", status: "unavailable", detail: `sigstore: the bundle could not be fetched (${bundle.detail})` }
-  return verifySigstoreBundle(bundle.bytes, bytes, { trust: options.trust, identity: codexSigstoreIdentity(action.version) })
+  let bytes: Uint8Array
+  try {
+    bytes = await collect(bundle.bytes, MAX_BUNDLE_BYTES)
+  } catch {
+    return { kind: "sigstore", status: "unavailable", detail: "sigstore: the bundle could not be fetched (larger than any bundle)" }
+  }
+  return verifySigstoreBundle(bytes, artifact, { trust: options.trust, identity: codexSigstoreIdentity(action.version) })
 }
 
 export function createCodexHarnessSource(options: CodexSourceOptions): HarnessSource {
@@ -59,17 +64,16 @@ export function createCodexHarnessSource(options: CodexSourceOptions): HarnessSo
       only(action.harness)
       const archive = await options.download.get(action.source.url, { maxBytes: action.size })
       if (archive.status !== "ok") throw new Error(`cannot download ${action.source.file}: ${archive.status === "missing" ? "not found" : archive.detail}`)
-      const bytes = archive.bytes
-      const file = await staging.write(action.source.file, bytes, { maxBytes: action.size })
+      const file = await staging.write(action.source.file, archive.bytes, { maxBytes: action.size })
       // Only bytes that are exactly the pinned artifact are looked at any further.
-      if (bytes.byteLength !== action.size || digestOf(bytes) !== action.sha256) return { file, evidence: [] }
+      if (file.size !== action.size || file.sha256 !== action.sha256) return { file, evidence: [] }
       const evidence: EvidenceResult[] = []
-      if (action.evidence.includes("sigstore")) evidence.push(await sigstoreEvidence(action, bytes, options))
+      if (action.evidence.includes("sigstore")) evidence.push(await sigstoreEvidence(action, staging.open(file), options))
       return { file, evidence }
     },
     async unpack(action, file, staging) {
       only(action.harness)
-      return unpackCodexArchive(await collect(staging.open(file).stream(), file.size))
+      return unpackCodexFile(staging.open(file), staging)
     },
     installed: (harness) => (harness === "codex" ? options.installed?.(harness) : undefined),
     floor: (harness) => (harness === "codex" ? options.floor?.(harness) : undefined),
@@ -77,7 +81,7 @@ export function createCodexHarnessSource(options: CodexSourceOptions): HarnessSo
   }
 }
 
-/** A Downloader over fetch(): https only, no redirects to plain http, at most `maxBytes` read. */
+/** A Downloader over fetch(): https only, no redirects to plain http, at most `maxBytes` read (as it streams). */
 export const httpsDownloader = (fetchImpl: (url: string, init?: RequestInit) => Promise<Response> = fetch): Downloader => ({
   async get(url, { maxBytes }) {
     if (!url.startsWith("https://")) return { status: "error", detail: "only https downloads are allowed" }
@@ -92,26 +96,7 @@ export const httpsDownloader = (fetchImpl: (url: string, init?: RequestInit) => 
     if (!response.ok) return { status: "error", detail: `HTTP ${response.status}` }
     const declared = Number(response.headers.get("content-length") ?? NaN)
     if (Number.isFinite(declared) && declared > maxBytes) return { status: "error", detail: `larger than ${maxBytes} bytes` }
-    const chunks: Uint8Array[] = []
-    let total = 0
-    const reader = response.body?.getReader()
-    if (reader)
-      for (;;) {
-        const { done, value } = await reader.read()
-        if (done) break
-        total += value.byteLength
-        if (total > maxBytes) {
-          await reader.cancel().catch(() => {})
-          return { status: "error", detail: `larger than ${maxBytes} bytes` }
-        }
-        chunks.push(value)
-      }
-    const bytes = new Uint8Array(total)
-    let at = 0
-    for (const c of chunks) {
-      bytes.set(c, at)
-      at += c.byteLength
-    }
-    return { status: "ok", bytes }
+    // The body streams; running past the limit fails the transfer (the staging write) as soon as it happens.
+    return { status: "ok", bytes: responseChunks(response, maxBytes, () => new Error(`${url} is larger than ${maxBytes} bytes`)) }
   },
 })

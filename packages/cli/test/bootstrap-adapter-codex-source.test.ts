@@ -7,7 +7,7 @@ import { createCodexHarnessSource, httpsDownloader } from "../src/bootstrap/adap
 import { trustFromTrustedRoot } from "../src/bootstrap/adapters/codex/sigstore.ts"
 import { sha256Of } from "../src/bootstrap/transaction/state.ts"
 import { CODEX_ARCHIVE_DARWIN, CODEX_ARCHIVE_LINUX, CODEX_PINS, codexManifest, fakeDownloads, sigstoreWorld } from "./bootstrap/codex-fixtures.ts"
-import { memoryStaging } from "../src/bootstrap/transaction/stream.ts"
+import { collect, memoryStaging } from "../src/bootstrap/transaction/stream.ts"
 
 const STAGING = memoryStaging()
 const stage = (bytes: Uint8Array) => STAGING.write("artifact", bytes, { maxBytes: 1 << 30 })
@@ -116,9 +116,12 @@ describe("httpsDownloader", () => {
     expect(await d.get("http://example.com/x", { maxBytes: 10 })).toMatchObject({ status: "error" })
     expect(seen).toEqual([])
     expect(await d.get("https://example.com/missing", { maxBytes: 10 })).toEqual({ status: "missing" })
-    expect(await d.get("https://example.com/big", { maxBytes: 10 })).toMatchObject({ status: "error" })
+    // The body streams: running past the limit fails as it is read (or at once, when the length is declared).
+    const big = await d.get("https://example.com/big", { maxBytes: 10 })
+    if (big.status === "ok") await expect(collect(big.bytes, 1 << 20)).rejects.toThrow(/larger/)
+    else expect(big).toMatchObject({ status: "error" })
     const ok = await d.get("https://example.com/x", { maxBytes: 10 })
-    expect(ok.status === "ok" && new TextDecoder().decode(ok.bytes)).toBe("ok")
+    expect(ok.status === "ok" && new TextDecoder().decode(await collect(ok.bytes, 1 << 20))).toBe("ok")
     expect(await httpsDownloader(async () => response(500)).get("https://example.com/x", { maxBytes: 10 })).toMatchObject({ status: "error" })
     expect(await httpsDownloader(async () => Promise.reject(new Error("offline"))).get("https://example.com/x", { maxBytes: 10 })).toMatchObject({ status: "error" })
   })

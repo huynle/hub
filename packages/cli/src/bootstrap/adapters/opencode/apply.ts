@@ -32,7 +32,7 @@ import type { HarnessSource } from "../../transaction/builtin.ts"
 import type { ActionExecutor, ExecutorMap, StepContext } from "../../transaction/executor.ts"
 import { mergeConfigText } from "../../transaction/json-merge.ts"
 import { txFail, txOk } from "../../transaction/result.ts"
-import type { ByteSource } from "../../transaction/stream.ts"
+import { responseChunks, type ByteSource } from "../../transaction/stream.ts"
 import { passesAsPending, type ReadinessGate } from "../readiness.ts"
 import { unpackOpencodeFile } from "./archive.ts"
 import { mcpServerSets } from "./config.ts"
@@ -65,28 +65,7 @@ export function httpsDownload(fetchImpl: (url: string, init?: RequestInit) => Pr
     if (!response.ok) throw new Error(`download of ${url} failed: HTTP ${response.status}`)
     const declared = Number(response.headers.get("content-length") ?? "")
     if (Number.isFinite(declared) && declared > limits.maxBytes) throw new Error(`${url} is larger than the pinned ${limits.maxBytes} bytes`)
-    return bodyChunks(response, limits.maxBytes, () => new Error(`${url} is larger than the pinned ${limits.maxBytes} bytes`))
-  }
-}
-
-/** A response body as chunks, cancelled (and failing with tooLarge()) once it passes `maxBytes`. */
-export async function* bodyChunks(response: Response, maxBytes: number, tooLarge: () => Error): AsyncGenerator<Uint8Array> {
-  const reader = response.body?.getReader()
-  if (!reader) return
-  let total = 0
-  try {
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) return
-      total += value.byteLength
-      if (total > maxBytes) {
-        await reader.cancel().catch(() => {})
-        throw tooLarge()
-      }
-      yield value
-    }
-  } finally {
-    reader.releaseLock()
+    return responseChunks(response, limits.maxBytes, () => new Error(`${url} is larger than the pinned ${limits.maxBytes} bytes`))
   }
 }
 
