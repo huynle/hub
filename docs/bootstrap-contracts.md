@@ -1,11 +1,14 @@
-# Bootstrap contracts (v1, amendment v1.1)
+# Bootstrap contracts (v1, amendments v1.1 and v1.2)
 
 Status: **frozen v1** (amended on 2026-10-28, before any release, with the user's decisions on the open
 questions: pinned harness installs, manual edits for symlinked configs, and release signing; see §8), then
 **amendment v1.1** (2026-10-28, still before any release; `CONTRACT_AMENDMENT = "1.1"`), a coordinated change to the
-contracts and every merged bootstrap module. Each v1.1 change is marked "v1.1" below, and §9 lists them all.
-Code: `packages/cli/src/bootstrap/contracts/`. Tests: `packages/cli/test/bootstrap-contracts.test.ts` and
-`packages/cli/test/bootstrap-contracts-v11.test.ts`. Shared fixtures: `packages/cli/test/bootstrap/fixtures.ts`.
+contracts and every merged bootstrap module. Each v1.1 change is marked "v1.1" below, and §9 lists them all. Then
+**amendment v1.2** (2026-10-29, `CONTRACT_AMENDMENT = "1.2"`, additive): readiness probes are classified, so a
+fresh install that only waits on the user's login or spoke commits as "installed, not ready" (§10).
+Code: `packages/cli/src/bootstrap/contracts/`. Tests: `packages/cli/test/bootstrap-contracts.test.ts`,
+`packages/cli/test/bootstrap-contracts-v11.test.ts` and `packages/cli/test/bootstrap-contracts-v12.test.ts`. Shared
+fixtures: `packages/cli/test/bootstrap/fixtures.ts`.
 
 This document defines the contracts for bootstrapping a machine into Hub with a standalone `hubctl`, which is
 installed before any harness and then installs pinned harnesses itself: the documents each layer exchanges, the rules that validate them, the threat model they
@@ -50,7 +53,7 @@ misreads them.
 | `platform.ts` | `SUPPORTED_TARGETS`, `UNSUPPORTED_TARGETS` (with reasons), `targetOf`, `checkTarget`. |
 | `paths.ts` | `PathRef` (named root + safe relative path), `resolvePathRef`, `checkNoSymlinkEscape`, `ELEVATED_ROOTS`. v1.1: `ExecutionContext`, `rootPathIn`, and a context argument for `resolvePathRef`. |
 | `exec.ts` | Executable/argv contract: `programLayout`, `serviceArgv`, `SERVICE_COMMANDS`, `EMBEDDED_ASSETS`. |
-| `harness.ts` | `HarnessAdapter` (discover/plan/verify), `Probe`, `REQUIRED_PROBES`, `isHarnessReady`, `createAdapterRegistry`, `EVIDENCE_KINDS`, `HARNESS_EVIDENCE`. |
+| `harness.ts` | `HarnessAdapter` (discover/plan/verify), `Probe`, `REQUIRED_PROBES`, `isHarnessReady`, `createAdapterRegistry`, `EVIDENCE_KINDS`, `HARNESS_EVIDENCE`. v1.2: `PROBE_CLASS` (`integrity` / `user`), `harnessReadiness` (`ready` / `pending` / `failed`, per-probe status, next steps), `PENDING_STEPS`. |
 | `actions.ts` | Typed `Action` union (16 kinds; v1.1 adds `select-harness-version`, `deactivate-service` and `remove-service`), `ACTION_FIELDS`/`ACTION_OPTIONAL`, `EXEC_KEYS`, `validateAction`. v1.1: `harnessVersionRef` and `harnessCurrentRef`. |
 | `discovery.ts` | `DiscoverySnapshot`, `validateDiscoverySnapshot`. v1.1: `snapshotDigest`, `executionContextOf`. |
 | `profile.ts` | `Profile` (v1.1: version 2, with `revision?` and `enrollment?`), `validateProfile`, `migrateProfile` + `PROFILE_MIGRATIONS` (1 → 2), `ENROLLMENT_MODES`, `enrollmentModeOf`, `PLAN_PROFILE_VERSIONS`. |
@@ -362,6 +365,11 @@ and observed within the last 15 minutes. `presence` never counts. Adapters must 
 (discovery's `resolvesTo`), not just the shim on PATH. That is an adapter obligation (HBS adapter tasks), which
 `isHarnessReady` cannot check by itself.
 
+v1.2: a probe that is not passing is classified by its kind (§10): an `integrity` failure means the install is
+broken and apply rolls back; a `user` probe pending means the harness is installed, not ready, which apply commits
+unless `--require-ready` is given. Readiness itself is unchanged: only `isHarnessReady` (every probe passing) makes a
+harness ready, and nothing advertises a capability before that.
+
 ### 3.11 Output envelope and exit codes
 
 With `--json`, stdout carries exactly one `hub.bootstrap.result` envelope:
@@ -670,8 +678,12 @@ spoke is. In cluster mode it answers from the pod's registry catalog, like `GET 
 - **A6:** nothing puts a hub-installed OpenCode on PATH; services and launches use absolute paths.
 - **Activation priors** are kept in memory: after a crash, recovery unloads a service even if it was loaded before
   the apply (no persistence without consent); a rolled-back unit file is restored but the running service is not
-  reloaded. A dedicated `service_failed` code and journaling a root directory apply creates are not done (a root
-  is not expressible as a `PathRef`).
+  reloaded. A dedicated `service_failed` code is not done.
+- **Root directories** (v1.2): a missing root under the home root (a fresh home without `~/.local/bin` or
+  `~/.local/share`) is journaled level by level as `directory` entries of the `home` root, so a rollback removes what
+  the transaction created, only while it is empty. A root outside home, below a symlink, or with no home directory is
+  still created unjournaled, as before. The applier's own state directory (`state:hub/bootstrap`, which holds the
+  journal) is never removed.
 - **Codex notarization** is allowed as evidence but not checked by the Codex source.
 - A Codex or Claude Code on PATH wins over the hub-installed one at discovery, so a unit planned before and after an
   install can differ (a second apply then rewrites it).
@@ -738,3 +750,84 @@ Choices made in v1.1:
 - The new error codes keep the exits those outcomes already had (5 and 4), so scripts keyed on exit codes keep
   working.
 - Only the profile changes schema version. The other documents gain additive fields or values and keep theirs.
+
+## 10. Amendment v1.2 (2026-10-29): install is not readiness
+
+**Context (HBS-12 acceptance).** On a clean, enrolled host, `hubctl setup apply` for `session-only` installed hubctl,
+linked `hub`, installed and selected OpenCode and merged its plugin and MCP config, then `verify-opencode` failed:
+`provider-auth` (`opencode models` exited 1: the user had not logged in yet) and `spoke-connected` (OpenCode had never
+been started). The whole transaction rolled back (exit 15). Both probes can only pass **after** the install, because
+the user needs the installed OpenCode to run `opencode auth login` and to start it, so apply could never succeed on a
+fresh host.
+
+**Contract.** `harness.ts` gives every probe kind a class, `PROBE_CLASS`. The class belongs to the kind, never to a
+probe's detail, so harness output cannot argue its way out of a rollback:
+
+| Class | Probe kinds | What a non-passing probe means |
+|---|---|---|
+| `integrity` | `presence`, `version-exec`, `api-health` | The install is broken: the binary is missing or does not run, is not the pinned version, is a container shim, or its local API does not answer. |
+| `user` | `provider-auth`, `spoke-connected` (Claude Code: spoke + conformance) | The install is fine, but it waits on the user: their provider login, or a harness or spoke they start. |
+
+`harnessReadiness(verification, now, also?)` classifies a verification against `REQUIRED_PROBES` plus the probes the
+`verify-harness` action asks for (`also`; Codex always adds `api-health`):
+
+- Each probe gets a status: `pass` (present, passing, fresh), `pending` (a `user` probe that is not passing, or
+  stale), `fail` (an `integrity` probe that is not passing or stale, or **any** required probe that was not run).
+- The harness state: `failed` if any probe fails, else `pending` if any is pending, else `ready`. `ready` holds
+  exactly when `isHarnessReady` does (with `also` empty).
+- `nextSteps`: for `pending`, the user's step for each pending probe (`PENDING_STEPS`, e.g. "run `opencode auth
+  login`", "start OpenCode"), then `VERIFY_STEP` ("then check readiness with `hubctl setup verify`"). Empty
+  otherwise. These are instructions for the user, never commands hubctl runs.
+
+**Apply.** Each `verify-harness` executor (OpenCode, Claude Code, Codex) classifies its verification and reports it
+(`onReadiness`), through one gate (`adapters/readiness.ts`, `ReadinessGate {requireReady, onReadiness}`):
+
+| State | Default apply | `apply --require-ready` |
+|---|---|---|
+| `ready` | step done | step done |
+| `pending` | step done: the harness is committed as **installed, not ready** | `harness_not_ready` (exit 15), rolled back |
+| `failed` | `harness_not_ready` (exit 15), rolled back | `harness_not_ready` (exit 15), rolled back |
+
+- The executors' own default is strict (`requireReady` absent = true), so a building block never loosens by
+  omission. The composition root (`setup/runtime.ts`, `readinessGate`) sets it per harness: strict with
+  `--require-ready`, and always strict for the harness of a requested `--verify-launch` (the bounded launch needs a
+  ready harness; the launch step itself stays strict too).
+- `hubctl setup apply` reports `data.ready` and `data.harnesses[]` = `{harness, ready, state: "ready" |
+  "installed-not-ready" | "failed", probes: [{kind, class, status, detail?}], nextSteps}` (also on failure), and
+  in text prints each harness, its probes and next steps. A not-ready harness is also a warning.
+- `hubctl setup verify` stays the strict readiness gate (exit 15 unless every harness is ready) and reports the same
+  `harnesses[]` shape. `hubctl setup recover --resume` takes `--require-ready` too.
+- Nothing advertises a capability before every probe passes: `claudeReadiness` and `codexCapabilities` are
+  unchanged, and `pending` is never `ready`.
+- Journals are unchanged and valid: `verify-harness` is still an `external` entry, `done` when the step passes.
+
+**Rollback leftovers.** A rollback now removes the root directories the transaction created (§7.6, "Root
+directories"). A directory hub created that now also holds files hub did not write (OpenCode's own probe writes
+into `~/.config/opencode`) is kept and reported in `TxReport.kept` (`data.kept`; text: `hubctl: note: kept …`), an
+informational note, not a conflict or a warning. Its files are not the user's edits of hub's files, and nothing of
+the user's was touched.
+
+**Decision: probes use the real configuration.** Probes run with the user's real environment and XDG directories,
+not an isolated `XDG_*`. Readiness must describe what the user will run: their provider login and config live there,
+and an isolated config would report "not logged in" for a user who is. The cost is that a probe can write into the
+harness's config directory, which the rollback note above makes harmless.
+
+**Ansible.** The role never passes `--require-ready` unless `hub_bootstrap_apply_require_ready` is set (rendered from
+`hubctl setup ansible --apply-require-ready`, `ROLE_APPLY_FLAGS`); readiness is gated separately by its `setup
+verify` step (`hub_bootstrap_require_ready`, default true), which fails the play with each harness's state and next
+steps while the install stays applied. Rerunning the play after the next steps converges: apply has nothing to do
+and verify passes.
+
+**Deferred: CPU feature requirements.** OpenCode's Bun runtime needs SSE4.2 even in its x64 baseline build, so on a
+host without it (a QEMU guest with the default `kvm64`/`qemu64` CPU model) `version-exec` fails, which v1.2 already
+classifies as an integrity failure and rolls back. A preview-time block (a discovery fact for the x86-64 feature
+level from `/proc/cpuinfo` or the macOS `machdep.cpu` sysctl, and an optional `cpu` requirement on a harness pin)
+would refuse earlier and with a clearer reason. It needs a new read-only probe capability (macOS has no file to
+read), a discovery snapshot field, a pin field in the signed manifest and a planner refusal, so it is left for a
+later amendment.
+
+| # | Amendment | Contract | Modules | Tests |
+|---|---|---|---|---|
+| 1 | Probe classes and classified readiness | `PROBE_CLASS`, `harnessReadiness`, `PENDING_STEPS` (§3.10) | adapters' verify executors (`adapters/readiness.ts`), `setup apply/verify/recover`, runtime `readinessGate` | `bootstrap-contracts-v12`, `bootstrap-readiness-v12`, `setup-readiness`, `setup-cli` (fresh host) |
+| 2 | Root directories journaled; created-but-foreign directories kept as notes | `directory` entries of the `home` root (§7.6); `TxReport.kept` | transaction engine, `setup` output | `bootstrap-transaction-dirs`, `setup-cli` (fresh host) |
+| 3 | Apply-only `--require-ready` in the Ansible role | `ROLE_APPLY_FLAGS`, `hub_bootstrap_apply_require_ready` | ansible renderer and role | `bootstrap-ansible`, `bootstrap-ansible-role` |

@@ -155,11 +155,13 @@ curl -fsSLO https://github.com/huynle/hub/releases/download/v<version>/hubctl-ma
 # 3. Preview: discover the host and print the exact plan and any manual edits. It writes nothing.
 ./hubctl setup preview --profile session-only --manifest hubctl-manifest.json --out preview.json
 
-# 4. Apply exactly that plan (rediscovered and re-planned; refused when the host changed since, exit 12).
+# 4. Apply exactly that plan (rediscovered and re-planned; refused when the host changed since, exit 12). A harness
+#    that is installed and runs but still waits on you (provider login, spoke not started) is committed as
+#    "installed, not ready" with the next steps; --require-ready fails (exit 15) and rolls back instead.
 ./hubctl setup apply --preview preview.json --manifest hubctl-manifest.json
 
-# 5. Check readiness with real probes (version, provider login, spoke connected; exit 15 when not ready),
-#    and undo whenever you like.
+# 5. Do the next steps it printed (e.g. `opencode auth login`, start OpenCode), then check readiness with real
+#    probes (version, provider login, spoke connected; exit 15 when not ready), and undo whenever you like.
 hubctl setup verify
 hubctl setup rollback            # or --to <txID>; files you changed since are kept and reported
 ```
