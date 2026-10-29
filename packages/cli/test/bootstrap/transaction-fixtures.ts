@@ -218,6 +218,8 @@ export interface WorldOptions {
   readonly verifyFails?: boolean
   /** v1.1: build the executors without a service manager client (deactivate-service then cannot run). */
   readonly noServiceControl?: boolean
+  /** Roots that do not exist yet on this host (a fresh home without ~/.local/bin, say). */
+  readonly missingRoots?: readonly string[]
 }
 
 /** A fake host: a sandbox with seeded user files, a signed manifest, the built-in executors and fakes for the rest. */
@@ -231,7 +233,7 @@ export class World {
   now = T0 + MINUTE
 
   constructor(readonly options: WorldOptions = {}) {
-    this.box = sandbox()
+    this.box = sandbox(options.missingRoots ? { missing: options.missingRoots } : {})
     this.manifest = signedManifest()
     this.verifyFails = Boolean(options.verifyFails)
     mkdirSync(this.box.path("config", "opencode"), { recursive: true })

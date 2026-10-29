@@ -393,7 +393,14 @@ function readRequest(io: SetupIo, file: string | undefined): SetupRequest {
   return r.value
 }
 
-const reportData = (outcome: TxOutcome) => (outcome.report ? { txID: outcome.report.txID, state: outcome.report.state, steps: outcome.report.steps, conflicts: outcome.report.conflicts, evidence: outcome.report.evidence } : undefined)
+const reportData = (outcome: TxOutcome) =>
+  outcome.report ? { txID: outcome.report.txID, state: outcome.report.state, steps: outcome.report.steps, conflicts: outcome.report.conflicts, kept: outcome.report.kept, evidence: outcome.report.evidence } : undefined
+
+/** Directories a rollback left in place because something else wrote into them: informational, not a warning. */
+function noteKept(io: SetupIo, json: boolean, outcome: { readonly report?: TxOutcome["report"] }): void {
+  if (json) return
+  for (const k of outcome.report?.kept ?? []) io.stderr(`hubctl: note: kept ${k.path ?? k.actionID}: ${k.reason}\n`)
+}
 
 // ---------- readiness (contract v1.2) ----------
 
@@ -471,6 +478,7 @@ async function apply(io: SetupIo, flags: Parsed["flags"], json: boolean): Promis
           ? "Only your provider login or the harness's spoke is missing; without --require-ready apply installs it as installed, not ready, so you can log in and start it"
           : undefined
     if (!json && harnesses.length > 0) io.stderr(`${readinessText(harnesses).join("\n")}\n`)
+    noteKept(io, json, outcome)
     return emit(io, json, envelope("setup apply", false, { ...(data ? { data } : {}), error: { code: outcome.code, message: outcome.message, ...(hint ? { hint } : {}) } }))
   }
   // Record what was applied (secret-free): the profile, its choices and catalog revision, and the floors seen.
@@ -644,6 +652,7 @@ async function rollback(io: SetupIo, flags: Parsed["flags"], json: boolean): Pro
     ...(request ? { profile: request.profile, choices: request.choices, ...(request.profile.revision ? { catalogRevision: request.profile.revision } : {}), txID: target!.txID, planDigest: target!.planDigest } : {}),
     floors: state.floors,
   })
+  noteKept(io, json, outcome)
   const data = { rolledBack: true, ...reportData(outcome) }
   const warnings = outcome.report.conflicts.map((c) => `${c.actionID}: ${c.reason}`)
   return emit(io, json, envelope("setup rollback", true, { data, warnings }), () => `rolled back${to ? ` to ${to}` : ""}${warnings.length ? ` (${warnings.length} file(s) kept because they changed since)` : ""}`)
@@ -674,6 +683,7 @@ async function recover(io: SetupIo, flags: Parsed["flags"], json: boolean): Prom
     mode,
     consent: { escalate: flags.escalate === true, confirmActivation: flags["confirm-activation"] === true },
   })
+  noteKept(io, json, outcome)
   if (!outcome.ok) return emit(io, json, envelope("setup recover", false, { ...(outcome.report ? { data: reportData(outcome) } : {}), error: { code: outcome.code, message: outcome.message } }))
   if (!outcome.report) return emit(io, json, envelope("setup recover", true, { data: { recovered: false } }), () => "nothing to recover")
   return emit(io, json, envelope("setup recover", true, { data: { recovered: true, mode, ...reportData(outcome) } }), () => `recovered ${outcome.report!.txID} (${mode}): ${outcome.report!.state}`)

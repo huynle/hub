@@ -436,6 +436,25 @@ esac
     expect(strict.code).toBe(15)
     expect(strict.envelope?.error?.code).toBe("harness_not_ready")
     expect(strict.envelope?.data?.state).toBe("rolled-back")
+    expect(strict.envelope?.data?.harnesses[0]).toMatchObject({ harness: "opencode", state: "installed-not-ready" })
+    expect(strict.envelope?.error?.hint).toContain("without --require-ready")
     for (const p of [".local/bin/hubctl", ".local/bin/hub", ".local/share/hub/harnesses/opencode/current", ".config/opencode/opencode.json"]) expect(existsSync(path.join(home, p))).toBe(false)
+    // The directories this apply created are gone too (they did not exist before)...
+    expect(existsSync(path.join(home, ".local", "bin"))).toBe(false)
+    expect(existsSync(path.join(home, ".local", "share"))).toBe(false)
+    // ...except the OpenCode config directory the probe wrote its own files into: kept, as a note, not a conflict.
+    expect(strict.envelope?.data?.conflicts).toEqual([])
+    expect(strict.envelope?.data?.kept.map((k: { path: string }) => k.path)).toEqual([path.join(home, ".config", "opencode")])
+    expect(existsSync(path.join(home, ".config", "opencode", "node_modules", ".lock"))).toBe(true)
+    expect(strict.envelope?.warnings ?? []).toEqual([])
+  }, 30_000)
+
+  test("text output of a rolled-back apply notes the kept directory without a warning", async () => {
+    const { manifestFile, hubctlRun, preview } = await freshHost()
+    const strict = await hubctlRun(["setup", "apply", "--preview", await preview("p1.json"), "--manifest", manifestFile, "--require-ready"])
+    expect(strict.code).toBe(15)
+    expect(strict.stderr).toContain("hubctl: note: kept")
+    expect(strict.stderr).not.toContain("warning")
+    expect(strict.stderr).toContain("opencode: installed, not ready")
   }, 30_000)
 })
