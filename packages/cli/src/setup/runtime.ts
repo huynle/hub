@@ -48,6 +48,7 @@ import {
   type NodeServicesPlan,
 } from "../bootstrap/adapters/node-services/index.ts"
 import { createOpencodeHarness, type Download, type ProcessRunner } from "../bootstrap/adapters/opencode/index.ts"
+import type { ReadinessGate } from "../bootstrap/adapters/readiness.ts"
 import { discover } from "../bootstrap/discovery/discover.ts"
 import { pathDirs, which } from "../bootstrap/discovery/executables.ts"
 import type { DiscoveryProbe } from "../bootstrap/discovery/probe.ts"
@@ -123,6 +124,11 @@ export interface ApplyChoices {
   readonly strict?: readonly HarnessID[]
   /** Sees each harness's classified readiness (the apply report). */
   readonly onReadiness?: (readiness: HarnessReadiness) => void
+}
+
+/** The readiness gate of one harness's verify-harness step (contract v1.2): strict only when asked or launched. */
+export function readinessGate(consent: ApplyChoices, harness: HarnessID): ReadinessGate {
+  return { requireReady: consent.requireReady === true || (consent.strict ?? []).includes(harness), ...(consent.onReadiness ? { onReadiness: consent.onReadiness } : {}) }
 }
 
 export interface SetupRuntime {
@@ -333,7 +339,7 @@ export function createSetupRuntime(deps: RuntimeDeps): SetupRuntime {
 
   function executors(bundle: PlanBundle, snap: DiscoverySnapshot, consent: ApplyChoices): ExecutorMap {
     const allowDowngrade = consent.allowDowngrade === true
-    const gate = (h: HarnessID) => ({ requireReady: consent.requireReady === true || (consent.strict ?? []).includes(h), ...(consent.onReadiness ? { onReadiness: consent.onReadiness } : {}) })
+    const gate = (h: HarnessID) => readinessGate(consent, h)
     const { opencode, claude, codex, sources } = adapters(installedHarnesses(bundle.history), allowDowngrade)
     const services = control(snap)
     const hubctl = hubctlSource()
