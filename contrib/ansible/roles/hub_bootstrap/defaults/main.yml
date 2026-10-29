@@ -11,8 +11,14 @@ hub_bootstrap_escalate: false
 hub_bootstrap_confirm_activation: false
 hub_bootstrap_allow_downgrade: false
 
-# Fail the play when `hubctl setup verify` reports a harness or provider that is not ready.
+# Fail the play when `hubctl setup verify` reports a harness or provider that is not ready. The apply before it has
+# already committed the install: a fresh host is "installed, not ready" until the user logs in and starts the
+# harness, so the first run fails here with the next steps; rerun the play once they are done.
 hub_bootstrap_require_ready: true
+
+# Pass --require-ready to `hubctl setup apply`: fail and roll the whole apply back unless every harness is already
+# ready (contract v1.2). Off by default, because on a fresh host the user can only log in after the install.
+hub_bootstrap_apply_require_ready: false
 
 # Where the digest-checked hubctl and its signed manifest are cached, and where the preview is kept for apply.
 hub_bootstrap_cache_dir: "{{ ansible_facts['user_dir'] }}/.cache/hub/bootstrap"

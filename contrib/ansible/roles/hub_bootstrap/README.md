@@ -52,6 +52,20 @@ hubctl machine enroll
 | normal | Preview (kept in `hub_bootstrap_state_dir/preview.json`), then `setup apply`, but only if the plan has changes. Then `setup verify` and `machine status`. |
 | second run | A converged host previews no changes, so apply does not run, and nothing reports `changed`. |
 
+**Install is not readiness (contract v1.2).** On a fresh host the user can only log in to a provider
+(`opencode auth login`, `claude auth login`, `codex login`) and start the harness or its spoke *after* the install.
+So by default `setup apply` commits a harness whose only missing probes wait on the user (provider login, spoke) as
+"installed, not ready", and rolls back only when the install itself is broken (wrong or missing binary, version
+mismatch, container shim, a binary that does not run). Readiness is then gated **separately** by the verify step:
+
+- `hub_bootstrap_require_ready: true` (default): the play fails at `setup verify` and prints each harness's state and
+  next steps. The install stays applied. Do the next steps on the host, then run the play again: the host is
+  converged, so apply does nothing and verify passes.
+- `hub_bootstrap_require_ready: false`: the verify result is only reported.
+- `hub_bootstrap_apply_require_ready: true` (off by default): the role passes `--require-ready` to `setup apply`,
+  which then fails with exit 15 and rolls the whole apply back unless every harness is already ready. Use it only
+  on hosts where the logins and spokes already exist.
+
 The play refuses, before apply, when any of these holds:
 
 - The plan differs from the one the vars were rendered from (`hub_bootstrap_expected_plan`).
@@ -76,7 +90,8 @@ Rendered by `hubctl setup ansible`. `meta/argument_specs.yml` validates them.
 | `hub_bootstrap_profile`, `hub_bootstrap_profile_digest` | the `hub.bootstrap-profile` document and the digest of its canonical JSON |
 | `hub_bootstrap_expected_plan` | `null`, or `{planDigest, hostFingerprint, snapshotDigest, target}` of the previewed plan |
 | `hub_bootstrap_escalate` / `_confirm_activation` / `_allow_downgrade` | consent, default `false`, passed as `--escalate` / `--confirm-activation` / `--allow-downgrade` |
-| `hub_bootstrap_require_ready` | fail when `setup verify` is not ready (default `true`) |
+| `hub_bootstrap_require_ready` | fail when `setup verify` is not ready (default `true`); rendered from `--no-require-ready` |
+| `hub_bootstrap_apply_require_ready` | pass `--require-ready` to `setup apply` (default `false`); rendered from `--apply-require-ready` |
 | `hub_bootstrap_cache_dir`, `hub_bootstrap_state_dir`, `hub_bootstrap_stage_in_check_mode` | local paths, defaults in `defaults/main.yml` |
 
 ## The hubctl interface this role expects
@@ -90,15 +105,19 @@ hubctl setup preview --profile <file|-> --manifest <file> [--out <file>] --json
     Profile from the file, or from stdin with "-". Verifies the manifest with the embedded trust root (exit 11 on
     failure). Prints one hub.bootstrap.result envelope whose data is the SetupPreview. With --out, also writes the
     SetupPreview (with its token) to <file>, mode 0600. Read-only otherwise.
-hubctl setup apply --preview <file> --manifest <file> [--escalate] [--confirm-activation] [--allow-downgrade] --json
+hubctl setup apply --preview <file> --manifest <file> [--escalate] [--confirm-activation] [--allow-downgrade]
+    [--require-ready] --json
     Revalidates the preview (rediscover, re-plan, compare), then applies. The hubctl artifact the plan installs is
-    the running, digest-checked binary. Exit codes as in BOOTSTRAP_EXIT.
+    the running, digest-checked binary. Exit codes as in BOOTSTRAP_EXIT. A harness whose only failing probes wait
+    on the user commits with exit 0 (data.harnesses[].state "installed-not-ready", with nextSteps); with
+    --require-ready it fails with 15 (harness_not_ready) and rolls back.
 hubctl setup verify --profile <file|-> --json
-    Runs the real probes for the profile's harnesses. Exit 0 when ready, 15 (harness_not_ready) otherwise.
+    Runs the real probes for the profile's harnesses. Exit 0 when ready, 15 (harness_not_ready) otherwise; data
+    has each harness's state, classified probes and next steps.
 hubctl machine status --json
     Envelope data: EnrollmentStatus (state unconfigured | configured | verified | revoked | offline | insecure).
 hubctl setup ansible --profile <file> [--plan <file>] --release-url <https-url> [--escalate]
-    [--confirm-activation] [--allow-downgrade] [--no-require-ready]
+    [--confirm-activation] [--allow-downgrade] [--no-require-ready] [--apply-require-ready]
     Verifies the release manifest, then prints renderYAML(renderRoleVars(...)). Errors use the envelope codes.
 ```
 

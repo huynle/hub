@@ -102,7 +102,7 @@ export const BOOTSTRAP_FLAGS: Readonly<Record<string, Readonly<Record<string, Fl
   "setup drift": { profile: "string", manifest: "string" },
   "setup rollback": { to: "string", "dry-run": "bool" },
   "setup recover": { resume: "bool", manifest: "string", "require-ready": "bool", ...CONSENT_FLAGS },
-  "setup ansible": { profile: "string", plan: "string", manifest: "string", "release-url": "string", "no-require-ready": "bool", ...CONSENT_FLAGS },
+  "setup ansible": { profile: "string", plan: "string", manifest: "string", "release-url": "string", "no-require-ready": "bool", "apply-require-ready": "bool", ...CONSENT_FLAGS },
 }
 
 // ---------- output ----------
@@ -711,6 +711,7 @@ async function ansible(io: SetupIo, flags: Parsed["flags"], json: boolean): Prom
       confirmActivation: flags["confirm-activation"] === true,
       allowDowngrade: flags["allow-downgrade"] === true,
       requireReady: flags["no-require-ready"] !== true,
+      applyRequireReady: flags["apply-require-ready"] === true,
     },
   })
   if (!r.ok) return emit(io, json, envelope("setup ansible", false, { error: { code: r.error.code, message: r.error.message } }))

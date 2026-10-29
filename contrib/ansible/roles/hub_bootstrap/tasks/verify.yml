@@ -1,6 +1,7 @@
 ---
-# Readiness comes only from real probes (`hubctl setup verify`); an install is not a ready harness. Enrollment is
-# reported, never performed: the device-code flow is a separate step a person approves on the host.
+# Readiness comes only from real probes (`hubctl setup verify`); an install is not a ready harness. The apply before
+# this commits a harness that only waits on the user (contract v1.2), so this step is the readiness gate. Enrollment
+# is reported, never performed: the device-code flow is a separate step a person approves on the host.
 - name: Verify the harnesses with real probes
   ansible.builtin.command:
     argv: "{{ [_hub_bootstrap_hubctl, 'setup', 'verify', '--profile', '-', '--json'] }}"
@@ -15,8 +16,12 @@
     that:
       - _hub_bootstrap_verify_run.rc == 0
     fail_msg: >-
-      hubctl setup verify: not ready (exit {{ _hub_bootstrap_verify_run.rc }}): {{ _hub_bootstrap_verify_run.stdout }}.
-      Provider and harness logins stay with the user on the host.
+      hubctl setup verify: not ready (exit {{ _hub_bootstrap_verify_run.rc }}).
+      {% for h in (((_hub_bootstrap_verify_run.stdout | from_json).data.harnesses | default([]))
+      if _hub_bootstrap_verify_run.stdout.startswith('{') else []) if not h.ready %}{{ h.harness }}:
+      {{ h.state }} ({{ h.nextSteps | join('; ') }}). {% endfor %}
+      The install is applied; provider and harness logins stay with the user on the host. Do the next steps there,
+      then run the play again (or set hub_bootstrap_require_ready to false).
     quiet: true
   when:
     - not ansible_check_mode

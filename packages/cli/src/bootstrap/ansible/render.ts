@@ -45,6 +45,15 @@ export const ROLE_FLAGS = Object.freeze({
   hub_bootstrap_allow_downgrade: "--allow-downgrade",
 } as const)
 
+/**
+ * v1.2: apply-only flags (not consent). `--require-ready` makes apply fail and roll back unless every harness is
+ * ready; without it apply commits a harness that only waits on the user, and the role's verify step (with
+ * hub_bootstrap_require_ready) is the readiness gate.
+ */
+export const ROLE_APPLY_FLAGS = Object.freeze({
+  hub_bootstrap_apply_require_ready: "--require-ready",
+} as const)
+
 export interface RenderOptions {
   /** https base URL of the hub release holding hubctl-manifest.json and the hubctl-<target> files. */
   readonly releaseBaseURL: string
@@ -53,6 +62,8 @@ export interface RenderOptions {
   readonly allowDowngrade?: boolean
   /** Fail the play when `hubctl setup verify` finds a harness not ready (default true). */
   readonly requireReady?: boolean
+  /** v1.2: pass --require-ready to `hubctl setup apply` (default false: apply commits installed-not-ready harnesses). */
+  readonly applyRequireReady?: boolean
 }
 
 export interface RenderInput {
@@ -104,6 +115,7 @@ export interface RoleVars {
   readonly hub_bootstrap_confirm_activation: boolean
   readonly hub_bootstrap_allow_downgrade: boolean
   readonly hub_bootstrap_require_ready: boolean
+  readonly hub_bootstrap_apply_require_ready: boolean
 }
 
 /** The order keys appear in the rendered YAML. */
@@ -123,6 +135,7 @@ const VAR_ORDER: readonly (keyof RoleVars)[] = [
   "hub_bootstrap_confirm_activation",
   "hub_bootstrap_allow_downgrade",
   "hub_bootstrap_require_ready",
+  "hub_bootstrap_apply_require_ready",
 ]
 
 export interface RenderError {
@@ -219,6 +232,7 @@ export function renderRoleVars(input: RenderInput): RenderResult {
     hub_bootstrap_confirm_activation: options.confirmActivation === true,
     hub_bootstrap_allow_downgrade: options.allowDowngrade === true,
     hub_bootstrap_require_ready: options.requireReady !== false,
+    hub_bootstrap_apply_require_ready: options.applyRequireReady === true,
   }
   const secrets = findSecrets(vars)
   if (secrets.length > 0) return refuse("invalid", `refusing to render credential-shaped values at ${secrets.join(", ")}`, secrets[0])
@@ -256,9 +270,10 @@ export interface RoleCommands {
 /** The exact argv the role runs; the same words a person runs on the direct path. */
 export function directCommands(vars: RoleVars, paths: RolePaths): RoleCommands {
   const consent = (Object.keys(ROLE_FLAGS) as (keyof typeof ROLE_FLAGS)[]).filter((key) => vars[key] === true).map((key) => ROLE_FLAGS[key])
+  const applyFlags = (Object.keys(ROLE_APPLY_FLAGS) as (keyof typeof ROLE_APPLY_FLAGS)[]).filter((key) => vars[key] === true).map((key) => ROLE_APPLY_FLAGS[key])
   return {
     preview: [paths.hubctl, "setup", "preview", "--profile", paths.profile, "--manifest", paths.manifest, "--out", paths.preview, "--json"],
-    apply: [paths.hubctl, "setup", "apply", "--preview", paths.preview, "--manifest", paths.manifest, ...consent, "--json"],
+    apply: [paths.hubctl, "setup", "apply", "--preview", paths.preview, "--manifest", paths.manifest, ...consent, ...applyFlags, "--json"],
     verify: [paths.hubctl, "setup", "verify", "--profile", paths.profile, "--json"],
   }
 }
