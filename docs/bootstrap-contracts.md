@@ -640,17 +640,24 @@ integration is and what is still open.
     `HarnessSource` streams its download into it (`fetch(action, staging)`), and the staging area records the
     sha256 and size of what it wrote. `install-harness` checks the pin (and the upstream evidence) against that
     digest, never one a source reports, before `unpack(action, file, staging)` streams the archive's members into
-    staging files (`adapters/archive-stream.ts`: gzip and raw deflate through `node:zlib` streams, a block-by-block
-    tar reader, zip members by offset from the central directory). Limits hold while inflating: the inflated total,
-    and a zip member never past its recorded size. Every member is judged before its body is read.
+    staging files (`adapters/archive-stream.ts`: a block-by-block tar reader, zip members by offset from the central
+    directory). Limits hold while inflating: the inflated total, and a zip member never past its recorded size.
+    Every member is judged before its body is read, and its CRC-32 (gzip trailer, zip directory) is checked.
+  - **Decision: hub inflates by itself** (`adapters/inflate.ts`, RFC 1951/1952, synchronous over the staged file,
+    32 KiB window, 64 KiB output chunks). `node:zlib`'s one-shot calls hold the whole output, and with the real
+    OpenCode 2.2.0 darwin zip Bun 1.3.5's zlib *streams* stalled for good (no output, no error) in about half the
+    runs once the consumer hashed and wrote each chunk, even when it yielded to the event loop; Node does not. The
+    cost is speed: ~3-7 s for 247 MB on a loaded laptop, against ~2 s for zlib.
   - A `tree` change, and a `file` change, may name a `StagedFile` instead of bytes. The engine moves a file its
     staging area wrote into the staged tree (copying across filesystems), and copies any other file (hubctl's own
     executable for `install-artifact`) in chunks, checking the digest while it copies (`integrity_mismatch`,
     nothing replaced). The staging directory is removed after each step and swept under the lock; it is never
     needed for recovery or resume.
-  - Measured (synthetic 300 MiB binary, real engine and OpenCode source, `test/bootstrap/memory-probe.ts`): peak
-    RSS growth fell from 1.97 GB (tar.gz) and 1.70 GB (zip) to about 50 MB. `bootstrap-install-memory.test.ts`
-    keeps it so (32 MiB always, 300 MiB with `HUB_MEMORY_TEST=1`).
+  - Measured (real engine and OpenCode source in a child process, `test/bootstrap/memory-probe.ts`): with the
+    real OpenCode 2.2.0 assets the peak RSS of the whole process fell from 1.77 GB to 0.19 GB (linux-x64-baseline
+    tar.gz) and from 1.00 GB to 0.19 GB (darwin-arm64 zip); with a synthetic 300 MiB binary, the growth over the
+    runtime fell from 1.97 GB (tar.gz) and 1.70 GB (zip) to about 70 MB. `bootstrap-install-memory.test.ts` keeps it
+    so (32 MiB always, 300 MiB with `HUB_MEMORY_TEST=1`).
 
 ### 7.3 Spoke presence (central)
 

@@ -4,10 +4,10 @@
 // the real engine, the built-in install-harness executor and the OpenCode source, in a child process
 // (test/bootstrap/memory-probe.ts) so the runner's own heap stays out of the numbers:
 //
-//   always on      32 MiB releases (tar.gz and zip): peak RSS growth stays a bounded constant (the runtime, zlib and
-//                  garbage not yet collected: ~40-90 MB however large the release) instead of a multiple of the
-//                  binary (it was ~6.5x), and no filesystem write or read ever carries more than one chunk (no
-//                  whole-file buffering);
+//   always on      32 MiB releases (tar.gz and zip): peak RSS growth stays a bounded constant (the runtime and
+//                  garbage not yet collected: ~70-80 MB however large the release) instead of a multiple of the
+//                  binary (it was ~6.5x: ~435 MB for 64 MiB), and no filesystem write or read ever carries more than
+//                  one chunk (no whole-file buffering);
 //   HUB_MEMORY_TEST=1  300 MiB releases, the size of the real thing: growth stays well under 1 GB (it was ~2 GB).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { closeSync, mkdtempSync, openSync, readSync, rmSync, statSync } from "node:fs"
@@ -75,8 +75,8 @@ describe("installing a harness keeps memory bounded", () => {
       expect(r.error).toBeUndefined()
       expect(r.ok).toBe(true)
       expect(r.unpacked).toBe(32 * MiB)
-      // Before streaming: ~6.5x the binary (~210 MB here, 2 GB for 300 MiB). Streaming: the runtime plus a few chunks.
-      expect(r.growth).toBeLessThan(96 * MiB)
+      // Before streaming: ~6.5x the binary (~210 MB here, 2 GB for 300 MiB). Streaming: a constant ~70-80 MB.
+      expect(r.growth).toBeLessThan(128 * MiB)
     }, 300_000)
   }
 
