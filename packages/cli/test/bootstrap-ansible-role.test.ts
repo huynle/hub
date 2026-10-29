@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process"
 import { readdirSync, readFileSync, statSync } from "node:fs"
 import path from "node:path"
 import { canonicalJSON, digestOf, findSecrets, manifestPayload, verifyManifest, type ArtifactManifest } from "../src/bootstrap/contracts/index.ts"
-import { ROLE_FLAGS, renderRoleVars, type RoleVars } from "../src/bootstrap/ansible/index.ts"
+import { ROLE_APPLY_FLAGS, ROLE_FLAGS, renderRoleVars, type RoleVars } from "../src/bootstrap/ansible/index.ts"
 import { generateKeyPairSync, sign } from "node:crypto"
 import * as F from "./bootstrap/fixtures.ts"
 
@@ -75,6 +75,16 @@ describe("hub_bootstrap role layout", () => {
     const defaults = load("defaults/main.yml")
     for (const key of Object.keys(ROLE_FLAGS)) expect(defaults[key]).toBe(false)
     expect(defaults.hub_bootstrap_require_ready).toBe(true)
+    // v1.2: apply commits a harness that only waits on the user; strict apply (with rollback) only when asked.
+    expect(defaults.hub_bootstrap_apply_require_ready).toBe(false)
+  })
+
+  test("v1.2: hub_bootstrap_apply_require_ready becomes exactly --require-ready on apply, and only there", () => {
+    const expr = String(load("vars/main.yml")._hub_bootstrap_apply_flags)
+    for (const [key, flag] of Object.entries(ROLE_APPLY_FLAGS)) expect(expr).toContain(`['${flag}'] if ${key} | bool`)
+    const apply = commandTasks().find((t) => argvText(t).includes("'setup', 'apply'"))!
+    expect(argvText(apply)).toContain("_hub_bootstrap_apply_flags")
+    for (const t of commandTasks().filter((t) => !argvText(t).includes("'setup', 'apply'"))) expect(argvText(t)).not.toContain("_hub_bootstrap_apply_flags")
   })
 
   test("each consent var becomes exactly its hubctl flag", () => {

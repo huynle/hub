@@ -4,6 +4,7 @@
 import type { HarnessVerification } from "../../contracts/index.ts"
 import { installHarnessExecutor, type HarnessSource } from "../../transaction/builtin.ts"
 import type { ActionExecutor } from "../../transaction/executor.ts"
+import type { ReadinessGate } from "../readiness.ts"
 import { claudeVerifyExecutor } from "./verify.ts"
 
 export * from "./adapter.ts"
@@ -13,7 +14,7 @@ export * from "./ports.ts"
 export * from "./source.ts"
 export * from "./verify.ts"
 
-export interface ClaudeExecutorOptions {
+export interface ClaudeExecutorOptions extends ReadinessGate {
   /** createClaudeHarnessSource(...) */
   readonly source: HarnessSource
   /** adapter.verify(context) */
@@ -30,6 +31,12 @@ export interface ClaudeExecutorOptions {
 export function claudeExecutors(options: ClaudeExecutorOptions): { readonly "install-harness": ActionExecutor<"install-harness">; readonly "verify-harness": ActionExecutor<"verify-harness"> } {
   return {
     "install-harness": installHarnessExecutor(options.source),
-    "verify-harness": claudeVerifyExecutor({ verify: options.verify, now: options.now, ...(options.onVerified ? { onVerified: options.onVerified } : {}) }),
+    "verify-harness": claudeVerifyExecutor({
+      verify: options.verify,
+      now: options.now,
+      ...(options.onVerified ? { onVerified: options.onVerified } : {}),
+      ...(options.requireReady !== undefined ? { requireReady: options.requireReady } : {}),
+      ...(options.onReadiness ? { onReadiness: options.onReadiness } : {}),
+    }),
   }
 }

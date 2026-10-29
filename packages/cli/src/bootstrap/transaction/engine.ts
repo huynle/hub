@@ -140,6 +140,11 @@ export interface TxReport {
   readonly steps: readonly StepOutcome[]
   /** Files recovery left alone because they changed since hub wrote them (or could not be restored safely). */
   readonly conflicts: readonly Conflict[]
+  /**
+   * Informational, not a conflict: directories hub created that a rollback left in place because they now also hold
+   * files hub did not write (a harness probe's cache, say). Nothing of the user's was touched.
+   */
+  readonly kept: readonly Conflict[]
   /** Upstream evidence recorded for harness installs (never part of the journal). */
   readonly evidence: readonly { readonly actionID: string; readonly results: readonly EvidenceResult[] }[]
 }
@@ -380,6 +385,7 @@ export function createApplier(config: ApplierConfig): Applier {
       if (undo.length === 0) return { ok: true }
       const steps: StepOutcome[] = []
       const conflicts: Conflict[] = []
+      const kept: Conflict[] = []
       let last: TxReport | undefined
       for (const journal of undo) {
         const r = await new Run(store, lock, store.readPlan(journal), journal).rollbackAll()
@@ -387,8 +393,9 @@ export function createApplier(config: ApplierConfig): Applier {
         last = r.report
         steps.push(...r.report.steps)
         conflicts.push(...r.report.conflicts)
+        kept.push(...r.report.kept)
       }
-      return { ok: true, report: { ...last!, steps, conflicts } }
+      return { ok: true, report: { ...last!, steps, conflicts, kept } }
     })
   }
 
@@ -397,6 +404,7 @@ export function createApplier(config: ApplierConfig): Applier {
     private journal: TransactionJournal
     private readonly steps: StepOutcome[] = []
     private readonly conflicts: Conflict[] = []
+    private readonly kept: Conflict[] = []
     private readonly evidence: { actionID: string; results: readonly EvidenceResult[] }[] = []
 
     constructor(
@@ -413,7 +421,7 @@ export function createApplier(config: ApplierConfig): Applier {
     }
 
     report(): TxReport {
-      return { txID: this.txID, state: this.journal.state, steps: [...this.steps], conflicts: [...this.conflicts], evidence: [...this.evidence] }
+      return { txID: this.txID, state: this.journal.state, steps: [...this.steps], conflicts: [...this.conflicts], kept: [...this.kept], evidence: [...this.evidence] }
     }
 
     persist(patch: Partial<Pick<TransactionJournal, "state" | "entries">> = {}): void {
@@ -573,24 +581,44 @@ export function createApplier(config: ApplierConfig): Applier {
       if (!r.ok) throw new TxError(r.code, `${action.id}: ${r.message}`)
     }
 
-    /** Creates the missing directories above `ref`, each journaled as its own owned change. */
+    /** Creates the missing directories above `ref` (its root first), each journaled as its own owned change. */
     private async parents(action: Action, ref: PathRef): Promise<void> {
       const parts = ref.rel.split("/").slice(0, -1)
       const root = rootDir(ref.root, config.roots, context)!
-      if (!fs.lstat(root)) fs.mkdirp(root, PARENT_MODE)
-      for (let i = 1; i <= parts.length; i++) {
-        const rel = parts.slice(0, i).join("/")
-        const abs = `${root === "/" ? "" : root}/${rel}`
-        const info = fs.lstat(abs)
-        if (info?.kind === "directory") continue
-        if (info) throw new TxError("conflict", `${abs} is not a directory`)
-        const entry = await this.append({ actionID: action.id, kind: action.kind, class: "directory", path: { root: ref.root, rel }, before: { exists: false }, after: { exists: true, mode: PARENT_MODE }, status: "pending" })
-        const again = this.resolve({ root: ref.root, rel })
-        if (!again.ok) throw new TxError(again.code, `${action.id}: ${again.message}`)
-        fs.mkdir(abs, PARENT_MODE)
-        fs.chmod(abs, PARENT_MODE)
-        await this.settle(entry, { status: "done", after: fileState(fs, abs) })
+      if (!fs.lstat(root)) await this.rootDirs(action, ref.root, root)
+      for (let i = 1; i <= parts.length; i++) await this.ownedDir(action, { root: ref.root, rel: parts.slice(0, i).join("/") }, `${root === "/" ? "" : root}/${parts.slice(0, i).join("/")}`)
+    }
+
+    /** One missing directory, journaled before it is made (rollback removes it while it is empty). */
+    private async ownedDir(action: Action, ref: PathRef, abs: string): Promise<void> {
+      const info = fs.lstat(abs)
+      if (info?.kind === "directory") return
+      if (info) throw new TxError("conflict", `${abs} is not a directory`)
+      const entry = await this.append({ actionID: action.id, kind: action.kind, class: "directory", path: ref, before: { exists: false }, after: { exists: true, mode: PARENT_MODE }, status: "pending" })
+      const again = this.resolve(ref)
+      if (!again.ok) throw new TxError(again.code, `${action.id}: ${again.message}`)
+      fs.mkdir(abs, PARENT_MODE)
+      fs.chmod(abs, PARENT_MODE)
+      await this.settle(entry, { status: "done", after: fileState(fs, abs) })
+    }
+
+    /**
+     * A missing root directory (a fresh home without ~/.local/bin). A root is not a PathRef of its own, but a root
+     * under the home root is one of the home root's: each missing level is journaled as a home directory, so a
+     * rollback removes what this transaction created (and only while it is empty). A root outside home, or below a
+     * symlink or a missing home, is created unjournaled as before (it cannot be owned without following the link).
+     */
+    private async rootDirs(action: Action, id: PathRef["root"], root: string): Promise<void> {
+      const home = id === "home" ? undefined : rootDir("home", config.roots, context)
+      const homeInfo = home ? fs.lstat(home) : undefined
+      const rel = home && homeInfo?.kind === "directory" && root.startsWith(`${home}/`) ? root.slice(home.length + 1) : undefined
+      const parts = rel?.split("/") ?? []
+      const levels = parts.map((_, i) => ({ rel: parts.slice(0, i + 1).join("/"), abs: `${home}/${parts.slice(0, i + 1).join("/")}` }))
+      if (!rel || levels.some((l) => fs.lstat(l.abs)?.kind === "symlink")) {
+        fs.mkdirp(root, PARENT_MODE)
+        return
       }
+      for (const level of levels) await this.ownedDir(action, { root: "home", rel: level.rel }, level.abs)
     }
 
     private backup(seq: number, target: string, current: FileState): { id: string } | undefined {
@@ -848,7 +876,8 @@ export function createApplier(config: ApplierConfig): Applier {
               fs.rmdir(target)
             } catch (error) {
               if (errnoOf(error) !== "ENOTEMPTY" && errnoOf(error) !== "EEXIST") throw error
-              await this.conflict(entry, target, "is not empty (it holds files hub did not create); kept", current)
+              // Informational: hub made this directory, and something else (often the harness itself) wrote into it.
+              this.kept.push({ seq: entry.seq, actionID: entry.actionID, path: target, reason: "hub created this directory, and it now also holds files hub did not write (a harness may have written them); left in place" })
               return "keep-user-edit"
             }
             await this.mark(entry, "undone")

@@ -5,7 +5,7 @@
   ansible.builtin.command:
     argv: >-
       {{ [_hub_bootstrap_hubctl, 'setup', 'apply', '--preview', _hub_bootstrap_preview_file, '--manifest', _hub_bootstrap_manifest]
-      + _hub_bootstrap_consent_flags + ['--json'] }}
+      + _hub_bootstrap_consent_flags + _hub_bootstrap_apply_flags + ['--json'] }}
   register: _hub_bootstrap_apply_run
   changed_when: _hub_bootstrap_apply_run.rc == 0
   failed_when: false
@@ -21,7 +21,8 @@
     fail_msg: >-
       hubctl setup apply failed (exit {{ _hub_bootstrap_apply_run.rc }}): {{ _hub_bootstrap_apply_run.stdout }}.
       Exit 12 means the host changed since the preview (run again); exit 14 means an interrupted apply must be
-      recovered on the host with `hubctl setup recover` first.
+      recovered on the host with `hubctl setup recover` first; exit 15 (only with hub_bootstrap_apply_require_ready)
+      means a harness was not ready, so the apply was rolled back.
     quiet: true
   when:
     - not ansible_check_mode

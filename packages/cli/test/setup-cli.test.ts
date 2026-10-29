@@ -342,3 +342,119 @@ describe("hubctl setup with a signed release manifest (pinned installs)", () => 
     expect(r.envelope?.error?.code).toBe("signature_invalid")
   })
 })
+
+// HBS-12 acceptance: on a fresh, enrolled host the provider login and the spoke can only happen after the install
+// (the user needs the installed OpenCode for `opencode auth login` and to start it). So apply commits a harness that
+// only waits on the user as "installed, not ready" (exit 0) and `setup verify` stays the strict gate (exit 15);
+// `apply --require-ready` keeps the old all-or-nothing behaviour (exit 15, rolled back).
+describe("hubctl setup on a fresh host: install is not readiness (contract v1.2)", () => {
+  // `opencode models` fails until the user logs in (a marker file), and, like the real one, writes into its config
+  // directory while it runs.
+  const PENDING_OPENCODE = `#!/bin/sh
+case "$1" in
+  --version) echo "opencode v2.2.0" ;;
+  models)
+    mkdir -p "$HOME/.config/opencode/node_modules" && echo "{}" > "$HOME/.config/opencode/node_modules/.lock"
+    if [ -f "$HOME/.logged-in" ]; then echo "anthropic/claude-sonnet-4"; else echo "no providers" >&2; exit 1; fi ;;
+  *) exit 2 ;;
+esac
+`
+
+  async function freshHost() {
+    h = await harness()
+    const home = tempHome()
+    rmSync(path.join(home, "bin", "opencode"))
+    const target = `${process.platform}-${process.arch}`
+    const key = ephemeralKey()
+    const archive = process.platform === "darwin" ? { file: `opencode-${target}.zip`, bytes: zip([{ name: "opencode", content: PENDING_OPENCODE }]) } : { file: `opencode-${target}.tar.gz`, bytes: tarGz([{ name: "opencode", content: PENDING_OPENCODE }]) }
+    const pin = { harness: "opencode" as const, version: "2.2.0", target, url: `https://github.com/anomalyco/opencode/releases/download/v2.2.0/${archive.file}`, file: archive.file, ...bytesInfo(archive.bytes), evidence: [] }
+    const manifestFile = path.join(home, "hubctl-manifest.json")
+    writeFileSync(manifestFile, JSON.stringify(signWith(releaseBody("0.8.0", "0.7.0", [pin]), key)))
+    const hubctl = fakeBinary(target)
+    const bootstrap = { machineID: "test-machine-id", trustRoot: canonicalJSON(rootOf(key)), ports: { uid: 501, hubctlBytes: () => hubctl, opencodeDownload: async () => archive.bytes, serviceRunner: async () => ({ exitCode: 1 }) } }
+    const hubctlRun = async (argv: string[]) => {
+      let stdout = ""
+      let stderr = ""
+      const code = await run(argv, { env: { HOME: home, PATH: `${home}/bin:/usr/bin:/bin` }, home, stdout: (s) => (stdout += s), stderr: (s) => (stderr += s), program: { execPath: process.execPath, entry: ENTRY }, bootstrap })
+      return { code, stdout, stderr, envelope: stdout.trim().startsWith("{") ? (JSON.parse(stdout) as ResultEnvelope<any>) : undefined }
+    }
+    expect((await enroll(home, h)).code).toBe(0)
+    const preview = async (name: string) => {
+      const file = path.join(home, name)
+      const r = await hubctlRun(["setup", "preview", "--profile", "session-only", "--manifest", manifestFile, "--out", file, "--json"])
+      expect(r.code).toBe(0)
+      return file
+    }
+    return { home, manifestFile, hubctlRun, preview }
+  }
+
+  test("apply commits installed-not-ready (exit 0) → verify 15 → the user logs in and starts OpenCode → verify 0", async () => {
+    const { home, manifestFile, hubctlRun, preview } = await freshHost()
+    const applied = await hubctlRun(["setup", "apply", "--preview", await preview("p1.json"), "--manifest", manifestFile, "--json"])
+    expect(applied.envelope?.error).toBeUndefined()
+    expect(applied.code).toBe(0)
+    expect(validateEnvelope(applied.envelope).ok).toBe(true)
+    expect(applied.envelope?.data?.state).toBe("committed")
+    expect(applied.envelope?.data?.ready).toBe(false)
+    const oc = applied.envelope?.data?.harnesses.find((x: { harness: string }) => x.harness === "opencode")
+    expect(oc.state).toBe("installed-not-ready")
+    expect(oc.probes.map((p: { kind: string; class: string; status: string }) => [p.kind, p.class, p.status])).toEqual([
+      ["version-exec", "integrity", "pass"],
+      ["provider-auth", "user", "pending"],
+      ["spoke-connected", "user", "pending"],
+    ])
+    expect(oc.nextSteps.join("\n")).toContain("opencode auth login")
+    expect(oc.nextSteps.at(-1)).toContain("hubctl setup verify")
+    expect(existsSync(path.join(home, ".local", "share", "hub", "harnesses", "opencode", "current", "bin", "opencode"))).toBe(true)
+    expect(existsSync(path.join(home, ".local", "bin", "hubctl"))).toBe(true)
+
+    const notReady = await hubctlRun(["setup", "verify", "--json"])
+    expect(notReady.code).toBe(15)
+    expect(notReady.envelope?.error?.code).toBe("harness_not_ready")
+    expect(notReady.envelope?.data?.harnesses[0]).toMatchObject({ harness: "opencode", ready: false, state: "installed-not-ready" })
+
+    writeFileSync(path.join(home, ".logged-in"), "")
+    const client = await spoke(h!, { machine: { token: machineToken(home) }, hello: { harness: "opencode" } })
+    const ready = await hubctlRun(["setup", "verify", "--json"])
+    expect(ready.code).toBe(0)
+    expect(ready.envelope?.data?.harnesses[0]).toMatchObject({ harness: "opencode", ready: true, state: "ready" })
+    client.close()
+  }, 30_000)
+
+  test("text output names the harness as installed, not ready, with the next steps", async () => {
+    const { manifestFile, hubctlRun, preview } = await freshHost()
+    const applied = await hubctlRun(["setup", "apply", "--preview", await preview("p1.json"), "--manifest", manifestFile])
+    expect(applied.code).toBe(0)
+    expect(applied.stdout).toContain("opencode: installed, not ready")
+    expect(applied.stdout).toContain("opencode auth login")
+    expect(applied.stdout).toContain("hubctl setup verify")
+  }, 30_000)
+
+  test("with --require-ready the same apply fails with harness_not_ready (15) and rolls everything back", async () => {
+    const { home, manifestFile, hubctlRun, preview } = await freshHost()
+    const strict = await hubctlRun(["setup", "apply", "--preview", await preview("p1.json"), "--manifest", manifestFile, "--require-ready", "--json"])
+    expect(strict.code).toBe(15)
+    expect(strict.envelope?.error?.code).toBe("harness_not_ready")
+    expect(strict.envelope?.data?.state).toBe("rolled-back")
+    expect(strict.envelope?.data?.harnesses[0]).toMatchObject({ harness: "opencode", state: "installed-not-ready" })
+    expect(strict.envelope?.error?.hint).toContain("without --require-ready")
+    for (const p of [".local/bin/hubctl", ".local/bin/hub", ".local/share/hub/harnesses/opencode/current", ".config/opencode/opencode.json"]) expect(existsSync(path.join(home, p))).toBe(false)
+    // The directories this apply created are gone too (they did not exist before)...
+    expect(existsSync(path.join(home, ".local", "bin"))).toBe(false)
+    expect(existsSync(path.join(home, ".local", "share"))).toBe(false)
+    // ...except the OpenCode config directory the probe wrote its own files into: kept, as a note, not a conflict.
+    expect(strict.envelope?.data?.conflicts).toEqual([])
+    expect(strict.envelope?.data?.kept.map((k: { path: string }) => k.path)).toEqual([path.join(home, ".config", "opencode")])
+    expect(existsSync(path.join(home, ".config", "opencode", "node_modules", ".lock"))).toBe(true)
+    expect(strict.envelope?.warnings ?? []).toEqual([])
+  }, 30_000)
+
+  test("text output of a rolled-back apply notes the kept directory without a warning", async () => {
+    const { manifestFile, hubctlRun, preview } = await freshHost()
+    const strict = await hubctlRun(["setup", "apply", "--preview", await preview("p1.json"), "--manifest", manifestFile, "--require-ready"])
+    expect(strict.code).toBe(15)
+    expect(strict.stderr).toContain("hubctl: note: kept")
+    expect(strict.stderr).not.toContain("warning")
+    expect(strict.stderr).toContain("opencode: installed, not ready")
+  }, 30_000)
+})

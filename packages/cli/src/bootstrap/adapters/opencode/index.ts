@@ -8,6 +8,7 @@ import { discover } from "../../discovery/discover.ts"
 import type { DiscoveryProbe } from "../../discovery/probe.ts"
 import type { HarnessSource } from "../../transaction/builtin.ts"
 import type { ExecutorMap } from "../../transaction/executor.ts"
+import type { ReadinessGate } from "../readiness.ts"
 import { createOpencodeHarnessSource, httpsDownload, opencodeExecutors, type Download } from "./apply.ts"
 import { createOpencodeAdapter, type OpencodePlanOptions } from "./plan.ts"
 import { locateOpencodeBinary, nodeProcessRunner, verifyOpencode, type ProcessRunner, type ProviderProbe, type SpokeProbe } from "./verify.ts"
@@ -39,8 +40,8 @@ export interface OpencodeHarness {
   readonly adapter: HarnessAdapter
   /** Absent without a manifest (nothing can be installed then). */
   readonly source?: HarnessSource
-  /** Executors for apply's context: merge them over builtinExecutors. */
-  executors(context: () => AdapterContext): Pick<ExecutorMap, "register-mcp-server" | "verify-harness">
+  /** Executors for apply's context: merge them over builtinExecutors. `gate`: the v1.2 readiness gate. */
+  executors(context: () => AdapterContext, gate?: ReadinessGate): Pick<ExecutorMap, "register-mcp-server" | "verify-harness">
 }
 
 /** The version directory a hub-managed binary lives in (data:hub/harnesses/opencode/<version>/bin/opencode). */
@@ -74,6 +75,7 @@ export function createOpencodeHarness(options: OpencodeHarnessOptions): Opencode
   return {
     adapter,
     ...(source ? { source } : {}),
-    executors: (context) => opencodeExecutors({ adapter, context, ...(options.authority ? { authority: options.authority as PathRef } : {}), ...(options.onVerification ? { onVerification: options.onVerification } : {}) }),
+    executors: (context, gate = {}) =>
+      opencodeExecutors({ adapter, context, ...gate, ...(options.authority ? { authority: options.authority as PathRef } : {}), ...(options.onVerification ? { onVerification: options.onVerification } : {}) }),
   }
 }

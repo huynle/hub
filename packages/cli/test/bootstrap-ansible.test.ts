@@ -18,7 +18,7 @@ import {
   type TrustRoot,
   type VerifiedManifest,
 } from "../src/bootstrap/contracts/index.ts"
-import { ANSIBLE_VARS_SCHEMA, ROLE_FLAGS, directCommands, renderRoleVars, renderYAML, type RenderInput, type RoleVars } from "../src/bootstrap/ansible/index.ts"
+import { ANSIBLE_VARS_SCHEMA, ROLE_APPLY_FLAGS, ROLE_FLAGS, directCommands, renderRoleVars, renderYAML, type RenderInput, type RoleVars } from "../src/bootstrap/ansible/index.ts"
 import * as F from "./bootstrap/fixtures.ts"
 
 function verifiedManifest(): VerifiedManifest {
@@ -200,6 +200,18 @@ describe("direct and rendered paths have the same plan semantics", () => {
     expect(consenting.apply.slice(-4)).toEqual(["--escalate", "--confirm-activation", "--allow-downgrade", "--json"])
     expect(consenting.preview).toEqual(plain.preview)
     expect(Object.values(ROLE_FLAGS).sort()).toEqual(["--allow-downgrade", "--confirm-activation", "--escalate"])
+  })
+
+  test("v1.2: apply is strict about readiness only when asked (--require-ready); verify runs separately either way", () => {
+    const paths = { hubctl: "/x/hubctl", profile: "/x/p", preview: "/x/q", manifest: "/x/m" }
+    const plain = rendered().vars
+    expect(plain.hub_bootstrap_apply_require_ready).toBe(false)
+    expect(directCommands(plain, paths).apply).not.toContain("--require-ready")
+    const strict = rendered({ options: { releaseBaseURL: BASE, applyRequireReady: true } }).vars
+    expect(strict.hub_bootstrap_apply_require_ready).toBe(true)
+    expect(directCommands(strict, paths).apply.slice(-2)).toEqual(["--require-ready", "--json"])
+    expect(directCommands(strict, paths).verify).toEqual(directCommands(plain, paths).verify)
+    expect(ROLE_APPLY_FLAGS).toEqual({ hub_bootstrap_apply_require_ready: "--require-ready" })
   })
 
   test("no command ever enrolls the machine", () => {

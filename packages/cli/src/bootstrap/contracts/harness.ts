@@ -78,6 +78,84 @@ export function isHarnessReady(verification: HarnessVerification, now: number): 
   })
 }
 
+/**
+ * v1.2: what a probe that is not passing means. `integrity`: the install itself is wrong (the binary is missing, does
+ * not run, is not the pinned version, is a container shim, its local API does not answer), so apply rolls back.
+ * `user`: the install is fine but waits on the user (their provider login, a spoke they start), which only the
+ * installed harness lets them do, so apply commits it as "installed, not ready" unless --require-ready is given.
+ * The class belongs to the probe kind, never to a probe's detail, so it cannot be argued from harness output.
+ */
+export const PROBE_CLASSES = ["integrity", "user"] as const
+export type ProbeClass = (typeof PROBE_CLASSES)[number]
+export const PROBE_CLASS: Readonly<Record<ProbeKind, ProbeClass>> = Object.freeze({
+  presence: "integrity",
+  "version-exec": "integrity",
+  "api-health": "integrity",
+  "provider-auth": "user",
+  "spoke-connected": "user",
+})
+
+/** v1.2: pass (present, passing, fresh); pending (a user probe that is not passing); fail (anything else). */
+export type ProbeStatus = "pass" | "pending" | "fail"
+/** v1.2: ready (every probe passes); pending (only user probes do not); failed (an integrity probe does not). */
+export type ReadinessState = "ready" | "pending" | "failed"
+
+export interface ProbeReadiness {
+  readonly kind: ProbeKind
+  readonly class: ProbeClass
+  readonly status: ProbeStatus
+  readonly detail?: string
+}
+
+export interface HarnessReadiness {
+  readonly harness: HarnessID
+  readonly state: ReadinessState
+  readonly probes: readonly ProbeReadiness[]
+  /** What the user does next, in order (empty when ready); never a command hubctl runs. */
+  readonly nextSteps: readonly string[]
+}
+
+/** v1.2: the user's next step for each pending user probe. */
+export const PENDING_STEPS: Readonly<Record<HarnessID, Readonly<Partial<Record<ProbeKind, string>>>>> = Object.freeze({
+  opencode: {
+    "provider-auth": "sign in to a model provider on this machine: run `opencode auth login`",
+    "spoke-connected": "start OpenCode (`opencode`) so the hub plugin connects its spoke",
+  },
+  "claude-code": {
+    "provider-auth": "log in to Claude Code on this machine: run `claude auth login`",
+    "spoke-connected": "start the claude-code spoke (`hub claude-code daemon`, or activate the hub services)",
+  },
+  codex: {
+    "provider-auth": "log in to Codex on this machine: run `codex login`",
+    "spoke-connected": "start the Codex spoke (`hub codex-spoke serve`, or activate the hub services)",
+  },
+})
+export const VERIFY_STEP = "then check readiness with `hubctl setup verify`"
+
+const fresh = (p: Probe, now: number) => p.ok && p.observedAt <= now + CLOCK_SKEW_MS && now - p.observedAt <= PROBE_MAX_AGE_MS
+
+/**
+ * v1.2: classifies a verification. Every REQUIRED_PROBES kind and every kind in `also` (the probes a verify-harness
+ * action asks for) must be present; a missing one is a failure (an adapter reports every probe it owes). `ready`
+ * implies isHarnessReady.
+ */
+export function harnessReadiness(verification: HarnessVerification, now: number, also: readonly ProbeKind[] = []): HarnessReadiness {
+  const required = REQUIRED_PROBES[verification.harness] ?? []
+  const kinds = [...required, ...also.filter((k) => !required.includes(k))]
+  const probes: ProbeReadiness[] = kinds.map((kind) => {
+    const found = verification.probes.filter((p) => p.kind === kind)
+    const cls = PROBE_CLASS[kind]
+    if (found.length === 0) return { kind, class: cls, status: "fail", detail: "not run" }
+    const bad = found.find((p) => !fresh(p, now))
+    const detail = (bad ?? found[found.length - 1]!).detail
+    const status: ProbeStatus = !bad ? "pass" : cls === "user" ? "pending" : "fail"
+    return { kind, class: cls, status, ...(detail !== undefined ? { detail } : {}) }
+  })
+  const state: ReadinessState = probes.some((p) => p.status === "fail") ? "failed" : probes.some((p) => p.status === "pending") ? "pending" : "ready"
+  const steps = state === "pending" ? probes.flatMap((p) => (p.status === "pending" ? (PENDING_STEPS[verification.harness]?.[p.kind] ?? []) : [])) : []
+  return { harness: verification.harness, state, probes, nextSteps: state === "pending" ? [...steps, VERIFY_STEP] : [] }
+}
+
 /** What an adapter may use: typed, injected capabilities only (the applier implements them). */
 export interface AdapterContext {
   readonly env: Readonly<Record<string, string | undefined>>

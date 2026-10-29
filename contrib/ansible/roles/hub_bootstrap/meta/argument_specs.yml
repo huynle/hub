@@ -70,6 +70,10 @@ argument_specs:
         type: bool
         default: true
         description: Fail when `hubctl setup verify` reports a harness that is not ready.
+      hub_bootstrap_apply_require_ready:
+        type: bool
+        default: false
+        description: Pass --require-ready to `hubctl setup apply` (roll the apply back unless every harness is ready).
       hub_bootstrap_cache_dir:
         type: str
         description: Cache of the digest-checked hubctl and its manifest.

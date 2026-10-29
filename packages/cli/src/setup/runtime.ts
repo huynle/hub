@@ -22,6 +22,7 @@ import {
   type DiscoverySnapshot,
   type HarnessAdapter,
   type HarnessID,
+  type HarnessReadiness,
   type HarnessVerification,
   type PathRef,
   type Profile,
@@ -47,6 +48,7 @@ import {
   type NodeServicesPlan,
 } from "../bootstrap/adapters/node-services/index.ts"
 import { createOpencodeHarness, type Download, type ProcessRunner } from "../bootstrap/adapters/opencode/index.ts"
+import type { ReadinessGate } from "../bootstrap/adapters/readiness.ts"
 import { discover } from "../bootstrap/discovery/discover.ts"
 import { pathDirs, which } from "../bootstrap/discovery/executables.ts"
 import type { DiscoveryProbe } from "../bootstrap/discovery/probe.ts"
@@ -110,11 +112,30 @@ export interface PlanBundle {
   readonly history: readonly TransactionRecord[]
 }
 
+/** The consent and readiness choices apply makes (never part of the plan, so never part of its digest). */
+export interface ApplyChoices {
+  readonly allowDowngrade?: boolean
+  /**
+   * v1.2: fail (and roll back) unless every harness is ready (`--require-ready`). Without it a harness that only waits
+   * on the user (provider login, spoke) is committed as installed, not ready; an integrity failure still rolls back.
+   */
+  readonly requireReady?: boolean
+  /** Harnesses that must be ready regardless (the --verify-launch harness: the launch needs it). */
+  readonly strict?: readonly HarnessID[]
+  /** Sees each harness's classified readiness (the apply report). */
+  readonly onReadiness?: (readiness: HarnessReadiness) => void
+}
+
+/** The readiness gate of one harness's verify-harness step (contract v1.2): strict only when asked or launched. */
+export function readinessGate(consent: ApplyChoices, harness: HarnessID): ReadinessGate {
+  return { requireReady: consent.requireReady === true || (consent.strict ?? []).includes(harness), ...(consent.onReadiness ? { onReadiness: consent.onReadiness } : {}) }
+}
+
 export interface SetupRuntime {
   readonly deps: RuntimeDeps
   discover(): Result<DiscoverySnapshot>
   plan(profile: Profile, choices: SetupChoices): Promise<PlanBundle>
-  executors(bundle: PlanBundle, snapshot: DiscoverySnapshot, consent: { readonly allowDowngrade?: boolean }): ExecutorMap
+  executors(bundle: PlanBundle, snapshot: DiscoverySnapshot, consent: ApplyChoices): ExecutorMap
   applier(snapshot: DiscoverySnapshot, executors: ExecutorMap): Applier
   verify(harnesses: readonly HarnessID[]): Promise<HarnessVerification[]>
   /** This host's transactions (oldest first), from the journals and their plans. */
@@ -316,8 +337,9 @@ export function createSetupRuntime(deps: RuntimeDeps): SetupRuntime {
       }),
   }
 
-  function executors(bundle: PlanBundle, snap: DiscoverySnapshot, consent: { readonly allowDowngrade?: boolean }): ExecutorMap {
+  function executors(bundle: PlanBundle, snap: DiscoverySnapshot, consent: ApplyChoices): ExecutorMap {
     const allowDowngrade = consent.allowDowngrade === true
+    const gate = (h: HarnessID) => readinessGate(consent, h)
     const { opencode, claude, codex, sources } = adapters(installedHarnesses(bundle.history), allowDowngrade)
     const services = control(snap)
     const hubctl = hubctlSource()
@@ -331,7 +353,7 @@ export function createSetupRuntime(deps: RuntimeDeps): SetupRuntime {
       ...(hubctl ? { hubctl } : {}),
       ...(deps.manifest ? { harness: dispatchHarnessSource({ manifest: deps.manifest, sources, allowDowngrade }) } : {}),
     })
-    const oc = opencode.executors(context)
+    const oc = opencode.executors(context, gate("opencode"))
     const launchProbe = ports.launchDriver ? { driver: ports.launchDriver, ...(deps.signal ? { signal: deps.signal } : {}), onReport: (r: LaunchReport) => deps.stderr(launchReportText(r)) } : undefined
     return {
       ...builtin,
@@ -339,8 +361,8 @@ export function createSetupRuntime(deps: RuntimeDeps): SetupRuntime {
       "register-mcp-server": dispatchByHarness("register-mcp-server", { opencode: oc["register-mcp-server"]! }),
       "verify-harness": dispatchByHarness("verify-harness", {
         opencode: oc["verify-harness"]!,
-        "claude-code": claudeVerifyExecutor({ verify: () => claude.verify(context()), now: deps.now }),
-        codex: codexVerifyExecutor({ verify: (ctx) => codex.verify(ctx), context }),
+        "claude-code": claudeVerifyExecutor({ verify: () => claude.verify(context()), now: deps.now, ...gate("claude-code") }),
+        codex: codexVerifyExecutor({ verify: (ctx) => codex.verify(ctx), context, ...gate("codex") }),
       }),
       "enroll-machine": enrollExecutor(),
       "verify-runtime": verifyRuntime,

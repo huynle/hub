@@ -30,5 +30,10 @@ _hub_bootstrap_consent_flags: >-
   + (['--confirm-activation'] if hub_bootstrap_confirm_activation | bool else [])
   + (['--allow-downgrade'] if hub_bootstrap_allow_downgrade | bool else []) }}
 
+# Apply-only flags (contract v1.2): --require-ready makes apply fail and roll back unless every harness is ready.
+# Off by default: apply commits a harness that only waits on the user's login or spoke, and the verify step gates.
+_hub_bootstrap_apply_flags: >-
+  {{ (['--require-ready'] if hub_bootstrap_apply_require_ready | bool else []) }}
+
 # Plan actions that change something (the verifications only read).
 _hub_bootstrap_read_only_kinds: [verify-harness, verify-runtime]

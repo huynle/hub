@@ -10,11 +10,14 @@
 //   spoke-connected  the injected spoke probe sees the claude-code hooks spoke connected, and the injected
 //                    conformance probe passes. Both are required: without either, the harness is not ready.
 //
-// Not ready means no capability: claudeReadiness offers "claude-code" only when every probe passes, and the
-// verify-harness step fails with harness_not_ready otherwise (so the transaction rolls back).
-import { isHarnessReady, type AdapterContext, type HarnessVerification, type Probe } from "../../contracts/index.ts"
+// Not ready means no capability: claudeReadiness offers "claude-code" only when every probe passes. The
+// verify-harness step classifies the probes (contract v1.2): an integrity failure (the binary) fails it with
+// harness_not_ready (so the transaction rolls back); a login or spoke that waits on the user fails it only with
+// requireReady (the default), and otherwise passes as "installed, not ready".
+import { harnessReadiness, isHarnessReady, type AdapterContext, type HarnessVerification, type Probe } from "../../contracts/index.ts"
 import type { ActionExecutor } from "../../transaction/executor.ts"
 import { txFail, txOk } from "../../transaction/result.ts"
+import { passesAsPending, type ReadinessGate } from "../readiness.ts"
 import type { ProbeRunner, RunResult } from "./ports.ts"
 
 export const VERSION_ARGV: readonly string[] = Object.freeze(["--version"])
@@ -131,27 +134,31 @@ export function claudeReadiness(verification: HarnessVerification, now: number):
   return { ready, problems: problems.length > 0 ? problems : ["the probes are missing or stale"] }
 }
 
-export interface ClaudeVerifyOptions {
+export interface ClaudeVerifyOptions extends ReadinessGate {
   readonly verify: () => Promise<HarnessVerification>
   readonly now: () => number
   /** Sees every verification (ready or not), e.g. to record it or offer the capability. */
   readonly onVerified?: (verification: HarnessVerification) => void
 }
 
-/** The verify-harness step for claude-code: an external effect that fails unless the harness is ready. */
+/** The verify-harness step for claude-code: an external effect that fails unless ready (or, v1.2, only pending). */
 export function claudeVerifyExecutor(options: ClaudeVerifyOptions): ActionExecutor<"verify-harness"> {
   return {
     kind: "verify-harness",
     plan: () => ({ class: "external" }),
     check: async (action) => (action.harness === "claude-code" ? txOk(undefined) : txFail("internal", `the Claude Code verifier cannot verify ${action.harness}`)),
-    change: async () =>
+    change: async (action) =>
       txOk({
         type: "effect",
         perform: async () => {
           const verification = await options.verify()
           options.onVerified?.(verification)
+          const classified = harnessReadiness(verification, options.now(), action.probes)
+          options.onReadiness?.(structuredClone(classified))
           const readiness = claudeReadiness(verification, options.now())
-          return readiness.ready ? txOk(undefined) : txFail("harness_not_ready", `Claude Code is not ready: ${readiness.problems.join("; ")}`)
+          if (readiness.ready) return txOk(undefined)
+          if (verification.harness === "claude-code" && passesAsPending(classified, options)) return txOk(undefined)
+          return txFail("harness_not_ready", `Claude Code is not ready: ${readiness.problems.join("; ")}`)
         },
       }),
   }

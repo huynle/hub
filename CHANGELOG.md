@@ -10,6 +10,15 @@
   `--confirm-activation`), an optional bounded verification launch (`--verify-launch`), all journaled and undone
   with `setup rollback`. Readiness comes from real probes (`setup verify`, exit 15 when not ready). `--json` prints
   one `hub.bootstrap.result` envelope; exits 10–15 are new (docs/bootstrap-contracts.md §3.11).
+- **hubctl bootstrap, install is not readiness (contract v1.2)**: `setup apply` on a fresh host no longer rolls
+  back because you have not logged in to a provider or started the harness yet (which needs the installed harness).
+  Readiness probes are classified: a broken install (missing or wrong binary, version mismatch, container shim, a
+  binary that does not run) still rolls back; a harness that only waits on you is committed as "installed, not
+  ready", with each probe's status and the next steps (`--json`: `data.harnesses`). `--require-ready` keeps the
+  strict behaviour (exit 15, rolled back); `setup verify` stays the strict gate; `--verify-launch` keeps its
+  harness strict. A rollback now also removes the root directories the apply created (e.g. `~/.local/bin`), and a
+  directory hub created that something else wrote into is kept as a note, not a conflict. The Ansible role passes
+  `--require-ready` only with `hub_bootstrap_apply_require_ready` and gates readiness at its verify step.
 - **Hub API**: `GET /spoke/presence` (machine token only, read-only) lists which harness spokes of the caller's own
   machine are connected (harness, evidence, features), for `hubctl setup verify`.
 - `hub node install`, `hub claude-code install` and `hub codex-spoke install` render their units from templates
