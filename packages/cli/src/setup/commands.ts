@@ -15,7 +15,7 @@ import {
   ENVELOPE_SCHEMA,
   exitFor,
   HARNESS_ORDER,
-  isHarnessReady,
+  harnessReadiness,
   PROFILE_IDS,
   programLayout,
   resolvePathRef,
@@ -26,6 +26,7 @@ import {
   type EnrollmentMode,
   type ErrorCode,
   type HarnessID,
+  type HarnessReadiness,
   type Issue,
   type Json,
   type PathRef,
@@ -96,11 +97,11 @@ export const BOOTSTRAP_FLAGS: Readonly<Record<string, Readonly<Record<string, Fl
   "machine status": { "no-verify": "bool" },
   "setup discover": {},
   "setup preview": { profile: "string", manifest: "string", out: "string", enrollment: "string", "workspace-root": "multi", "verify-launch": "string", server: "string", name: "string", ...CONSENT_FLAGS },
-  "setup apply": { preview: "string", manifest: "string", ...CONSENT_FLAGS },
+  "setup apply": { preview: "string", manifest: "string", "require-ready": "bool", ...CONSENT_FLAGS },
   "setup verify": { profile: "string" },
   "setup drift": { profile: "string", manifest: "string" },
   "setup rollback": { to: "string", "dry-run": "bool" },
-  "setup recover": { resume: "bool", manifest: "string", ...CONSENT_FLAGS },
+  "setup recover": { resume: "bool", manifest: "string", "require-ready": "bool", ...CONSENT_FLAGS },
   "setup ansible": { profile: "string", plan: "string", manifest: "string", "release-url": "string", "no-require-ready": "bool", ...CONSENT_FLAGS },
 }
 
@@ -394,6 +395,41 @@ function readRequest(io: SetupIo, file: string | undefined): SetupRequest {
 
 const reportData = (outcome: TxOutcome) => (outcome.report ? { txID: outcome.report.txID, state: outcome.report.state, steps: outcome.report.steps, conflicts: outcome.report.conflicts, evidence: outcome.report.evidence } : undefined)
 
+// ---------- readiness (contract v1.2) ----------
+
+/** One harness's readiness as `setup apply` and `setup verify` report it. */
+export interface HarnessReport {
+  readonly harness: HarnessID
+  readonly ready: boolean
+  /** ready; installed-not-ready (only user probes wait: login, spoke); failed (an integrity probe failed). */
+  readonly state: "ready" | "installed-not-ready" | "failed"
+  readonly probes: HarnessReadiness["probes"]
+  readonly nextSteps: readonly string[]
+}
+
+const READINESS_STATE = { ready: "ready", pending: "installed-not-ready", failed: "failed" } as const
+
+export const harnessReport = (r: HarnessReadiness): HarnessReport => ({ harness: r.harness, ready: r.state === "ready", state: READINESS_STATE[r.state], probes: r.probes, nextSteps: r.nextSteps })
+
+const READINESS_TEXT = { ready: "ready", "installed-not-ready": "installed, not ready", failed: "not working" } as const
+
+function readinessText(reports: readonly HarnessReport[]): string[] {
+  return reports.flatMap((h) => [
+    `${h.harness}: ${READINESS_TEXT[h.state]}`,
+    ...h.probes.map((p) => `  ${({ pass: "ok     ", pending: "pending", fail: "FAIL   " } as const)[p.status]} ${p.kind}${p.detail ? `: ${p.detail}` : ""}`),
+    ...h.nextSteps.map((s) => `  next: ${s}`),
+  ])
+}
+
+/** Collects the readiness each verify-harness step reports (the latest per harness, in HARNESS_ORDER). */
+function readinessCollector() {
+  const seen = new Map<HarnessID, HarnessReadiness>()
+  return {
+    onReadiness: (r: HarnessReadiness) => void seen.set(r.harness, r),
+    reports: (): HarnessReport[] => HARNESS_ORDER.flatMap((h) => (seen.has(h) ? [harnessReport(seen.get(h)!)] : [])),
+  }
+}
+
 async function apply(io: SetupIo, flags: Parsed["flags"], json: boolean): Promise<number> {
   const request = readRequest(io, str(flags, "preview"))
   const snapshot = discovered(io)
@@ -401,7 +437,11 @@ async function apply(io: SetupIo, flags: Parsed["flags"], json: boolean): Promis
   const runtime = runtimeFor(io, manifest, snapshot)
   const bundle = await runtime.plan(request.profile, request.choices)
   const allowDowngrade = flags["allow-downgrade"] === true
-  const applier = runtime.applier(snapshot, runtime.executors(bundle, snapshot, { allowDowngrade }))
+  const requireReady = flags["require-ready"] === true
+  const readiness = readinessCollector()
+  // A verification launch needs its harness ready, so --verify-launch keeps that harness strict.
+  const strict = request.choices.launch ? [request.choices.launch.harness] : []
+  const applier = runtime.applier(snapshot, runtime.executors(bundle, snapshot, { allowDowngrade, requireReady, strict, onReadiness: readiness.onReadiness }))
   const { probe, now } = context(io)
   const outcome = await applier.apply({
     token: request.preview.token,
@@ -419,8 +459,18 @@ async function apply(io: SetupIo, flags: Parsed["flags"], json: boolean): Promis
     },
   })
   if (!outcome.ok) {
-    const data = reportData(outcome)
-    const hint = outcome.code.startsWith("preview_") ? "Preview again: hubctl setup preview --out <file>" : outcome.code === "recovery_required" ? "Run hubctl setup recover first" : undefined
+    const report = reportData(outcome)
+    const harnesses = readiness.reports()
+    const data = report || harnesses.length > 0 ? { ...report, ...(harnesses.length > 0 ? { ready: false, harnesses } : {}) } : undefined
+    const pendingOnly = harnesses.length > 0 && harnesses.every((h) => h.state !== "failed")
+    const hint = outcome.code.startsWith("preview_")
+      ? "Preview again: hubctl setup preview --out <file>"
+      : outcome.code === "recovery_required"
+        ? "Run hubctl setup recover first"
+        : outcome.code === "harness_not_ready" && requireReady && pendingOnly
+          ? "Only your provider login or the harness's spoke is missing; without --require-ready apply installs it as installed, not ready, so you can log in and start it"
+          : undefined
+    if (!json && harnesses.length > 0) io.stderr(`${readinessText(harnesses).join("\n")}\n`)
     return emit(io, json, envelope("setup apply", false, { ...(data ? { data } : {}), error: { code: outcome.code, message: outcome.message, ...(hint ? { hint } : {}) } }))
   }
   // Record what was applied (secret-free): the profile, its choices and catalog revision, and the floors seen.
@@ -437,10 +487,19 @@ async function apply(io: SetupIo, flags: Parsed["flags"], json: boolean): Promis
     floors: manifest ? raiseFloors(state.floors, manifest, snapshot.host.target) : state.floors,
   })
   store.writeRequest(request)
-  const data = reportData(outcome)!
-  const warnings = [...(bundle.node()?.notes ?? []), ...outcome.report.conflicts.map((c) => `${c.actionID}: ${c.reason}`)]
+  const harnesses = readiness.reports()
+  const data = { ...reportData(outcome)!, ready: harnesses.every((h) => h.ready), harnesses }
+  const warnings = [
+    ...(bundle.node()?.notes ?? []),
+    ...outcome.report.conflicts.map((c) => `${c.actionID}: ${c.reason}`),
+    ...harnesses.filter((h) => !h.ready).map((h) => `${h.harness} is installed, not ready: ${h.probes.filter((p) => p.status !== "pass").map((p) => p.kind).join(", ")} waits on you (see the next steps)`),
+  ]
   return emit(io, json, envelope("setup apply", true, { data, warnings }), () =>
-    [`Applied ${outcome.report.steps.length} step(s) (${outcome.report.txID}); undo with hubctl setup rollback`, ...outcome.report.steps.map((s) => `  ${s.outcome.padEnd(8)} ${s.actionID}`)].join("\n"),
+    [
+      `Applied ${outcome.report.steps.length} step(s) (${outcome.report.txID}); undo with hubctl setup rollback`,
+      ...outcome.report.steps.map((s) => `  ${s.outcome.padEnd(8)} ${s.actionID}`),
+      ...readinessText(harnesses),
+    ].join("\n"),
   )
 }
 
@@ -451,10 +510,10 @@ async function verify(io: SetupIo, flags: Parsed["flags"], json: boolean): Promi
   const runtime = runtimeFor(io, undefined, snapshot)
   const now = context(io).now()
   const verifications = await runtime.verify(profile.harnesses)
-  const harnesses = verifications.map((v) => ({ harness: v.harness, ready: isHarnessReady(v, now), probes: v.probes }))
+  const harnesses = verifications.map((v) => harnessReport(harnessReadiness(v, now)))
   const ready = harnesses.every((h) => h.ready)
   const data = { profile: profile.id, ready, harnesses }
-  const text = () => harnesses.map((h) => [`${h.harness}: ${h.ready ? "ready" : "not ready"}`, ...h.probes.map((p) => `  ${p.ok ? "ok  " : "FAIL"} ${p.kind}${p.detail ? `: ${p.detail}` : ""}`)].join("\n")).join("\n")
+  const text = () => readinessText(harnesses).join("\n")
   if (ready) return emit(io, json, envelope("setup verify", true, { data }), text)
   const failing = harnesses.filter((h) => !h.ready).map((h) => h.harness)
   if (!json) io.stdout(`${text()}\n`)
@@ -611,7 +670,7 @@ async function recover(io: SetupIo, flags: Parsed["flags"], json: boolean): Prom
     const { probe, now } = context(io)
     planned(() => previewSetup({ probe, profile, now: now(), ...bundle.sources }))
   }
-  const outcome = await runtime.applier(snapshot, runtime.executors(bundle, snapshot, { allowDowngrade: flags["allow-downgrade"] === true })).recover({
+  const outcome = await runtime.applier(snapshot, runtime.executors(bundle, snapshot, { allowDowngrade: flags["allow-downgrade"] === true, requireReady: flags["require-ready"] === true })).recover({
     mode,
     consent: { escalate: flags.escalate === true, confirmActivation: flags["confirm-activation"] === true },
   })
