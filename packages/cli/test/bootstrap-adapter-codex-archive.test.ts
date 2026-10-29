@@ -12,7 +12,7 @@ describe("unpackCodexArchive", () => {
     const r = unpackCodexArchive(tgz(PACKAGE_ENTRIES))
     expect(r.ok).toBe(true)
     if (!r.ok) return
-    expect(r.value.map((f) => [f.rel, f.mode, text(f.bytes)])).toEqual([
+    expect(r.value.map((f) => [f.rel, f.mode, ("bytes" in f ? text(f.bytes) : "")])).toEqual([
       ["bin/codex", 0o755, CODEX_SCRIPT],
       ["bin/codex-code-mode-host", 0o755, "#!code-mode-host"],
       ["codex-package.json", 0o644, '{"version":"0.165.0"}'],
@@ -24,7 +24,7 @@ describe("unpackCodexArchive", () => {
 
   test("a standalone archive (one codex-<triple> binary) becomes bin/codex", () => {
     const r = unpackCodexArchive(tgz([{ name: "codex-x86_64-unknown-linux-musl", text: "ELF", mode: 0o755 }]))
-    expect(r.ok && r.value.map((f) => [f.rel, f.mode, text(f.bytes)])).toEqual([["bin/codex", 0o755, "ELF"]])
+    expect(r.ok && r.value.map((f) => [f.rel, f.mode, ("bytes" in f ? text(f.bytes) : "")])).toEqual([["bin/codex", 0o755, "ELF"]])
   })
 
   test("pax and GNU long names name the next entry; ./ prefixes are dropped; setuid bits are stripped", () => {

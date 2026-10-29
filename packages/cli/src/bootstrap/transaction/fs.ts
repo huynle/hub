@@ -3,7 +3,8 @@
 // boundary) and the engine stays a pure function of what this interface reports.
 //
 // Writes are only ever "create a new file exclusively" (O_CREAT|O_EXCL|O_NOFOLLOW, then fsync); replacing a file is
-// always stage-then-rename, so a reader (or a crash) sees the old file or the new one, never a torn mix.
+// always stage-then-rename, so a reader (or a crash) sees the old file or the new one, never a torn mix. Large files
+// (a harness binary, hubctl itself) are written and read in chunks (createExclusive, readRange), never whole.
 import {
   chmodSync,
   closeSync,
@@ -17,6 +18,7 @@ import {
   readdirSync,
   readFileSync,
   readlinkSync,
+  readSync,
   renameSync,
   rmdirSync,
   symlinkSync,
@@ -32,14 +34,27 @@ export interface EntryInfo {
   readonly size: number
 }
 
+/** A file being created exclusively, written in chunks (createExclusive). */
+export interface TxWriter {
+  write(chunk: Uint8Array): void
+  /** Sets the mode, fsyncs and closes: the file is complete. */
+  close(): void
+  /** Closes and removes the incomplete file. */
+  abort(): void
+}
+
 export interface TxFs {
   /** Does not follow symlinks; undefined when nothing is there. */
   lstat(path: string): EntryInfo | undefined
   readFile(path: string): Uint8Array
+  /** At most `length` bytes from `offset` (fewer at the end of the file). Does not follow a final symlink. */
+  readRange(path: string, offset: number, length: number): Uint8Array
   readlink(path: string): string
   readdir(path: string): string[]
   /** Creates a new file (fails if anything exists there, a symlink included), writes it fully, sets `mode`, fsyncs. */
   writeExclusive(path: string, data: Uint8Array | string, mode: number): void
+  /** Like writeExclusive, for content that arrives in chunks: the file is created now and completed by close(). */
+  createExclusive(path: string, mode: number): TxWriter
   /** Atomic replace of `to`'s directory entry. */
   rename(from: string, to: string): void
   /** Hard link; fails if `to` exists (an atomic create-if-absent of complete content). */
@@ -83,6 +98,21 @@ export const nodeFs: TxFs = {
     }
   },
   readFile: (path) => new Uint8Array(readFileSync(path)),
+  readRange(path, offset, length) {
+    const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    try {
+      const out = new Uint8Array(length)
+      let got = 0
+      while (got < length) {
+        const n = readSync(fd, out, got, length - got, offset + got)
+        if (n === 0) break
+        got += n
+      }
+      return got === length ? out : out.subarray(0, got)
+    } finally {
+      closeSync(fd)
+    }
+  },
   readlink: (path) => readlinkSync(path),
   readdir: (path) => readdirSync(path),
   writeExclusive(path, data, mode) {
@@ -102,6 +132,45 @@ export const nodeFs: TxFs = {
           unlinkSync(path)
         } catch {}
       }
+    }
+  },
+  createExclusive(path, mode) {
+    const fd = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, mode)
+    let open = true
+    const finish = (complete: boolean) => {
+      if (!open) return
+      open = false
+      try {
+        if (complete) {
+          fchmodSync(fd, mode)
+          fsyncSync(fd)
+        }
+      } finally {
+        closeSync(fd)
+        if (!complete) {
+          try {
+            unlinkSync(path)
+          } catch {}
+        }
+      }
+    }
+    return {
+      write(chunk) {
+        if (!open) throw new Error(`${path} is already closed`)
+        let offset = 0
+        while (offset < chunk.byteLength) offset += writeSync(fd, chunk, offset, chunk.byteLength - offset)
+      },
+      close() {
+        try {
+          finish(true)
+        } catch (error) {
+          try {
+            unlinkSync(path)
+          } catch {}
+          throw error
+        }
+      },
+      abort: () => finish(false),
     }
   },
   rename: (from, to) => renameSync(from, to),

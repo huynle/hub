@@ -21,7 +21,7 @@ import {
 import { builtinExecutors } from "../../src/bootstrap/transaction/builtin.ts"
 import { createApplier, type Applier, type ApplierConfig, type FreshPlan } from "../../src/bootstrap/transaction/engine.ts"
 import type { ActionExecutor, ExecutorMap } from "../../src/bootstrap/transaction/executor.ts"
-import { nodeFs, type TxFs } from "../../src/bootstrap/transaction/fs.ts"
+import { nodeFs, type TxFs, type TxWriter } from "../../src/bootstrap/transaction/fs.ts"
 import { txFail, txOk } from "../../src/bootstrap/transaction/result.ts"
 import { ACTIONS, HOST, MANIFEST_UNSIGNED, MINUTE, PREVIEW, SNAPSHOT_DIGEST, T0, TRUST_ROOT_TEMPLATE } from "./fixtures.ts"
 
@@ -120,9 +120,23 @@ export class FaultyFs implements TxFs {
     this.alive()
     return this.inner.readdir(path)
   }
+  readRange(path: string, offset: number, length: number) {
+    this.alive()
+    return this.inner.readRange(path, offset, length)
+  }
   writeExclusive(path: string, data: Uint8Array | string, mode: number) {
     this.mutate("writeExclusive", path)
     this.inner.writeExclusive(path, data, mode)
+  }
+  /** One mutation, like writeExclusive; a dead process writes nothing more (its file stays incomplete). */
+  createExclusive(path: string, mode: number): TxWriter {
+    this.mutate("writeExclusive", path)
+    const inner = this.inner.createExclusive(path, mode)
+    return {
+      write: (chunk) => (this.alive(), inner.write(chunk)),
+      close: () => (this.alive(), inner.close()),
+      abort: () => (this.alive(), inner.abort()),
+    }
   }
   rename(from: string, to: string) {
     this.mutate("rename", to)
@@ -304,8 +318,8 @@ export class World {
       },
       harness: {
         manifest: this.manifest,
-        fetch: async () => ({
-          bytes: enc(this.options.tamperedHarness ? `${HARNESS_ARCHIVE}!` : HARNESS_ARCHIVE),
+        fetch: async (action, staging) => ({
+          file: await staging.write(action.source.file, enc(this.options.tamperedHarness ? `${HARNESS_ARCHIVE}!` : HARNESS_ARCHIVE), { maxBytes: 1 << 20 }),
           evidence: this.options.failedEvidence ? [{ kind: "sigstore", status: "failed" }] : [],
         }),
         unpack: async () => txOk(HARNESS_FILES.map((f) => ({ rel: f.rel, bytes: enc(f.text), mode: f.mode }))),

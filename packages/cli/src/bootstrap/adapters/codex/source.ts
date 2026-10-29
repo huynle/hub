@@ -12,6 +12,7 @@
 import { createHash } from "node:crypto"
 import type { EvidenceResult, HarnessID, InstallHarness, VerifiedManifest } from "../../contracts/index.ts"
 import type { HarnessSource } from "../../transaction/builtin.ts"
+import { collect } from "../../transaction/stream.ts"
 import { unpackCodexArchive } from "./archive.ts"
 import { codexSigstoreIdentity, verifySigstoreBundle, type SigstoreTrust } from "./sigstore.ts"
 
@@ -54,20 +55,21 @@ export function createCodexHarnessSource(options: CodexSourceOptions): HarnessSo
   }
   return {
     manifest: options.manifest,
-    async fetch(action) {
+    async fetch(action, staging) {
       only(action.harness)
       const archive = await options.download.get(action.source.url, { maxBytes: action.size })
       if (archive.status !== "ok") throw new Error(`cannot download ${action.source.file}: ${archive.status === "missing" ? "not found" : archive.detail}`)
       const bytes = archive.bytes
+      const file = await staging.write(action.source.file, bytes, { maxBytes: action.size })
       // Only bytes that are exactly the pinned artifact are looked at any further.
-      if (bytes.byteLength !== action.size || digestOf(bytes) !== action.sha256) return { bytes, evidence: [] }
+      if (bytes.byteLength !== action.size || digestOf(bytes) !== action.sha256) return { file, evidence: [] }
       const evidence: EvidenceResult[] = []
       if (action.evidence.includes("sigstore")) evidence.push(await sigstoreEvidence(action, bytes, options))
-      return { bytes, evidence }
+      return { file, evidence }
     },
-    async unpack(action, bytes) {
+    async unpack(action, file, staging) {
       only(action.harness)
-      return unpackCodexArchive(bytes)
+      return unpackCodexArchive(await collect(staging.open(file).stream(), file.size))
     },
     installed: (harness) => (harness === "codex" ? options.installed?.(harness) : undefined),
     floor: (harness) => (harness === "codex" ? options.floor?.(harness) : undefined),

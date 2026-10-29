@@ -78,7 +78,7 @@ export function unpackCodexArchive(bytes: Uint8Array, options: { readonly maxByt
   }
   if (data.byteLength > limit) return bad(`it inflates beyond ${limit} bytes`)
 
-  const files: TreeFile[] = []
+  const files: (TreeFile & { readonly bytes: Uint8Array })[] = []
   const seen = new Set<string>()
   let nextName: string | undefined
   let at = 0

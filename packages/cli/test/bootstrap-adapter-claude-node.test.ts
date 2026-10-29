@@ -8,6 +8,10 @@ import { createClaudeHarnessSource } from "../src/bootstrap/adapters/claude/inde
 import { httpsDownloader, nodeRunner, tempScratch } from "../src/bootstrap/adapters/claude/node.ts"
 import { DownloadTooLarge } from "../src/bootstrap/adapters/claude/ports.ts"
 import { CLAUDE_BINARIES, claudePin, FakeDownloads, signedHubManifest } from "./bootstrap/claude-adapter-fixtures.ts"
+import { memoryStaging } from "../src/bootstrap/transaction/stream.ts"
+
+const STAGING = memoryStaging()
+const stage = (bytes: Uint8Array) => STAGING.write("artifact", bytes, { maxBytes: 1 << 30 })
 
 const BUN = process.execPath
 /** Child processes start slowly on a loaded machine; these tests allow for it. */
@@ -119,7 +123,7 @@ describe("download failures in the source keep their meaning", () => {
   }
   const codeOf = async (body: Uint8Array | Error) => {
     const src = createClaudeHarnessSource({ manifest, download: new FakeDownloads().set(pin.url, body), platform: "darwin" })
-    return src.fetch(action).then(
+    return src.fetch(action, STAGING).then(
       () => "ok",
       (e: { code?: string }) => e.code ?? "thrown",
     )

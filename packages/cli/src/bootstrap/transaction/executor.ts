@@ -6,7 +6,8 @@
 //   check    whether the step may run on this host now (read-only: preconditions, pins, versions);
 //   change   what the target should become (read-only: bytes for a file, a symlink target, a directory tree,
 //            or an `effect` for steps with no file of their own to stage: enrollment, verification, activation,
-//            launch);
+//            launch). Large content (a harness, hubctl) is never passed as bytes: it is streamed into the step's
+//            StagingArea (stream.ts) and named as a StagedFile, which the engine moves or copies into place;
 //   undo     how to reverse a done effect that has no backup (clear a stored credential, unload a service).
 //
 // Executors never write files themselves (except an effect, through its own typed client such as the
@@ -14,6 +15,7 @@
 // harness, MCP-registration, service-activation, enrollment and verification executors through this interface.
 import type { Action, ActionKind, EntryClass, EvidenceResult, ExecutionContext, FileState, PathRef, RootMapping } from "../contracts/index.ts"
 import type { TxFs } from "./fs.ts"
+import type { StagedFile, StagingArea } from "./stream.ts"
 import type { ResolveOptions } from "./resolve.ts"
 import type { TxResult } from "./result.ts"
 
@@ -25,17 +27,23 @@ export interface HostInfo {
   readonly target: string
 }
 
-/** One file of a directory tree an executor wants staged (a harness unpacked from its verified archive). */
-export interface TreeFile {
+/**
+ * One file of a directory tree an executor wants staged (a harness unpacked from its verified archive): small
+ * content as bytes, large content as a file of the step's staging area.
+ */
+export type TreeFile = {
   /** Relative, "/"-separated, inside the tree (isSafeRel). */
   readonly rel: string
-  readonly bytes: Uint8Array
   readonly mode: number
-}
+} & ({ readonly bytes: Uint8Array } | { readonly staged: StagedFile })
 
 export type Change =
-  /** Write these bytes. `refuse`: an existing different file is a conflict. `backup`: it is backed up and replaced. */
-  | { readonly type: "file"; readonly bytes: Uint8Array; readonly mode: number; readonly replace: "refuse" | "backup" }
+  /**
+   * Write these bytes (or this staged file: one the step's staging area wrote is moved, any other is copied, its
+   * digest checked while it is copied). `refuse`: an existing different file is a conflict. `backup`: it is backed
+   * up and replaced.
+   */
+  | ({ readonly type: "file"; readonly mode: number; readonly replace: "refuse" | "backup" } & ({ readonly bytes: Uint8Array } | { readonly staged: StagedFile }))
   | { readonly type: "directory"; readonly mode: number }
   | { readonly type: "symlink"; readonly target: string; readonly replace: "refuse" | "backup" }
   /** A fresh, immutable tree (a versioned install root). An existing different tree is a conflict. */
@@ -77,6 +85,8 @@ export interface StepContext {
   readonly resolve: (ref: PathRef, options?: ResolveOptions) => TxResult<string>
   /** Records upstream evidence for the apply report (never into the journal). */
   readonly recordEvidence: (results: readonly EvidenceResult[]) => void
+  /** The step's private scratch space for large downloads and what they unpack to (removed after the step). */
+  readonly staging: StagingArea
 }
 
 export interface UndoContext {

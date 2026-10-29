@@ -5,6 +5,10 @@ import { describe, expect, test } from "bun:test"
 import { checkHarnessEvidence, findSecrets, type InstallHarness } from "../src/bootstrap/contracts/index.ts"
 import { CODESIGN, createClaudeHarnessSource, upstreamPlatform } from "../src/bootstrap/adapters/claude/source.ts"
 import { armoredSignature, CLAUDE_BINARIES, CLAUDE_VERSION, claudePin, FakeRunner, FakeScratch, pgpKey, RELEASES, signedHubManifest, upstreamManifest, upstreamRelease, type ClaudeTarget } from "./bootstrap/claude-adapter-fixtures.ts"
+import { memoryStaging } from "../src/bootstrap/transaction/stream.ts"
+
+const STAGING = memoryStaging()
+const stage = (bytes: Uint8Array) => STAGING.write("artifact", bytes, { maxBytes: 1 << 30 })
 
 const manifest = signedHubManifest()
 
@@ -57,8 +61,8 @@ describe("createClaudeHarnessSource fetch", () => {
   test("downloads the pinned URL and verifies both kinds of evidence on macOS", async () => {
     const { src, release, runner, scratch } = source()
     const action = installFor("darwin-arm64")
-    const got = await src.fetch(action)
-    expect(got.bytes).toEqual(CLAUDE_BINARIES["darwin-arm64"])
+    const got = await src.fetch(action, STAGING)
+    expect(STAGING.bytes(got.file)).toEqual(CLAUDE_BINARIES["darwin-arm64"])
     expect(statusOf(got.evidence, "gpg-manifest")).toBe("verified")
     expect(statusOf(got.evidence, "macos-notarization")).toBe("verified")
     expect(release.downloads.requests).toContain(action.source.url)
@@ -73,27 +77,27 @@ describe("createClaudeHarnessSource fetch", () => {
 
   test("on Linux only the manifest is attempted; the pin lists no notarization", async () => {
     const { src, runner } = source({ platform: "linux" })
-    const got = await src.fetch(installFor("linux-x64"))
+    const got = await src.fetch(installFor("linux-x64"), STAGING)
     expect(got.evidence.map((e) => [e.kind, e.status])).toEqual([["gpg-manifest", "verified"]])
     expect(runner.calls).toEqual([])
   })
 
   test("notarization is unavailable off macOS or without codesign, never failed", async () => {
-    const linuxHost = await source({ platform: "linux" }).src.fetch(installFor("darwin-arm64"))
+    const linuxHost = await source({ platform: "linux" }).src.fetch(installFor("darwin-arm64"), STAGING)
     expect(statusOf(linuxHost.evidence, "macos-notarization")).toBe("unavailable")
-    const noCodesign = await source({ runner: codesign("missing") }).src.fetch(installFor("darwin-arm64"))
+    const noCodesign = await source({ runner: codesign("missing") }).src.fetch(installFor("darwin-arm64"), STAGING)
     expect(statusOf(noCodesign.evidence, "macos-notarization")).toBe("unavailable")
   })
 
   test("signed by Anthropic but notarization not confirmable (offline) is unavailable", async () => {
-    const got = await source({ runner: codesign(0, 3) }).src.fetch(installFor("darwin-arm64"))
+    const got = await source({ runner: codesign(0, 3) }).src.fetch(installFor("darwin-arm64"), STAGING)
     expect(statusOf(got.evidence, "macos-notarization")).toBe("unavailable")
   })
 
   test("a binary not signed by Anthropic fails notarization, and the evidence rejects it", async () => {
     for (const code of [1, 3]) {
       const action = installFor("darwin-arm64")
-      const got = await source({ runner: codesign(code) }).src.fetch(action)
+      const got = await source({ runner: codesign(code) }).src.fetch(action, STAGING)
       expect(statusOf(got.evidence, "macos-notarization")).toBe("failed")
       const report = checkHarnessEvidence(action, { sha256: action.sha256, size: action.size }, got.evidence)
       expect(report.ok ? "ok" : report.issues[0]!.code).toBe("evidence_failed")
@@ -105,35 +109,35 @@ describe("createClaudeHarnessSource fetch", () => {
     const manifestBytes = upstreamManifest(CLAUDE_VERSION)
     // Forged: another key's signature claiming to be the pinned key's.
     const forged = upstreamRelease({ key, manifest: manifestBytes, signature: armoredSignature(pgpKey(), manifestBytes, { issuer: key.fingerprint }) })
-    expect(statusOf((await source({ release: forged }).src.fetch(installFor("darwin-arm64"))).evidence, "gpg-manifest")).toBe("failed")
+    expect(statusOf((await source({ release: forged }).src.fetch(installFor("darwin-arm64"), STAGING)).evidence, "gpg-manifest")).toBe("failed")
     const unknown = upstreamRelease({ key, manifest: manifestBytes, signature: armoredSignature(pgpKey(), manifestBytes) })
-    expect(statusOf((await source({ release: unknown }).src.fetch(installFor("darwin-arm64"))).evidence, "gpg-manifest")).toBe("unavailable")
+    expect(statusOf((await source({ release: unknown }).src.fetch(installFor("darwin-arm64"), STAGING)).evidence, "gpg-manifest")).toBe("unavailable")
   })
 
   test("a signed manifest that lists other bytes fails", async () => {
     const other = { "darwin-arm64": new Uint8Array([0xcf, 0xfa, 0xed, 0xfe, 1, 2, 3]) }
     const release = upstreamRelease({ binaries: other })
     release.downloads.set(`${RELEASES}/${CLAUDE_VERSION}/darwin-arm64/claude`, CLAUDE_BINARIES["darwin-arm64"])
-    const got = await source({ release }).src.fetch(installFor("darwin-arm64"))
+    const got = await source({ release }).src.fetch(installFor("darwin-arm64"), STAGING)
     expect(statusOf(got.evidence, "gpg-manifest")).toBe("failed")
   })
 
   test("a signed manifest for another version fails", async () => {
     const key = pgpKey()
     const release = upstreamRelease({ key, manifest: upstreamManifest("2.1.91") })
-    expect(statusOf((await source({ release }).src.fetch(installFor("darwin-arm64"))).evidence, "gpg-manifest")).toBe("failed")
+    expect(statusOf((await source({ release }).src.fetch(installFor("darwin-arm64"), STAGING)).evidence, "gpg-manifest")).toBe("failed")
   })
 
   test("no signature published (releases before 2.1.89) or an unreachable bucket is unavailable", async () => {
     const unsigned = upstreamRelease({ signature: new Error("404") })
-    expect(statusOf((await source({ release: unsigned }).src.fetch(installFor("darwin-arm64"))).evidence, "gpg-manifest")).toBe("unavailable")
+    expect(statusOf((await source({ release: unsigned }).src.fetch(installFor("darwin-arm64"), STAGING)).evidence, "gpg-manifest")).toBe("unavailable")
     const noKey = upstreamRelease()
     noKey.downloads.set("https://downloads.claude.ai/keys/claude-code.asc", new Error("offline"))
-    expect(statusOf((await source({ release: noKey }).src.fetch(installFor("darwin-arm64"))).evidence, "gpg-manifest")).toBe("unavailable")
+    expect(statusOf((await source({ release: noKey }).src.fetch(installFor("darwin-arm64"), STAGING)).evidence, "gpg-manifest")).toBe("unavailable")
   })
 
   test("the published key must be the pinned one", async () => {
-    const got = await source({ fingerprint: "31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE" }).src.fetch(installFor("darwin-arm64"))
+    const got = await source({ fingerprint: "31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE" }).src.fetch(installFor("darwin-arm64"), STAGING)
     expect(statusOf(got.evidence, "gpg-manifest")).toBe("unavailable")
   })
 
@@ -141,39 +145,39 @@ describe("createClaudeHarnessSource fetch", () => {
     const action = { ...installFor("darwin-arm64"), source: { ...installFor("darwin-arm64").source, url: "https://mirror.example/claude" } }
     const release = upstreamRelease()
     release.downloads.set("https://mirror.example/claude", CLAUDE_BINARIES["darwin-arm64"])
-    const got = await source({ release }).src.fetch(action)
+    const got = await source({ release }).src.fetch(action, STAGING)
     expect(statusOf(got.evidence, "gpg-manifest")).toBe("unavailable")
   })
 
   test("evidence details carry no secrets and are single lines", async () => {
-    const got = await source({ runner: codesign(1) }).src.fetch(installFor("darwin-arm64"))
+    const got = await source({ runner: codesign(1) }).src.fetch(installFor("darwin-arm64"), STAGING)
     expect(findSecrets(got.evidence)).toEqual([])
     for (const e of got.evidence) expect(e.detail ?? "").not.toContain("\n")
   })
 
   test("only Claude Code installs are served", async () => {
-    await expect(source().src.fetch({ ...installFor("darwin-arm64"), harness: "codex" } as InstallHarness)).rejects.toThrow()
+    await expect(source().src.fetch({ ...installFor("darwin-arm64"), harness: "codex" } as InstallHarness, STAGING)).rejects.toThrow()
   })
 })
 
 describe("unpack", () => {
   test("the single binary becomes <version>/claude, executable", async () => {
     const { src } = source()
-    const files = await src.unpack(installFor("darwin-arm64"), CLAUDE_BINARIES["darwin-arm64"])
+    const files = await src.unpack(installFor("darwin-arm64"), await stage(CLAUDE_BINARIES["darwin-arm64"]), STAGING)
     expect(files.ok && files.value.map((f) => [f.rel, f.mode])).toEqual([["claude", 0o755]])
   })
 
   test("a binary for another platform is refused", async () => {
     const { src } = source()
-    const r = await src.unpack(installFor("darwin-arm64"), CLAUDE_BINARIES["linux-x64"])
+    const r = await src.unpack(installFor("darwin-arm64"), await stage(CLAUDE_BINARIES["linux-x64"]), STAGING)
     expect(r.ok ? "ok" : r.code).toBe("invalid")
-    const r2 = await src.unpack(installFor("linux-x64"), CLAUDE_BINARIES["darwin-arm64"])
+    const r2 = await src.unpack(installFor("linux-x64"), await stage(CLAUDE_BINARIES["darwin-arm64"]), STAGING)
     expect(r2.ok ? "ok" : r2.code).toBe("invalid")
   })
 
   test("other pinned file shapes (compressed, archives) are refused", async () => {
     const { src } = source()
-    const r = await src.unpack({ ...installFor("darwin-arm64"), source: { ...installFor("darwin-arm64").source, file: "claude.zst" } }, CLAUDE_BINARIES["darwin-arm64"])
+    const r = await src.unpack({ ...installFor("darwin-arm64"), source: { ...installFor("darwin-arm64").source, file: "claude.zst" } }, await stage(CLAUDE_BINARIES["darwin-arm64"]), STAGING)
     expect(r.ok ? "ok" : r.code).toBe("invalid")
   })
 })

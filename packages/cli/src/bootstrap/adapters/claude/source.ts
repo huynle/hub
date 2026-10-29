@@ -16,6 +16,7 @@ import type { EvidenceResult, HarnessID, InstallHarness, VerifiedManifest } from
 import type { HarnessSource } from "../../transaction/builtin.ts"
 import type { TreeFile } from "../../transaction/executor.ts"
 import { TxError, txFail, txOk, type TxResult } from "../../transaction/result.ts"
+import { collect } from "../../transaction/stream.ts"
 import { CLAUDE_SIGNING_FINGERPRINT, verifyDetachedSignature } from "./openpgp.ts"
 import { DownloadTooLarge, type Downloader, type ProbeRunner, type Scratch } from "./ports.ts"
 
@@ -130,7 +131,7 @@ function nativeFor(target: string, bytes: Uint8Array): boolean {
 export function createClaudeHarnessSource(options: ClaudeSourceOptions): HarnessSource {
   return {
     manifest: options.manifest,
-    async fetch(action) {
+    async fetch(action, staging) {
       if (action.harness !== "claude-code") throw new Error(`the Claude Code source cannot install ${action.harness}`)
       // One byte more than pinned is still fetched, so a longer file is an integrity mismatch, not a download error.
       let bytes: Uint8Array
@@ -145,9 +146,10 @@ export function createClaudeHarnessSource(options: ClaudeSourceOptions): Harness
         if (kind === "gpg-manifest") evidence.push(await gpgManifest(options, action, bytes))
         else if (kind === "macos-notarization") evidence.push(await notarization(options, action, bytes))
       }
-      return { bytes, evidence }
+      return { file: await staging.write("claude", bytes, { maxBytes: action.size + 1 }), evidence }
     },
-    async unpack(action, bytes): Promise<TxResult<readonly TreeFile[]>> {
+    async unpack(action, file, staging): Promise<TxResult<readonly TreeFile[]>> {
+      const bytes = await collect(staging.open(file).stream(), file.size)
       if (action.source.file !== "claude") return txFail("invalid", `the Claude Code pin must be upstream's raw binary "claude", not ${JSON.stringify(action.source.file)}`)
       if (!nativeFor(action.target, bytes)) return txFail("invalid", `the downloaded file is not a native ${action.target} executable`)
       return txOk([{ rel: "claude", bytes, mode: 0o755 }])

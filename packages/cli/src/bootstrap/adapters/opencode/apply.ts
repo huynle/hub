@@ -2,9 +2,10 @@
 // pinned downloads and the executors for the two action kinds the built-ins leave to adapters.
 //
 //   HarnessSource        fetch: exactly the URL hub's verified manifest pins (checkHarnessPin), bounded by the
-//                        pinned size, over https only; OpenCode publishes no upstream evidence, so only the pinned
-//                        digest vouches for the bytes (installHarnessExecutor checks it before unpack is called).
-//                        unpack: archive.ts (pure).
+//                        pinned size, over https only, streamed into the step's staging area (never held whole);
+//                        OpenCode publishes no upstream evidence, so only the pinned digest vouches for the bytes
+//                        (installHarnessExecutor checks the staging area's digest before unpack is called).
+//                        unpack: archive.ts (streams the binary into the staging area).
 //   register-mcp-server  hubctl's `mcp` at the stable authority under mcp.servers.hub, decided from the file as it is
 //                        at apply (config.ts) and spliced in by the lossless JSONC merge; only while the file is as
 //                        previewed (precondition); a foreign "hub" server is a conflict. Journal class config: backed up,
@@ -31,8 +32,9 @@ import type { HarnessSource } from "../../transaction/builtin.ts"
 import type { ActionExecutor, ExecutorMap, StepContext } from "../../transaction/executor.ts"
 import { mergeConfigText } from "../../transaction/json-merge.ts"
 import { txFail, txOk } from "../../transaction/result.ts"
+import type { ByteSource } from "../../transaction/stream.ts"
 import { passesAsPending, type ReadinessGate } from "../readiness.ts"
-import { unpackOpencodeArchive } from "./archive.ts"
+import { unpackOpencodeFile } from "./archive.ts"
 import { mcpServerSets } from "./config.ts"
 import { checkAuthority, DEFAULT_AUTHORITY } from "./plan.ts"
 
@@ -44,10 +46,17 @@ export interface DownloadLimits {
   readonly signal?: AbortSignal
 }
 
-/** Fetches bytes (no verification: the executor checks them against the pin). */
-export type Download = (url: string, limits: DownloadLimits) => Promise<Uint8Array>
+/**
+ * Fetches a body (no verification: the executor checks it against the pin): bytes, or chunks as they arrive (the
+ * source streams them into the staging area).
+ */
+export type Download = (url: string, limits: DownloadLimits) => Promise<ByteSource>
 
-/** A Download over fetch: https only (every hop: the final URL too), refused once it exceeds the limit. */
+/**
+ * A Download over fetch: https only (every hop: the final URL too), refused once it exceeds the limit. The status
+ * and declared length are checked before it resolves; the body then streams, chunk by chunk, and fails as soon as
+ * it runs past the limit.
+ */
 export function httpsDownload(fetchImpl: (url: string, init?: RequestInit) => Promise<Response> = fetch): Download {
   return async (url, limits) => {
     if (!url.startsWith("https://")) throw new Error(`refusing to download ${url}: https only`)
@@ -56,27 +65,28 @@ export function httpsDownload(fetchImpl: (url: string, init?: RequestInit) => Pr
     if (!response.ok) throw new Error(`download of ${url} failed: HTTP ${response.status}`)
     const declared = Number(response.headers.get("content-length") ?? "")
     if (Number.isFinite(declared) && declared > limits.maxBytes) throw new Error(`${url} is larger than the pinned ${limits.maxBytes} bytes`)
-    const chunks: Uint8Array[] = []
-    let total = 0
-    const reader = response.body?.getReader()
-    if (reader)
-      for (;;) {
-        const { done, value } = await reader.read()
-        if (done) break
-        total += value.byteLength
-        if (total > limits.maxBytes) {
-          await reader.cancel()
-          throw new Error(`${url} is larger than the pinned ${limits.maxBytes} bytes`)
-        }
-        chunks.push(value)
+    return bodyChunks(response, limits.maxBytes, () => new Error(`${url} is larger than the pinned ${limits.maxBytes} bytes`))
+  }
+}
+
+/** A response body as chunks, cancelled (and failing with tooLarge()) once it passes `maxBytes`. */
+export async function* bodyChunks(response: Response, maxBytes: number, tooLarge: () => Error): AsyncGenerator<Uint8Array> {
+  const reader = response.body?.getReader()
+  if (!reader) return
+  let total = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) return
+      total += value.byteLength
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {})
+        throw tooLarge()
       }
-    const out = new Uint8Array(total)
-    let at = 0
-    for (const c of chunks) {
-      out.set(c, at)
-      at += c.byteLength
+      yield value
     }
-    return out
+  } finally {
+    reader.releaseLock()
   }
 }
 
@@ -101,15 +111,17 @@ const onlyOpencode = (harness: HarnessID) => {
 export function createOpencodeHarnessSource(options: OpencodeSourceOptions): HarnessSource {
   return {
     manifest: options.manifest,
-    async fetch(action: InstallHarness) {
+    async fetch(action: InstallHarness, staging) {
       onlyOpencode(action.harness)
       const pin = checkHarnessPin(options.manifest, action)
       if (!pin.ok) throw new Error(`refusing to download ${action.source.url}: it is not the artifact hub ${options.manifest.release} pins (${pin.issues[0]!.message})`)
-      const bytes = await options.download(pin.value.url, { maxBytes: pin.value.size })
+      const body = await options.download(pin.value.url, { maxBytes: pin.value.size })
+      const file = await staging.write(action.source.file, body, { maxBytes: pin.value.size })
       // OpenCode publishes no signatures (contract §5): there is no upstream evidence to attempt.
-      return { bytes, evidence: [] }
+      return { file, evidence: [] }
     },
-    unpack: async (action, bytes) => (action.harness === "opencode" ? unpackOpencodeArchive(action.source.file, bytes) : txFail("invalid", `the OpenCode harness source cannot unpack ${action.harness}`)),
+    unpack: async (action, file, staging) =>
+      action.harness === "opencode" ? unpackOpencodeFile(action.source.file, staging.open(file), staging) : txFail("invalid", `the OpenCode harness source cannot unpack ${action.harness}`),
     installed: (harness) => (harness === "opencode" ? options.installed?.() : undefined),
     floor: (harness) => (harness === "opencode" ? options.floor?.() : undefined),
     ...(options.allowDowngrade ? { allowDowngrade: true } : {}),

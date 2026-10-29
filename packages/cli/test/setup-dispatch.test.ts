@@ -8,6 +8,7 @@ import type { HarnessSource } from "../src/bootstrap/transaction/builtin.ts"
 import type { ActionExecutor, StepContext } from "../src/bootstrap/transaction/executor.ts"
 import { txOk } from "../src/bootstrap/transaction/result.ts"
 import { dispatchByHarness, dispatchHarnessSource } from "../src/setup/dispatch.ts"
+import { memoryStaging } from "../src/bootstrap/transaction/stream.ts"
 import { ACTIONS, INSTALL_CLAUDE, INSTALL_CODEX } from "./bootstrap/fixtures.ts"
 
 const VERIFY = (harness: HarnessID): VerifyHarness => ({ id: `verify-${harness}`, kind: "verify-harness", escalation: "user", summary: "verify", harness, probes: ["version-exec"] })
@@ -55,7 +56,7 @@ describe("dispatchByHarness", () => {
 describe("dispatchHarnessSource", () => {
   const source = (name: string, calls: string[]): HarnessSource => ({
     manifest: {} as HarnessSource["manifest"],
-    fetch: async (a) => (calls.push(`${name}:fetch:${a.harness}`), { bytes: new Uint8Array([1]), evidence: [] }),
+    fetch: async (a, staging) => (calls.push(`${name}:fetch:${a.harness}`), { file: await staging.write("a", new Uint8Array([1]), { maxBytes: 1 }), evidence: [] }),
     unpack: async (a) => (calls.push(`${name}:unpack:${a.harness}`), txOk([])),
     installed: (h) => (h === "opencode" ? { version: "2.2.0", sha256: `sha256:${"a".repeat(64)}` } : undefined),
     floor: () => "2.0.0",
@@ -67,8 +68,9 @@ describe("dispatchHarnessSource", () => {
     const src = dispatchHarnessSource({ manifest, sources: { opencode: source("oc", calls), "claude-code": source("cc", calls) }, allowDowngrade: true })
     expect(src.manifest).toBe(manifest)
     expect(src.allowDowngrade).toBe(true)
-    await src.fetch(ACTIONS["install-harness"] as InstallHarness)
-    await src.unpack(INSTALL_CLAUDE as InstallHarness, new Uint8Array())
+    const staging = memoryStaging()
+    const { file } = await src.fetch(ACTIONS["install-harness"] as InstallHarness, staging)
+    await src.unpack(INSTALL_CLAUDE as InstallHarness, file, staging)
     expect(calls).toEqual(["oc:fetch:opencode", "cc:unpack:claude-code"])
     expect(src.installed!("opencode")?.version).toBe("2.2.0")
     expect(src.floor!("claude-code")).toBe("2.0.0")
@@ -77,8 +79,9 @@ describe("dispatchHarnessSource", () => {
 
   test("a harness without a source: unpack refuses, fetch rejects with a typed failure", async () => {
     const src = dispatchHarnessSource({ manifest: {} as HarnessSource["manifest"], sources: {} })
-    const unpacked = await src.unpack(INSTALL_CODEX as InstallHarness, new Uint8Array())
+    const staging = memoryStaging()
+    const unpacked = await src.unpack(INSTALL_CODEX as InstallHarness, await staging.write("a", new Uint8Array(), { maxBytes: 1 }), staging)
     expect(unpacked.ok).toBe(false)
-    await expect(src.fetch(INSTALL_CODEX as InstallHarness)).rejects.toThrow(/codex/)
+    await expect(src.fetch(INSTALL_CODEX as InstallHarness, staging)).rejects.toThrow(/codex/)
   })
 })

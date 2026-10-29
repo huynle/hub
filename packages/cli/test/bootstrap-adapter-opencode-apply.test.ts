@@ -9,6 +9,7 @@ import { createAdapterRegistry, planDigest, REQUIRED_PROBES, type Action, type A
 import { createOpencodeHarnessSource, httpsDownload, opencodeExecutors } from "../src/bootstrap/adapters/opencode/apply.ts"
 import { createOpencodeAdapter, planOpencode } from "../src/bootstrap/adapters/opencode/plan.ts"
 import { builtinExecutors } from "../src/bootstrap/transaction/builtin.ts"
+import { collect, memoryStaging } from "../src/bootstrap/transaction/stream.ts"
 import { createApplier } from "../src/bootstrap/transaction/engine.ts"
 import { DISCOVERY_DARWIN, HOST, MINUTE, PREVIEW, PROFILE_SESSION_ONLY, T0 } from "./bootstrap/fixtures.ts"
 import { ARCHIVES, CONFIG_WITH_EVERYTHING, FAKE_BINARY, PINNED, insertionsOf, opencodePin, sha256Of, signedManifest } from "./bootstrap/opencode-adapter-fixtures.ts"
@@ -185,18 +186,20 @@ describe("createOpencodeHarnessSource", () => {
   test("fetches exactly the pinned URL, bounded by the pinned size; OpenCode has no upstream evidence", async () => {
     const calls: string[] = []
     const source = createOpencodeHarnessSource({ manifest: MANIFEST, download: async (url, l) => (calls.push(`${url} ${l.maxBytes}`), ARCHIVES["linux-x64"].bytes) })
-    const r = await source.fetch(action())
+    const staging = memoryStaging()
+    const r = await source.fetch(action(), staging)
     expect(r.evidence).toEqual([])
     expect(calls).toEqual([`${opencodePin("linux-x64").url} ${ARCHIVES["linux-x64"].bytes.byteLength}`])
-    const files = await source.unpack(action(), r.bytes)
+    expect(staging.bytes(r.file)).toEqual(ARCHIVES["linux-x64"].bytes)
+    const files = await source.unpack(action(), r.file, staging)
     expect(files.ok && files.value.map((f) => f.rel)).toEqual(["bin/opencode"])
   })
 
   test("refuses other harnesses and unpinned sources without downloading", async () => {
     let called = false
     const source = createOpencodeHarnessSource({ manifest: MANIFEST, download: async () => ((called = true), new Uint8Array()) })
-    await expect(source.fetch(action({ harness: "codex" }))).rejects.toThrow(/opencode/i)
-    await expect(source.fetch(action({ source: { manifest: MANIFEST.release, url: "https://evil.example/opencode-linux-x64.tar.gz", file: "opencode-linux-x64.tar.gz" } }))).rejects.toThrow(/pin/)
+    await expect(source.fetch(action({ harness: "codex" }), memoryStaging())).rejects.toThrow(/opencode/i)
+    await expect(source.fetch(action({ source: { manifest: MANIFEST.release, url: "https://evil.example/opencode-linux-x64.tar.gz", file: "opencode-linux-x64.tar.gz" } }), memoryStaging())).rejects.toThrow(/pin/)
     expect(called).toBe(false)
   })
 
@@ -213,12 +216,16 @@ describe("httpsDownload", () => {
   const response = (body: Uint8Array, init: { url?: string; status?: number } = {}) =>
     Object.defineProperty(new Response(body as BodyInit, { status: init.status ?? 200 }), "url", { value: init.url ?? "https://objects.githubusercontent.com/x" }) as Response
 
-  test("https only, final URL https, size bounded", async () => {
+  test("https only, final URL https, size bounded while it streams", async () => {
     const body = enc("12345")
-    expect(await httpsDownload(async () => response(body))("https://github.com/x", { maxBytes: 5 })).toEqual(body)
-    await expect(httpsDownload(async () => response(body))("http://github.com/x", { maxBytes: 5 })).rejects.toThrow(/https/)
-    await expect(httpsDownload(async () => response(body, { url: "http://mirror.example/x" }))("https://github.com/x", { maxBytes: 5 })).rejects.toThrow(/https/)
-    await expect(httpsDownload(async () => response(body))("https://github.com/x", { maxBytes: 4 })).rejects.toThrow(/larger/)
+    const get = async (url: string, maxBytes: number, init?: { url?: string; status?: number }) => collect(await httpsDownload(async () => response(body, init))(url, { maxBytes }), 1 << 20)
+    expect(await get("https://github.com/x", 5)).toEqual(body)
+    await expect(get("http://github.com/x", 5)).rejects.toThrow(/https/)
+    await expect(get("https://github.com/x", 5, { url: "http://mirror.example/x" })).rejects.toThrow(/https/)
+    await expect(get("https://github.com/x", 4)).rejects.toThrow(/larger/)
+    // The body is a stream of chunks, never collected by the download itself.
+    const chunks = httpsDownload(async () => response(body))("https://github.com/x", { maxBytes: 5 })
+    expect((await chunks) instanceof Uint8Array).toBe(false)
     await expect(httpsDownload(async () => response(body, { status: 404 }))("https://github.com/x", { maxBytes: 5 })).rejects.toThrow(/404/)
   })
 })

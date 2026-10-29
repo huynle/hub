@@ -15,11 +15,14 @@
 //   remove-service     v1.1: removes the unit, only while it is still exactly the one hub installed (backed up, so
 //                      a rollback restores it)
 //   install-artifact   hubctl from a verified manifest: exact target, pinned digest, downgrade policy, bytes checked
+//                      (hubctl's own executable is digested and copied in chunks, never read whole)
 //   install-harness    a harness pinned by the verified manifest: checkHarnessPin, downgrade policy, the pinned
 //                      digest of the download first, then the upstream evidence, then the adapter's unpacker
 //
 // Fetching and unpacking come from injected, typed sources (no shell, no generic exec); verification always
-// happens here, so a source cannot skip it.
+// happens here, so a source cannot skip it. Harness downloads stream into the step's staging area, which digests
+// them as it writes: the pin is checked against that digest, never one the source reports, before anything is
+// unpacked; the unpacker streams the archive's members into the staging area too (bounded memory, stream.ts).
 import {
   checkArtifactBytes,
   checkHarnessEvidence,
@@ -41,12 +44,16 @@ import type { ActionExecutor, ExecutorMap, StepContext, TreeFile } from "./execu
 import { mergeConfigText } from "./json-merge.ts"
 import { fromResult, txFail, txOk, type TxResult } from "./result.ts"
 import { sha256Of } from "./state.ts"
+import { fileDigest, type StagedFile, type StagingArea } from "./stream.ts"
 
 export interface HubctlSource {
   /** The release manifest, already verified against the shipped trust root. */
   readonly manifest: VerifiedManifest
-  /** Downloads the release file for `entry` (bytes only; the executor checks them). */
-  fetch(entry: ArtifactEntry): Promise<Uint8Array>
+  /**
+   * The release file for `entry`: its bytes, or the path of a local copy (hubctl's own standalone executable), which
+   * the executor digests and the engine copies in chunks. Either way the executor checks it against the pin.
+   */
+  fetch(entry: ArtifactEntry): Promise<Uint8Array | { readonly path: string }>
   /** The hubctl currently installed, if any (downgrade policy). */
   readonly installed?: { readonly version: string; readonly sha256: string }
   /** The highest security floor this machine has seen. */
@@ -57,10 +64,16 @@ export interface HubctlSource {
 
 export interface HarnessSource {
   readonly manifest: VerifiedManifest
-  /** Downloads the pinned file and runs the upstream evidence checks the action lists (adapter-specific). */
-  fetch(action: InstallHarness): Promise<{ readonly bytes: Uint8Array; readonly evidence: readonly EvidenceResult[] }>
-  /** Unpacks verified bytes into the install tree (adapter-specific; pure: no writes). */
-  unpack(action: InstallHarness, bytes: Uint8Array): Promise<TxResult<readonly TreeFile[]>>
+  /**
+   * Downloads the pinned file into `staging` (streamed, staging.write) and runs the upstream evidence checks the
+   * action lists (adapter-specific).
+   */
+  fetch(action: InstallHarness, staging: StagingArea): Promise<{ readonly file: StagedFile; readonly evidence: readonly EvidenceResult[] }>
+  /**
+   * Unpacks the verified download into the install tree (adapter-specific): large members are streamed into
+   * `staging` and named as staged files; nothing else is written.
+   */
+  unpack(action: InstallHarness, file: StagedFile, staging: StagingArea): Promise<TxResult<readonly TreeFile[]>>
   installed?(harness: HarnessID): { readonly version: string; readonly sha256: string } | undefined
   floor?(harness: HarnessID): string | undefined
   readonly allowDowngrade?: boolean
@@ -218,10 +231,19 @@ export const installArtifactExecutor = (source?: HubctlSource): ActionExecutor<"
     change: async (action, ctx) => {
       const entry = entryFor(action, ctx.host.target)
       if (!entry.ok) return entry
-      const bytes = await source!.fetch(entry.value)
-      const checked = fromResult(checkArtifactBytes(entry.value, { sha256: sha256Of(bytes), size: bytes.byteLength }))
+      const fetched = await source!.fetch(entry.value)
+      if (fetched instanceof Uint8Array) {
+        const checked = fromResult(checkArtifactBytes(entry.value, { sha256: sha256Of(fetched), size: fetched.byteLength }))
+        if (!checked.ok) return checked
+        return txOk({ type: "file", bytes: fetched, mode: 0o755, replace: "backup" })
+      }
+      const info = ctx.fs.lstat(fetched.path)
+      if (info?.kind !== "file") return txFail("not_found", `${fetched.path} is not a regular file`)
+      const staged = { path: fetched.path, sha256: fileDigest(ctx.fs, fetched.path), size: info.size }
+      const checked = fromResult(checkArtifactBytes(entry.value, { sha256: staged.sha256, size: staged.size }))
       if (!checked.ok) return checked
-      return txOk({ type: "file", bytes, mode: 0o755, replace: "backup" })
+      // The engine copies it in chunks and checks this digest again while it copies.
+      return txOk({ type: "file", staged, mode: 0o755, replace: "backup" })
     },
   }
 }
@@ -247,16 +269,21 @@ export const installHarnessExecutor = (source?: HarnessSource): ActionExecutor<"
     change: async (action, ctx) => {
       const pin = pinFor(action, ctx.host.target)
       if (!pin.ok) return pin
-      const download = await source!.fetch(action)
+      const download = await source!.fetch(action, ctx.staging)
+      // The digest the staging area recorded while it wrote the download (never one the source reports).
+      const written = ctx.staging.written(download.file)
+      if (!written) return txFail("internal", `the ${action.harness} source did not download into the transaction's staging area`)
       // The pinned digest first (mandatory), then the upstream evidence; only verified bytes reach the unpacker.
-      const evidence = fromResult(checkHarnessEvidence(action, { sha256: sha256Of(download.bytes), size: download.bytes.byteLength }, download.evidence))
+      const evidence = fromResult(checkHarnessEvidence(action, written, download.evidence))
       if (!evidence.ok) return evidence
       ctx.recordEvidence(evidence.value)
-      const files = await source!.unpack(action, download.bytes)
+      const files = await source!.unpack(action, { path: download.file.path, ...written }, ctx.staging)
       if (!files.ok) return files
       const seen = new Set<string>()
       for (const f of files.value) {
         if (!isSafeRel(f.rel) || seen.has(f.rel) || !Number.isInteger(f.mode) || f.mode < 0 || f.mode > 0o777) return txFail("invalid", `the ${action.harness} archive has an unsafe entry ${JSON.stringify(f.rel)}`)
+        // Unpacked members are files the staging area wrote, with the digest it recorded.
+        if ("staged" in f && ctx.staging.written(f.staged)?.sha256 !== f.staged.sha256) return txFail("invalid", `the ${action.harness} archive's ${JSON.stringify(f.rel)} was not unpacked into the staging area`)
         seen.add(f.rel)
       }
       for (const rel of seen) if ([...seen].some((other) => other.startsWith(`${rel}/`))) return txFail("invalid", `the ${action.harness} archive uses ${rel} as both a file and a directory`)

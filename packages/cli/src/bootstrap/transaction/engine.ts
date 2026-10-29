@@ -13,6 +13,8 @@
 //   - write-ahead ownership journal: each change is journaled ("pending", with the state before, the state it will
 //     leave and the backup) before it happens, and "done" after; contents and credentials never enter it;
 //   - atomic replacement: new content is staged beside the target and renamed over it;
+//   - bounded memory: large content (a harness, hubctl) reaches the engine as files of the step's staging area
+//     (stream.ts), never as bytes; it is moved or copied in chunks, digested in chunks, and backed up in chunks;
 //   - rollback on any failure and recovery after a crash (recover): newest entry first, undo only what is still
 //     exactly as we left it, keep anything changed since (reported as a conflict), clear (never restore) a
 //     credential, refuse a backup that does not match what it backed up;
@@ -56,6 +58,7 @@ import { resolveTarget, rootDir, type ResolveOptions } from "./resolve.ts"
 import { errnoOf, fromResult, TxError, txFail, txOk, type TxFailure, type TxResult } from "./result.ts"
 import { fileState, sameState, sha256Of, treeDigestOfFiles } from "./state.ts"
 import { TxStore } from "./store.ts"
+import { copyFile, fsStaging, type StagedFile, type StagingArea } from "./stream.ts"
 
 export interface ApplierConfig {
   /** The roots discovery mapped on this host. */
@@ -406,6 +409,7 @@ export function createApplier(config: ApplierConfig): Applier {
     private readonly conflicts: Conflict[] = []
     private readonly kept: Conflict[] = []
     private readonly evidence: { actionID: string; results: readonly EvidenceResult[] }[] = []
+    private scratch?: ReturnType<typeof fsStaging>
 
     constructor(
       private readonly store: TxStore,
@@ -432,6 +436,21 @@ export function createApplier(config: ApplierConfig): Applier {
 
     private executor(action: Action): ActionExecutor | undefined {
       return config.executors[action.kind] as ActionExecutor | undefined
+    }
+
+    /** The current step's staging area (its directory is only created once something is written). */
+    private staging(): StagingArea {
+      this.scratch ??= fsStaging(fs, this.store.stagingDir(this.txID))
+      return this.scratch
+    }
+
+    /** Removes the step's staging directory (what was not moved into place); a failure is left for the sweep. */
+    private dropStaging(): void {
+      const scratch = this.scratch
+      this.scratch = undefined
+      try {
+        scratch?.dispose()
+      } catch {}
     }
 
     private resolve(ref: PathRef, options?: ResolveOptions): TxResult<string> {
@@ -475,6 +494,7 @@ export function createApplier(config: ApplierConfig): Applier {
         original: this.original(step.path, current),
         resolve: (ref, options) => this.resolve(ref, options),
         recordEvidence: (results) => this.evidence.push({ actionID: action.id, results }),
+        staging: this.staging(),
       })
     }
 
@@ -532,6 +552,14 @@ export function createApplier(config: ApplierConfig): Applier {
     }
 
     private async step(action: Action): Promise<TxResult<void>> {
+      try {
+        return await this.stepOnce(action)
+      } finally {
+        this.dropStaging()
+      }
+    }
+
+    private async stepOnce(action: Action): Promise<TxResult<void>> {
       this.renew()
       const exec = this.executor(action)
       if (!exec) return txFail("internal", `this hubctl cannot apply ${action.kind} steps`)
@@ -624,8 +652,31 @@ export function createApplier(config: ApplierConfig): Applier {
     private backup(seq: number, target: string, current: FileState): { id: string } | undefined {
       if (!current.exists) return undefined
       const id = `bk_${seq}`
-      this.store.writeBackup(this.txID, id, current.symlink ? fs.readlink(target) : fs.readFile(target))
+      if (current.symlink) this.store.writeBackup(this.txID, id, fs.readlink(target))
+      else this.store.writeBackupFrom(this.txID, id, target)
       return { id }
+    }
+
+    /**
+     * Puts a staged file at `dest` with `mode`: a file this step's staging area wrote (with the digest it recorded) is
+     * moved (copied across filesystems); any other file is copied in chunks and must have the digest it claims.
+     */
+    private place(file: StagedFile, dest: string, mode: number, staging: StagingArea): void {
+      const written = staging.written(file)
+      if (written && written.sha256 === file.sha256 && fs.lstat(file.path)?.kind === "file") {
+        try {
+          fs.rename(file.path, dest)
+          fs.chmod(dest, mode)
+          return
+        } catch (error) {
+          if (errnoOf(error) !== "EXDEV") throw error
+        }
+      }
+      if (fs.lstat(file.path)?.kind !== "file") throw new TxError("not_found", `${file.path} is not a regular file`)
+      if (copyFile(fs, file.path, dest, mode) !== file.sha256) {
+        fs.unlink(dest)
+        throw new TxError("integrity_mismatch", `${file.path} changed after it was verified; nothing was installed`)
+      }
     }
 
     private async perform(action: Action, step: StepPlan, ctx: StepContext, change: Change): Promise<TxResult<"applied" | "skipped">> {
@@ -669,7 +720,9 @@ export function createApplier(config: ApplierConfig): Applier {
         case "file":
         case "symlink": {
           const desired: FileState =
-            change.type === "file" ? { exists: true, sha256: sha256Of(change.bytes), mode: change.mode } : { exists: true, symlink: true, sha256: sha256Of(change.target) }
+            change.type === "file"
+              ? { exists: true, sha256: "bytes" in change ? sha256Of(change.bytes) : change.staged.sha256, mode: change.mode }
+              : { exists: true, symlink: true, sha256: sha256Of(change.target) }
           if (current.exists) {
             if (sameState(current, desired) && (change.type === "symlink" || kind === "file")) return this.skip()
             if (change.replace === "refuse") return conflict("already exists with other content")
@@ -681,8 +734,9 @@ export function createApplier(config: ApplierConfig): Applier {
           const entry = await this.append({ actionID: action.id, kind: action.kind, class: step.class, path: path!, before: current, after: desired, ...(backup ? { backup } : {}), status: "pending" })
           this.recheck(action, step)
           const staged = this.stagingPath(target!, entry.seq)
-          if (change.type === "file") fs.writeExclusive(staged, change.bytes, change.mode)
-          else fs.symlink(change.target, staged)
+          if (change.type === "symlink") fs.symlink(change.target, staged)
+          else if ("bytes" in change) fs.writeExclusive(staged, change.bytes, change.mode)
+          else this.place(change.staged, staged, change.mode, ctx.staging)
           fs.rename(staged, target!)
           fs.fsyncDir(dirname(target!))
           const after = fileState(fs, target!)
@@ -697,7 +751,7 @@ export function createApplier(config: ApplierConfig): Applier {
           const entry = await this.append({ actionID: action.id, kind: action.kind, class: step.class, path: path!, before: current, after: desired, status: "pending" })
           this.recheck(action, step)
           const staged = this.stagingPath(target!, entry.seq)
-          this.stageTree(staged, change.files, change.mode)
+          this.stageTree(staged, change.files, change.mode, ctx.staging)
           fs.rename(staged, target!)
           fs.fsyncDir(dirname(target!))
           const after = fileState(fs, target!, { tree: true })
@@ -708,7 +762,7 @@ export function createApplier(config: ApplierConfig): Applier {
       }
     }
 
-    private stageTree(dir: string, files: readonly TreeFile[], mode: number): void {
+    private stageTree(dir: string, files: readonly TreeFile[], mode: number, staging: StagingArea): void {
       fs.mkdir(dir, mode)
       fs.chmod(dir, mode)
       const dirs = new Set<string>()
@@ -720,7 +774,10 @@ export function createApplier(config: ApplierConfig): Applier {
         fs.mkdir(`${dir}/${d}`, mode)
         fs.chmod(`${dir}/${d}`, mode)
       }
-      for (const f of files) fs.writeExclusive(`${dir}/${f.rel}`, f.bytes, f.mode)
+      for (const f of files) {
+        if ("bytes" in f) fs.writeExclusive(`${dir}/${f.rel}`, f.bytes, f.mode)
+        else this.place(f.staged, `${dir}/${f.rel}`, f.mode, staging)
+      }
     }
 
     private cleanup(): void {
@@ -849,15 +906,21 @@ export function createApplier(config: ApplierConfig): Applier {
           await this.conflict(entry, target, "changed since hub wrote it; kept as it is", current)
           break
         case "restore-backup": {
-          const bytes = entry.backup ? this.store.readBackup(this.txID, entry.backup.id) : undefined
-          const backupDigest = bytes ? sha256Of(entry.before.symlink ? new TextDecoder().decode(bytes) : bytes) : undefined
-          if (!bytes || backupDigest !== entry.before.sha256) {
+          // A symlink's backup is its target text; a file's is read and copied in chunks, never whole.
+          const link = entry.backup && entry.before.symlink ? this.store.readBackup(this.txID, entry.backup.id) : undefined
+          const file = entry.backup && !entry.before.symlink ? this.store.backupFile(this.txID, entry.backup.id) : undefined
+          const backupDigest = link ? sha256Of(new TextDecoder().decode(link)) : file?.sha256
+          if ((!link && !file) || backupDigest !== entry.before.sha256) {
             await this.conflict(entry, target, "its backup is missing or does not match what was backed up; left as hub wrote it", current)
             return "keep-user-edit"
           }
           const staged = this.stagingPath(target, entry.seq)
-          if (entry.before.symlink) fs.symlink(new TextDecoder().decode(bytes), staged)
-          else fs.writeExclusive(staged, bytes, entry.before.mode ?? 0o600)
+          if (link) fs.symlink(new TextDecoder().decode(link), staged)
+          else if (copyFile(fs, file!.path, staged, entry.before.mode ?? 0o600) !== entry.before.sha256) {
+            fs.unlink(staged)
+            await this.conflict(entry, target, "its backup changed while it was restored; left as hub wrote it", current)
+            return "keep-user-edit"
+          }
           fs.rename(staged, target)
           fs.fsyncDir(dirname(target))
           await this.mark(entry, "undone")
