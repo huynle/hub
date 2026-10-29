@@ -75,7 +75,9 @@ describe("planNodeServices", () => {
   })
 
   test("the node needs workspace roots, narrow ones", () => {
-    expect(codes(planNodeServices(input(), { layout: STANDALONE_LINUX }))).toEqual(["missing_field"])
+    const missing = planNodeServices(input(), { layout: STANDALONE_LINUX })
+    expect(codes(missing)).toEqual(["missing_field"])
+    expect(!missing.ok && missing.issues[0]!.message).toContain("--workspace-root")
     expect(codes(planNodeServices(input(), { ...BASE, node: { workspaceRoots: ["/home/dev"] } }))).toEqual(["invalid_path"])
   })
 

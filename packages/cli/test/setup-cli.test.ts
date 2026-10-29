@@ -201,7 +201,7 @@ describe("hubctl setup (session-only, against a real hub)", () => {
     const noRoots = await cli(home, ["setup", "preview", "--profile", "launch-node", "--json"])
     if (noRoots.envelope?.error?.code !== "no_service_manager") {
       expect(noRoots.code).toBe(2)
-      expect(noRoots.envelope?.error?.message).toContain("workspace")
+      expect(noRoots.envelope?.error?.message).toContain("--workspace-root")
     }
     expect((await cli(home, ["setup", "preview", "--profile", "nope", "--json"])).code).toBe(2)
     writeFileSync(path.join(home, "bad.json"), "{}")
