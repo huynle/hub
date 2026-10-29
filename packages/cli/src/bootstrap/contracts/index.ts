@@ -6,8 +6,8 @@
 // Changing a contract means a new schema version (and a migration where documents persist); never an in-place
 // change of meaning.
 export const CONTRACT_VERSION = 1
-/** The amendment of the v1 contracts this code implements (docs/bootstrap-contracts.md, items marked "v1.1"). */
-export const CONTRACT_AMENDMENT = "1.1"
+/** The amendment of the v1 contracts this code implements (docs/bootstrap-contracts.md, items marked "v1.1"/"v1.2"). */
+export const CONTRACT_AMENDMENT = "1.2"
 
 export * from "./validate.ts"
 export * from "./canonical.ts"

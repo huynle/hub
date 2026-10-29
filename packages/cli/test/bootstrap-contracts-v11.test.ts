@@ -47,7 +47,8 @@ function expectRejected(result: Result<unknown>, code: string) {
   expect(result.issues.map((i): string => i.code)).toContain(code)
 }
 
-test("the amendment is labelled v1.1", () => expect(CONTRACT_AMENDMENT).toBe("1.1"))
+// v1.2 (bootstrap-contracts-v12.test.ts) is additive: everything v1.1 defines still holds.
+test("the amendment is v1.1 or a later additive amendment", () => expect(["1.1", "1.2"]).toContain(CONTRACT_AMENDMENT))
 
 describe("v1.1 snapshotDigest", () => {
   test("is the canonical digest of the snapshot without capturedAt", () => {
