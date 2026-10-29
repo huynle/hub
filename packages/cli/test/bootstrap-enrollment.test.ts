@@ -248,4 +248,36 @@ describe("machine enroll", () => {
     expect(defaultMachineName("")).toBe("machine")
     expect(defaultMachineName("x".repeat(100))).toHaveLength(64)
   })
+  // HBS-12 acceptance (E1): the OpenCode spoke connects only when config.json's mode is not "off" (its default).
+  test("sharing: a fresh enrollment turns it on; an explicit off is kept, with a warning", async () => {
+    const h = hub()
+    const run = await enroll(h, { verify: false })
+    expect(JSON.parse(readFileSync(run.store.location, "utf8")).mode).toBe("always")
+    expect(run.result.envelope.warnings ?? []).toEqual([])
+
+    const file = tempConfig()
+    mkdirSync(path.dirname(file), { recursive: true })
+    writeFileSync(file, JSON.stringify({ mode: "off" }))
+    const off = await enroll(hub(), { store: new ConfigCredentialStore(file), verify: false })
+    expect(off.result.envelope.ok).toBe(true)
+    expect(JSON.parse(readFileSync(file, "utf8")).mode).toBe("off")
+    expect(off.result.envelope.warnings?.join(" ")).toContain('mode is "off"')
+    expectSecretFree(off)
+  })
+
+  test("sharing: enrolling again repairs a credential stored without a mode (an older hubctl), never an explicit one", async () => {
+    const h = hub()
+    const first = await enroll(h, { verify: false })
+    const { mode: _mode, ...rest } = JSON.parse(readFileSync(first.store.location, "utf8"))
+    writeFileSync(first.store.location, JSON.stringify(rest))
+    const again = await enroll(h, { store: first.store, verify: false })
+    expect(again.result.envelope.ok).toBe(true)
+    expect(JSON.parse(readFileSync(first.store.location, "utf8")).mode).toBe("always")
+    expect(again.result.envelope.warnings?.join(" ")).toContain("sharing")
+
+    writeFileSync(first.store.location, JSON.stringify({ ...rest, mode: "off" }))
+    const kept = await enroll(h, { store: first.store, verify: false })
+    expect(JSON.parse(readFileSync(first.store.location, "utf8")).mode).toBe("off")
+    expect(kept.result.envelope.warnings?.join(" ")).toContain('mode is "off"')
+  })
 })

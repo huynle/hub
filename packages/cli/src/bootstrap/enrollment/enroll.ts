@@ -18,7 +18,7 @@ import { EnrollmentRefused, pollEnrollment, startEnrollment } from "../../../../
 import type { CredentialStore, MachineCredential, MachineEnrollment } from "../contracts/index.ts"
 import { approvalURL, checkServerURL, isUserCode } from "./policy.ts"
 import { failure, line, success, type MachineResult } from "./result.ts"
-import { CredentialStoreError, type StoreContents } from "./store.ts"
+import { CredentialStoreError, type SharingMode, type StoreContents } from "./store.ts"
 import { probeCredential, statusOf, storeFailure } from "./status.ts"
 
 /** The longest a single enrollment waits for approval, whatever the hub says (the hub's own expiry is 10 minutes). */
@@ -41,7 +41,25 @@ export interface EnrollPrompt {
   readonly warning?: string
 }
 
-export type EnrollStore = CredentialStore & { preflight?(): Promise<void>; inspect?(): StoreContents }
+export type EnrollStore = CredentialStore & { preflight?(): Promise<void>; inspect?(): StoreContents; sharingMode?(): SharingMode; enableSharing?(): boolean }
+
+/** Why an enrolled machine's OpenCode spoke stays disconnected: the user's explicit `mode: "off"`. */
+export function sharingOffWarning(location: string): string {
+  return `sharing is off for this machine (mode is "off" in ${location}), so the OpenCode spoke will not connect; turn it on with /hub → Mode in OpenCode, or set "mode" to "always"`
+}
+
+/**
+ * The sharing notes of an enrolled machine. With `repair`, a config with no `mode` at all (written by an older
+ * hubctl) gets the default; an explicit mode is never changed. Best effort: a store that cannot say adds nothing.
+ */
+function sharingNotes(store: EnrollStore, repair: boolean): string[] {
+  try {
+    if (repair && store.enableSharing?.()) return [`turned sharing on for this machine (mode "always" in ${store.location}), so the OpenCode spoke connects`]
+    return store.sharingMode?.() === "off" ? [sharingOffWarning(store.location)] : []
+  } catch {
+    return []
+  }
+}
 
 export interface MachineEnrollOptions {
   readonly server: string
@@ -127,7 +145,7 @@ export async function machineEnroll(options: MachineEnrollOptions): Promise<Mach
     const probe = options.verify === false ? undefined : await probeCredential(existing, probeOptions(options))
     const status = statusOf(existing, probe?.reachable ? probe : undefined, now())
     if (status.state === "revoked") return failure(COMMAND, "revoked", "The hub rejected this machine's stored credential", { data: status, hint: "Pass --reenroll to enroll it again" })
-    return success(COMMAND, status, [`already enrolled as ${existing.machineID}; pass --reenroll to replace this machine's identity`])
+    return success(COMMAND, status, [`already enrolled as ${existing.machineID}; pass --reenroll to replace this machine's identity`, ...sharingNotes(store, true)])
   }
 
   try {
@@ -198,6 +216,7 @@ async function persist(credential: MachineCredential, options: MachineEnrollOpti
     })
     return { ...result, retryPersist: () => persist(credential, options, warnings, 1) }
   }
+  warnings = [...warnings, ...sharingNotes(options.store, false)]
   if (options.verify === false) return success(COMMAND, statusOf(credential, undefined, now()), warnings)
   const probe = await probeCredential(credential, probeOptions(options))
   if (probe && !probe.reachable) return success(COMMAND, statusOf(credential, undefined, now()), [...warnings, `enrolled, but not verified: ${probe.detail}`])

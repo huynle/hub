@@ -121,3 +121,49 @@ describe("ConfigCredentialStore", () => {
     expect(lstatSync(path.dirname(file)).mode & 0o777).toBe(0o700)
   })
 })
+
+// HBS-12 acceptance (E1): the OpenCode spoke connects only when config.json's `mode` is not "off", and the spoke's
+// default is "off". An enrollment that stores a credential without a mode left the spoke disconnected for good.
+describe("ConfigCredentialStore sharing mode", () => {
+  test("a fresh enrollment turns sharing on (mode always), so the spoke connects", async () => {
+    const file = fileIn(home())
+    const store = new ConfigCredentialStore(file)
+    expect(store.sharingMode()).toBe("unset")
+    await store.write(CRED)
+    expect(raw(file).mode).toBe("always")
+    expect(readConfig(file, "x").mode).toBe("always")
+    expect(store.sharingMode()).toBe("always")
+  })
+
+  test("an explicit mode is never overridden, including off", async () => {
+    for (const mode of ["off", "session", "always"] as const) {
+      const file = fileIn(home())
+      mkdirSync(path.dirname(file), { recursive: true })
+      writeFileSync(file, JSON.stringify({ mode, futureKey: 1 }))
+      const store = new ConfigCredentialStore(file)
+      await store.write(CRED)
+      expect(raw(file)).toMatchObject({ mode, futureKey: 1 })
+      expect(store.sharingMode()).toBe(mode)
+    }
+  })
+
+  test("enableSharing sets mode always only when absent, keeping every other key", async () => {
+    const file = fileIn(home())
+    mkdirSync(path.dirname(file), { recursive: true })
+    writeFileSync(file, JSON.stringify({ server: CRED.server, machineID: CRED.machineID, token: TOKEN, futureKey: [1] }))
+    const store = new ConfigCredentialStore(file)
+    expect(store.enableSharing()).toBe(true)
+    expect(raw(file)).toMatchObject({ mode: "always", futureKey: [1], token: TOKEN })
+    expect(store.enableSharing()).toBe(false)
+    writeFileSync(file, JSON.stringify({ mode: "off", token: TOKEN }))
+    expect(store.enableSharing()).toBe(false)
+    expect(raw(file).mode).toBe("off")
+  })
+
+  test("a mode the spoke does not understand reads as off (the spoke's own fallback)", async () => {
+    const file = fileIn(home())
+    mkdirSync(path.dirname(file), { recursive: true })
+    writeFileSync(file, JSON.stringify({ mode: "sometimes" }))
+    expect(new ConfigCredentialStore(file).sharingMode()).toBe("off")
+  })
+})
