@@ -9,7 +9,9 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { harness, spoke, type Harness } from "../../../test/central-harness.ts"
+import { harness, spoke, waitFor, type Harness } from "../../../test/central-harness.ts"
+import { EventQueue } from "../../../test/spoke-fake.ts"
+import { Spoke, type SpokeHost } from "../../../src/spoke/spoke.ts"
 import { canonicalJSON, validateEnvelope, type ResultEnvelope } from "../src/bootstrap/contracts/index.ts"
 import { tarGz, zip } from "./bootstrap/opencode-adapter-fixtures.ts"
 import { bytesInfo, ephemeralKey, fakeBinary, releaseBody, rootOf, signWith } from "./bootstrap/release-fixtures.ts"
@@ -482,5 +484,70 @@ esac
     expect(strict.stderr).toContain("hubctl: note: kept")
     expect(strict.stderr).not.toContain("warning")
     expect(strict.stderr).toContain("opencode: installed, not ready")
+  }, 30_000)
+  // HBS-12 acceptance (E1): the real OpenCode plugin spoke, reading the config.json `machine enroll` wrote, connects
+  // with no manual edit (the spoke connects only when `mode` is not "off", and its default is "off").
+  function pluginSpoke(home: string): Spoke {
+    const events = new EventQueue<{ type: string; data: Record<string, unknown> }>()
+    const host: SpokeHost = {
+      directory: home,
+      opencodeVersion: "2.2.0",
+      events: (signal) => events.iterate(signal),
+      prompt: async () => ({ id: "msg_1" }),
+      context: async () => [],
+      getSession: async (id) => ({ id, location: { directory: home }, time: { updated: 1 } }),
+      replyPermission: async () => "replied",
+      interrupt: async () => undefined,
+      switchAgent: async () => undefined,
+      switchModel: async () => undefined,
+      hasAgent: async () => true,
+      defaultAgent: async () => "build",
+    }
+    const configFile = path.join(home, ".config", "hub", "config.json")
+    return new Spoke(host, { configFile, machineName: "ci-box", kind: "service", processID: "proc_e1", pid: 4242, pluginVersion: "9.9.9", snapshotDebounceMs: 10, snapshotIntervalMs: 60_000, seedDebounceMs: 10, pollMs: 20, backoff: { minMs: 10, maxMs: 50 } })
+  }
+
+  test("fresh enroll → apply → the plugin's spoke connects with no manual mode edit → verify 0", async () => {
+    const { home, manifestFile, hubctlRun, preview } = await freshHost()
+    expect(JSON.parse(readFileSync(path.join(home, ".config", "hub", "config.json"), "utf8")).mode).toBe("always")
+    const applied = await hubctlRun(["setup", "apply", "--preview", await preview("p1.json"), "--manifest", manifestFile, "--json"])
+    expect(applied.code).toBe(0)
+    writeFileSync(path.join(home, ".logged-in"), "")
+    const plugin = pluginSpoke(home)
+    plugin.start()
+    try {
+      await waitFor(() => plugin.status().connection === "connected", 5000)
+      const ready = await hubctlRun(["setup", "verify", "--json"])
+      expect(ready.envelope?.error).toBeUndefined()
+      expect(ready.code).toBe(0)
+    } finally {
+      plugin.stop()
+    }
+  }, 30_000)
+
+  test("an explicit mode off is kept, and verify's next step says the mode is off", async () => {
+    const { home, manifestFile, hubctlRun, preview } = await freshHost()
+    const file = path.join(home, ".config", "hub", "config.json")
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), mode: "off" }))
+    const applied = await hubctlRun(["setup", "apply", "--preview", await preview("p1.json"), "--manifest", manifestFile, "--json"])
+    expect(applied.code).toBe(0)
+    expect(applied.envelope?.data?.harnesses[0].nextSteps.join("\n")).toContain('mode is "off"')
+    writeFileSync(path.join(home, ".logged-in"), "")
+    const plugin = pluginSpoke(home)
+    plugin.start()
+    try {
+      await Bun.sleep(200)
+      expect(plugin.status().connection).not.toBe("connected")
+      const verify = await hubctlRun(["setup", "verify", "--json"])
+      expect(verify.code).toBe(15)
+      const steps: string[] = verify.envelope?.data?.harnesses[0].nextSteps
+      expect(steps.join("\n")).toContain('mode is "off"')
+      expect(steps.join("\n")).not.toContain("start OpenCode (`opencode`) so")
+      const text = await hubctlRun(["setup", "verify"])
+      expect(text.stdout).toContain('mode is "off"')
+      expect(JSON.parse(readFileSync(file, "utf8")).mode).toBe("off")
+    } finally {
+      plugin.stop()
+    }
   }, 30_000)
 })
