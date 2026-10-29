@@ -52,6 +52,11 @@ modules. Every capability is injected.
 
   Details are built by the adapter, never copied from harness output. Anything that looks like a credential is
   withheld. The child process gets the user's own environment, and nothing from it is recorded.
+
+  Contract v1.2 classifies them: `version-exec` is an integrity probe (its failure rolls the apply back);
+  `provider-auth` and `spoke-connected` wait on the user (`opencode auth login`, starting OpenCode), so by default
+  the `verify-harness` step commits OpenCode as installed, not ready (`requireReady: false`, set by `hubctl setup
+  apply` unless `--require-ready`). The executor's own default stays strict.
 - **Rollback.** All rollback goes through the engine. The new version directory is removed, `current` is restored
   from its backup, and the config is restored from its backup, except when the user changed it after hub wrote it.
   Then it is kept and reported as a conflict (`bootstrap-adapter-opencode-apply.test.ts`).
@@ -150,7 +155,7 @@ The original list:
   own provider configuration. `now: Date.now`.
 - **Spoke probe.** The hub needs a machine-credential query that answers "is an OpenCode spoke of this machine
   connected?". Today `GET /api/machines` (user auth) lists `processes` per machine. Without a `SpokeProbe`, OpenCode
-  is never ready, which is correct but blocks every apply.
+  is never ready, which is correct; since contract v1.2 it only blocks a strict (`--require-ready`) apply.
 - **Authority.** The MCP server runs `user-bin:hubctl`, which this plan's `install-artifact` installs.
   `src/spoke/launchers.ts` writes `hub`/`hubctl` launchers into the hub state dir that run the CLI bundle from the
   plugin's install (cache) directory. They must not become what services or MCP clients depend on. Suggested
