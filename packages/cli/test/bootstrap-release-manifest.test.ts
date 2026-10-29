@@ -42,6 +42,17 @@ describe("buildManifestBody", () => {
     expectRejected(buildManifestBody({ ...input, artifacts: [...artifacts, { ...artifacts[0]!, target: "windows-x64", file: "hubctl-windows-x64.exe" }] }), "unsupported_platform")
   })
 
+  test("an explicit target subset: exactly those targets, each still required, nothing outside it", () => {
+    const linux = artifacts.filter((a) => a.target.startsWith("linux-"))
+    const r = buildManifestBody({ ...input, artifacts: linux, targets: ["linux-arm64", "linux-x64"] })
+    expect(r.ok && r.value.artifacts.map((a) => a.target)).toEqual(["linux-x64", "linux-arm64"])
+    expectRejected(buildManifestBody({ ...input, artifacts: linux.slice(0, 1), targets: ["linux-x64", "linux-arm64"] }), "missing_field")
+    expectRejected(buildManifestBody({ ...input, artifacts, targets: ["linux-x64", "linux-arm64"] }), "inconsistent")
+    expectRejected(buildManifestBody({ ...input, artifacts: linux, targets: [] }), "invalid_value")
+    expectRejected(buildManifestBody({ ...input, artifacts: linux, targets: ["linux-x64", "linux-x64", "linux-arm64"] }), "duplicate")
+    expectRejected(buildManifestBody({ ...input, artifacts: linux, targets: ["linux-x64", "linux-arm64", "windows-x64"] }), "unsupported_platform")
+  })
+
   test("refuses a floor above the release and a bad version", () => {
     expectRejected(buildManifestBody({ ...input, minimumVersion: "0.9.0" }), "inconsistent")
     expectRejected(buildManifestBody({ ...input, release: "v0.8.0" }), "invalid_value")

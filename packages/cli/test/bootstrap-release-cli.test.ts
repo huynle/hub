@@ -3,7 +3,7 @@
 // echoed), and verification of every artifact. Keys are ephemeral; builds are recorded, not run (see
 // bootstrap-release-build.test.ts for a real compile).
 import { describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { SUPPORTED_TARGETS, canonicalJSON, validateArtifactManifest, verifyManifest } from "../src/bootstrap/contracts/index.ts"
@@ -149,6 +149,52 @@ describe("manifest", () => {
     writeFileSync(w.pins, "{}")
     expect(await runRelease(["manifest", "--dist", w.dist, "--pins", w.pins, "--minimum-version", "0.0.1", "--out", w.file("c.json")], harness().io)).toBe(1)
     expect(existsSync(w.file("c.json"))).toBe(false)
+  })
+})
+
+describe("a target subset (--targets)", () => {
+  const subsetWorkspace = () => {
+    const w = workspace()
+    for (const t of SUPPORTED_TARGETS) if (t.target !== "linux-x64") rmSync(path.join(w.dist, `hubctl-${t.target}`))
+    return w
+  }
+  const manifestArgs = (w: ReturnType<typeof workspace>, out: string, more: string[] = []) => ["manifest", "--dist", w.dist, "--pins", w.pins, "--minimum-version", "0.0.1", "--out", w.file(out), ...more]
+
+  test("manifest --targets lists exactly the named targets, and says so", async () => {
+    const w = subsetWorkspace()
+    const h = harness()
+    expect(await runRelease(manifestArgs(w, "sub.json", ["--targets", "linux-x64"]), h.io)).toBe(0)
+    const body = JSON.parse(readFileSync(w.file("sub.json"), "utf8"))
+    expect(body.artifacts.map((a: { target: string }) => a.target)).toEqual(["linux-x64"])
+    expect(body.artifacts[0]).toMatchObject(bytesInfo(fakeBinary("linux-x64", version)))
+    expect(h.out()).toContain("1 artifacts (linux-x64)")
+  })
+
+  test("without --targets every supported target is still required; a named target must be built", async () => {
+    const w = subsetWorkspace()
+    expect(await runRelease(manifestArgs(w, "all.json"), harness().io)).toBe(1)
+    const missing = harness()
+    expect(await runRelease(manifestArgs(w, "two.json", ["--targets", "linux-x64,darwin-arm64"]), missing.io)).toBe(1)
+    expect(missing.err()).toContain("hubctl-darwin-arm64")
+    for (const bad of ["windows-x64", "linux-x64,linux-x64", "", "linux-x64,"]) expect([bad, await runRelease(manifestArgs(w, "bad.json", ["--targets", bad]), harness().io)]).toEqual([bad, 2])
+    for (const f of ["all.json", "two.json", "bad.json"]) expect(existsSync(w.file(f))).toBe(false)
+  })
+
+  test("sign refuses a subset body unless --targets names the same subset; verify --dist checks exactly those", async () => {
+    const w = subsetWorkspace()
+    expect(await runRelease(manifestArgs(w, "sub.json", ["--targets", "linux-x64"]), harness().io)).toBe(0)
+    const env = { [SIGNING_KEY_ENV]: w.key.pem }
+    const signArgs = ["sign", "--in", w.file("sub.json"), "--out", w.file("m.json"), "--trust-root", w.root]
+    expect(await runRelease(signArgs, harness(env).io)).toBe(1)
+    expect(existsSync(w.file("m.json"))).toBe(false)
+    expect(await runRelease([...signArgs, "--targets", "linux-x64,linux-arm64"], harness(env).io)).toBe(1)
+    expect(await runRelease([...signArgs, "--targets", "linux-x64"], harness(env).io)).toBe(0)
+    const verifyArgs = ["verify", "--manifest", w.file("m.json"), "--trust-root", w.root, "--dist", w.dist]
+    expect(await runRelease(verifyArgs, harness().io)).toBe(1)
+    const h = harness()
+    expect(await runRelease([...verifyArgs, "--targets", "linux-x64"], h.io)).toBe(0)
+    expect(h.out().trim().split("\n")).toEqual([expect.stringMatching(/^ok linux-x64 /)])
+    expect(await runRelease([...verifyArgs, "--targets", "linux-x64,darwin-arm64"], harness().io)).not.toBe(0)
   })
 })
 

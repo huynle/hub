@@ -7,7 +7,7 @@ unchanged.
 | File | Role |
 |---|---|
 | `verify.ts` | The installer's checks on a downloaded hubctl: signature (trust root), exact target, size and digest, downgrade policy. |
-| `manifest.ts` | Builds the manifest body (every supported target, matrix order, harness pins) and signs it (ed25519, detached, over `manifestPayload`). |
+| `manifest.ts` | Builds the manifest body (every supported target, or an explicit `targets` subset; matrix order; harness pins) and signs it (ed25519, detached, over `manifestPayload`). |
 | `pins.ts` | The reviewed harness pin list (`harness-pins.json`): format, validation, re-download check. |
 | `trust-root.ts` | The trust root embedded at build time (`--define HUBCTL_TRUST_ROOT=…`), never read at run time. |
 | `assets.ts` | The six service templates of `EMBEDDED_ASSETS`, imported as text so the binary carries them. |
@@ -21,9 +21,11 @@ Everything except `build` needs only bun and node's built-ins, so the signing jo
 scripts/build-hubctl.sh                        # dev build: every supported target, no trust root
 scripts/build-hubctl.sh linux-x64              # one target
 scripts/build-hubctl.sh --require-trust-root   # release build: refuses without trust-root.json
+scripts/build-hubctl.sh linux-x64 --outdir /tmp/out   # binaries and checksums in /tmp/out
 ```
 
-Outputs: `dist/hubctl-<target>` and `dist/HUBCTL_SHA256SUMS`. The supported targets are `darwin-arm64`,
+Outputs: `dist/hubctl-<target>` and `dist/HUBCTL_SHA256SUMS` (in `--outdir` instead, when given). x64 targets are
+compiled against Bun's `-baseline` runtime, which needs no AVX2 (older CPUs, QEMU's default `kvm64` model). The supported targets are `darwin-arm64`,
 `darwin-x64`, `linux-x64` and `linux-arm64` (glibc). Windows and musl are refused with their reasons. The
 binary is the whole program: it runs without bun, node or the repository, and a `hub` link to it is the same
 command surface. A build without a trust root cannot verify any release (`shippedTrustRoot` fails closed).
@@ -104,3 +106,10 @@ bun scripts/hubctl-release.ts verify --manifest hubctl-manifest.json --target li
 The exit code is 0 when the artifact is accepted and 11 when it is rejected: `signature_invalid`, `wrong_platform`,
 `integrity_mismatch`, `downgrade_rejected` or `below_security_floor`. Pass `--installed V --installed-sha256 D`,
 `--floor V` and `--allow-downgrade` to apply the downgrade policy.
+
+## A partial release (some targets only)
+
+`manifest`, `sign` and `verify --dist` take `--targets T,…` (e.g. `--targets linux-x64`) to list exactly the
+targets a test or partial release ships. Each listed target must be built and is checked in full; an artifact for
+any other target is refused. `sign` refuses a partial body unless `--targets` names the same list, so a partial
+release is never signed by accident. Without `--targets`, every supported target is required.
