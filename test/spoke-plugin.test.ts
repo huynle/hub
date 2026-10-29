@@ -585,6 +585,44 @@ describe("plugin setup", () => {
   })
 })
 
+// HBS-12 acceptance (E2): on first use OpenCode gives a location's plugins ~5 s to activate (else HTTP 503, "Location
+// plugins did not finish activating"), and the hub plugin is loaded cold from the npm cache. Its import and setup()
+// must stay small: no heavy module graph for an identity function, and registrations that do not queue up.
+describe("cold start", () => {
+  test("loading the plugin entry never loads @opencode/plugin's promise runtime (its define is an identity function)", () => {
+    const entry = path.join(import.meta.dir, "..", "server.ts")
+    const probe = `await import(${JSON.stringify(entry)}); console.log(JSON.stringify(Object.keys(require.cache)))`
+    const r = Bun.spawnSync([process.execPath, "-e", probe], { cwd: path.join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe" })
+    expect(r.exitCode).toBe(0)
+    const loaded = JSON.parse(r.stdout.toString()) as string[]
+    expect(loaded.some((m) => m.endsWith(`${path.sep}src${path.sep}index.ts`))).toBe(true)
+    expect(loaded.filter((m) => /@opencode\/plugin\/dist\/promise\//.test(m))).toEqual([])
+  })
+
+  test("setup registers with OpenCode concurrently and never waits on the hub, so a slow host does not add up", async () => {
+    // A hub that accepts the connection and never answers.
+    const hanging = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } })
+    cleanups.push(() => hanging.stop(true))
+    tempConfig({ server: `http://127.0.0.1:${hanging.port}`, mode: "always", token: "tok" })
+    const fake = fakeContext()
+    const slow = <F extends (...args: any[]) => Promise<any>>(f: F) => (async (...args: Parameters<F>) => (await Bun.sleep(150), f(...args))) as F
+    let registrations = 0
+    for (const [domain, method] of [["agent", "transform"], ["session", "hook"], ["tool", "transform"], ["tool", "hook"], ["shell", "hook"], ["rpc", "register"]] as const) {
+      const ctx = fake.ctx as any
+      const original = ctx[domain][method]
+      ctx[domain][method] = slow(async (...args: unknown[]) => (registrations++, original(...args)))
+    }
+    const started = performance.now()
+    cleanups.push((await plugin.setup(fake.ctx as any)) as () => void)
+    const took = performance.now() - started
+    expect(registrations).toBeGreaterThanOrEqual(9)
+    // One at a time this is >= 9 × 150 ms; concurrently about one registration's time.
+    expect(took).toBeLessThan(700)
+    expect(fake.registered).toEqual(["hub", "voice"])
+    expect(fake.tools.map((t) => t.name).sort()).toEqual(["hub", "hub_task_stop"])
+  })
+})
+
 describe("session env injection hooks", () => {
   function tempStateDir() {
     const dir = mkdtempSync(path.join(tmpdir(), "hub-state-"))
