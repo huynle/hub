@@ -8,8 +8,8 @@ import { CODEX_SCRIPT, PACKAGE_ENTRIES, pax, tar, tgz } from "./bootstrap/codex-
 const text = (b: Uint8Array) => new TextDecoder().decode(b)
 
 describe("unpackCodexArchive", () => {
-  test("unpacks the upstream package layout file by file, keeping modes, skipping directory entries", () => {
-    const r = unpackCodexArchive(tgz(PACKAGE_ENTRIES))
+  test("unpacks the upstream package layout file by file, keeping modes, skipping directory entries", async () => {
+    const r = await unpackCodexArchive(tgz(PACKAGE_ENTRIES))
     expect(r.ok).toBe(true)
     if (!r.ok) return
     expect(r.value.map((f) => [f.rel, f.mode, text(f.bytes)])).toEqual([
@@ -22,14 +22,14 @@ describe("unpackCodexArchive", () => {
     ])
   })
 
-  test("a standalone archive (one codex-<triple> binary) becomes bin/codex", () => {
-    const r = unpackCodexArchive(tgz([{ name: "codex-x86_64-unknown-linux-musl", text: "ELF", mode: 0o755 }]))
+  test("a standalone archive (one codex-<triple> binary) becomes bin/codex", async () => {
+    const r = await unpackCodexArchive(tgz([{ name: "codex-x86_64-unknown-linux-musl", text: "ELF", mode: 0o755 }]))
     expect(r.ok && r.value.map((f) => [f.rel, f.mode, text(f.bytes)])).toEqual([["bin/codex", 0o755, "ELF"]])
   })
 
-  test("pax and GNU long names name the next entry; ./ prefixes are dropped; setuid bits are stripped", () => {
+  test("pax and GNU long names name the next entry; ./ prefixes are dropped; setuid bits are stripped", async () => {
     const long = `codex-resources/${"x".repeat(120)}`
-    const r = unpackCodexArchive(
+    const r = await unpackCodexArchive(
       tgz([
         { name: "./bin/codex", text: "c", mode: 0o4755 },
         { name: "PaxHeaders/1", type: "x", text: pax({ path: long }) },
@@ -59,14 +59,14 @@ describe("unpackCodexArchive", () => {
     truncated: new Uint8Array(gzipSync(tar([{ name: "bin/codex", text: "c".repeat(2000), mode: 0o755 }]).slice(0, 1024))),
   }
   for (const [label, bytes] of Object.entries(refused))
-    test(`refuses an archive with ${label}`, () => {
-      const r = unpackCodexArchive(bytes)
+    test(`refuses an archive with ${label}`, async () => {
+      const r = await unpackCodexArchive(bytes)
       expect(r.ok).toBe(false)
       if (!r.ok) expect(r.code).toBe("invalid")
     })
 
-  test("refuses an archive that inflates past the limit", () => {
-    const r = unpackCodexArchive(tgz([{ name: "bin/codex", text: "c".repeat(4096), mode: 0o755 }]), { maxBytes: 2048 })
+  test("refuses an archive that inflates past the limit", async () => {
+    const r = await unpackCodexArchive(tgz([{ name: "bin/codex", text: "c".repeat(4096), mode: 0o755 }]), { maxBytes: 2048 })
     expect(!r.ok && r.code).toBe("invalid")
   })
 })

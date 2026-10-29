@@ -1,8 +1,11 @@
 // File states as the journal records them: existence, digest and mode, never contents. A symlink's digest is the
 // digest of its target text; a harness install root (a directory tree) can be digested as a whole, so recovery can
-// tell "exactly as we left it" from "the user changed something inside".
+// tell "exactly as we left it" from "the user changed something inside". Files are digested in chunks (fileDigest):
+// a harness binary is never read whole.
 import { digestOf, sha256Hex, type FileState } from "../contracts/index.ts"
+import type { TreeFile } from "./executor.ts"
 import type { TxFs } from "./fs.ts"
+import { fileDigest } from "./stream.ts"
 
 export const sha256Of = (data: Uint8Array | string): string => `sha256:${sha256Hex(data)}`
 
@@ -11,7 +14,7 @@ export function fileState(fs: TxFs, path: string, options: { readonly tree?: boo
   if (!info) return { exists: false }
   switch (info.kind) {
     case "file":
-      return { exists: true, sha256: sha256Of(fs.readFile(path)), mode: info.mode }
+      return { exists: true, sha256: fileDigest(fs, path), mode: info.mode }
     case "symlink":
       return { exists: true, symlink: true, sha256: sha256Of(fs.readlink(path)) }
     case "directory":
@@ -33,7 +36,7 @@ export function treeDigest(fs: TxFs, dir: string): string {
       if (info.kind === "directory") {
         entries.push({ rel: childRel, kind: "directory", mode: info.mode })
         walk(childAbs, childRel)
-      } else if (info.kind === "file") entries.push({ rel: childRel, kind: "file", mode: info.mode, sha256: sha256Of(fs.readFile(childAbs)) })
+      } else if (info.kind === "file") entries.push({ rel: childRel, kind: "file", mode: info.mode, sha256: fileDigest(fs, childAbs) })
       else if (info.kind === "symlink") entries.push({ rel: childRel, kind: "symlink", sha256: sha256Of(fs.readlink(childAbs)) })
       else entries.push({ rel: childRel, kind: "other" })
     }
@@ -46,8 +49,8 @@ export function treeDigest(fs: TxFs, dir: string): string {
  * The digest treeDigest would compute for a directory holding exactly `files` (directories implied by their paths,
  * all with `dirMode`), so the journal can record a tree's state before it is staged.
  */
-export function treeDigestOfFiles(files: readonly { readonly rel: string; readonly bytes: Uint8Array; readonly mode: number }[], dirMode: number): string {
-  type Dir = Map<string, Dir | { readonly bytes: Uint8Array; readonly mode: number }>
+export function treeDigestOfFiles(files: readonly TreeFile[], dirMode: number): string {
+  type Dir = Map<string, Dir | { readonly sha256: string; readonly mode: number }>
   const root: Dir = new Map()
   for (const f of files) {
     const parts = f.rel.split("/")
@@ -60,7 +63,7 @@ export function treeDigestOfFiles(files: readonly { readonly rel: string; readon
       }
       dir = next
     }
-    dir.set(parts[parts.length - 1]!, { bytes: f.bytes, mode: f.mode })
+    dir.set(parts[parts.length - 1]!, { sha256: "bytes" in f ? sha256Of(f.bytes) : f.staged.sha256, mode: f.mode })
   }
   const entries: unknown[] = []
   const walk = (dir: Dir, rel: string) => {
@@ -70,7 +73,7 @@ export function treeDigestOfFiles(files: readonly { readonly rel: string; readon
       if (child instanceof Map) {
         entries.push({ rel: childRel, kind: "directory", mode: dirMode })
         walk(child, childRel)
-      } else entries.push({ rel: childRel, kind: "file", mode: child.mode, sha256: sha256Of(child.bytes) })
+      } else entries.push({ rel: childRel, kind: "file", mode: child.mode, sha256: child.sha256 })
     }
   }
   walk(root, "")

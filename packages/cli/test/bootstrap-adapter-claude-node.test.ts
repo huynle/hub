@@ -8,6 +8,10 @@ import { createClaudeHarnessSource } from "../src/bootstrap/adapters/claude/inde
 import { httpsDownloader, nodeRunner, tempScratch } from "../src/bootstrap/adapters/claude/node.ts"
 import { DownloadTooLarge } from "../src/bootstrap/adapters/claude/ports.ts"
 import { CLAUDE_BINARIES, claudePin, FakeDownloads, signedHubManifest } from "./bootstrap/claude-adapter-fixtures.ts"
+import { collect, memoryStaging } from "../src/bootstrap/transaction/stream.ts"
+
+const STAGING = memoryStaging()
+const stage = (bytes: Uint8Array) => STAGING.write("artifact", bytes, { maxBytes: 1 << 30 })
 
 const BUN = process.execPath
 /** Child processes start slowly on a loaded machine; these tests allow for it. */
@@ -54,7 +58,7 @@ describe("httpsDownloader", () => {
 
   test("returns the body of an https URL", async () => {
     const d = httpsDownloader({ fetch: async () => response("hello") })
-    expect(new TextDecoder().decode(await d.get("https://downloads.claude.ai/x", 10))).toBe("hello")
+    expect(new TextDecoder().decode(await collect(await d.get("https://downloads.claude.ai/x", 10), 10))).toBe("hello")
   })
 
   test("refuses plain http, and a redirect away from https", async () => {
@@ -65,8 +69,9 @@ describe("httpsDownloader", () => {
     await expect(d.get("https://downloads.claude.ai/x", 10)).rejects.toThrow()
   })
 
-  test("a body over the cap is DownloadTooLarge; an error status throws", async () => {
-    await expect(httpsDownloader({ fetch: async () => response("x".repeat(11)) }).get("https://downloads.claude.ai/x", 10)).rejects.toBeInstanceOf(DownloadTooLarge)
+  test("a body over the cap is DownloadTooLarge (as soon as it streams past it); an error status throws", async () => {
+    const over = httpsDownloader({ fetch: async () => response("x".repeat(11)) }).get("https://downloads.claude.ai/x", 10)
+    await expect(over.then((body) => collect(body, 1 << 20))).rejects.toBeInstanceOf(DownloadTooLarge)
     await expect(httpsDownloader({ fetch: async () => response("nope", { status: 404 }) }).get("https://downloads.claude.ai/x", 10)).rejects.toThrow()
   })
 })
@@ -119,7 +124,7 @@ describe("download failures in the source keep their meaning", () => {
   }
   const codeOf = async (body: Uint8Array | Error) => {
     const src = createClaudeHarnessSource({ manifest, download: new FakeDownloads().set(pin.url, body), platform: "darwin" })
-    return src.fetch(action).then(
+    return src.fetch(action, STAGING).then(
       () => "ok",
       (e: { code?: string }) => e.code ?? "thrown",
     )

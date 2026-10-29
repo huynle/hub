@@ -101,6 +101,16 @@ export function tarGz(entries: readonly ArchiveEntry[]): Uint8Array {
 }
 
 /** A zip archive (deflate, or stored with `store`), unix modes in the external attributes. */
+/** CRC-32 (what zip records for each member), bit by bit: fixtures are small. */
+function crcOf(data: Uint8Array): number {
+  let c = 0xffffffff
+  for (const b of data) {
+    c ^= b
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
+  }
+  return ~c >>> 0
+}
+
 export function zip(entries: readonly ArchiveEntry[], options: { store?: boolean } = {}): Uint8Array {
   const locals: Uint8Array[] = []
   const centrals: Uint8Array[] = []
@@ -116,6 +126,7 @@ export function zip(entries: readonly ArchiveEntry[], options: { store?: boolean
     lv.setUint32(0, 0x04034b50, true)
     lv.setUint16(4, 20, true)
     lv.setUint16(8, method, true)
+    lv.setUint32(14, crcOf(raw), true)
     lv.setUint32(18, data.byteLength, true)
     lv.setUint32(22, raw.byteLength, true)
     lv.setUint16(26, name.byteLength, true)
@@ -127,6 +138,7 @@ export function zip(entries: readonly ArchiveEntry[], options: { store?: boolean
     cv.setUint16(4, (3 << 8) | 20, true)
     cv.setUint16(6, 20, true)
     cv.setUint16(10, method, true)
+    cv.setUint32(16, crcOf(raw), true)
     cv.setUint32(20, data.byteLength, true)
     cv.setUint32(24, raw.byteLength, true)
     cv.setUint16(28, name.byteLength, true)

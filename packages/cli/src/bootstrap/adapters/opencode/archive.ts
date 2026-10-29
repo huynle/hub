@@ -1,25 +1,24 @@
 // Unpacking a verified OpenCode release archive into the files of its immutable version directory (contract §3.6.1,
 // data:hub/harnesses/opencode/<version>). Upstream (github.com/anomalyco/opencode releases) ships exactly one file,
 // `opencode`, in a zip for macOS (opencode-darwin-<arch>.zip, deflate) and a gzipped tar for Linux
-// (opencode-linux-<arch>.tar.gz). The executor has already checked the bytes against hub's pinned digest; this is a
-// pure reader (no writes, no processes) that still refuses anything an archive could smuggle in: links, devices,
-// names that climb out or are absolute, extra files (an installer script beside the binary), a duplicate, or no
-// binary at all. The binary always becomes bin/opencode, mode 0755. No dependency: zlib from node, small readers.
-import { gunzipSync, inflateRawSync } from "node:zlib"
+// (opencode-linux-<arch>.tar.gz). The executor has already checked the download against hub's pinned digest; this
+// still refuses anything an archive could smuggle in: links, devices, names that climb out or are absolute, extra
+// files (an installer script beside the binary), a duplicate, or no binary at all. The binary always becomes
+// bin/opencode, mode 0755.
+//
+// Streaming (HBS-12: a 4 GB host was OOM-killed holding the archive and the ~350 MB binary several times over): the
+// archive is read from the staging area in chunks (archive-stream.ts), every member is judged before its body is
+// read, and the binary is streamed straight into a staging file, hashed as it is written. Nothing is held whole.
+import { ArchiveError, readTarGz, zipMemberData, zipMembers } from "../archive-stream.ts"
 import type { TreeFile } from "../../transaction/executor.ts"
 import { txFail, txOk, type TxResult } from "../../transaction/result.ts"
+import { bytesReader, memoryStaging, type ByteReader, type StagedFile, type StagingArea } from "../../transaction/stream.ts"
 
 /** Where the binary goes inside the version directory. */
 export const OPENCODE_BINARY_REL = "bin/opencode"
 const BINARY_NAME = "opencode"
-/** A generous bound on what one release may unpack to (the 2.2.0 binary is about 220 MB). */
+/** A generous bound on what one release may unpack to (the 2.2.0 binary is about 350 MB). */
 export const MAX_UNPACKED_BYTES = 1024 * 1024 * 1024
-
-interface Entry {
-  readonly name: string
-  readonly kind: "file" | "directory" | "other"
-  readonly bytes?: Uint8Array
-}
 
 const invalid = (file: string, why: string) => txFail("invalid", `${file}: ${why}; refusing to install it`)
 
@@ -31,134 +30,62 @@ function memberName(raw: string): string | undefined {
   return parts.join("/")
 }
 
-// ---------- zip ----------
-
-function readZip(bytes: Uint8Array): Entry[] | string {
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-  // The end-of-central-directory record: within the last 64 KiB + 22 bytes.
-  let eocd = -1
-  for (let i = bytes.byteLength - 22; i >= Math.max(0, bytes.byteLength - 22 - 0xffff); i--)
-    if (view.getUint32(i, true) === 0x06054b50) {
-      eocd = i
-      break
-    }
-  if (eocd < 0) return "not a zip archive"
-  const count = view.getUint16(eocd + 10, true)
-  const cdSize = view.getUint32(eocd + 12, true)
-  const cdOffset = view.getUint32(eocd + 16, true)
-  if (count === 0xffff || cdOffset === 0xffffffff || cdOffset + cdSize > eocd) return "an unsupported or damaged zip (zip64 or bad directory)"
-  const entries: Entry[] = []
-  const decoder = new TextDecoder("utf-8", { fatal: true })
-  let at = cdOffset
-  let total = 0
-  for (let n = 0; n < count; n++) {
-    if (at + 46 > eocd || view.getUint32(at, true) !== 0x02014b50) return "a damaged zip directory"
-    const flags = view.getUint16(at + 8, true)
-    const method = view.getUint16(at + 10, true)
-    const compressed = view.getUint32(at + 20, true)
-    const size = view.getUint32(at + 24, true)
-    const nameLen = view.getUint16(at + 28, true)
-    const extraLen = view.getUint16(at + 30, true)
-    const commentLen = view.getUint16(at + 32, true)
-    const madeBy = view.getUint8(at + 5)
-    const external = view.getUint32(at + 38, true)
-    const local = view.getUint32(at + 42, true)
-    let name: string
-    try {
-      name = decoder.decode(bytes.subarray(at + 46, at + 46 + nameLen))
-    } catch {
-      return "a member name that is not UTF-8"
-    }
-    at += 46 + nameLen + extraLen + commentLen
-    const type = madeBy === 3 ? (external >>> 16) & 0o170000 : name.endsWith("/") ? 0o040000 : 0o100000
-    if (type === 0o040000) {
-      entries.push({ name, kind: "directory" })
-      continue
-    }
-    if (type !== 0o100000) {
-      entries.push({ name, kind: "other" })
-      continue
-    }
-    if (flags & 0x1) return `${name} is encrypted`
-    if (local + 30 > bytes.byteLength || view.getUint32(local, true) !== 0x04034b50) return "a damaged zip member"
-    const start = local + 30 + view.getUint16(local + 26, true) + view.getUint16(local + 28, true)
-    if (start + compressed > bytes.byteLength) return "a truncated zip"
-    total += size
-    if (total > MAX_UNPACKED_BYTES) return "more data than any OpenCode release unpacks to"
-    const data = bytes.subarray(start, start + compressed)
-    let out: Uint8Array
-    try {
-      if (method === 0) out = data.slice()
-      else if (method === 8) out = new Uint8Array(inflateRawSync(data, { maxOutputLength: size + 1 }))
-      else return `${name} uses an unsupported compression method (${method})`
-    } catch {
-      return `${name} does not decompress`
-    }
-    if (out.byteLength !== size) return `${name} does not have its recorded size`
-    entries.push({ name, kind: "file", bytes: out })
-  }
-  return entries
+/** Judges one member: undefined to skip it (the archive's own root directory), "binary" to unpack it. */
+function judge(raw: string, kind: "file" | "directory" | "other", hasBinary: boolean): "binary" | undefined {
+  const name = memberName(raw)
+  if (name === undefined) throw new ArchiveError(`the member ${JSON.stringify(raw)} has an unsafe name`)
+  if (kind === "directory" && name === "") return undefined
+  if (kind !== "file") throw new ArchiveError(`${JSON.stringify(raw)} is not a regular file (links and devices are never installed)`)
+  if (name !== BINARY_NAME) throw new ArchiveError(`unexpected member ${JSON.stringify(raw)} (an OpenCode release holds only the ${BINARY_NAME} binary)`)
+  if (hasBinary) throw new ArchiveError(`${BINARY_NAME} appears twice`)
+  return "binary"
 }
 
-// ---------- tar.gz ----------
+const tarKind = (type: string) => (type === "0" || type === "7" ? "file" : type === "5" ? "directory" : "other")
 
-const field = (block: Uint8Array, at: number, len: number) => {
-  const raw = block.subarray(at, at + len)
-  const end = raw.indexOf(0)
-  return new TextDecoder().decode(end < 0 ? raw : raw.subarray(0, end))
-}
-const octal = (block: Uint8Array, at: number, len: number) => {
-  const s = field(block, at, len).trim()
-  return /^[0-7]+$/.test(s) ? parseInt(s, 8) : s === "" ? 0 : Number.NaN
+async function fromTarGz(reader: ByteReader, staging: StagingArea, maxBytes: number): Promise<StagedFile | undefined> {
+  let binary: StagedFile | undefined
+  // Symlinks (2), hard links (1), devices (3, 4), FIFOs (6), and pax/GNU headers that could rename a member (x, g,
+  // L, K) are all "other": refused.
+  await readTarGz(reader, { maxBytes }, async (member) => {
+    if (judge(member.header.name, tarKind(member.header.type), binary !== undefined) !== "binary") return
+    binary = await staging.write(BINARY_NAME, member.body(), { maxBytes: member.header.size })
+  })
+  return binary
 }
 
-function readTarGz(bytes: Uint8Array): Entry[] | string {
-  let tar: Uint8Array
+async function fromZip(reader: ByteReader, staging: StagingArea, maxBytes: number): Promise<StagedFile | undefined> {
+  // The whole directory is judged before any member is inflated.
+  const members = zipMembers(reader, { maxBytes })
+  let chosen: (typeof members)[number] | undefined
+  for (const m of members) if (judge(m.name, m.kind, chosen !== undefined) === "binary") chosen = m
+  if (!chosen) return undefined
+  return staging.write(BINARY_NAME, zipMemberData(reader, chosen), { maxBytes: chosen.size })
+}
+
+/**
+ * The install tree of a verified OpenCode archive named `file` (its format follows the upstream asset name), read
+ * from `reader`; the binary is streamed into `staging`. `maxBytes` (default MAX_UNPACKED_BYTES) bounds what it
+ * inflates to.
+ */
+export async function unpackOpencodeFile(file: string, reader: ByteReader, staging: StagingArea, options: { readonly maxBytes?: number } = {}): Promise<TxResult<TreeFile[]>> {
+  const maxBytes = options.maxBytes ?? MAX_UNPACKED_BYTES
+  const zip = file.endsWith(".zip")
+  if (!zip && !file.endsWith(".tar.gz") && !file.endsWith(".tgz")) return invalid(file, "not an OpenCode CLI archive (expected .zip or .tar.gz)")
+  let binary: StagedFile | undefined
   try {
-    tar = new Uint8Array(gunzipSync(bytes, { maxOutputLength: MAX_UNPACKED_BYTES }))
-  } catch {
-    return "not a gzip archive (or larger than any OpenCode release)"
-  }
-  const entries: Entry[] = []
-  for (let at = 0; at + 512 <= tar.byteLength; ) {
-    const header = tar.subarray(at, at + 512)
-    if (header.every((b) => b === 0)) return entries
-    let sum = 0
-    for (let i = 0; i < 512; i++) sum += i >= 148 && i < 156 ? 32 : header[i]!
-    if (octal(header, 148, 8) !== sum) return "a damaged tar header"
-    const size = octal(header, 124, 12)
-    if (!Number.isSafeInteger(size)) return "a damaged tar header"
-    const type = field(header, 156, 1) || "0"
-    const magic = field(header, 257, 6)
-    const prefix = magic.startsWith("ustar") && magic !== "ustar " ? field(header, 345, 155) : ""
-    const name = prefix ? `${prefix}/${field(header, 0, 100)}` : field(header, 0, 100)
-    const dataStart = at + 512
-    if (dataStart + size > tar.byteLength) return "a truncated tar"
-    if (type === "0" || type === "7") entries.push({ name, kind: "file", bytes: tar.slice(dataStart, dataStart + size) })
-    else if (type === "5") entries.push({ name, kind: "directory" })
-    // Symlinks (2), hard links (1), devices (3, 4), FIFOs (6), and pax/GNU headers that could rename a member (x, g, L, K).
-    else entries.push({ name, kind: "other" })
-    at = dataStart + Math.ceil(size / 512) * 512
-  }
-  return "a tar without its end marker"
-}
-
-// ---------- the tree ----------
-
-/** The install tree of a verified OpenCode archive named `file` (its format follows the upstream asset name). */
-export function unpackOpencodeArchive(file: string, bytes: Uint8Array): TxResult<TreeFile[]> {
-  const read = file.endsWith(".zip") ? readZip(bytes) : file.endsWith(".tar.gz") || file.endsWith(".tgz") ? readTarGz(bytes) : `not an OpenCode CLI archive (expected .zip or .tar.gz)`
-  if (typeof read === "string") return invalid(file, read)
-  let binary: Uint8Array | undefined
-  for (const entry of read) {
-    const name = memberName(entry.name)
-    if (name === undefined) return invalid(file, `the member ${JSON.stringify(entry.name)} has an unsafe name`)
-    if (entry.kind === "directory" && name === "") continue
-    if (entry.kind !== "file") return invalid(file, `${JSON.stringify(entry.name)} is not a regular file (links and devices are never installed)`)
-    if (name !== BINARY_NAME) return invalid(file, `unexpected member ${JSON.stringify(entry.name)} (an OpenCode release holds only the ${BINARY_NAME} binary)`)
-    if (binary) return invalid(file, `${BINARY_NAME} appears twice`)
-    binary = entry.bytes!
+    binary = zip ? await fromZip(reader, staging, maxBytes) : await fromTarGz(reader, staging, maxBytes)
+  } catch (error) {
+    if (error instanceof ArchiveError) return invalid(file, error.message)
+    throw error
   }
   if (!binary) return invalid(file, `no ${BINARY_NAME} binary inside`)
-  return txOk([{ rel: OPENCODE_BINARY_REL, bytes: binary, mode: 0o755 }])
+  return txOk([{ rel: OPENCODE_BINARY_REL, staged: binary, mode: 0o755 }])
+}
+
+/** unpackOpencodeFile over bytes in memory, the tree as bytes (small archives: tests, fixtures). */
+export async function unpackOpencodeArchive(file: string, bytes: Uint8Array, options: { readonly maxBytes?: number } = {}): Promise<TxResult<TreeFile[]>> {
+  const staging = memoryStaging()
+  const r = await unpackOpencodeFile(file, bytesReader(bytes), staging, options)
+  return r.ok ? txOk(r.value.map((f) => ("staged" in f ? { rel: f.rel, mode: f.mode, bytes: staging.bytes(f.staged) } : f))) : r
 }

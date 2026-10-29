@@ -8,14 +8,17 @@
 //   macos-notarization  on macOS, /usr/bin/codesign (fixed argv, through the injected runner) on a private scratch
 //                       copy of the downloaded bytes: signed by Anthropic PBC's Developer ID, then notarized.
 //
+// The binary streams into the step's staging area (never held whole: HBS-12); the signed manifest is compared with
+// the digest the staging area recorded, and codesign gets a scratch copy written in chunks.
+//
 // Each is recorded as verified, unavailable (could not be checked here: no codesign, offline, unsigned release,
 // unknown key) or failed (checked and wrong); a failure rejects the artifact (checkHarnessEvidence). Nothing here
 // runs a shell, reads a credential or touches ~/.claude.
-import { createHash } from "node:crypto"
 import type { EvidenceResult, HarnessID, InstallHarness, VerifiedManifest } from "../../contracts/index.ts"
 import type { HarnessSource } from "../../transaction/builtin.ts"
 import type { TreeFile } from "../../transaction/executor.ts"
 import { TxError, txFail, txOk, type TxResult } from "../../transaction/result.ts"
+import { collect, TooLarge, type ByteReader, type StagedFile } from "../../transaction/stream.ts"
 import { CLAUDE_SIGNING_FINGERPRINT, verifyDetachedSignature } from "./openpgp.ts"
 import { DownloadTooLarge, type Downloader, type ProbeRunner, type Scratch } from "./ports.ts"
 
@@ -60,10 +63,9 @@ export interface ClaudeSourceOptions {
 }
 
 const result = (kind: EvidenceResult["kind"], status: EvidenceResult["status"], detail: string): EvidenceResult => ({ kind, status, detail: detail.replace(/\s+/g, " ").slice(0, 200) })
-const hexDigest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex")
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v)
 
-async function gpgManifest(options: ClaudeSourceOptions, action: InstallHarness, bytes: Uint8Array): Promise<EvidenceResult> {
+async function gpgManifest(options: ClaudeSourceOptions, action: InstallHarness, file: StagedFile): Promise<EvidenceResult> {
   const kind = "gpg-manifest"
   const m = UPSTREAM_BINARY.exec(action.source.url)
   const platform = upstreamPlatform(action.target)
@@ -73,11 +75,8 @@ async function gpgManifest(options: ClaudeSourceOptions, action: InstallHarness,
   let signature: Uint8Array
   let key: Uint8Array
   try {
-    ;[manifest, signature, key] = await Promise.all([
-      options.download.get(`${base}/manifest.json`, MANIFEST_MAX),
-      options.download.get(`${base}/manifest.json.sig`, SIGNATURE_MAX),
-      options.download.get(UPSTREAM_KEY_URL, KEY_MAX),
-    ])
+    const small = async (url: string, max: number) => collect(await options.download.get(url, max), max)
+    ;[manifest, signature, key] = await Promise.all([small(`${base}/manifest.json`, MANIFEST_MAX), small(`${base}/manifest.json.sig`, SIGNATURE_MAX), small(UPSTREAM_KEY_URL, KEY_MAX)])
   } catch {
     return result(kind, "unavailable", `the signed manifest of ${action.version} could not be downloaded (upstream signs releases from 2.1.89 on)`)
   }
@@ -93,19 +92,19 @@ async function gpgManifest(options: ClaudeSourceOptions, action: InstallHarness,
   const entry = isRecord(doc) && isRecord(doc.platforms) ? doc.platforms[platform] : undefined
   if (!isRecord(doc) || doc.version !== action.version) return result(kind, "failed", `the signed manifest is not for ${action.version}`)
   const expected = action.sha256.replace(/^sha256:/, "")
-  if (!isRecord(entry) || entry.checksum !== expected || entry.size !== action.size || hexDigest(bytes) !== entry.checksum)
+  if (!isRecord(entry) || entry.checksum !== expected || entry.size !== action.size || file.sha256 !== `sha256:${entry.checksum}`)
     return result(kind, "failed", `the signed manifest lists other bytes for ${platform} than hub's pin`)
   return result(kind, "verified", `upstream manifest.json signed by ${fingerprint} lists this binary`)
 }
 
-async function notarization(options: ClaudeSourceOptions, action: InstallHarness, bytes: Uint8Array): Promise<EvidenceResult> {
+async function notarization(options: ClaudeSourceOptions, action: InstallHarness, binary: ByteReader): Promise<EvidenceResult> {
   const kind = "macos-notarization"
   if (options.platform !== "darwin" || !action.target.startsWith("darwin-")) return result(kind, "unavailable", "notarization is checked on macOS only")
   const { runner, scratch } = options
   if (!runner || !scratch) return result(kind, "unavailable", "no codesign runner in this hubctl")
   const run = (args: readonly string[], file: string) => runner.run(CODESIGN.program, [...args, file], { env: { PATH: "/usr/bin:/bin" }, timeoutMs: CODESIGN_TIMEOUT_MS, maxOutputBytes: 64 << 10 })
   try {
-    return await scratch.withFile(bytes, async (file) => {
+    return await scratch.withFile(binary.stream(), async (file) => {
       const identity = await run(CODESIGN.identity, file)
       if (identity.kind !== "exited") return result(kind, "unavailable", `codesign could not run (${identity.kind})`)
       if (identity.code !== 0) return result(kind, "failed", `the binary is not validly signed by Anthropic PBC (${ANTHROPIC_TEAM_ID}); codesign exit ${identity.code}`)
@@ -130,27 +129,29 @@ function nativeFor(target: string, bytes: Uint8Array): boolean {
 export function createClaudeHarnessSource(options: ClaudeSourceOptions): HarnessSource {
   return {
     manifest: options.manifest,
-    async fetch(action) {
+    async fetch(action, staging) {
       if (action.harness !== "claude-code") throw new Error(`the Claude Code source cannot install ${action.harness}`)
       // One byte more than pinned is still fetched, so a longer file is an integrity mismatch, not a download error.
-      let bytes: Uint8Array
+      // The body streams into the staging area; a longer one fails as soon as it runs past the limit.
+      let file: StagedFile
       try {
-        bytes = await options.download.get(action.source.url, action.size + 1)
+        file = await staging.write("claude", await options.download.get(action.source.url, action.size + 1), { maxBytes: action.size + 1 })
       } catch (error) {
-        if (error instanceof DownloadTooLarge) throw new TxError("integrity_mismatch", `${action.source.url} is larger than the pinned ${action.size} bytes`)
+        if (error instanceof DownloadTooLarge || error instanceof TooLarge) throw new TxError("integrity_mismatch", `${action.source.url} is larger than the pinned ${action.size} bytes`)
         throw new TxError("offline", `${action.source.url} could not be downloaded`)
       }
       const evidence: EvidenceResult[] = []
       for (const kind of action.evidence) {
-        if (kind === "gpg-manifest") evidence.push(await gpgManifest(options, action, bytes))
-        else if (kind === "macos-notarization") evidence.push(await notarization(options, action, bytes))
+        if (kind === "gpg-manifest") evidence.push(await gpgManifest(options, action, file))
+        else if (kind === "macos-notarization") evidence.push(await notarization(options, action, staging.open(file)))
       }
-      return { bytes, evidence }
+      return { file, evidence }
     },
-    async unpack(action, bytes): Promise<TxResult<readonly TreeFile[]>> {
+    async unpack(action, file, staging): Promise<TxResult<readonly TreeFile[]>> {
       if (action.source.file !== "claude") return txFail("invalid", `the Claude Code pin must be upstream's raw binary "claude", not ${JSON.stringify(action.source.file)}`)
-      if (!nativeFor(action.target, bytes)) return txFail("invalid", `the downloaded file is not a native ${action.target} executable`)
-      return txOk([{ rel: "claude", bytes, mode: 0o755 }])
+      if (!nativeFor(action.target, staging.open(file).read(0, 4))) return txFail("invalid", `the downloaded file is not a native ${action.target} executable`)
+      // The tree is the staged download itself: the engine moves it into place (no copy).
+      return txOk([{ rel: "claude", staged: file, mode: 0o755 }])
     },
     installed: (harness: HarnessID) => (harness === "claude-code" ? options.installed : undefined),
     floor: (harness: HarnessID) => (harness === "claude-code" ? options.floor : undefined),

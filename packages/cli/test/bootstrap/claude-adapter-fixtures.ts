@@ -7,6 +7,7 @@
 //   pgpKey     an ephemeral RSA key generated at test time, with helpers that build OpenPGP v4 packets and
 //              detached signatures for the threat cases (no key material is committed).
 import { createHash, generateKeyPairSync, sign, type KeyObject } from "node:crypto"
+import { collect, type ByteSource } from "../../src/bootstrap/transaction/stream.ts"
 import { manifestPayload, verifyManifest, type ArtifactManifest, type HarnessPin, type VerifiedManifest } from "../../src/bootstrap/contracts/index.ts"
 import { DownloadTooLarge, type Downloader, type ProbeRunner, type RunResult, type Scratch } from "../../src/bootstrap/adapters/claude/ports.ts"
 import { MANIFEST_UNSIGNED, TRUST_ROOT_TEMPLATE } from "./fixtures.ts"
@@ -274,8 +275,8 @@ export class FakeRunner implements ProbeRunner {
 /** A scratch area that only records what it was given (no files are written). */
 export class FakeScratch implements Scratch {
   readonly files: Uint8Array[] = []
-  async withFile<T>(bytes: Uint8Array, use: (path: string) => Promise<T>): Promise<T> {
-    this.files.push(bytes)
+  async withFile<T>(content: ByteSource, use: (path: string) => Promise<T>): Promise<T> {
+    this.files.push(await collect(content, 1 << 30))
     return use(`/scratch/claude-${this.files.length}`)
   }
 }

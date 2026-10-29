@@ -14,6 +14,7 @@ import { canonicalJSON, validateEnvelope, type ResultEnvelope } from "../src/boo
 import { tarGz, zip } from "./bootstrap/opencode-adapter-fixtures.ts"
 import { bytesInfo, ephemeralKey, fakeBinary, releaseBody, rootOf, signWith } from "./bootstrap/release-fixtures.ts"
 import { run, type Io } from "../src/cli"
+import { nodeFs, type TxFs } from "../src/bootstrap/transaction/fs.ts"
 
 let h: Harness | undefined
 const homes: string[] = []
@@ -385,8 +386,33 @@ esac
       expect(r.code).toBe(0)
       return file
     }
-    return { home, manifestFile, hubctlRun, preview }
+    return { home, manifestFile, hubctlRun, preview, trustRoot: bootstrap.trustRoot, archive: archive.bytes }
   }
+
+  // HBS-12: the standalone hubctl installs itself by a chunked copy of its own executable (~105 MB for real), never
+  // by reading it whole; the copy is checked against the pinned digest while it is made.
+  test("a standalone hubctl installs itself by a chunked copy: its executable is never read whole", async () => {
+    const { home, manifestFile, trustRoot, archive } = await freshHost()
+    const target = `${process.platform}-${process.arch}`
+    const executable = path.join(home, "dist", "hubctl")
+    mkdirSync(path.dirname(executable), { recursive: true })
+    writeFileSync(executable, fakeBinary(target), { mode: 0o755 })
+    const wholeReads: string[] = []
+    const fs: TxFs = { ...nodeFs, readFile: (p) => (wholeReads.push(p), nodeFs.readFile(p)) }
+    const bootstrap = { machineID: "test-machine-id", trustRoot, ports: { uid: 501, fs, opencodeDownload: async () => archive, serviceRunner: async () => ({ exitCode: 1 }) } }
+    const standalone = async (argv: string[]) => {
+      let stdout = ""
+      const code = await run(argv, { env: { HOME: home, PATH: `${home}/bin:/usr/bin:/bin` }, home, stdout: (x) => (stdout += x), stderr: () => {}, program: { execPath: executable, entry: "/$bunfs/root/hubctl" }, bootstrap })
+      return { code, envelope: JSON.parse(stdout) as ResultEnvelope<any> }
+    }
+    const file = path.join(home, "standalone.json")
+    expect((await standalone(["setup", "preview", "--profile", "session-only", "--manifest", manifestFile, "--out", file, "--json"])).code).toBe(0)
+    const applied = await standalone(["setup", "apply", "--preview", file, "--manifest", manifestFile, "--json"])
+    expect(applied.envelope.error).toBeUndefined()
+    expect(applied.code).toBe(0)
+    expect(readFileSync(path.join(home, ".local", "bin", "hubctl"))).toEqual(Buffer.from(fakeBinary(target)))
+    expect(wholeReads.filter((p) => p === executable)).toEqual([])
+  }, 60_000)
 
   test("apply commits installed-not-ready (exit 0) → verify 15 → the user logs in and starts OpenCode → verify 0", async () => {
     const { home, manifestFile, hubctlRun, preview } = await freshHost()

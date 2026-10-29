@@ -20,9 +20,10 @@
 //
 // Not checked (limitations, documented in the report): embedded SCTs (certificate transparency) and Merkle
 // inclusion proofs (legacy bundles carry only the SET).
-import { createHash, createPublicKey, verify, X509Certificate, type KeyObject } from "node:crypto"
+import { createHash, createPublicKey, createVerify, verify, X509Certificate, type KeyObject } from "node:crypto"
 import type { EvidenceResult } from "../../contracts/index.ts"
 import { txFail, txOk, type TxResult } from "../../transaction/result.ts"
+import { CHUNK_BYTES, type ByteReader } from "../../transaction/stream.ts"
 
 export interface SigstoreAuthority {
   /** Issuing CA first, root last. */
@@ -213,8 +214,22 @@ function verifySET(log: SigstoreLog, b: LegacyBundle): boolean {
   }
 }
 
-/** One sigstore evidence result for `artifact` (never throws). */
-export function verifySigstoreBundle(bundle: Uint8Array, artifact: Uint8Array, options: { readonly trust?: SigstoreTrust; readonly identity: SigstoreIdentity }): EvidenceResult {
+/** The artifact's bytes in chunks: a staged artifact (a ~150 MB Codex package) is never read whole. */
+function* piecesOf(artifact: Uint8Array | ByteReader): Generator<Uint8Array> {
+  if (artifact instanceof Uint8Array) {
+    yield artifact
+    return
+  }
+  for (let at = 0; at < artifact.size; ) {
+    const piece = artifact.read(at, CHUNK_BYTES)
+    if (piece.byteLength === 0) return
+    at += piece.byteLength
+    yield piece
+  }
+}
+
+/** One sigstore evidence result for `artifact`, in memory or staged (never throws). */
+export function verifySigstoreBundle(bundle: Uint8Array, artifact: Uint8Array | ByteReader, options: { readonly trust?: SigstoreTrust; readonly identity: SigstoreIdentity }): EvidenceResult {
   const { trust, identity } = options
   if (!trust) return unavailable("this hubctl carries no sigstore trusted root")
   const b = parseLegacy(bundle)
@@ -247,7 +262,9 @@ export function verifySigstoreBundle(bundle: Uint8Array, artifact: Uint8Array, o
 
     let signed = false
     try {
-      signed = verify("sha256", artifact, leaf.publicKey, b.signature)
+      const verifier = createVerify("sha256")
+      for (const piece of piecesOf(artifact)) verifier.update(piece)
+      signed = verifier.verify(leaf.publicKey, b.signature)
     } catch {}
     if (!signed) return failed("the signature does not match the artifact")
 
@@ -262,7 +279,9 @@ export function verifySigstoreBundle(bundle: Uint8Array, artifact: Uint8Array, o
     } catch {
       return failed("the transparency log entry cannot be read")
     }
-    const digest = createHash("sha256").update(artifact).digest("hex")
+    const hash = createHash("sha256")
+    for (const piece of piecesOf(artifact)) hash.update(piece)
+    const digest = hash.digest("hex")
     const spec = isObj(body) && body.kind === "hashedrekord" && isObj(body.spec) ? body.spec : undefined
     if (!spec || spec.data?.hash?.algorithm !== "sha256" || spec.data?.hash?.value !== digest) return failed("the transparency log entry is for another artifact")
     if (spec.signature?.content !== b.signature.toString("base64")) return failed("the transparency log entry has another signature")

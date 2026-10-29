@@ -7,7 +7,7 @@ and it never gets a shell.
 | File | Role |
 |---|---|
 | `adapter.ts` | `createClaudeAdapter` (a `HarnessAdapter`) and `planClaude`. Plans, in order: pinned `install-harness`, `select-harness-version`, `merge-config` of hub's own `config:hub/claude-code.json`, `verify-harness`. Also `discover()` and `binary()`, both through the read-only `DiscoveryProbe`. |
-| `source.ts` | `createClaudeHarnessSource`, the `HarnessSource` for `installHarnessExecutor`. It downloads the pinned file, records the optional evidence and unpacks the single binary into `<version>/claude`. |
+| `source.ts` | `createClaudeHarnessSource`, the `HarnessSource` for `installHarnessExecutor`. It streams the pinned file into the step's staging area, records the optional evidence (against the staged digest; codesign on a scratch copy written in chunks) and installs the staged binary itself as `<version>/claude`. |
 | `openpgp.ts` | An in-house check of a detached OpenPGP v4 RSA signature. It verifies upstream's signed `manifest.json` against the pinned release key and needs no `gpg`. |
 | `verify.ts` | The real readiness probes, `claudeReadiness` (the capability is offered only when the harness is ready) and `claudeVerifyExecutor`. |
 | `ports.ts` / `node.ts` | The injected ports (`Downloader`, `ProbeRunner`, `Scratch`) and their Node defaults (`httpsDownloader`, `nodeRunner`, `tempScratch`). |

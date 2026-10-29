@@ -59,14 +59,14 @@ export function dispatchHarnessSource(options: HarnessSources): HarnessSource {
   return {
     manifest: options.manifest,
     ...(options.allowDowngrade ? { allowDowngrade: true } : {}),
-    fetch: async (action) => {
+    fetch: async (action, staging) => {
       const source = pick(action)
       if (!source) throw new TxError("internal", `this hubctl has no source to install ${action.harness} from`)
-      return source.fetch(action)
+      return source.fetch(action, staging)
     },
-    unpack: async (action, bytes) => {
+    unpack: async (action, file, staging) => {
       const source = pick(action)
-      return source ? source.unpack(action, bytes) : txFail("internal", `this hubctl has no source to install ${action.harness} from`)
+      return source ? source.unpack(action, file, staging) : txFail("internal", `this hubctl has no source to install ${action.harness} from`)
     },
     installed: (harness) => options.sources[harness]?.installed?.(harness),
     floor: (harness) => options.sources[harness]?.floor?.(harness),

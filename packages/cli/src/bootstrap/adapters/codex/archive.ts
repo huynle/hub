@@ -1,5 +1,7 @@
-// Unpacks a Codex release archive (.tar.gz) into the immutable install tree, in memory and without a tar binary.
-// It only ever sees bytes the install-harness executor's caller has already checked against hub's pinned digest
+// Unpacks a Codex release archive (.tar.gz) into the immutable install tree, without a tar binary, streaming: the
+// package inflates to ~0.5 GB, so the archive is read from the staging area in chunks (archive-stream.ts) and each
+// member is streamed into its own staging file, hashed as it is written (HBS-12; nothing is held whole). It only
+// ever sees a download the install-harness executor has already checked against hub's pinned digest
 // (CodexHarnessSource.unpack), and it is still strict, because the tree is installed as is:
 //
 //   - regular files and directories only: symlinks, hard links, devices and FIFOs are refused;
@@ -9,43 +11,25 @@
 //   - two layouts are accepted: the upstream package (bin/codex plus its helpers, codex-package-<triple>.tar.gz,
 //     what Codex's own install.sh installs) and the standalone binary (one codex-<triple> file, which becomes
 //     bin/codex). Either way the tree has bin/codex.
-import { gunzipSync } from "node:zlib"
 import { isSafeRel } from "../../contracts/index.ts"
 import type { TreeFile } from "../../transaction/executor.ts"
 import { txFail, txOk, type TxResult } from "../../transaction/result.ts"
+import { bytesReader, memoryStaging, type ByteReader, type StagedFile, type StagingArea } from "../../transaction/stream.ts"
+import { ArchiveError, readTarGz } from "../archive-stream.ts"
 
 /** The executable inside an installed Codex tree. */
 export const CODEX_BINARY_REL = "bin/codex"
-/** Upstream archives inflate to ~0.5 GB today; anything far beyond that is refused rather than buffered. */
+/** Upstream archives inflate to ~0.5 GB today; anything far beyond that is refused, as it inflates. */
 export const MAX_UNPACKED_BYTES = 2 * 1024 ** 3 - 1
-const BLOCK = 512
+/** pax and GNU long-name records are small; a larger one is not a name. */
+const MAX_NAME_RECORD = 64 * 1024
 const STANDALONE = /^codex-[a-z0-9_]+-[a-z0-9_]+-[a-z0-9_]+(?:-[a-z0-9_]+)?$/
 
 const bad = (why: string) => txFail("invalid", `the Codex archive is not acceptable: ${why}`)
 
-function field(block: Uint8Array, offset: number, length: number): string {
-  const raw = block.subarray(offset, offset + length)
-  const end = raw.indexOf(0)
-  return new TextDecoder().decode(end < 0 ? raw : raw.subarray(0, end))
-}
-
-function octal(block: Uint8Array, offset: number, length: number): number | undefined {
-  if (block[offset]! & 0x80) {
-    // GNU base-256 for large sizes.
-    let n = 0
-    for (let i = offset + 1; i < offset + length; i++) n = n * 256 + block[i]!
-    return n
-  }
-  const text = field(block, offset, length).trim()
-  if (text === "") return 0
-  return /^[0-7]+$/.test(text) ? parseInt(text, 8) : undefined
-}
-
-function checksumOK(block: Uint8Array): boolean {
-  const stored = octal(block, 148, 8)
-  let sum = 0
-  for (let i = 0; i < BLOCK; i++) sum += i >= 148 && i < 156 ? 0x20 : block[i]!
-  return stored === sum
+function field(bytes: Uint8Array): string {
+  const end = bytes.indexOf(0)
+  return new TextDecoder().decode(end < 0 ? bytes : bytes.subarray(0, end))
 }
 
 /** "<len> key=value\n" records of a pax extended header. */
@@ -67,67 +51,53 @@ function paxPath(body: Uint8Array): string | undefined {
 
 const normalize = (name: string) => name.replace(/^(?:\.\/)+/, "").replace(/\/+$/, "")
 
-/** The install tree of a verified Codex .tar.gz. Pure: nothing is written. */
-export function unpackCodexArchive(bytes: Uint8Array, options: { readonly maxBytes?: number } = {}): TxResult<TreeFile[]> {
-  const limit = options.maxBytes ?? MAX_UNPACKED_BYTES
-  let data: Uint8Array
-  try {
-    data = new Uint8Array(gunzipSync(bytes, { maxOutputLength: limit }))
-  } catch (cause) {
-    return bad(/maxOutputLength|buffer|too large|exceed/i.test(String(cause)) ? `it inflates beyond ${limit} bytes` : "it is not a gzip stream")
-  }
-  if (data.byteLength > limit) return bad(`it inflates beyond ${limit} bytes`)
-
-  const files: TreeFile[] = []
+/**
+ * The install tree of a verified Codex .tar.gz read from `reader`: every file is streamed into `staging` (judged
+ * before its body is read). `maxBytes` (default MAX_UNPACKED_BYTES) bounds what the archive inflates to.
+ */
+export async function unpackCodexFile(reader: ByteReader, staging: StagingArea, options: { readonly maxBytes?: number } = {}): Promise<TxResult<TreeFile[]>> {
+  const files: { rel: string; staged: StagedFile; mode: number }[] = []
   const seen = new Set<string>()
   let nextName: string | undefined
-  let at = 0
-  let ended = false
-  while (at + BLOCK <= data.byteLength) {
-    const block = data.subarray(at, at + BLOCK)
-    if (block.every((b) => b === 0)) {
-      ended = true
-      break
-    }
-    if (!checksumOK(block)) return bad("a header checksum does not match")
-    const size = octal(block, 124, 12)
-    if (size === undefined) return bad("a header has an unreadable size")
-    const type = String.fromCharCode(block[156]!)
-    const bodyStart = at + BLOCK
-    const bodyEnd = bodyStart + size
-    if (bodyEnd > data.byteLength) return bad("it is truncated")
-    const body = data.subarray(bodyStart, bodyEnd)
-    at = bodyStart + Math.ceil(size / BLOCK) * BLOCK
-
-    if (type === "x") {
-      nextName = paxPath(body) ?? nextName
-      continue
-    }
-    if (type === "g") continue
-    if (type === "L") {
-      nextName = field(body, 0, body.byteLength)
-      continue
-    }
-    const ustar = field(block, 257, 6).startsWith("ustar")
-    const prefix = ustar ? field(block, 345, 155) : ""
-    const raw = nextName ?? (prefix ? `${prefix}/${field(block, 0, 100)}` : field(block, 0, 100))
-    nextName = undefined
-    if (raw.startsWith("/")) return bad(`${JSON.stringify(raw)} is an absolute path`)
-    const name = normalize(raw)
-    if (type === "5") {
-      if (name !== "" && !isSafeRel(name)) return bad(`${JSON.stringify(raw)} leaves the install directory`)
-      continue
-    }
-    if (type !== "0" && type !== "\0" && type !== "7") return bad(`${JSON.stringify(raw)} is not a regular file (links and devices are never installed)`)
-    if (!isSafeRel(name)) return bad(`${JSON.stringify(raw)} leaves the install directory`)
-    if (seen.has(name)) return bad(`${name} appears twice`)
-    seen.add(name)
-    const mode = (octal(block, 100, 8) ?? 0o644) & 0o777
-    files.push({ rel: name, bytes: body.slice(), mode })
+  try {
+    await readTarGz(reader, { maxBytes: options.maxBytes ?? MAX_UNPACKED_BYTES }, async (member) => {
+      const { type } = member.header
+      if (type === "x") {
+        nextName = paxPath(await member.bytes(MAX_NAME_RECORD)) ?? nextName
+        return
+      }
+      if (type === "g") return
+      if (type === "L") {
+        nextName = field(await member.bytes(MAX_NAME_RECORD))
+        return
+      }
+      const raw = nextName ?? member.header.name
+      nextName = undefined
+      if (raw.startsWith("/")) throw new ArchiveError(`${JSON.stringify(raw)} is an absolute path`)
+      const name = normalize(raw)
+      if (type === "5") {
+        if (name !== "" && !isSafeRel(name)) throw new ArchiveError(`${JSON.stringify(raw)} leaves the install directory`)
+        return
+      }
+      if (type !== "0" && type !== "7") throw new ArchiveError(`${JSON.stringify(raw)} is not a regular file (links and devices are never installed)`)
+      if (!isSafeRel(name)) throw new ArchiveError(`${JSON.stringify(raw)} leaves the install directory`)
+      if (seen.has(name)) throw new ArchiveError(`${name} appears twice`)
+      seen.add(name)
+      const staged = await staging.write(name, member.body(), { maxBytes: member.header.size })
+      files.push({ rel: name, staged, mode: (member.header.mode ?? 0o644) & 0o777 })
+    })
+  } catch (error) {
+    if (error instanceof ArchiveError) return bad(error.message)
+    throw error
   }
-  if (!ended) return bad("it is truncated")
-
-  if (files.length === 1 && STANDALONE.test(files[0]!.rel)) return txOk([{ rel: CODEX_BINARY_REL, bytes: files[0]!.bytes, mode: 0o755 }])
+  if (files.length === 1 && STANDALONE.test(files[0]!.rel)) return txOk([{ rel: CODEX_BINARY_REL, staged: files[0]!.staged, mode: 0o755 }])
   if (!seen.has(CODEX_BINARY_REL)) return bad(`it has no ${CODEX_BINARY_REL}`)
   return txOk(files)
+}
+
+/** unpackCodexFile over bytes in memory, the tree as bytes (small archives: tests, fixtures). */
+export async function unpackCodexArchive(bytes: Uint8Array, options: { readonly maxBytes?: number } = {}): Promise<TxResult<(TreeFile & { readonly bytes: Uint8Array })[]>> {
+  const staging = memoryStaging()
+  const r = await unpackCodexFile(bytesReader(bytes), staging, options)
+  return r.ok ? txOk(r.value.map((f) => ({ rel: f.rel, mode: f.mode, bytes: "bytes" in f ? f.bytes : staging.bytes(f.staged) }))) : r
 }

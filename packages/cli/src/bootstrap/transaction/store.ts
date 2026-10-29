@@ -4,6 +4,8 @@
 //   state:hub/bootstrap/journal/<txID>.json      the transaction journal (digests and modes only)
 //   state:hub/bootstrap/journal/<txID>.plan.json the plan it applies (secret-free by contract), for resume/rollback
 //   state:hub/bootstrap/backups/<txID>/<bk_id>   owner-only copies of files before they changed (never credentials)
+//   state:hub/bootstrap/staging/<txID>/          a step's scratch space for large downloads and what they unpack to
+//                                                (stream.ts); removed after each step, swept under the lock
 //
 // Every document is validated before it is written and after it is read, written atomically (temporary file,
 // fsync, rename) with owner-only permissions, and reached only through symlink-checked paths.
@@ -21,6 +23,7 @@ import {
 import type { TxFs } from "./fs.ts"
 import { resolveTarget } from "./resolve.ts"
 import { errnoOf, TxError } from "./result.ts"
+import { copyFile, fileDigest } from "./stream.ts"
 
 const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes)
 const STALE_TEMP = /\.tmp$|\.broken-/
@@ -30,6 +33,7 @@ export class TxStore {
   readonly lockPath: string
   private readonly journalDir: string
   private readonly backupDir: string
+  private readonly stagingRoot: string
 
   constructor(
     private readonly fs: TxFs,
@@ -42,6 +46,12 @@ export class TxStore {
     this.base = lock.value.slice(0, lock.value.lastIndexOf("/"))
     this.journalDir = `${this.base}/journal`
     this.backupDir = `${this.base}/backups`
+    this.stagingRoot = `${this.base}/staging`
+  }
+
+  /** The scratch directory of one transaction (created on first use by fsStaging). */
+  stagingDir(txID: string): string {
+    return `${this.stagingRoot}/${txID}`
   }
 
   /** Creates the state directories (owner-only) and refuses if any of them is not a plain directory. */
@@ -53,11 +63,25 @@ export class TxStore {
     }
   }
 
-  /** Removes temporary files an interrupted writer left behind (only while holding the lock). */
+  /**
+   * Removes temporary files an interrupted writer left behind, and every staging directory (only while holding the
+   * lock: no step is running, and nothing in staging is ever needed to recover or resume).
+   */
   sweep(): void {
     for (const dir of [this.base, this.journalDir]) {
       for (const name of this.list(dir)) if (STALE_TEMP.test(name)) this.removeQuietly(`${dir}/${name}`)
     }
+    const info = this.fs.lstat(this.stagingRoot)
+    if (info?.kind === "directory") for (const name of this.list(this.stagingRoot)) this.removeTree(`${this.stagingRoot}/${name}`)
+    else if (info) this.removeQuietly(this.stagingRoot)
+  }
+
+  private removeTree(path: string): void {
+    const info = this.fs.lstat(path)
+    if (!info) return
+    if (info.kind !== "directory") return this.removeQuietly(path)
+    for (const name of this.list(path)) this.removeTree(`${path}/${name}`)
+    this.fs.rmdir(path)
   }
 
   journals(): TransactionJournal[] {
@@ -108,6 +132,21 @@ export class TxStore {
     const path = `${dir}/${id}`
     this.removeQuietly(path)
     this.fs.writeExclusive(path, bytes, 0o600)
+  }
+
+  /** Backs up the regular file `from` by a streaming copy (a large file is never read whole). */
+  writeBackupFrom(txID: string, id: string, from: string): void {
+    const dir = `${this.backupDir}/${txID}`
+    if (!this.fs.lstat(dir)) this.fs.mkdir(dir, 0o700)
+    const path = `${dir}/${id}`
+    this.removeQuietly(path)
+    copyFile(this.fs, from, path, 0o600)
+  }
+
+  /** A file backup's path and the digest of what it holds now (undefined when it is missing). */
+  backupFile(txID: string, id: string): { readonly path: string; readonly sha256: string } | undefined {
+    const path = `${this.backupDir}/${txID}/${id}`
+    return this.fs.lstat(path)?.kind === "file" ? { path, sha256: fileDigest(this.fs, path) } : undefined
   }
 
   readBackup(txID: string, id: string): Uint8Array | undefined {
