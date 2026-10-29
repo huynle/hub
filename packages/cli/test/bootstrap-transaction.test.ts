@@ -118,7 +118,8 @@ describe("consent, host and version checks", () => {
     const before = w.snapshot({ includeBootstrapState: true })
     const r = await w.applier().apply({ token: w.token(w.plan()), replan: w.replan(), consent: {} })
     expect(codeOf(r)).toBe("needs_user")
-    expect(w.snapshot({ includeBootstrapState: true })).toEqual({ ...before, ...stateDirs(w) })
+    expect(w.snapshot({ includeBootstrapState: true })).toEqual(before)
+    expect(existsSync(w.box.path("state", "hub"))).toBe(false)
   })
 
   test("an elevated action needs --escalate", async () => {
@@ -170,10 +171,18 @@ describe("consent, host and version checks", () => {
   })
 })
 
-/** The applier's own state directories (created on first use, before any check fails). */
-function stateDirs(w: World): Record<string, string> {
-  const snap = w.snapshot({ includeBootstrapState: true })
-  return Object.fromEntries(Object.entries(snap).filter(([k]) => k.includes("hub/bootstrap")))
+/** Every entry under the sandbox, directories included (the applier's own state too): proof a call wrote nothing. */
+function entries(w: World): string[] {
+  const out: string[] = []
+  const walk = (dir: string) => {
+    for (const name of readdirSync(dir).sort()) {
+      const p = `${dir}/${name}`
+      out.push(p.slice(w.box.dir.length + 1))
+      if (lstatSync(p).isDirectory()) walk(p)
+    }
+  }
+  walk(w.box.dir)
+  return out
 }
 
 describe("preview revalidation", () => {
@@ -199,6 +208,23 @@ describe("preview revalidation", () => {
     expect(codeOf(await w.applier().apply({ token, replan: w.replan(), consent: ALL }))).toBe("ok")
     const replay = await w.applier().apply({ token, replan: w.replan(), consent: ALL })
     expect(codeOf(replay)).toBe("preview_replayed")
+  })
+
+  test("a refused apply on a fresh host creates nothing, not even the applier's own state directories", async () => {
+    const cases: [string, (w: World) => Parameters<ReturnType<World["applier"]>["apply"]>[0]][] = [
+      ["preview_expired", (w) => ({ token: w.token(w.plan(), { issuedAt: w.now - 11 * MINUTE, expiresAt: w.now - MINUTE }), replan: w.replan(), consent: ALL })],
+      ["preview_foreign", (w) => ({ token: w.token(w.plan(), { hostFingerprint: OTHER_HOST }), replan: w.replan(), consent: ALL })],
+      ["preview_stale", (w) => ({ token: w.token(w.plan({ omit: ["first-launch"] })), replan: w.replan(), consent: ALL })],
+      ["invalid", (w) => ({ token: w.token(w.plan()), replan: w.replan((p) => ({ ...p, version: 99 }) as never), consent: ALL })],
+      ["manual_edit_required", (w) => ({ token: w.token(w.plan()), replan: w.replan(undefined, { blockers: [MANUAL_EDIT_MERGE] }), consent: ALL })],
+      ["needs_user", (w) => ({ token: w.token(w.plan()), replan: w.replan(), consent: {} })],
+    ]
+    for (const [code, request] of cases) {
+      const w = world()
+      const before = entries(w)
+      expect([code, codeOf(await w.applier().apply(request(w)))]).toEqual([code, code])
+      expect([code, entries(w)]).toEqual([code, before])
+    }
   })
 
   test("a manual-edit blocker or failed evidence in the fresh plan blocks apply", async () => {

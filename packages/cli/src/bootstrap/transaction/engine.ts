@@ -102,7 +102,10 @@ export interface FreshPlan {
 export interface ApplyRequest {
   /** The preview token (unknown: it is validated here). */
   readonly token: unknown
-  /** The revalidation hook: rediscover and re-plan now (under the lock). */
+  /**
+   * The revalidation hook: rediscover and re-plan now. Must only read: apply calls it once before taking the lock
+   * (so a refused apply writes nothing) and again under the lock.
+   */
   readonly replan: () => Promise<FreshPlan>
   readonly consent?: Consent
 }
@@ -268,28 +271,63 @@ export function createApplier(config: ApplierConfig): Applier {
     return undefined
   }
 
+  /**
+   * Re-plans and revalidates the preview, with `store`'s journals as the used nonces: the plan to apply and the
+   * token's nonce, or why it is refused. Reads only; nothing is written.
+   */
+  async function admit(store: TxStore, request: ApplyRequest): Promise<{ ok: true; plan: SetupPlan; nonce: string } | TxFailure> {
+    const fresh = await request.replan()
+    const checked = fromResult(validateSetupPlan(fresh.plan), "the fresh plan is invalid")
+    if (!checked.ok) return checked
+    const plan = checked.value
+    if (fresh.snapshot && snapshotDigest(fresh.snapshot) !== plan.snapshotDigest) return txFail("preview_stale", "the fresh plan was not made from the fresh snapshot; run the preview again")
+    const usedNonces = new Set(store.journals().map((j) => j.nonce))
+    const token = revalidatePreview(request.token, { now: now(), hostFingerprint: config.host.fingerprint, plan, usedNonces })
+    if (!token.ok) {
+      const issue = token.issues[0]!
+      return txFail(issue.code.startsWith("preview_") ? (issue.code as ErrorCode) : "preview_invalid", issue.message)
+    }
+    const applicable = fromResult(
+      previewApplicable({ schema: SETUP_PREVIEW_SCHEMA, version: 1, plan, planDigest: planDigest(plan), token: token.value, blockers: fresh.blockers ?? [], evidence: fresh.evidence ?? [] }),
+    )
+    if (!applicable.ok) return applicable
+    const problem = consentProblem(plan, request.consent)
+    if (problem) return problem
+    return { ok: true, plan, nonce: token.value.nonce }
+  }
+
+  /**
+   * The admission check before the lock is taken, so a refused apply (expired, stale, replayed or invalid preview,
+   * missing consent) writes nothing: not even the state directories the lock lives in. Undefined when it passes
+   * or cannot decide (an interrupted transaction, an unusable state directory): the locked path decides then, and
+   * re-runs the whole check under the lock either way.
+   */
+  async function refusedBeforeLock(request: ApplyRequest): Promise<TxFailure | undefined> {
+    let store: TxStore
+    try {
+      store = new TxStore(fs, config.roots, context)
+      if (unfinished(store).length > 0) return undefined
+    } catch {
+      return undefined
+    }
+    try {
+      const admitted = await admit(store, request)
+      return admitted.ok ? undefined : admitted
+    } catch (error) {
+      return failureOf(error)
+    }
+  }
+
   async function apply(request: ApplyRequest): Promise<TxOutcome> {
+    const refused = await refusedBeforeLock(request)
+    if (refused) return refused
     const txID = newID()
     return locked<TxOutcome>(txID, false, async (store, lock) => {
       if (unfinished(store).length > 0) return txFail("recovery_required", "an interrupted apply must be recovered first (`hubctl setup recover`)")
-      const fresh = await request.replan()
-      const checked = fromResult(validateSetupPlan(fresh.plan), "the fresh plan is invalid")
-      if (!checked.ok) return checked
-      const plan = checked.value
-      if (fresh.snapshot && snapshotDigest(fresh.snapshot) !== plan.snapshotDigest) return txFail("preview_stale", "the fresh plan was not made from the fresh snapshot; run the preview again")
-      const usedNonces = new Set(store.journals().map((j) => j.nonce))
-      const token = revalidatePreview(request.token, { now: now(), hostFingerprint: config.host.fingerprint, plan, usedNonces })
-      if (!token.ok) {
-        const issue = token.issues[0]!
-        return txFail(issue.code.startsWith("preview_") ? (issue.code as ErrorCode) : "preview_invalid", issue.message)
-      }
-      const applicable = fromResult(
-        previewApplicable({ schema: SETUP_PREVIEW_SCHEMA, version: 1, plan, planDigest: planDigest(plan), token: token.value, blockers: fresh.blockers ?? [], evidence: fresh.evidence ?? [] }),
-      )
-      if (!applicable.ok) return applicable
-      const problem = consentProblem(plan, request.consent)
-      if (problem) return problem
-      const run = new Run(store, lock, plan, newJournal(txID, plan, token.value.nonce))
+      const admitted = await admit(store, request)
+      if (!admitted.ok) return admitted
+      const { plan } = admitted
+      const run = new Run(store, lock, plan, newJournal(txID, plan, admitted.nonce))
       const pre = await run.preflight()
       if (!pre.ok) return pre
       store.writePlan(txID, plan)

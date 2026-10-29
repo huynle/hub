@@ -204,6 +204,9 @@ nonce}`, with a lifetime of at most 15 minutes and a nonce of 16–128 url-safe 
 6. Apply **rediscovers and re-plans**. The fresh snapshot digest and the fresh plan digest must both equal the
    token's (`preview_stale`).
 
+A refused apply writes nothing, not even the applier's state directories under `state:hub/bootstrap`: the engine
+runs these checks (and the consent checks) once before it takes the apply lock, and again under the lock.
+
 The token is not an authority: apply only compares it against values it just computed itself. A forged token can
 at most cause a plan the user could have previewed anyway to be applied, and even then only on this host and only
 if nothing changed. For this reason the token is deliberately unsigned and has no MAC (decision Q6).
