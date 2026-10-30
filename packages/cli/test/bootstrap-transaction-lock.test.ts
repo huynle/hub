@@ -73,6 +73,18 @@ describe("resolveTarget", () => {
     expect(parent.ok ? "ok" : parent.code).toBe("conflict")
   })
 
+  // HBS-12 (E4): a PATH link's target goes through a harness's `current` link (a symlink by design). The target is only
+  // the link's text, never written through; it is still a checked PathRef (no traversal, a mapped root).
+  test("a symlink's target (targetOnly) may lead through a link, and is still refused when unsafe or unmapped", () => {
+    box = sandbox()
+    mkdirSync(`${box.dir}/dotfiles/opencode`, { recursive: true })
+    symlinkSync(`${box.dir}/dotfiles/opencode`, box.path("config", "opencode"))
+    const through = resolveTarget({ root: "config", rel: "opencode/bin/opencode" }, box.roots, nodeFs, { targetOnly: true })
+    expect(through.ok && through.value).toBe(box.path("config", "opencode/bin/opencode"))
+    expect(resolveTarget({ root: "config", rel: "../x" }, box.roots, nodeFs, { targetOnly: true }).ok).toBe(false)
+    expect(resolveTarget({ root: "systemd-user", rel: "x" }, box.roots, nodeFs, { targetOnly: true }).ok).toBe(false)
+  })
+
   test("refuses a path through a regular file", () => {
     box = sandbox()
     writeFileSync(box.path("config", "hub"), "not a dir")
