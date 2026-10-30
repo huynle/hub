@@ -133,7 +133,9 @@ and no failing ones. A harness that is not installed has no path, version or ver
   `path` = `harnessCurrentRef(harness)` atomically to `target` = `harnessVersionRef(harness, version)` (`inconsistent`
   otherwise). Journal class `link`: the previous link is backed up, so a rollback makes the previous version current
   again.
-- `link-executable`: the hub ↔ hubctl alias.
+- `link-executable`: the hub ↔ hubctl alias, and (HBS-12, A6) a hub-installed harness's PATH link in `user-bin`
+  (§7.6). Its `target` is only the link's text: it is a checked PathRef, but not symlink-checked, since a harness's
+  `current` is a link by design.
 - `write-file`: an embedded or rendered asset pinned by digest, `onConflict: "refuse"` only.
 - `merge-config`: lossless (`preserveUnknown: true` only, precondition digest, JSON-pointer sets). v1.1: `json` and
   `jsonc` files may have comments and trailing commas, and are edited in place without losing either (§3.12.1).
@@ -704,7 +706,12 @@ spoke is. In cluster mode it answers from the pod's registry catalog, like `GET 
   OpenCode adapter, not a structured `unmergeable-format` edit; the message names the file.
 - **A5:** `previous` of `install-harness` / `select-harness-version` comes from the history only when hub installed
   the earlier version; discovery does not record a tree digest.
-- **A6:** nothing puts a hub-installed OpenCode on PATH; services and launches use absolute paths.
+- **A6 (resolved, HBS-12):** a hub-installed harness goes on PATH through a typed `link-executable` in `user-bin`
+  (`~/.local/bin/opencode` → `data:hub/harnesses/opencode/current/bin/opencode`; `claude` and `codex` likewise), from
+  `harnessLinkContributor`. It is planned only for a harness hub makes current (this plan selects it, or its `current`
+  binary exists), only when no other command of that name is on PATH, and only when `user-bin` holds nothing of that
+  name but a link into hub's own harness directory: a user's binary is never shadowed or replaced. It is journaled
+  (class `link`) and rolled back like the hub alias. When `user-bin` is not on PATH, preview and apply say so.
 - **Activation priors** are kept in memory: after a crash, recovery unloads a service even if it was loaded before
   the apply (no persistence without consent); a rolled-back unit file is restored but the running service is not
   reloaded. A dedicated `service_failed` code is not done.
@@ -720,6 +727,31 @@ spoke is. In cluster mode it answers from the pod's registry catalog, like `GET 
   needs `hub login` with an app token allowed to launch.
 - The release key, its trust root (`trust-root.json`) and the reviewed pin list (`harness-pins.json`) are not set up
   yet (§7.5): until they are, no build can verify a release manifest.
+
+### 7.7 HBS-12 acceptance on a clean Debian VM
+
+- **Sharing mode.** The OpenCode spoke connects only while `config.json`'s `mode` is not `"off"`, and the spoke's
+  default is `"off"` (the `/hub` dialog asks for a mode after enrolling; hubctl cannot ask). The credential store
+  (`ConfigCredentialStore.write`) therefore sets `mode: "always"` when the file has no `mode` key, so a
+  hubctl-enrolled machine connects with no manual edit. An explicit value, `"off"` included, is never changed:
+  `machine enroll` reports it as a warning, and `setup apply`/`setup verify` replace the OpenCode "start OpenCode"
+  next step with one that says the mode is off. `machine enroll` on an already enrolled machine adds the default to a
+  config with no `mode` (written by an earlier hubctl). A rollback of an inline enrollment clears the credential and
+  leaves the mode; without a token it does nothing.
+- **Plugin cold start.** On the first use of a directory OpenCode 2.2's service activated the plugin in ~5.4 s, past
+  the CLI's 5 s bound (HTTP 503). Measured: importing `@opencode/plugin`'s runtime entry (for `Plugin.define`, an
+  identity function) cost ~0.9–1.6 s of schema modules; the plugin now imports its types only, and loading the entry
+  fell from ~1.1–2.6 s to ~0.3 s on a laptop. `setup()` registers its hooks, tools and RPC concurrently; it never
+  awaits the hub (the spoke connects in the background) or the network. The launchers are a few small synchronous
+  writes, skipped when unchanged, and stay in `setup()`. The OpenCode probes retry once on the 503 (adapter README).
+- **Converged reruns.** `hubctlContributor` compares the installed `user-bin:hubctl` with the pinned artifact by
+  digest (read in chunks) and the `hub` link by its target, so a rerun from any hubctl path plans neither.
+  `planSetup` leaves out `state-dir` once `state:hub/bootstrap/state.json` exists (a committed apply wrote it; the
+  apply lock creates the directory but never that file, so a fresh preview and apply's locked re-plan still agree).
+  A converged session-only host plans only `verify-opencode`.
+- **Deferred: plugin diagnostics.** The service-spawned `opencode serve --service` discards stderr, so the plugin's
+  `[hub]` errors are invisible. `@opencode/plugin` 2.2's server plugin context has no logger, so they cannot be routed
+  into OpenCode's log yet.
 
 ## 8. Decisions (resolved 2026-10-28) and open items
 
