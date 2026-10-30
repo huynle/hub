@@ -25,7 +25,10 @@
   path); a hub-installed OpenCode, Claude Code or Codex is linked into `~/.local/bin` when no other one is on PATH
   (with a hint when `~/.local/bin` is not on PATH); the OpenCode probes retry once when a cold OpenCode service has
   not finished activating its plugins (HTTP 503); and the plugin no longer loads `@opencode/plugin`'s runtime, so it
-  activates faster on a cold start.
+  activates faster on a cold start. Units for a standalone hubctl no longer set `BUN_BE_BUN=1` (it made the compiled
+  binary act as the bun CLI and crash-loop), and `--confirm-activation` now checks that each activated service stays
+  running: a failed or crash-looping service fails the apply with `service_failed` (exit 15), is unloaded and rolled
+  back, and the message points at `journalctl --user -u <unit>` or the agent's log.
 - **Hub API**: `GET /spoke/presence` (machine token only, read-only) lists which harness spokes of the caller's own
   machine are connected (harness, evidence, features), for `hubctl setup verify`.
 - `hub node install`, `hub claude-code install` and `hub codex-spoke install` render their units from templates
