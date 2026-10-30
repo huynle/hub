@@ -329,8 +329,7 @@ describe("hubctl setup with a signed release manifest (pinned installs)", () => 
     expect(again.envelope.data.plan.actions.map((a: { kind: string }) => a.kind)).not.toContain("install-harness")
     // HBS-12 (E3): converged, so only verification is planned, whatever path the previewing hubctl runs from (the
     // installed hubctl is compared with the pinned artifact by digest, the hub link by its target).
-    expect(again.envelope.data.plan.actions.map((a: { id: string }) => a.id)).not.toContain("install-hubctl")
-    expect(again.envelope.data.plan.actions.map((a: { id: string }) => a.id)).not.toContain("link-hub")
+    expect(again.envelope.data.plan.actions.map((a: { id: string }) => a.id)).toEqual(["verify-opencode"])
 
     expect((await with_(["setup", "verify", "--profile", "session-only", "--json"])).code).toBe(0)
     client.close()

@@ -4,6 +4,7 @@
 // re-plans and compares (revalidatePreview), then refuses while a manual edit or failed evidence remains. Both only
 // read, through the probe.
 import {
+  executionContextOf,
   fail,
   ok,
   planDigest,
@@ -12,7 +13,9 @@ import {
   revalidatePreview,
   validatePreviewToken,
   validateSetupPreview,
+  resolvePathRef,
   type DiscoverySnapshot,
+  type PathRef,
   type PreviewToken,
   type Profile,
   type Result,
@@ -42,7 +45,11 @@ export interface PreviewRequest extends PlanSources {
 function discoverAndPlan(probe: DiscoveryProbe, profile: Profile, now: number, sources: PlanSources): Result<{ snapshot: DiscoverySnapshot } & PlannedSetup> {
   const snap = discover(probe, { now })
   if (!snap.ok) return snap
-  const planned = planSetup({ snapshot: snap.value, profile, links: inspectLinks(probe, snap.value), adapters: sources.adapters, contributors: sources.contributors, enrollment: sources.enrollment })
+  const fileExists = (ref: PathRef) => {
+    const where = resolvePathRef(ref, snap.value.roots, executionContextOf(snap.value))
+    return where.ok && probe.lstat(where.value) === "file"
+  }
+  const planned = planSetup({ snapshot: snap.value, profile, links: inspectLinks(probe, snap.value), fileExists, adapters: sources.adapters, contributors: sources.contributors, enrollment: sources.enrollment })
   return planned.ok ? ok({ snapshot: snap.value, ...planned.value }) : planned
 }
 
