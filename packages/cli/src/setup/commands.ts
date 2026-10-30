@@ -219,7 +219,7 @@ function launchDriverFor(io: SetupIo) {
   const store = credentialStoreFor(io.env, io.home)
   const client = () => {
     const credentials = resolveCredentials(io.env as Env, io.home)
-    if (!credentials) throw new Error("not logged in to the hub (run `hub login` with an app token allowed to launch)")
+    if (!credentials) throw new Error("not logged in to the hub (run `hub login --scope sessions:launch`; an app token launches under a grant with verb launch)")
     return clientFor(credentials)
   }
   return hubLaunchDriver({

@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **`hub login` with a device code**: without `--token`, `hub login [--url URL] [--scope S]... [--name N]` prints an
+  approval link and code; you approve it in the console as yourself (`/approve`: "CLI login for <name>", every
+  scope as a checkbox, the requested ones ticked) and get an app token with the scopes you chose (default
+  `sessions:read`, `messages:send`, `messages:read`; `--scope sessions:launch` or ticking it for launching, which
+  also needs a grant with verb `launch`, as the output says). Stored like `--token` (owner-only, now written
+  atomically); the URL defaults to this machine's enrollment. `--token` and a piped token still work. New hub routes:
+  `POST /cli/login`, `/cli/login/poll`, `GET /api/cli-logins/:code`, `POST …/approve|deny` (devices only; single-use,
+  10-minute codes; audited `cli-login.approve|deny`, never the token).
+- On an enrolled machine without a user login, `hub launch`, `whoami` and the other user commands now say that the
+  machine enrollment (`mch_…`) is not a user login and to run `hub login`; a forbidden `hub launch` with an app token
+  says it needs a grant with verb `launch`.
+- **`hub` on PATH for plugin-only installs**: the OpenCode plugin links `~/.local/bin/hub` to its launcher (only when
+  nothing of yours is there and no other `hub` is on PATH; the setup's `hub` → `hubctl` link is kept), with one hint
+  when `~/.local/bin` is not on PATH.
+
 - **hubctl bootstrap**: `hubctl machine enroll|status` and `hubctl setup discover|preview|apply|verify|drift|
   rollback|recover|ansible` (also as `hub …`; the program name grants nothing). A standalone hubctl enrolls the
   machine with the device code, previews a deterministic typed plan (writes nothing; `--out` keeps it for apply),

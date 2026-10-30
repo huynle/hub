@@ -11,6 +11,7 @@
 //                          Result failure is thrown as a typed PlanRefusal the CLI catches and maps with exitFor.
 import { ERROR_CODES, harnessCurrentRef, HARNESS_ORDER, selectArtifact, type Action, type ErrorCode, type HarnessID, type Issue, type PathRef, type PlanInput, type Result, type VerifiedManifest } from "../bootstrap/contracts/index.ts"
 import type { PlanContributor } from "../bootstrap/preview/plan.ts"
+import { userBinLinkDecision } from "./user-bin.ts"
 
 export const HUBCTL_REF = { root: "user-bin", rel: "hubctl" } as const
 export const HUB_ALIAS_REF = { root: "user-bin", rel: "hub" } as const
@@ -121,13 +122,17 @@ export function harnessLinkContributor(inspector: PathInspector): PlanContributo
       const targetPath = inspector.where(target)
       const ownDir = inspector.where({ root: current.root, rel: `hub/harnesses/${harness}` })
       if (!linkPath || !targetPath || !ownDir) continue
-      const there = inspector.entry(link)
       const pointsTo = inspector.linkTarget(link)
-      if (there === "symlink" && pointsTo === targetPath) continue
-      const hubOwned = there === "symlink" && pointsTo !== undefined && pointsTo.startsWith(`${ownDir}/`)
-      if (there !== "missing" && !hubOwned) continue
       const found = inspector.onPath(exe.name)
-      if (found !== undefined && found !== linkPath) continue
+      const decision = userBinLinkDecision({
+        entry: inspector.entry(link),
+        ...(pointsTo !== undefined ? { pointsTo } : {}),
+        target: targetPath,
+        linkPath,
+        hubOwned: (to) => to.startsWith(`${ownDir}/`),
+        ...(found !== undefined ? { foundOnPath: found } : {}),
+      })
+      if (decision !== "create" && decision !== "replace") continue
       actions.push({
         id: `link-${harness}`,
         kind: "link-executable",

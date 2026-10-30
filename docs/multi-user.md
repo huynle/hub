@@ -70,6 +70,8 @@ owned by `local` is reassigned to that admin (audit `migrate.local`), and `local
 ## Ownership rules
 
 - Device-code enrollment: the approving device's owner becomes the machine's owner.
+- CLI login (`hub login` without a token): the approving device's owner gets the new app token. A machine
+  enrollment is never a user login: the machine credential identifies a machine to the hub, not a person.
 - Pairing code requested by a spoke (`pairCode`) → the new device belongs to the machine's owner.
 - One-time login link (`openLink`) → logs in as (creates a device for) the machine's owner.
 - Bootstrap pairing code (no devices yet) and loopback first-machine auto-approve: `pairing` mode only.
@@ -104,6 +106,10 @@ New or changed:
 | `GET /auth/login`, `GET /auth/callback` | public | see OIDC flow |
 | `GET /api/enrollments` | admin | pending enrollments (users approve through `/approve?code=` only) |
 | `POST /api/enrollments/:code/approve\|deny` | any | approver becomes owner |
+| `POST /cli/login {clientName, scopes?}` | public | `{userCode, deviceCode, approveURL, intervalMs, expiresAt, scopes}`: a CLI login asking for `sessions:read`, `messages:send`, `messages:read` plus `scopes`; 10 min, 5 starts a minute (429) |
+| `POST /cli/login/poll {deviceCode}` | public | `{status: "pending" \| "denied" \| "expired"}`, or once `{status: "approved", token, tokenID, scopes}` (`no-store`); afterwards `expired` |
+| `GET /api/cli-logins/:code` | any (devices only) | `{login: {userCode, clientName, scopes, created, expiresAt}}` while pending, else 404 |
+| `POST /api/cli-logins/:code/approve {scopes}` · `…/deny` | any (devices only) | the approver chooses the scopes (at least one known); approve makes the next poll issue an app token of the approver, labelled `CLI login: <clientName>` |
 | `GET /api/settings/speech` | any | the caller's effective settings (user → server default → hub.json → env), `ready`, keys masked, plus `scope: "user"` and `default: {...masked server default...}` |
 | `PUT /api/settings/speech` | any | updates the caller's own settings |
 | `GET/PUT /api/settings/speech/default` | admin | the server default (today's behavior) |
@@ -133,7 +139,7 @@ adds) is ignored.
 | `user` (`via: "device-token"`) | `Authorization: Bearer <device token>` | the same secret as the cookie, issued by `POST /api/devices/redeem` for a link code | until revoked | as above; bearer requests skip the same-origin check |
 | `session` `{userID, machineID, sessionID, via: "shell"}` | `Authorization: Bearer hst1.…` | `hst1.<payload>.<HMAC-SHA256>`, claims `typ, uid, mid, sid, exp, kid, ue, me, aud`; minted by the hub, never stored | 24 h (renewed with ⅓ left) | see *Epochs and revocation* |
 | `session` `{…, via: "act"}` | `Authorization: Bearer hst1.…` (`typ: "act"`) | the same format; pushed only with the `actTokens` op, kept apart by the spoke, never in any environment | as above | as above |
-| `app` `{userID, tokenID, scopes, label?}` | `Authorization: Bearer hat_<id>_<secret>` | created by a user (`POST /api/agent/app-tokens`, shown once); only a sha256 hash is stored; at most 50 per user | until revoked | revoked (`DELETE /api/agent/app-tokens/:id`) or the user disabled |
+| `app` `{userID, tokenID, scopes, label?}` | `Authorization: Bearer hat_<id>_<secret>` | created by a user (`POST /api/agent/app-tokens`, shown once), or by a CLI login the user approved (*CLI login* below); only a sha256 hash is stored; at most 50 per user | until revoked | revoked (`DELETE /api/agent/app-tokens/:id`) or the user disabled |
 
 What each actor may do:
 
@@ -168,6 +174,26 @@ processes; its reach is limited by its expiry, the session's liveness and the se
 **Signing keys.** HMAC keys live in `<HUB_STATE_DIR>/token-keys.json` (0600, created on first use) or come from
 `HUB_TOKEN_KEYS` (same JSON, e.g. shared by several hub instances). Older keys are kept so tokens they signed still
 verify until they expire.
+
+### CLI login
+
+`hub login` without `--token` is a device-code flow like machine enrollment, for a person instead of a machine:
+
+1. The terminal `POST /cli/login {clientName, scopes?}` (no credential). It always asks for `sessions:read`,
+   `messages:send` and `messages:read`; `hub login --scope sessions:launch` asks for launching too.
+2. The user opens `/approve?code=<user code>` signed in on one of their devices (cookie or device token; session and
+   app tokens get `403`, a cross-origin cookie request `403`). The page shows "CLI login for <name>", every scope as
+   a checkbox with the requested ones ticked, and Approve / Deny. The user may tick more or fewer scopes (at least
+   one); launching is possible only when `sessions:launch` is ticked.
+3. The terminal polls `POST /cli/login/poll {deviceCode}`. The first decision wins (any pod); the result is handed
+   out once (GETDEL), then the code reads `expired`. Approved: the hub issues an app token of the approver (still
+   active, else `denied`) with the chosen scopes, audited `cli-login.approve` and `app-token.create` (never the
+   token). The CLI checks it with `whoami` and stores it like `--token`.
+
+Authority comes from the app token's scopes and the user's grants only: an app token with `sessions:launch` still
+launches only under a grant with verb `launch` covering the repo. User codes of CLI logins and machine enrollments
+never collide, and neither approval route accepts the other's code. The device code is the poller's only secret
+(256 bits); a reply lost in transit cannot be fetched again (revoke that token in Settings → Agents).
 
 ### Epochs and revocation
 
@@ -290,7 +316,7 @@ provider/baseURL drops the stored key of that scope (existing rule).
 ## Audit actions
 
 `signin`, `signin.denied`, `device.pair`, `device.revoke`, `machine.approve`, `machine.deny`,
-`machine.revoke`, `user.role`, `user.disable`, `user.enable`, `speech.default`, `migrate.local`,
+`machine.revoke`, `cli-login.approve`, `cli-login.deny` (detail: the client name), `user.role`, `user.disable`, `user.enable`, `speech.default`, `migrate.local`,
 `device.link` (an app link code issued), `app-token.create`, `app-token.revoke`, `messaging.pause`,
 `messaging.resume`, `decision.answer` (the chosen option, or `text`), `grant.create`, `grant.update`,
 `grant.revoke` (the grant id), `webhook.create` (the host), `webhook.delete`, `agents.acting.pause`, `agents.acting.resume` (the admin's switch), and

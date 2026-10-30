@@ -724,7 +724,14 @@ spoke is. In cluster mode it answers from the pod's registry catalog, like `GET 
 - A Codex or Claude Code on PATH wins over the hub-installed one at discovery, so a unit planned before and after an
   install can differ (a second apply then rewrites it).
 - The verification launch uses `checkout` mode in the first workspace root, which must be a git repository, and
-  needs `hub login` with an app token allowed to launch.
+  needs `hub login` with an app token allowed to launch (`hub login --scope sessions:launch`, the device code, plus a
+  grant with verb `launch`; docs/multi-user.md *CLI login*). The machine credential is never a user login.
+- **Plugin-only installs (`hub` on PATH):** the OpenCode plugin links `user-bin:hub` to its `hub` launcher under the
+  same rule as A6 (`setup/user-bin.ts` `userBinLinkDecision`, shared with `harnessLinkContributor`): only when nothing
+  is there or it is a link to a hub launcher, never when another `hub` is on PATH, and only from the default state
+  dir. A `hub` → `user-bin:hubctl` link (setup's `link-hub`) is kept, and setup's `link-hub` replaces the plugin's
+  link (a `link-executable` replaces its final symlink). The plugin never links `user-bin:hubctl`: it is
+  `install-artifact`'s path, which refuses to write through a symlink, and the launchers would exec themselves.
 - The release key, its trust root (`trust-root.json`) and the reviewed pin list (`harness-pins.json`) are not set up
   yet (§7.5): until they are, no build can verify a release manifest.
 

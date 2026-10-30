@@ -1,7 +1,8 @@
 // Which hub and token the CLI uses: HUB_URL + HUB_SESSION_TOKEN (a session's identity, set by the spoke in its
 // shells) win; else the login file written by `hub login` ($XDG_CONFIG_HOME or ~/.config, then hub/cli.json,
 // mode 0600) with an app token.
-import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { randomBytes } from "node:crypto"
+import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import type { Fetch } from "../../sdk/src/index.ts"
 
@@ -39,11 +40,21 @@ export function readLogin(file: string): Login | undefined {
   return undefined
 }
 
-/** Writes the login file, owner-only (0600; its directory 0700 when created). */
+/**
+ * Writes the login file, owner-only (0600; its directory 0700 when created), atomically: a private temporary file
+ * next to it is renamed over it, so a reader never sees half a file and a failed write leaves the old one.
+ */
 export function writeLogin(file: string, login: Login): void {
   mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
-  writeFileSync(file, `${JSON.stringify({ url: login.url, token: login.token }, null, 2)}\n`, { mode: 0o600 })
-  chmodSync(file, 0o600)
+  const tmp = `${file}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`
+  try {
+    writeFileSync(tmp, `${JSON.stringify({ url: login.url, token: login.token }, null, 2)}\n`, { mode: 0o600, flag: "wx" })
+    chmodSync(tmp, 0o600)
+    renameSync(tmp, file)
+  } catch (cause) {
+    rmSync(tmp, { force: true })
+    throw cause
+  }
 }
 
 /** Deletes the login file; true when there was one. */

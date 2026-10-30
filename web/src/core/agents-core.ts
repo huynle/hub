@@ -69,6 +69,53 @@ export function appTokenBody(label: string, scopes: readonly string[]): { ok: tr
   return { ok: true, body: { label: clean, scopes: [...new Set(scopes)] } }
 }
 
+// ---------- CLI login approval (/approve?code=…: `hub login` without a token) ----------
+
+/** What each app token scope lets its holder do, in plain words (the approval page and Settings → Agents). */
+export const SCOPE_LABELS: Readonly<Record<(typeof APP_TOKEN_SCOPES)[number], string>> = {
+  "sessions:read": "Read your sessions and their activity",
+  "sessions:manage": "Name sessions and claim roles",
+  "messages:send": "Send messages and asks, reply and decline",
+  "messages:read": "Read messages to it",
+  "sessions:act": "Approve, deny, answer, prompt and stop sessions (only under a grant)",
+  "sessions:launch": "Launch sessions (only under a grant with verb launch for the repo)",
+  "events:subscribe": "Subscribe webhooks to events",
+}
+
+/** A pending CLI login (GET /api/cli-logins/:code). */
+export interface CliLoginView {
+  readonly userCode: string
+  readonly clientName: string
+  /** The scopes the terminal asked for. */
+  readonly scopes: readonly string[]
+  readonly created: number
+  readonly expiresAt: number
+}
+
+const isScope = (scope: string) => APP_TOKEN_SCOPES.includes(scope as (typeof APP_TOKEN_SCOPES)[number])
+
+export function parseCliLogin(raw: unknown): CliLoginView | undefined {
+  const login = isObject(raw) ? raw.login : undefined
+  if (!isObject(login) || typeof login.userCode !== "string" || typeof login.clientName !== "string" || !strings(login.scopes) || typeof login.created !== "number" || typeof login.expiresAt !== "number") return undefined
+  return { userCode: login.userCode, clientName: login.clientName, scopes: login.scopes.filter(isScope), created: login.created, expiresAt: login.expiresAt }
+}
+
+/** Every scope as a checkbox: the requested ones ticked first. */
+export function cliLoginChoices(login: CliLoginView): { scope: string; label: string; requested: boolean; checked: boolean }[] {
+  return APP_TOKEN_SCOPES.map((scope) => {
+    const requested = login.scopes.includes(scope)
+    return { scope, label: SCOPE_LABELS[scope], requested, checked: requested }
+  })
+}
+
+/** POST /api/cli-logins/:code/approve's body: the ticked scopes (at least one, all known). */
+export function cliLoginApproveBody(scopes: readonly string[]): { ok: true; body: { scopes: string[] } } | { ok: false; error: string } {
+  if (!scopes.length) return { ok: false, error: "Pick at least one scope" }
+  const unknown = scopes.find((scope) => !isScope(scope))
+  if (unknown) return { ok: false, error: `Unknown scope: ${unknown}` }
+  return { ok: true, body: { scopes: [...new Set(scopes)] } }
+}
+
 /** A grant from the hub; undefined when it is not one. */
 export function parseGrant(raw: unknown): GrantView | undefined {
   if (!isObject(raw)) return undefined

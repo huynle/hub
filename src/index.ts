@@ -16,7 +16,7 @@ import { herdrRunner } from "./spoke/herdr"
 import { launchSource } from "./spoke/launch-source"
 import { HubRpcError, hubMsg, hubWho } from "./spoke/hub-rpc"
 import { HUB_TOOL, HUB_TOOL_DESCRIPTION, HUB_TOOL_INPUT, runHubTool } from "./spoke/hub-tool"
-import { cliEntry, installLaunchers, standaloneHubctl } from "./spoke/launchers"
+import { cliEntry, installLaunchers, linkUserBin, standaloneHubctl } from "./spoke/launchers"
 import { listServiceSessions } from "./spoke/listing"
 import { ensureLocalHub } from "./spoke/localhub"
 import { nodeConfigPath, readWorkspaceRoots } from "./spoke/node-roots"
@@ -212,8 +212,12 @@ async function registerShellEnv(ctx: Context, identity: (sessionID: string) => {
     // The `hub`/`hubctl` launchers run the CLI with this runtime (OpenCode's binary as bun; src/spoke/launchers.ts).
     const bun = typeof process.versions.bun === "string"
     const entry = cliEntry(fileURLToPath(new URL("..", import.meta.url)), bun)
-    if (entry) installLaunchers({ binDir, execPath: process.execPath, bun, entry, standalone: standaloneHubctl(homedir()) })
-    else console.error("[hub] no built hub CLI (packages/cli/dist/hub-cli.js): `hub` is not installed")
+    if (entry) {
+      installLaunchers({ binDir, execPath: process.execPath, bun, entry, standalone: standaloneHubctl(homedir()) })
+      // `hub` in the user's own terminals too (~/.local/bin/hub, never over anything of theirs).
+      const { hint } = linkUserBin({ home: homedir(), binDir, path: process.env.PATH })
+      if (hint) console.error(`[hub] ${hint}`)
+    } else console.error("[hub] no built hub CLI (packages/cli/dist/hub-cli.js): `hub` is not installed")
   } catch (cause) {
     console.error("[hub] could not install the hub CLI launchers", cause)
   }

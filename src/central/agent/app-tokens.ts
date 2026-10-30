@@ -21,6 +21,8 @@ import type { AgentRoute } from "./routes"
  */
 export const APP_SCOPES: readonly string[] = ["sessions:read", "sessions:manage", "messages:send", "messages:read", "sessions:act", "sessions:launch", "events:subscribe"]
 export const DEFAULT_APP_SCOPES: readonly string[] = ["sessions:read"]
+/** What `hub login` (the CLI login device code) asks for unless it asks for more: reading sessions and messaging. */
+export const DEFAULT_CLI_LOGIN_SCOPES: readonly string[] = ["sessions:read", "messages:send", "messages:read"]
 export const MAX_APP_TOKENS = 50
 export const MAX_APP_TOKEN_LABEL = 100
 
@@ -88,6 +90,29 @@ const view = (token: AppToken) => ({
   ...(typeof token.created === "number" ? { created: token.created } : {}),
 })
 
+/**
+ * Issues an app token of `userID` (the POST route below, and an approved CLI login): the record stored (sha256 of the
+ * token only) and the token, which the caller hands out once and never logs. rate_limited at MAX_APP_TOKENS.
+ */
+export async function issueAppToken(store: Store, userID: string, input: { readonly label?: string; readonly scopes: readonly string[] }): Promise<{ record: AppToken; token: string }> {
+  const id = randomBytes(8).toString("hex")
+  const token = `hat_${id}_${randomBytes(32).toString("base64url")}`
+  const record: AppToken = { id, tokenHash: hashToken(token), ...(input.label ? { label: input.label } : {}), scopes: [...input.scopes], created: Date.now() }
+  let full = false
+  await store.updateAgentData(userID, (data) => {
+    const tokens = data.appTokens ?? []
+    full = false
+    if (tokens.length >= MAX_APP_TOKENS) {
+      full = true
+      return
+    }
+    data.appTokens = [...tokens, record]
+  })
+  if (full) throw new AgentError("rate_limited", `At most ${MAX_APP_TOKENS} app tokens per user`, { hint: "Revoke unused tokens" })
+  await store.audit({ actor: userID, action: "app-token.create", target: id, ...(input.label ? { detail: input.label } : {}) })
+  return { record, token }
+}
+
 /** POST, GET and DELETE /api/agent/app-tokens: user actors only. */
 export function appTokenRoutes(store: Store): AgentRoute[] {
   return [
@@ -96,22 +121,7 @@ export function appTokenRoutes(store: Store): AgentRoute[] {
       path: PREFIX,
       allow: {},
       async handle({ request, user }) {
-        const input = parseCreate(await request.json())
-        const id = randomBytes(8).toString("hex")
-        const token = `hat_${id}_${randomBytes(32).toString("base64url")}`
-        const record: AppToken = { id, tokenHash: hashToken(token), ...(input.label ? { label: input.label } : {}), scopes: input.scopes, created: Date.now() }
-        let full = false
-        await store.updateAgentData(user.id, (data) => {
-          const tokens = data.appTokens ?? []
-          full = false
-          if (tokens.length >= MAX_APP_TOKENS) {
-            full = true
-            return
-          }
-          data.appTokens = [...tokens, record]
-        })
-        if (full) throw new AgentError("rate_limited", `At most ${MAX_APP_TOKENS} app tokens per user`, { hint: "Revoke unused tokens" })
-        await store.audit({ actor: user.id, action: "app-token.create", target: id, ...(input.label ? { detail: input.label } : {}) })
+        const { record, token } = await issueAppToken(store, user.id, parseCreate(await request.json()))
         return Response.json({ ...view(record), token }, { status: 201, headers: NO_STORE })
       },
     },

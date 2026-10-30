@@ -16,6 +16,7 @@ import { authPage, cookieValue, deviceName, OIDC_COOKIE, OidcClient, OidcError }
 import { isNotificationKind, Push, type PushSender } from "./push"
 import { pushEndpointProblem, resolveHost as systemResolveHost, type ResolveHost } from "./push-target"
 import { Webhooks } from "./agent/webhooks"
+import { issueAppToken } from "./agent/app-tokens"
 import { AGENT_EVENTS_AGE_MS, AGENT_EVENTS_MAX, AgentEvents, archiveEvent } from "./agent/events"
 import { EventWriters } from "./agent/event-writers"
 import { MemoryEventLog } from "./backend/memory-events"
@@ -972,6 +973,12 @@ export function startCentral(options: CentralOptions): Central {
         if (poll.status === "approved") broadcast({ type: "catalog" })
         return Response.json(poll)
       }
+      // `hub login` without a token (CLI login device code): no credential; the device code is the poller's secret.
+      if (method === "POST" && pathname === "/cli/login") {
+        const input = await body(request)
+        return Response.json(await auth.startCliLogin(input.clientName, input.scopes), { headers: NO_STORE })
+      }
+      if (method === "POST" && pathname === "/cli/login/poll") return await cliLoginPoll((await body(request)).deviceCode)
       if (method === "GET" && pathname === "/spoke/presence") return await spokePresence(request)
       if (method === "GET" && pathname === "/.well-known/hub") {
         return wellKnown({ publicURL, version: options.version ?? "0.0.0", auth: config.auth.mode === "oidc" ? { mode: "oidc", issuer: config.auth.issuer } : { mode: "pairing" } })
@@ -1107,6 +1114,13 @@ export function startCentral(options: CentralOptions): Central {
       return Response.json({ prefs }, { headers: NO_STORE })
     }),
     route("GET", "/api/reads", "user", ({ user }) => Response.json({ reads: store.reads(user.id) }, { headers: NO_STORE })),
+    // A CLI login (`hub login`): the user approves it as themselves, with the scopes they tick, or denies it.
+    route("GET", "/api/cli-logins/:code", "user", async ({ params }) => {
+      const login = await auth.cliLogin(params.code!)
+      return login ? Response.json({ login }, { headers: NO_STORE }) : error(404, "No pending CLI login with that code")
+    }),
+    route("POST", "/api/cli-logins/:code/approve", "user", async ({ request, params, user }) => decideCliLogin(params.code!, "approved", user, (await body(request)).scopes)),
+    route("POST", "/api/cli-logins/:code/deny", "user", ({ params, user }) => decideCliLogin(params.code!, "denied", user)),
     route("POST", "/api/enrollments/:code/approve", "user", ({ params, user }) => decideEnrollment(params.code!, "approved", user)),
     route("POST", "/api/enrollments/:code/deny", "user", ({ params, user }) => decideEnrollment(params.code!, "denied", user)),
     route("GET", "/api/devices", "user", ({ device, user }) =>
@@ -1470,6 +1484,31 @@ export function startCentral(options: CentralOptions): Central {
     await store.audit({ actor: user.id, action: status === "approved" ? "machine.approve" : "machine.deny", detail: machineName })
     broadcast({ type: "enrollment" }, { admins: true })
     return new Response(null, { status: 204 })
+  }
+
+  async function decideCliLogin(code: string, status: "approved" | "denied", user: UserRecord, scopes?: unknown): Promise<Response> {
+    const clientName = await auth.decideCliLogin(code, status, user.id, scopes)
+    if (clientName === undefined) return error(404, "No pending CLI login with that code")
+    await store.audit({ actor: user.id, action: status === "approved" ? "cli-login.approve" : "cli-login.deny", detail: clientName })
+    return new Response(null, { status: 204 })
+  }
+
+  /**
+   * The decision on a CLI login, once. Approved: a new app token of the approver (still active) with the scopes
+   * they chose, in this response only (no-store, never logged).
+   */
+  async function cliLoginPoll(deviceCode: unknown): Promise<Response> {
+    const poll = await auth.pollCliLogin(deviceCode)
+    if (poll.status !== "approved") return Response.json({ status: poll.status }, { headers: NO_STORE })
+    const owner = store.user(poll.ownerID)
+    if (!owner || owner.disabled) return Response.json({ status: "denied" }, { headers: NO_STORE })
+    try {
+      const { record, token } = await issueAppToken(store, owner.id, { label: `CLI login: ${poll.clientName}`, scopes: poll.scopes })
+      return Response.json({ status: "approved", token, tokenID: record.id, scopes: record.scopes }, { headers: NO_STORE })
+    } catch (cause) {
+      if (cause instanceof AgentError && cause.code === "rate_limited") return error(429, cause.message, "rate_limited")
+      throw cause
+    }
   }
 
   async function revokeMachine(id: string, user: UserRecord): Promise<Response> {

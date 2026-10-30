@@ -3,11 +3,14 @@
 // - device pairing: short single-use numeric codes, shown in the /hub dialog or logged at startup
 // - login links: long single-use codes opened from the terminal to sign a browser in
 // - app link codes: long single-use codes (QR / hubapp:// deep link) a native app redeems for a device token
+// - CLI login (device-code flow, `hub login`): a terminal asks, a signed-in user approves it as themselves with the
+//   scopes they choose, the terminal polls for the decision (the caller then issues an app token for that user)
 // Pending codes, enrollments and the limiters live in the Kv / Counters backends (process memory by default, so a
 // restart invalidates them; Valkey in a cluster, so a code issued on one pod is redeemed on any). Codes are spent
 // with GETDEL: exactly one redeem wins, on any pod.
 import { randomBytes, randomInt } from "node:crypto"
 import type { EnrollPoll, EnrollStart } from "../protocol"
+import { APP_SCOPES, DEFAULT_CLI_LOGIN_SCOPES } from "./agent/app-tokens"
 import { MemoryCounters } from "./backend/memory-counters"
 import { MemoryKv } from "./backend/memory-kv"
 import type { Counters, Kv } from "./backend/types"
@@ -32,6 +35,7 @@ export const ENROLL_INTERVAL_MS = 2000
 export const PAIR_TTL_MS = 5 * 60_000
 export const LOGIN_TTL_MS = 2 * 60_000
 export const LINK_TTL_MS = 5 * 60_000
+export const CLI_LOGIN_TTL_MS = 10 * 60_000
 /** Longest device public key accepted at link time (characters). */
 export const MAX_PUBLIC_KEY = 4096
 
@@ -63,6 +67,15 @@ function deviceLabel(value: unknown, fallback: string): string {
   return text ? [...text].slice(0, 64).join("").trim() : fallback
 }
 
+/** App token scopes from a client: a list of known scopes (deduplicated, in order); absent is none when `optional`. */
+function scopeList(value: unknown, optional: boolean): string[] {
+  if (value === undefined && optional) return []
+  if (!Array.isArray(value) || !value.every((s): s is string => typeof s === "string")) throw new ValidationError("scopes must be a list of scope names")
+  const unknown = value.find((s) => !APP_SCOPES.includes(s))
+  if (unknown !== undefined) throw new ValidationError(`Unknown scope: ${unknown.slice(0, 64)}`)
+  return [...new Set(value)]
+}
+
 const PEM = /^-----BEGIN PUBLIC KEY-----([\s\S]*)-----END PUBLIC KEY-----$/
 const KEY_BODY = /^[A-Za-z0-9+/_-]{16,}={0,2}$/
 
@@ -86,6 +99,45 @@ interface Enrollment {
   /** The approver: owner of the machine created on the next poll. */
   readonly ownerID?: string
 }
+
+interface CliLogin {
+  readonly userCode: string
+  readonly deviceCode: string
+  readonly clientName: string
+  /** The scopes the terminal asked for (shown on the approval page, ticked by default). */
+  readonly scopes: readonly string[]
+  readonly created: number
+  readonly expiresAt: number
+  readonly status: "pending" | "approved" | "denied"
+  /** The approver: the user the app token is issued for. */
+  readonly ownerID?: string
+  /** The scopes the approver chose. */
+  readonly approved?: readonly string[]
+}
+
+/** POST /cli/login → a code to approve in the console (never a credential). */
+export interface CliLoginStart {
+  readonly userCode: string
+  readonly deviceCode: string
+  readonly approveURL: string
+  readonly intervalMs: number
+  readonly expiresAt: number
+  readonly scopes: readonly string[]
+}
+
+/** A pending CLI login as the approval page shows it. */
+export interface PendingCliLogin {
+  readonly userCode: string
+  readonly clientName: string
+  readonly scopes: readonly string[]
+  readonly created: number
+  readonly expiresAt: number
+}
+
+/** The decision on a CLI login, delivered once. `approved` carries who approved it and the scopes they chose. */
+export type CliLoginPoll =
+  | { readonly status: "pending" | "denied" | "expired" }
+  | { readonly status: "approved"; readonly ownerID: string; readonly clientName: string; readonly scopes: readonly string[] }
 
 /** A pending pairing code, login link or app link code and the user its device will belong to. */
 interface Grant {
@@ -135,6 +187,10 @@ const KEYS = {
   enrollSlot: (slot: number) => `auth:enroll-slot:${slot}`,
   enrollSeq: "auth:enroll-seq",
   enrollRate: "auth:enroll-rate",
+  cliLogin: (deviceCode: string) => `auth:cli-login:${deviceCode}`,
+  cliLoginCode: (userCode: string) => `auth:cli-login-code:${userCode}`,
+  cliLoginDecided: (deviceCode: string) => `auth:cli-login-decided:${deviceCode}`,
+  cliLoginRate: "auth:cli-login-rate",
   pairFailures: "auth:pair-failures",
   code: (kind: CodeKind, code: string) => `auth:${kind}:${code}`,
 }
@@ -181,7 +237,8 @@ export class Auth {
     const px = ENROLL_TTL_MS + 1
     const deviceCode = newToken()
     let code = userCode()
-    while (!(await this.kv.set(KEYS.enrollCode(code), deviceCode, { px, nx: true }))) code = userCode()
+    // A user code names one request: never one a CLI login holds.
+    while ((await this.kv.get(KEYS.cliLoginCode(code))) !== undefined || !(await this.kv.set(KEYS.enrollCode(code), deviceCode, { px, nx: true }))) code = userCode()
     const enrollment: Enrollment = { userCode: code, deviceCode, machineName: machine, created, expiresAt, status: "pending" }
     await this.kv.set(KEYS.enroll(deviceCode), JSON.stringify(enrollment), { px })
     const slot = await this.counters.incr(KEYS.enrollSeq, ENROLL_SEQ_TTL_MS)
@@ -254,6 +311,75 @@ export class Auth {
   /** Milliseconds a record expiring at `expiresAt` is still valid for (valid through expiresAt itself). */
   private remaining(expiresAt: number): number {
     return expiresAt - this.now() + 1
+  }
+
+  // ---------- CLI login ----------
+
+  /**
+   * Starts a CLI login for `clientName` (the terminal's machine name), asking for the default scopes plus
+   * `scopes`. Rate limited like enrollment. The device code is the poller's secret; the user code is what the
+   * approver confirms.
+   */
+  async startCliLogin(clientName: unknown, scopes: unknown): Promise<CliLoginStart> {
+    const client = name(clientName, "client name")
+    const requested = [...new Set([...DEFAULT_CLI_LOGIN_SCOPES, ...scopeList(scopes, true)])]
+    if ((await this.counters.incr(KEYS.cliLoginRate, ENROLL_WINDOW_MS)) > ENROLL_MAX) throw new RateLimitError("Too many login requests; try again in a minute")
+    const created = this.now()
+    const expiresAt = created + CLI_LOGIN_TTL_MS
+    const px = CLI_LOGIN_TTL_MS + 1
+    const deviceCode = newToken()
+    let code = userCode()
+    while ((await this.kv.get(KEYS.enrollCode(code))) !== undefined || !(await this.kv.set(KEYS.cliLoginCode(code), deviceCode, { px, nx: true }))) code = userCode()
+    const login: CliLogin = { userCode: code, deviceCode, clientName: client, scopes: requested, created, expiresAt, status: "pending" }
+    await this.kv.set(KEYS.cliLogin(deviceCode), JSON.stringify(login), { px })
+    return { userCode: code, deviceCode, approveURL: `${this.publicURL}/approve?code=${code}`, intervalMs: ENROLL_INTERVAL_MS, expiresAt, scopes: requested }
+  }
+
+  /** The pending CLI login of a user code, for the approval page; undefined once decided or expired. */
+  async cliLogin(code: string): Promise<PendingCliLogin | undefined> {
+    const login = await this.cliLoginOf(code)
+    if (!login || login.status !== "pending") return undefined
+    const { userCode, clientName, scopes, created, expiresAt } = login
+    return { userCode, clientName, scopes: [...scopes], created, expiresAt }
+  }
+
+  /**
+   * Approves (as `ownerID`, with the `scopes` they chose: at least one known scope) or denies a pending CLI login:
+   * its client name, or undefined when no such code is pending. The first decision wins (SET NX), on any pod.
+   */
+  async decideCliLogin(code: string, status: "approved" | "denied", ownerID: string, scopes?: unknown): Promise<string | undefined> {
+    const approved = status === "approved" ? scopeList(scopes, false) : undefined
+    if (approved && approved.length === 0) throw new ValidationError("Choose at least one scope")
+    const login = await this.cliLoginOf(code)
+    if (!login || login.status !== "pending") return undefined
+    const px = this.remaining(login.expiresAt)
+    if (!(await this.kv.set(KEYS.cliLoginDecided(login.deviceCode), status, { px, nx: true }))) return undefined
+    const decided: CliLogin = { ...login, status, ownerID, ...(approved ? { approved } : {}) }
+    await this.kv.set(KEYS.cliLogin(login.deviceCode), JSON.stringify(decided), { px })
+    return login.clientName
+  }
+
+  /** The decision on a CLI login, delivered once (GETDEL); afterwards the code reads as expired. */
+  async pollCliLogin(deviceCode: unknown): Promise<CliLoginPoll> {
+    const login = typeof deviceCode === "string" && deviceCode ? await this.pendingLogin(deviceCode) : undefined
+    if (!login) return { status: "expired" }
+    if (login.status === "pending") return { status: "pending" }
+    const taken = parse<CliLogin>(await this.kv.getdel(KEYS.cliLogin(login.deviceCode)))
+    if (!taken || taken.status === "pending") return { status: "expired" }
+    await this.kv.del(KEYS.cliLoginCode(taken.userCode))
+    if (taken.status === "denied" || !taken.ownerID || !taken.approved) return { status: "denied" }
+    return { status: "approved", ownerID: taken.ownerID, clientName: taken.clientName, scopes: [...taken.approved] }
+  }
+
+  private async cliLoginOf(code: string): Promise<CliLogin | undefined> {
+    const deviceCode = await this.kv.get(KEYS.cliLoginCode(normalizeUserCode(code)))
+    return deviceCode === undefined ? undefined : await this.pendingLogin(deviceCode)
+  }
+
+  /** The CLI login of a device code, unless it expired. */
+  private async pendingLogin(deviceCode: string): Promise<CliLogin | undefined> {
+    const login = parse<CliLogin>(await this.kv.get(KEYS.cliLogin(deviceCode)))
+    return login && this.remaining(login.expiresAt) > 0 ? login : undefined
   }
 
   // ---------- device pairing ----------

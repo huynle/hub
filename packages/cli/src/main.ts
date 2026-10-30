@@ -35,10 +35,11 @@ const claudeMcp = argv[0] === "claude-code" && argv[1] === "mcp"
 // `hub codex-spoke serve` (the Codex spoke service) and `hub preset run` (until its pane ends) too.
 const codexServe = argv[0] === "codex-spoke" && argv[1] === "serve"
 const presetRun = argv[0] === "preset" && argv[1] === "run"
-// `hubctl machine enroll` polls until the code is approved: Ctrl-C cancels it (exit 4, nothing stored). `hubctl setup
-// apply` / `recover` pass the signal to their probes and the verification launch, so Ctrl-C fails the running step and
-// the transaction rolls back, instead of the process dying between a write and its journal entry.
-const enroll = argv[0] === "machine" && argv[1] === "enroll"
+// `hubctl machine enroll` and `hub login` (device code) poll until the code is approved: Ctrl-C cancels them (exit 4,
+// nothing stored). `hubctl setup apply` / `recover` pass the signal to their probes and the verification launch, so
+// Ctrl-C fails the running step and the transaction rolls back, instead of the process dying between a write and its
+// journal entry.
+const enroll = (argv[0] === "machine" && argv[1] === "enroll") || argv[0] === "login"
 const applying = argv[0] === "setup" && (argv[1] === "apply" || argv[1] === "recover")
 const controller = new AbortController()
 if (argv[0] === "watch" || argv[0] === "mcp" || nodeRun || claudeDaemon || claudeMcp || codexServe || presetRun || enroll || applying)
@@ -50,6 +51,7 @@ process.exitCode = await run(argv, {
   stdout: (s) => process.stdout.write(s),
   stderr: (s) => process.stderr.write(s),
   stdin,
+  stdinIsTerminal: process.stdin.isTTY === true,
   signal: controller.signal,
   input: process.stdin,
   cwd: process.cwd(),
