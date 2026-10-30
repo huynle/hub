@@ -1,6 +1,6 @@
 {
   "name": "@huynle/hub-sdk",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "private": true,
   "description": "Typed client for the hub's /api/agent (internal; shipped inside @huynle/hub, not published on its own).",
   "license": "MIT",

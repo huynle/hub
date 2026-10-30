@@ -1,6 +1,6 @@
 {
   "name": "@huynle/hub-runtime-openshell",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "private": true,
   "description": "The `openshell` runtime of `hub node`: launches in NVIDIA OpenShell sandboxes, driven through the openshell CLI (internal; shipped inside @huynle/hub, not published on its own).",
   "license": "MIT",

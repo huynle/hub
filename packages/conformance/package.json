@@ -1,6 +1,6 @@
 {
   "name": "@huynle/hub-conformance",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "private": true,
   "description": "The spoke conformance suite: runs a spoke through its harness driver against a recording hub and checks the hello, feature honesty, events, deliver, permissions, token hygiene, reconnect and frame limits (internal; not published or shipped).",
   "license": "MIT",

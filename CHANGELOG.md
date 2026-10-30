@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.7.2
+
+First release with signed standalone `hubctl` binaries (`hubctl-<target>`, `hubctl-manifest.json` signed by `hub-release-1`, `HUBCTL_SHA256SUMS`) and pinned OpenCode 2.2.0 for `hubctl setup`.
+
 - **`hub login` with a device code**: without `--token`, `hub login [--url URL] [--scope S]... [--name N]` prints an
   approval link and code; you approve it in the console as yourself (`/approve`: "CLI login for <name>", every
   scope as a checkbox, the requested ones ticked) and get an app token with the scopes you chose (default

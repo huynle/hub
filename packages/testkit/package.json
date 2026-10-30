@@ -1,6 +1,6 @@
 {
   "name": "@huynle/hub-testkit",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "private": true,
   "description": "Test doubles for hub spokes and harness packages: fake hub, fake spoke clients, stub model servers (OpenAI chat completions, Anthropic Messages, OpenAI Responses), a deny-all proxy and the harness driver protocol (internal; not published or shipped).",
   "license": "MIT",
