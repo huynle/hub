@@ -1,0 +1,13 @@
+{
+  "schema": "hub.trust-root",
+  "version": 1,
+  "threshold": 1,
+  "keys": [
+    {
+      "keyID": "hub-release-1",
+      "algorithm": "ed25519",
+      "publicKey": "MCowBQYDK2VwAyEAedYGFamR6BeN2QG7eorgc1ilpboyFzEiwaOE+n8bzVQ=",
+      "status": "active"
+    }
+  ]
+}
