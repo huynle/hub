@@ -230,7 +230,21 @@ export const DISCOVERY_CONTAINER_HOST_UNITS: DiscoverySnapshot = {
   roots: [...DISCOVERY_IN_CONTAINER.roots.filter((r) => r.id !== "systemd-user"), { id: "systemd-user", path: "/srv/dev/.config/systemd/user", containerPath: "/workspace/home/.config/systemd/user" }],
 }
 
-/** A fake launchctl / systemctl --user: records every call and keeps the load and enable state of each service. */
+/** One health sample of a fake service: what `systemctl --user show` or `launchctl print` would report. */
+export type FakeHealth = "running" | "activating" | "auto-restart" | "failed"
+
+const SYSTEMD_SHOW: Readonly<Record<FakeHealth, [string, string]>> = {
+  running: ["active", "running"],
+  activating: ["activating", "start"],
+  "auto-restart": ["activating", "auto-restart"],
+  failed: ["failed", "failed"],
+}
+
+/**
+ * A fake launchctl / systemctl --user: records every call and keeps the load and enable state of each service.
+ * A loaded service reports `running` to health queries unless `health` scripts it: one sample per query, the last
+ * one repeating; each `auto-restart` or `failed` sample counts one restart (NRestarts, launchd runs).
+ */
 export class FakeManager {
   readonly calls: string[] = []
   readonly loaded = new Set<string>()
@@ -239,57 +253,93 @@ export class FakeManager {
   readonly failing = new Map<string, number>()
   /** Services that refuse to come up (activation leaves them unloaded). */
   readonly broken = new Set<string>()
+  /** Scripted health samples per unit or label. */
+  readonly health = new Map<string, FakeHealth[]>()
+  /** Extra text a launchctl print adds (to prove its output never reaches a message). */
+  printExtra = ""
+  private readonly restarts = new Map<string, number>()
 
   constructor(seed: { loaded?: readonly string[]; enabled?: readonly string[] } = {}) {
     for (const s of seed.loaded ?? []) this.loaded.add(s)
     for (const s of seed.enabled ?? []) this.enabled.add(s)
   }
 
-  readonly run = async (call: { readonly program: "systemctl" | "launchctl"; readonly words: readonly string[] }): Promise<{ readonly exitCode: number }> => {
+  readonly run = async (call: { readonly program: "systemctl" | "launchctl"; readonly words: readonly string[] }): Promise<{ readonly exitCode: number; readonly output?: string }> => {
     const line = [call.program, ...call.words].join(" ")
     this.calls.push(line)
     const forced = this.failing.get(line)
     if (forced !== undefined) return { exitCode: forced }
-    return { exitCode: call.program === "systemctl" ? this.systemctl(call.words) : this.launchctl(call.words) }
+    return call.program === "systemctl" ? this.systemctl(call.words) : this.launchctl(call.words)
   }
 
-  private systemctl(words: readonly string[]): number {
+  private sample(name: string): { state: FakeHealth; restarts: number } {
+    const script = this.health.get(name)
+    const state = script ? (script.length > 1 ? script.shift()! : script[0]!) : "running"
+    const restarts = (this.restarts.get(name) ?? 0) + (state === "auto-restart" || state === "failed" ? 1 : 0)
+    this.restarts.set(name, restarts)
+    return { state, restarts }
+  }
+
+  private systemctl(words: readonly string[]): { exitCode: number; output?: string } {
     const [, verb, ...rest] = words
     const unit = rest[rest.length - 1]!
     switch (verb) {
       case "daemon-reload":
-        return 0
+        return { exitCode: 0 }
       case "is-active":
-        return this.loaded.has(unit) ? 0 : 3
+        return { exitCode: this.loaded.has(unit) ? 0 : 3 }
       case "is-enabled":
-        return this.enabled.has(unit) ? 0 : 1
+        return { exitCode: this.enabled.has(unit) ? 0 : 1 }
+      case "show": {
+        if (!this.loaded.has(unit)) return { exitCode: 0, output: "NRestarts=0\nActiveState=inactive\nSubState=dead\n" }
+        const { state, restarts } = this.sample(unit)
+        const [active, sub] = SYSTEMD_SHOW[state]
+        return { exitCode: 0, output: `NRestarts=${restarts}\nActiveState=${active}\nSubState=${sub}\n` }
+      }
       case "enable":
         this.enabled.add(unit)
-        return 0
+        return { exitCode: 0 }
       case "disable":
         this.enabled.delete(unit)
-        return 0
+        return { exitCode: 0 }
       case "start":
       case "restart":
         if (!this.broken.has(unit)) this.loaded.add(unit)
-        return 0
+        this.restarts.delete(unit)
+        return { exitCode: 0 }
       case "stop":
         this.loaded.delete(unit)
-        return 0
+        return { exitCode: 0 }
     }
-    return 1
+    return { exitCode: 1 }
   }
 
-  private launchctl(words: readonly string[]): number {
+  private launchctl(words: readonly string[]): { exitCode: number; output?: string } {
     const [verb, target, file] = words
-    if (verb === "print") return this.loaded.has(target!.split("/").pop()!) ? 0 : 113
-    if (verb === "bootout") return this.loaded.delete(target!.split("/").pop()!) ? 0 : 3
+    if (verb === "print") {
+      const label = target!.split("/").pop()!
+      if (!this.loaded.has(label)) return { exitCode: 113, output: `Could not find service "${label}" in domain for user gui: 501\n` }
+      const { state, restarts } = this.sample(label)
+      const status =
+        state === "running"
+          ? "\tstate = running\n\tpid = 4242\n"
+          : state === "activating"
+            ? "\tstate = spawn scheduled\n"
+            : `\tstate = ${state === "failed" ? "not running" : "spawn scheduled"}\n`
+      const exited = restarts > 0 ? "\tlast exit code = 1\n" : "\tlast exit code = (never exited)\n"
+      return { exitCode: 0, output: `gui/501/${label} = {\n\tactive count = 1\n\ttype = LaunchAgent\n${status}${this.printExtra}\truns = ${restarts + 1}\n${exited}}\n` }
+    }
+    if (verb === "bootout") {
+      const label = target!.split("/").pop()!
+      this.restarts.delete(label)
+      return { exitCode: this.loaded.delete(label) ? 0 : 3 }
+    }
     if (verb === "bootstrap") {
       const label = file!.split("/").pop()!.replace(/\.plist$/, "")
-      if (this.broken.has(label)) return 5
+      if (this.broken.has(label)) return { exitCode: 5 }
       this.loaded.add(label)
-      return 0
+      return { exitCode: 0 }
     }
-    return 1
+    return { exitCode: 1 }
   }
 }
