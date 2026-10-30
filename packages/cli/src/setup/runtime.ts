@@ -13,11 +13,13 @@
 // Nothing here runs a shell: processes are started only by the adapters' fixed-argv runners and the service
 // manager's fixed-call runner. Every capability that reaches outside is a port the tests replace.
 import { realpathSync } from "node:fs"
+import nodePath from "node:path"
 import {
   createAdapterRegistry,
   executionContextOf,
   HARNESS_ORDER,
   ok,
+  resolvePathRef,
   rootPathIn,
   type AdapterContext,
   type DiscoverySnapshot,
@@ -62,10 +64,11 @@ import { builtinExecutors, type HarnessSource, type HubctlSource } from "../boot
 import { createApplier, type Applier } from "../bootstrap/transaction/engine.ts"
 import type { ActionExecutor, ExecutorMap } from "../bootstrap/transaction/executor.ts"
 import { nodeFs, type TxFs } from "../bootstrap/transaction/fs.ts"
+import { fileDigest } from "../bootstrap/transaction/stream.ts"
 import { txFail, txOk } from "../bootstrap/transaction/result.ts"
 import { TxStore } from "../bootstrap/transaction/store.ts"
 import { checkOpenShell } from "../openshell.ts"
-import { enrollmentContributor, HUBCTL_REF, hubctlContributor, refusing } from "./contributors.ts"
+import { enrollmentContributor, HUBCTL_REF, hubctlContributor, refusing, type InstalledInspector } from "./contributors.ts"
 import { dispatchByHarness, dispatchHarnessSource } from "./dispatch.ts"
 import { claudeSpokeProbes, codexSpokeStatus, opencodeSpokeProbe, type PresenceOptions } from "./spoke-probe.ts"
 import type { BootstrapState, SetupChoices } from "./state.ts"
@@ -143,6 +146,36 @@ export interface SetupRuntime {
   history(snapshot: DiscoverySnapshot): TransactionRecord[]
   /** The hubctl the services and MCP clients run: user-bin:hubctl when the plan installs it, else this process. */
   serviceLayout(snapshot: DiscoverySnapshot): ProgramLayout
+}
+
+/**
+ * What the files a plan would write hold now, read-only through the applier's filesystem: a regular file's digest
+ * (in chunks; hubctl is ~105 MB) and whether a path is a symlink to a target, in the snapshot's execution context.
+ */
+export function installedInspector(snapshot: DiscoverySnapshot, fs: TxFs): InstalledInspector {
+  const where = (ref: PathRef) => {
+    const r = resolvePathRef(ref, snapshot.roots, executionContextOf(snapshot))
+    return r.ok ? r.value : undefined
+  }
+  return {
+    sha256: (ref) => {
+      const file = where(ref)
+      try {
+        return file && fs.lstat(file)?.kind === "file" ? fileDigest(fs, file) : undefined
+      } catch {
+        return undefined
+      }
+    },
+    linksTo: (ref, target) => {
+      const link = where(ref)
+      const to = where(target)
+      try {
+        return link !== undefined && to !== undefined && fs.lstat(link)?.kind === "symlink" && nodePath.resolve(nodePath.dirname(link), fs.readlink(link)) === to
+      } catch {
+        return false
+      }
+    },
+  }
 }
 
 /** A manifest that pins nothing (no --manifest): Codex is then only verified, never installed. */
@@ -242,7 +275,7 @@ export function createSetupRuntime(deps: RuntimeDeps): SetupRuntime {
     } catch {}
     let nodePlan: NodeServicesPlan | undefined
     const contributors = [
-      hubctlContributor(deps.manifest ? { manifest: deps.manifest } : {}),
+      hubctlContributor({ ...(deps.manifest ? { manifest: deps.manifest } : {}), ...(snap ? { installed: installedInspector(snap, fs) } : {}) }),
       refusing((input) => {
         const planned = planNodeServices(input, {
           layout: serviceLayout(input.snapshot),

@@ -42,6 +42,34 @@ describe("hubctlContributor", () => {
   })
 })
 
+// HBS-12 acceptance (E3): a converged host plans no hubctl install and no hub link, whatever path the hubctl that
+// previews runs from: the installed file is compared by digest with the pinned artifact, the link by its target.
+describe("hubctlContributor on a converged host", () => {
+  const pinned = MANIFEST_UNSIGNED.artifacts.find((a) => a.target === DISCOVERY_DARWIN.host.target)!
+  const inspector = (files: Record<string, string>, links: Record<string, string>) => ({
+    sha256: (ref: { root: string; rel: string }) => files[`${ref.root}:${ref.rel}`],
+    linksTo: (ref: { root: string; rel: string }, target: { root: string; rel: string }) => links[`${ref.root}:${ref.rel}`] === `${target.root}:${target.rel}`,
+  })
+
+  test("the pinned hubctl already installed and hub linked to it: nothing", () => {
+    const installed = inspector({ "user-bin:hubctl": pinned.sha256 }, { "user-bin:hub": "user-bin:hubctl" })
+    expect(hubctlContributor({ manifest: verified(), installed })(input)).toEqual([])
+  })
+
+  test("the pinned hubctl installed, the link missing or elsewhere: only the link", () => {
+    for (const links of [{}, { "user-bin:hub": "home:elsewhere" }] as Record<string, string>[]) {
+      const actions = hubctlContributor({ manifest: verified(), installed: inspector({ "user-bin:hubctl": pinned.sha256 }, links) })(input)
+      expect(actions.map((a) => a.id)).toEqual(["link-hub"])
+    }
+  })
+
+  test("another hubctl (other bytes) or none: installed, and linked when needed", () => {
+    const other = `sha256:${"ab".repeat(32)}`
+    expect(hubctlContributor({ manifest: verified(), installed: inspector({ "user-bin:hubctl": other }, { "user-bin:hub": "user-bin:hubctl" }) })(input).map((a) => a.id)).toEqual(["install-hubctl"])
+    expect(hubctlContributor({ manifest: verified(), installed: inspector({}, {}) })(input).map((a) => a.id)).toEqual(["install-hubctl", "link-hub"])
+  })
+})
+
 describe("enrollmentContributor", () => {
   test("enrolls with the given hub while the machine is not enrolled with it", () => {
     const actions = enrollmentContributor({ server: "https://hub.example", machineName: "laptop", enrolledWith: undefined })(input)

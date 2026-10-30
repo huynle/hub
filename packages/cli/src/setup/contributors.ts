@@ -9,7 +9,7 @@
 //                          is not enrolled with it (the device code is approved by a person on the hub).
 //   refusing               a contributor that can refuse: planSetup has no refusal channel for contributors, so a
 //                          Result failure is thrown as a typed PlanRefusal the CLI catches and maps with exitFor.
-import { ERROR_CODES, selectArtifact, type Action, type ErrorCode, type Issue, type PlanInput, type Result, type VerifiedManifest } from "../bootstrap/contracts/index.ts"
+import { ERROR_CODES, selectArtifact, type Action, type ErrorCode, type Issue, type PathRef, type PlanInput, type Result, type VerifiedManifest } from "../bootstrap/contracts/index.ts"
 import type { PlanContributor } from "../bootstrap/preview/plan.ts"
 
 export const HUBCTL_REF = { root: "user-bin", rel: "hubctl" } as const
@@ -40,14 +40,30 @@ export function refusing(plan: (input: PlanInput) => Result<readonly Action[]>):
   }
 }
 
-export function hubctlContributor(options: { readonly manifest?: VerifiedManifest }): PlanContributor {
+/**
+ * What is installed now (read-only): a file's digest (undefined when there is no regular file) and whether a path is
+ * a symlink to a target. The CLI reads the files the plan would write; tests inject fakes.
+ */
+export interface InstalledInspector {
+  sha256(ref: PathRef): string | undefined
+  linksTo(ref: PathRef, target: PathRef): boolean
+}
+
+/**
+ * The pinned hubctl and its `hub` alias, each only when not already in place: an installed hubctl with the pinned
+ * artifact's digest is that artifact, whichever path the hubctl that plans runs from (HBS-12 E3: a converged host
+ * plans no install and no link).
+ */
+export function hubctlContributor(options: { readonly manifest?: VerifiedManifest; readonly installed?: InstalledInspector }): PlanContributor {
   return ({ snapshot }) => {
     const manifest = options.manifest
     if (!manifest) return []
     const artifact = selectArtifact(manifest, snapshot.host.target)
     if (!artifact.ok) return []
-    return [
-      {
+    const installed = options.installed
+    const actions: Action[] = []
+    if (installed?.sha256(HUBCTL_REF) !== artifact.value.sha256)
+      actions.push({
         id: "install-hubctl",
         kind: "install-artifact",
         escalation: "user",
@@ -57,9 +73,10 @@ export function hubctlContributor(options: { readonly manifest?: VerifiedManifes
         target: snapshot.host.target,
         sha256: artifact.value.sha256,
         path: { ...HUBCTL_REF },
-      },
-      { id: "link-hub", kind: "link-executable", escalation: "user", summary: "Link hub to hubctl (the same command surface)", path: { ...HUB_ALIAS_REF }, target: { ...HUBCTL_REF } },
-    ]
+      })
+    if (!installed?.linksTo(HUB_ALIAS_REF, HUBCTL_REF))
+      actions.push({ id: "link-hub", kind: "link-executable", escalation: "user", summary: "Link hub to hubctl (the same command surface)", path: { ...HUB_ALIAS_REF }, target: { ...HUBCTL_REF } })
+    return actions
   }
 }
 
