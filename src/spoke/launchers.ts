@@ -132,6 +132,9 @@ function onPath(name: string, searchPath: string, skip: string): string | undefi
  * nothing when converged (the plugin runs this at start).
  */
 export function linkUserBin(options: { readonly home: string; readonly binDir: string; readonly path: string | undefined }): { linked: string[]; hint?: string } {
+  // Only the default hub bin dir (~/.local/state/hub/bin): a custom HUB_STATE_DIR (tests, containers, a throwaway
+  // state) must never leave ~/.local/bin pointing into it.
+  if (path.resolve(options.binDir) !== path.join(options.home, ".local", "state", "hub", "bin")) return { linked: [] }
   const userBin = userBinDir(options.home)
   const linkPath = path.join(userBin, "hub")
   const target = path.join(options.binDir, "hub")

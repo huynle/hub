@@ -91,7 +91,7 @@ describe("linkUserBin (plugin-only installs)", () => {
     expect(readlinkSync(link)).toBe(path.join(userBin, "hubctl"))
   })
 
-  test("a link to an older hub launcher (another state dir) is hub's own: it is moved to this one", () => {
+  test("a link to an older hub launcher is hub's own: it is moved to this one", () => {
     const { home, binDir, userBin, link } = setup()
     const old = path.join(tmp(), "state", "bin")
     installLaunchers({ binDir: old, execPath: "/bin/opencode", bun: true, entry: "/pkg/hub-cli.js" })
@@ -110,6 +110,14 @@ describe("linkUserBin (plugin-only installs)", () => {
     expect(existsSync(link)).toBe(false)
     expect(result.hint).toContain(path.join(other, "hub"))
     expect(result.hint).toContain(path.join(binDir, "hub"))
+  })
+
+  test("a custom state dir (HUB_STATE_DIR: tests, containers) links nothing: ~/.local/bin never points into it", () => {
+    const { home, userBin, link } = setup()
+    const custom = path.join(tmp(), "bin")
+    installLaunchers({ binDir: custom, execPath: "/bin/opencode", bun: true, entry: "/pkg/hub-cli.js" })
+    expect(linkUserBin({ home, binDir: custom, path: userBin })).toEqual({ linked: [] })
+    expect(existsSync(link)).toBe(false)
   })
 
   test("the plugin's own bin dir on PATH does not count as another hub", () => {
