@@ -74,7 +74,7 @@ export function hubLaunchDriver(options: HubLaunchDriverOptions): LaunchDriver {
         const created = await options.launches.create(spec, { signal })
         return txOk({ launchID: created.launch.id })
       } catch (error) {
-        return txFail("harness_not_ready", `the hub refused the verification launch (${message(error)}); it needs \`hub login\` with an app token allowed to launch`)
+        return txFail("harness_not_ready", `the hub refused the verification launch (${message(error)}); it needs \`hub login --scope sessions:launch\` and a grant with verb launch`)
       }
     },
     awaitResponse: (id, signal) => until(id, signal, (l) => (l.state === "running" && l.sessionID ? true : l.state === "ended" ? `the launch ended ${l.outcome ?? ""} before its session answered`.trim() : undefined)),
