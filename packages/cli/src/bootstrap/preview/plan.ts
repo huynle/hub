@@ -43,8 +43,11 @@ import {
   type SetupPlan,
 } from "../contracts/index.ts"
 
+/** What a contributor plans from: the adapters' input, and the actions planned before it (adapters first). */
+export type ContributorInput = PlanInput & { readonly planned?: readonly Action[] }
+
 /** Proposes actions for a plan; must be deterministic in its input (like HarnessAdapter.plan). */
-export type PlanContributor = (input: PlanInput) => readonly Action[]
+export type PlanContributor = (input: ContributorInput) => readonly Action[]
 
 /** A symlink found between a root and a path the plan would write. */
 export interface LinkFact {
@@ -101,6 +104,13 @@ const PHASE: Readonly<Record<ActionKind, number>> = {
 
 const HARNESS_LABEL: Readonly<Record<HarnessID, string>> = { opencode: "OpenCode", "claude-code": "Claude Code", codex: "Codex" }
 
+/**
+ * The bootstrap state a committed apply writes (setup/state.ts). Its presence means the state directory exists, so a
+ * rerun leaves state-dir out. Taking the apply lock creates the directory but not this file, so the preview and
+ * apply's locked re-plan agree on a fresh host.
+ */
+export const APPLIED_STATE: PathRef = { root: "state", rel: "hub/bootstrap/state.json" }
+
 const STATE_DIR: Action = { id: "state-dir", kind: "ensure-directory", escalation: "user", summary: "Create the hub state directory", path: { root: "state", rel: "hub" }, mode: 0o700 }
 
 const verifyHarness = (harness: HarnessID): Action => ({
@@ -120,7 +130,15 @@ export const issuesAt = (prefix: string, r: Result<unknown>): Issue[] => (r.ok ?
 const failed = <T>(issues: readonly Issue[]): Result<T> => ({ ok: false, issues: [...issues] })
 
 /** Plans a setup. Pure: the same inputs always give the same plan. */
-export function planSetup(input: { readonly snapshot: DiscoverySnapshot; readonly profile: Profile; readonly links: LinkInspector } & PlanSources): Result<PlannedSetup> {
+export function planSetup(
+  input: {
+    readonly snapshot: DiscoverySnapshot
+    readonly profile: Profile
+    readonly links: LinkInspector
+    /** Whether a regular file exists at a path (read-only; preview passes the probe's). */
+    readonly fileExists?: (ref: PathRef) => boolean
+  } & PlanSources,
+): Result<PlannedSetup> {
   const snap = validateDiscoverySnapshot(input.snapshot)
   const prof = validateProfile(input.profile)
   if (!snap.ok || !prof.ok) return failed([...issuesAt("/snapshot", snap), ...issuesAt("/profile", prof)])
@@ -133,7 +151,7 @@ export function planSetup(input: { readonly snapshot: DiscoverySnapshot; readonl
 
   // Collect: the state dir, then each chosen harness's adapter actions, then the other contributors.
   const planInput: PlanInput = { snapshot, profile }
-  const groups: Action[][] = [[STATE_DIR]]
+  const groups: Action[][] = [input.fileExists?.(APPLIED_STATE) ? [] : [STATE_DIR]]
   const harnessGroup = new Map<HarnessID, Action[]>()
   for (const id of HARNESS_ORDER) {
     if (!profile.harnesses.includes(id)) continue
@@ -141,7 +159,7 @@ export function planSetup(input: { readonly snapshot: DiscoverySnapshot; readonl
     harnessGroup.set(id, group)
     groups.push(group)
   }
-  for (const contribute of input.contributors ?? []) groups.push([...contribute(planInput)])
+  for (const contribute of input.contributors ?? []) groups.push([...contribute({ ...planInput, planned: groups.flat() })])
   // v1.1: a separate enrollment is its own step; the plan never enrolls.
   if ((input.enrollment ?? enrollmentModeOf(profile)) === "separate") for (const group of groups) group.splice(0, group.length, ...group.filter((a) => a.kind !== "enroll-machine"))
   // Every chosen harness is verified by real probes (presence is never readiness); runtimes are checked, never installed.

@@ -19,6 +19,13 @@
   harness strict. A rollback now also removes the root directories the apply created (e.g. `~/.local/bin`), and a
   directory hub created that something else wrote into is kept as a note, not a conflict. The Ansible role passes
   `--require-ready` only with `hub_bootstrap_apply_require_ready` and gates readiness at its verify step.
+- **hubctl bootstrap, HBS-12 acceptance fixes**: `machine enroll` turns sharing on (`mode: "always"`) when
+  `config.json` has no mode, so the OpenCode spoke of a hubctl-enrolled machine connects (an explicit `"off"` is kept
+  and reported); a rerun on a converged host plans only verification (the installed hubctl is compared by digest, not
+  path); a hub-installed OpenCode, Claude Code or Codex is linked into `~/.local/bin` when no other one is on PATH
+  (with a hint when `~/.local/bin` is not on PATH); the OpenCode probes retry once when a cold OpenCode service has
+  not finished activating its plugins (HTTP 503); and the plugin no longer loads `@opencode/plugin`'s runtime, so it
+  activates faster on a cold start.
 - **Hub API**: `GET /spoke/presence` (machine token only, read-only) lists which harness spokes of the caller's own
   machine are connected (harness, evidence, features), for `hubctl setup verify`.
 - `hub node install`, `hub claude-code install` and `hub codex-spoke install` render their units from templates

@@ -46,6 +46,15 @@ const opencodePlugin: PlanContributor = ({ snapshot }) => {
 }
 
 describe("planSetup and previewSetup", () => {
+  // HBS-12 (E3): once an apply committed (its bootstrap state exists, so the state directory does), a rerun plans no
+  // state-dir. Taking the apply lock creates the directory but never the state file, so preview and apply agree.
+  test("a host an apply already committed on plans no state dir", () => {
+    const applied = { ...MAC_NATIVE, files: { ...MAC_NATIVE.files, [`${MAC_HOME}/.local/state/hub/bootstrap/state.json`]: file("{}") } }
+    expect(preview(applied).plan.actions.map((a) => a.id)).toEqual(["verify-opencode"])
+    const locked = { ...MAC_NATIVE, files: { ...MAC_NATIVE.files, [`${MAC_HOME}/.local/state/hub/bootstrap/apply.lock`]: file("{}") } }
+    expect(preview(locked).plan.actions.map((a) => a.id)).toEqual(["state-dir", "verify-opencode"])
+  })
+
   test("a session-only preview: state dir, real verification, a bound 15-minute token", () => {
     const p = preview(MAC_NATIVE)
     expect(validateSetupPreview(p).ok).toBe(true)

@@ -153,7 +153,9 @@ export const linkExecutableExecutor = (): ActionExecutor<"link-executable"> => (
   kind: "link-executable",
   plan: (action) => ({ class: "link", path: action.path, resolve: { finalMayBeSymlink: true } }),
   change: async (action, ctx) => {
-    const target = ctx.resolve(action.target)
+    // The link's own path is symlink-checked (it is what gets written). Its target is only the link's text, never
+    // written through, and may lead through a harness's `current` link, which is a symlink by design (§3.6.1).
+    const target = ctx.resolve(action.target, { targetOnly: true })
     return target.ok ? txOk({ type: "symlink", target: target.value, replace: "backup" }) : target
   },
 })

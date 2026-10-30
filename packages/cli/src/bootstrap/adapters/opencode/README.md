@@ -50,6 +50,11 @@ modules. Every capability is injected.
     nothing. A stronger `ProviderProbe` can be injected.
   - `spoke-connected`: an injected `SpokeProbe`. Without one, the probe fails, so OpenCode is never ready by default.
 
+  On a cold start (the first use of a directory) OpenCode 2's background service can take longer than the CLI's ~5 s
+  to activate its plugins, and the CLI fails with HTTP 503 "Location plugins did not finish activating". The
+  `--version` and `models` probes retry once, after 1 s, on exactly that failure (`ACTIVATION_FAILURE`, read from the
+  child's output only to recognise it); any other failure is reported at once (HBS-12).
+
   Details are built by the adapter, never copied from harness output. Anything that looks like a credential is
   withheld. The child process gets the user's own environment, and nothing from it is recorded.
 

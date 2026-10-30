@@ -6,7 +6,7 @@ import { randomBytes } from "node:crypto"
 import { closeSync, lstatSync, mkdirSync, openSync, rmSync } from "node:fs"
 import { hostname } from "node:os"
 import path from "node:path"
-import { configPath, normalize, prepareConfigPath, readRawConfig, updateRawConfig } from "../../../../../src/config.ts"
+import { configPath, normalize, prepareConfigPath, readRawConfig, updateRawConfig, type Mode } from "../../../../../src/config.ts"
 import type { CredentialStore, MachineCredential } from "../contracts/index.ts"
 
 export type CredentialStoreFailure = "symlink" | "not_object" | "invalid" | "io"
@@ -23,6 +23,15 @@ export class CredentialStoreError extends Error {
     super(message)
   }
 }
+
+/**
+ * The spoke's sharing mode in config.json: `unset` when the file has no `mode` key (the spoke then treats it as
+ * "off"), else what the spoke reads (a value it does not understand reads as "off").
+ */
+export type SharingMode = Mode | "unset"
+
+/** The mode an enrollment turns on when the user never chose one: the OpenCode spoke connects only when it is not "off". */
+export const DEFAULT_SHARING: Mode = "always"
 
 /** What the file holds, without the credential: `incomplete` is a token without a machine ID (enroll again). */
 export type StoreContents = { readonly state: "empty" | "credential" | "incomplete" }
@@ -92,6 +101,26 @@ export class ConfigCredentialStore implements CredentialStore {
     return { state: config.machineID ? "credential" : "incomplete" }
   }
 
+  sharingMode(): SharingMode {
+    const raw = this.raw()
+    return "mode" in raw ? normalize({ mode: raw.mode }, "x").mode : "unset"
+  }
+
+  /**
+   * Turns sharing on (`mode: "always"`) when config.json has no `mode` at all, so an enrolled machine's spoke
+   * connects. An explicit value, "off" included, is the user's and is never changed. True when it wrote.
+   */
+  enableSharing(): boolean {
+    this.refuseLinks()
+    if ("mode" in this.raw()) return false
+    try {
+      updateRawConfig(this.location, (raw) => ("mode" in raw ? raw : { ...raw, mode: DEFAULT_SHARING }))
+    } catch (cause) {
+      throw ioError(this.location, "write", cause)
+    }
+    return true
+  }
+
   async read(): Promise<MachineCredential | undefined> {
     const raw = this.raw()
     const config = normalize(raw, hostname())
@@ -114,6 +143,8 @@ export class ConfigCredentialStore implements CredentialStore {
         machineID: credential.machineID,
         ...(credential.machineName ? { machineName: credential.machineName } : {}),
         token: credential.token,
+        // An enrolled machine shares by default (the /hub dialog asks; hubctl cannot): only when the user never chose.
+        ...("mode" in raw ? {} : { mode: DEFAULT_SHARING }),
       }))
     } catch (cause) {
       throw ioError(this.location, "write", cause)

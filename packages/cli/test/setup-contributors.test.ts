@@ -8,9 +8,9 @@
 //                         channel for contributors), so the CLI maps it through exitFor instead of crashing.
 import { describe, expect, test } from "bun:test"
 import { generateKeyPairSync, sign } from "node:crypto"
-import { findSecrets, manifestPayload, validateAction, verifyManifest, type ArtifactManifest, type PlanInput, type VerifiedManifest } from "../src/bootstrap/contracts/index.ts"
-import { enrollmentContributor, hubctlContributor, PlanRefusal, refusing } from "../src/setup/contributors.ts"
-import { DISCOVERY_DARWIN, MANIFEST_UNSIGNED, PROFILE_SESSION_ONLY, TRUST_ROOT_TEMPLATE } from "./bootstrap/fixtures.ts"
+import { findSecrets, manifestPayload, validateAction, verifyManifest, type Action, type ArtifactManifest, type PlanInput, type VerifiedManifest } from "../src/bootstrap/contracts/index.ts"
+import { enrollmentContributor, harnessLinkContributor, hubctlContributor, PlanRefusal, refusing, type PathInspector } from "../src/setup/contributors.ts"
+import { ACTIONS, DISCOVERY_DARWIN, MANIFEST_UNSIGNED, PROFILE_FULL_HARNESS, PROFILE_SESSION_ONLY, TRUST_ROOT_TEMPLATE } from "./bootstrap/fixtures.ts"
 
 function verified(body: Omit<ArtifactManifest, "signatures"> = MANIFEST_UNSIGNED): VerifiedManifest {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519")
@@ -39,6 +39,104 @@ describe("hubctlContributor", () => {
     expect(hubctlContributor({})(input)).toEqual([])
     const other = verified({ ...MANIFEST_UNSIGNED, artifacts: MANIFEST_UNSIGNED.artifacts.filter((a) => a.target !== DISCOVERY_DARWIN.host.target) })
     expect(hubctlContributor({ manifest: other })(input)).toEqual([])
+  })
+})
+
+// HBS-12 acceptance (E3): a converged host plans no hubctl install and no hub link, whatever path the hubctl that
+// previews runs from: the installed file is compared by digest with the pinned artifact, the link by its target.
+describe("hubctlContributor on a converged host", () => {
+  const pinned = MANIFEST_UNSIGNED.artifacts.find((a) => a.target === DISCOVERY_DARWIN.host.target)!
+  const inspector = (files: Record<string, string>, links: Record<string, string>) => ({
+    sha256: (ref: { root: string; rel: string }) => files[`${ref.root}:${ref.rel}`],
+    linksTo: (ref: { root: string; rel: string }, target: { root: string; rel: string }) => links[`${ref.root}:${ref.rel}`] === `${target.root}:${target.rel}`,
+  })
+
+  test("the pinned hubctl already installed and hub linked to it: nothing", () => {
+    const installed = inspector({ "user-bin:hubctl": pinned.sha256 }, { "user-bin:hub": "user-bin:hubctl" })
+    expect(hubctlContributor({ manifest: verified(), installed })(input)).toEqual([])
+  })
+
+  test("the pinned hubctl installed, the link missing or elsewhere: only the link", () => {
+    for (const links of [{}, { "user-bin:hub": "home:elsewhere" }] as Record<string, string>[]) {
+      const actions = hubctlContributor({ manifest: verified(), installed: inspector({ "user-bin:hubctl": pinned.sha256 }, links) })(input)
+      expect(actions.map((a) => a.id)).toEqual(["link-hub"])
+    }
+  })
+
+  test("another hubctl (other bytes) or none: installed, and linked when needed", () => {
+    const other = `sha256:${"ab".repeat(32)}`
+    expect(hubctlContributor({ manifest: verified(), installed: inspector({ "user-bin:hubctl": other }, { "user-bin:hub": "user-bin:hubctl" }) })(input).map((a) => a.id)).toEqual(["install-hubctl"])
+    expect(hubctlContributor({ manifest: verified(), installed: inspector({}, {}) })(input).map((a) => a.id)).toEqual(["install-hubctl", "link-hub"])
+  })
+})
+
+// HBS-12 acceptance (E4, contract amendment A6): a hub-installed harness is put on PATH by a typed link in user-bin
+// (~/.local/bin/opencode → data:hub/harnesses/opencode/current/bin/opencode), only when nothing else of that name is on
+// PATH and user-bin holds no other file of that name (never shadow or replace a user's binary).
+describe("harnessLinkContributor", () => {
+  const BIN = "/u/.local/bin"
+  const DATA = "/u/.local/share"
+  const where = (ref: { root: string; rel: string }) => `${ref.root === "user-bin" ? BIN : ref.root === "data" ? DATA : "/elsewhere"}/${ref.rel}`
+  const inspector = (state: { entries?: Record<string, "file" | "directory" | "symlink">; links?: Record<string, string>; path?: Record<string, string> }): PathInspector => ({
+    entry: (ref) => state.entries?.[where(ref)] ?? (state.links?.[where(ref)] ? "symlink" : "missing"),
+    linkTarget: (ref) => state.links?.[where(ref)],
+    where,
+    onPath: (name) => state.path?.[name],
+  })
+  const selectOpencode = { ...(ACTIONS["select-harness-version"] as Extract<Action, { kind: "select-harness-version" }>), harness: "opencode" as const }
+  const current = `${DATA}/hub/harnesses/opencode/current`
+
+  test("a harness this plan makes current, with no other opencode anywhere on PATH: linked into user-bin", () => {
+    const actions = harnessLinkContributor(inspector({}))({ ...input, planned: [selectOpencode] })
+    expect(actions).toEqual([
+      {
+        id: "link-opencode",
+        kind: "link-executable",
+        escalation: "user",
+        summary: "Put the hub-installed OpenCode on PATH: link ~/.local/bin/opencode to its current version",
+        path: { root: "user-bin", rel: "opencode" },
+        target: { root: "data", rel: "hub/harnesses/opencode/current/bin/opencode" },
+      },
+    ])
+    for (const a of actions) expect(validateAction(a).ok).toBe(true)
+  })
+
+  test("an already current hub install (a rerun) is linked too; an existing right link is converged", () => {
+    const state = { entries: { [`${current}/bin/opencode`]: "file" as const } }
+    expect(harnessLinkContributor(inspector(state))(input).map((a) => a.id)).toEqual(["link-opencode"])
+    const linked = { ...state, links: { [`${BIN}/opencode`]: `${current}/bin/opencode` }, path: { opencode: `${BIN}/opencode` } }
+    expect(harnessLinkContributor(inspector(linked))(input)).toEqual([])
+  })
+
+  test("a stale hub-owned link (into hub's own harness directory) is replaced", () => {
+    const state = { entries: { [`${current}/bin/opencode`]: "file" as const }, links: { [`${BIN}/opencode`]: `${DATA}/hub/harnesses/opencode/2.1.0/bin/opencode` }, path: { opencode: `${BIN}/opencode` } }
+    expect(harnessLinkContributor(inspector(state))(input).map((a) => a.id)).toEqual(["link-opencode"])
+  })
+
+  test("never shadows or replaces the user's binary", () => {
+    const base = { entries: { [`${current}/bin/opencode`]: "file" as const } }
+    // Another opencode on PATH (before or after user-bin): left alone.
+    expect(harnessLinkContributor(inspector({ ...base, path: { opencode: "/opt/homebrew/bin/opencode" } }))(input)).toEqual([])
+    // A user's own file or link in user-bin (on PATH or not): left alone.
+    expect(harnessLinkContributor(inspector({ entries: { ...base.entries, [`${BIN}/opencode`]: "file" } }))(input)).toEqual([])
+    expect(harnessLinkContributor(inspector({ ...base, links: { [`${BIN}/opencode`]: "/u/.opencode/bin/opencode" } }))(input)).toEqual([])
+  })
+
+  test("a harness hub does not manage here is not linked; claude and codex use their own binaries", () => {
+    expect(harnessLinkContributor(inspector({}))(input)).toEqual([])
+    const all = {
+      entries: {
+        [`${DATA}/hub/harnesses/opencode/current/bin/opencode`]: "file" as const,
+        [`${DATA}/hub/harnesses/claude-code/current/claude`]: "file" as const,
+        [`${DATA}/hub/harnesses/codex/current/bin/codex`]: "file" as const,
+      },
+    }
+    const actions = harnessLinkContributor(inspector(all))({ snapshot: DISCOVERY_DARWIN, profile: PROFILE_FULL_HARNESS }) as Extract<Action, { kind: "link-executable" }>[]
+    expect(actions.map((a) => [a.id, a.path.rel, a.target.rel])).toEqual([
+      ["link-opencode", "opencode", "hub/harnesses/opencode/current/bin/opencode"],
+      ["link-claude-code", "claude", "hub/harnesses/claude-code/current/claude"],
+      ["link-codex", "codex", "hub/harnesses/codex/current/bin/codex"],
+    ])
   })
 })
 

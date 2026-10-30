@@ -78,6 +78,49 @@ describe("verifyOpencode", () => {
     }
   })
 
+  // HBS-12 acceptance (E2): on a cold start OpenCode's background service can take longer than the CLI's ~5 s to
+  // activate its plugins, so the first `opencode models` fails with HTTP 503 "Location plugins did not finish
+  // activating". That one failure is retried once; any other failure is not.
+  const COLD = { exitCode: 1, stdout: "", stderr: "Error: Location plugins did not finish activating (HTTP 503)\n" }
+  function sequence(answers: Record<string, Array<{ exitCode: number | null; stdout?: string; stderr?: string }>>): ProcessRunner & { calls: string[] } {
+    const calls: string[] = []
+    return {
+      calls,
+      async run(request) {
+        const key = request.argv.join(" ")
+        calls.push(key)
+        const next = answers[key]!.shift()!
+        return { exitCode: next.exitCode, stdout: next.stdout ?? "", stderr: next.stderr ?? "", timedOut: false }
+      },
+    }
+  }
+
+  test("a cold-start activation failure (503) is retried once, then passes", async () => {
+    const runner = sequence({ "--version": [{ exitCode: 0, stdout: "opencode v2.2.0" }], models: [COLD, { exitCode: 0, stdout: "anthropic/claude-sonnet-4-5\n" }] })
+    const v = await verifyOpencode(context(), { runner, binary: BIN, spoke: connected, activationRetryDelayMs: 0 })
+    expect(runner.calls).toEqual(["--version", "models", "models"])
+    expect(v.probes.map((p) => p.ok)).toEqual([true, true, true])
+  })
+
+  test("the version probe is retried the same way", async () => {
+    const runner = sequence({ "--version": [COLD, { exitCode: 0, stdout: "opencode v2.2.0" }], models: [{ exitCode: 0, stdout: "anthropic/claude-sonnet-4-5\n" }] })
+    const v = await verifyOpencode(context(), { runner, binary: BIN, spoke: connected, activationRetryDelayMs: 0 })
+    expect(runner.calls).toEqual(["--version", "--version", "models"])
+    expect(v.probes[0]!.ok).toBe(true)
+  })
+
+  test("only once, and only for the activation failure", async () => {
+    const twice = sequence({ "--version": [{ exitCode: 0, stdout: "opencode v2.2.0" }], models: [COLD, COLD] })
+    const v = await verifyOpencode(context(), { runner: twice, binary: BIN, spoke: connected, activationRetryDelayMs: 0 })
+    expect(twice.calls).toEqual(["--version", "models", "models"])
+    expect(v.probes[1]).toMatchObject({ kind: "provider-auth", ok: false })
+    expect(v.probes[1]!.detail).toContain("did not finish activating")
+
+    const loggedOut = sequence({ "--version": [{ exitCode: 0, stdout: "opencode v2.2.0" }], models: [{ exitCode: 1, stderr: "no providers" }] })
+    await verifyOpencode(context(), { runner: loggedOut, binary: BIN, spoke: connected, activationRetryDelayMs: 0 })
+    expect(loggedOut.calls).toEqual(["--version", "models"])
+  })
+
   test("an expected (pinned) version must be the one that runs", async () => {
     const v = await verifyOpencode(context(), { runner: fakeRunner(HEALTHY), binary: BIN, spoke: connected, expectVersion: "2.1.0" })
     expect(v.probes[0]).toMatchObject({ kind: "version-exec", ok: false })

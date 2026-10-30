@@ -41,6 +41,8 @@ export interface ProcessOutcome {
   /** null when it was killed (timeout, signal). */
   readonly exitCode: number | null
   readonly stdout: string
+  /** Read only to recognise the cold-start activation failure (ACTIVATION_FAILURE); never reported raw. */
+  readonly stderr?: string
   readonly timedOut: boolean
 }
 
@@ -59,10 +61,10 @@ export const nodeProcessRunner: ProcessRunner = {
         request.file,
         [...request.argv],
         { shell: false, env, timeout: request.timeoutMs, maxBuffer: request.maxOutputBytes, encoding: "utf8", windowsHide: true, ...(request.signal ? { signal: request.signal } : {}) },
-        (error, stdout) => {
+        (error, stdout, stderr) => {
           const e = error as (NodeJS.ErrnoException & { killed?: boolean; code?: number | string }) | null
           if (e && typeof e.code === "string" && e.code !== "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") return reject(e)
-          resolve({ exitCode: e ? (typeof e.code === "number" ? e.code : null) : 0, stdout: String(stdout ?? ""), timedOut: Boolean(e?.killed) })
+          resolve({ exitCode: e ? (typeof e.code === "number" ? e.code : null) : 0, stdout: String(stdout ?? ""), stderr: String(stderr ?? ""), timedOut: Boolean(e?.killed) })
         },
       )
       child.stdin?.end()
@@ -87,7 +89,17 @@ export interface OpencodeVerifyOptions {
   readonly expectVersion?: string
   readonly versionTimeoutMs?: number
   readonly providerTimeoutMs?: number
+  /** The pause before the one retry after a cold-start activation failure (default 1 s). */
+  readonly activationRetryDelayMs?: number
 }
+
+/**
+ * OpenCode 2's CLI gives a location's plugins ~5 s to activate in its background service, then fails with HTTP 503
+ * "Location plugins did not finish activating". On the first use of a directory (plugins loaded cold, MCP servers
+ * connecting) that can happen once; the service keeps activating, so the probe tries again once.
+ */
+export const ACTIVATION_FAILURE = /did not finish activating/i
+const ACTIVATION_RETRY_DELAY_MS = 1000
 
 const VERSION_TIMEOUT_MS = 15_000
 const PROVIDER_TIMEOUT_MS = 90_000
@@ -99,7 +111,7 @@ const MODEL_LINE = /^[A-Za-z0-9][A-Za-z0-9._-]*\/\S+$/
 const safe = (detail: string): string => (isSecretValue(detail) ? "(details withheld: they looked like they carried a credential)" : detail.replace(/\s+/g, " ").trim().slice(0, 200))
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
-async function run(options: OpencodeVerifyOptions, context: AdapterContext, argv: readonly string[], timeoutMs: number): Promise<ProcessOutcome | string> {
+async function runOnce(options: OpencodeVerifyOptions, context: AdapterContext, argv: readonly string[], timeoutMs: number): Promise<ProcessOutcome | string> {
   try {
     return await options.runner.run({ file: options.binary!, argv, env: context.env, timeoutMs, maxOutputBytes: MAX_OUTPUT, ...(context.signal ? { signal: context.signal } : {}) })
   } catch (error) {
@@ -107,7 +119,19 @@ async function run(options: OpencodeVerifyOptions, context: AdapterContext, argv
   }
 }
 
-const failedRun = (r: ProcessOutcome) => (r.timedOut ? "timed out" : r.exitCode === null ? "was killed" : `exited ${r.exitCode}`)
+const coldStart = (r: ProcessOutcome | string): boolean => typeof r !== "string" && r.exitCode !== 0 && ACTIVATION_FAILURE.test(`${r.stderr ?? ""}\n${r.stdout}`)
+
+/** Runs one probe argv; a cold-start activation failure is retried once (ACTIVATION_FAILURE). */
+async function run(options: OpencodeVerifyOptions, context: AdapterContext, argv: readonly string[], timeoutMs: number): Promise<ProcessOutcome | string> {
+  const first = await runOnce(options, context, argv, timeoutMs)
+  if (!coldStart(first) || context.signal?.aborted) return first
+  const delay = options.activationRetryDelayMs ?? ACTIVATION_RETRY_DELAY_MS
+  if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay))
+  return runOnce(options, context, argv, timeoutMs)
+}
+
+const failedRun = (r: ProcessOutcome) =>
+  r.timedOut ? "timed out" : r.exitCode === null ? "was killed" : `exited ${r.exitCode}${coldStart(r) ? " (OpenCode's plugins did not finish activating in time, twice: start OpenCode once, then verify again)" : ""}`
 
 async function versionProbe(options: OpencodeVerifyOptions, context: AdapterContext): Promise<Omit<Probe, "observedAt">> {
   const r = await run(options, context, OPENCODE_PROBE_ARGV.version, options.versionTimeoutMs ?? VERSION_TIMEOUT_MS)

@@ -16,6 +16,7 @@ import {
   exitFor,
   HARNESS_ORDER,
   harnessReadiness,
+  PENDING_STEPS,
   PROFILE_IDS,
   programLayout,
   resolvePathRef,
@@ -40,7 +41,7 @@ import { OpencodePlanError } from "../bootstrap/adapters/opencode/plan.ts"
 import { parseJsonc } from "../bootstrap/transaction/json-merge.ts"
 import { renderRoleVars } from "../bootstrap/ansible/render.ts"
 import { createNodeProbe } from "../bootstrap/discovery/node-probe.ts"
-import { credentialStoreFor, defaultMachineName, machineEnroll, machineStatus, renderMachineResult } from "../bootstrap/enrollment/index.ts"
+import { credentialStoreFor, defaultMachineName, machineEnroll, machineStatus, renderMachineResult, sharingOffWarning } from "../bootstrap/enrollment/index.ts"
 import { previewSetup, renderPreview, revalidateApply } from "../bootstrap/preview/index.ts"
 import { defaultProfile } from "../bootstrap/profiles/catalog.ts"
 import { detectDrift, managedFields, type Observation } from "../bootstrap/profiles/drift.ts"
@@ -350,8 +351,24 @@ function printMachine(io: SetupIo, json: boolean, e: ResultEnvelope, exit: numbe
 
 // ---------- setup ----------
 
-function previewWarnings(snapshot: DiscoverySnapshot, plan: SetupPlan, notes: readonly string[]): string[] {
+/**
+ * A hint when the plan links commands into user-bin (hub, a harness) but that directory is not on the user's PATH:
+ * the links work, but the commands are not found by name until the user adds it.
+ */
+export function pathHint(snapshot: DiscoverySnapshot, plan: SetupPlan, env: Readonly<Record<string, string | undefined>>): string | undefined {
+  const linked = plan.actions.flatMap((a) => (a.kind === "link-executable" && a.path.root === "user-bin" ? [a.path.rel] : []))
+  if (linked.length === 0) return undefined
+  const bin = snapshot.roots.find((r) => r.id === "user-bin")
+  if (!bin) return undefined
+  const dir = rootPathIn(bin, executionContextOf(snapshot))
+  const onPath = (env.PATH ?? "").split(":").some((d) => d.replace(/\/+$/, "") === dir)
+  return onPath ? undefined : `${dir} is not on your PATH, so ${linked.join(", ")} will not be found by name; add it to PATH (for example in ~/.profile)`
+}
+
+function previewWarnings(snapshot: DiscoverySnapshot, plan: SetupPlan, notes: readonly string[], env: Readonly<Record<string, string | undefined>> = {}): string[] {
   const warnings = [...notes]
+  const hint = pathHint(snapshot, plan, env)
+  if (hint) warnings.push(hint)
   const mcp = plan.actions.some((a) => a.kind === "register-mcp-server")
   const installs = plan.actions.some((a) => a.kind === "install-artifact")
   const bin = resolvePathRef({ root: "user-bin", rel: "hubctl" }, snapshot.roots, executionContextOf(snapshot))
@@ -379,7 +396,7 @@ async function preview(io: SetupIo, flags: Parsed["flags"], json: boolean): Prom
     writeFileSync(tmp, `${JSON.stringify(request, null, 2)}\n`, { mode: 0o600 })
     renameSync(tmp, file)
   }
-  const warnings = previewWarnings(snapshot, r.value.plan, bundle.node()?.notes ?? [])
+  const warnings = previewWarnings(snapshot, r.value.plan, bundle.node()?.notes ?? [], io.env)
   return emit(io, json, envelope("setup preview", true, { data: r.value, warnings }), () =>
     [...renderPreview(r.value, io.home), ...(out ? [`Saved for apply: hubctl setup apply --preview ${out}`] : ["Keep it for apply with --out <file>; then: hubctl setup apply --preview <file>"])].join("\n"),
   )
@@ -417,6 +434,29 @@ export interface HarnessReport {
 const READINESS_STATE = { ready: "ready", pending: "installed-not-ready", failed: "failed" } as const
 
 export const harnessReport = (r: HarnessReadiness): HarnessReport => ({ harness: r.harness, ready: r.state === "ready", state: READINESS_STATE[r.state], probes: r.probes, nextSteps: r.nextSteps })
+
+/**
+ * The OpenCode spoke connects only while config.json's `mode` is not "off". When the user turned sharing off, a
+ * pending spoke-connected probe waits on that, not on starting OpenCode, so its next step says so.
+ */
+export function withSharingStep(reports: readonly HarnessReport[], sharing: { readonly off: boolean; readonly location: string }): HarnessReport[] {
+  if (!sharing.off) return [...reports]
+  const start = PENDING_STEPS.opencode["spoke-connected"]
+  return reports.map((r) =>
+    r.harness === "opencode" && r.probes.some((p) => p.kind === "spoke-connected" && p.status === "pending")
+      ? { ...r, nextSteps: r.nextSteps.map((s) => (s === start ? sharingOffWarning(sharing.location) : s)) }
+      : r,
+  )
+}
+
+function sharingOf(io: SetupIo): { off: boolean; location: string } {
+  const store = credentialStoreFor(io.env, io.home)
+  try {
+    return { off: store.sharingMode() === "off", location: store.location }
+  } catch {
+    return { off: false, location: store.location }
+  }
+}
 
 const READINESS_TEXT = { ready: "ready", "installed-not-ready": "installed, not ready", failed: "not working" } as const
 
@@ -467,7 +507,7 @@ async function apply(io: SetupIo, flags: Parsed["flags"], json: boolean): Promis
   })
   if (!outcome.ok) {
     const report = reportData(outcome)
-    const harnesses = readiness.reports()
+    const harnesses = withSharingStep(readiness.reports(), sharingOf(io))
     const data = report || harnesses.length > 0 ? { ...report, ...(harnesses.length > 0 ? { ready: false, harnesses } : {}) } : undefined
     const pendingOnly = harnesses.length > 0 && harnesses.every((h) => h.state !== "failed")
     const hint = outcome.code.startsWith("preview_")
@@ -495,12 +535,13 @@ async function apply(io: SetupIo, flags: Parsed["flags"], json: boolean): Promis
     floors: manifest ? raiseFloors(state.floors, manifest, snapshot.host.target) : state.floors,
   })
   store.writeRequest(request)
-  const harnesses = readiness.reports()
+  const harnesses = withSharingStep(readiness.reports(), sharingOf(io))
   const data = { ...reportData(outcome)!, ready: harnesses.every((h) => h.ready), harnesses }
   const warnings = [
     ...(bundle.node()?.notes ?? []),
     ...outcome.report.conflicts.map((c) => `${c.actionID}: ${c.reason}`),
     ...harnesses.filter((h) => !h.ready).map((h) => `${h.harness} is installed, not ready: ${h.probes.filter((p) => p.status !== "pass").map((p) => p.kind).join(", ")} waits on you (see the next steps)`),
+    ...[pathHint(snapshot, request.preview.plan, io.env)].filter((h): h is string => h !== undefined),
   ]
   return emit(io, json, envelope("setup apply", true, { data, warnings }), () =>
     [
@@ -518,7 +559,10 @@ async function verify(io: SetupIo, flags: Parsed["flags"], json: boolean): Promi
   const runtime = runtimeFor(io, undefined, snapshot)
   const now = context(io).now()
   const verifications = await runtime.verify(profile.harnesses)
-  const harnesses = verifications.map((v) => harnessReport(harnessReadiness(v, now)))
+  const harnesses = withSharingStep(
+    verifications.map((v) => harnessReport(harnessReadiness(v, now))),
+    sharingOf(io),
+  )
   const ready = harnesses.every((h) => h.ready)
   const data = { profile: profile.id, ready, harnesses }
   const text = () => readinessText(harnesses).join("\n")

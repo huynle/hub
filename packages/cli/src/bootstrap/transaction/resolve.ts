@@ -10,6 +10,11 @@ import { txFail, txOk, type TxResult } from "./result.ts"
 export interface ResolveOptions {
   /** link-executable manages a symlink at the final component; every component above it is still checked. */
   readonly finalMayBeSymlink?: boolean
+  /**
+   * A symlink's target: mapped and checked like any PathRef (no traversal, a known root) but never written through,
+   * so links on the way (a harness's `current`) are allowed.
+   */
+  readonly targetOnly?: boolean
   /** Where apply runs (default: the host). */
   readonly context?: ExecutionContext
 }
@@ -23,6 +28,7 @@ export function rootDir(id: PathRef["root"], roots: readonly RootMapping[], cont
 export function resolveTarget(ref: PathRef, roots: readonly RootMapping[], fs: TxFs, options: ResolveOptions = {}): TxResult<string> {
   const resolved = resolvePathRef(ref, roots, options.context)
   if (!resolved.ok) return txFail("invalid", `${ref.root}:${String(ref.rel)}: ${resolved.issues[0]!.message}`)
+  if (options.targetOnly) return txOk(resolved.value)
   const root = rootDir(ref.root, roots, options.context)!
   const parts = ref.rel.split("/")
   const checked = options.finalMayBeSymlink ? parts.slice(0, -1).join("/") : ref.rel

@@ -4,7 +4,8 @@
 import { mkdirSync, readFileSync } from "node:fs"
 import { homedir, hostname } from "node:os"
 import { fileURLToPath } from "node:url"
-import { Plugin } from "@opencode/plugin"
+// Types only: @opencode/plugin's runtime entry loads its whole schema graph (~1 s cold) for an identity define().
+import type { Plugin } from "@opencode/plugin"
 import { DEFAULT_SUBAGENT, prepareConfigPath } from "./config"
 import { HubRpc, VoiceRpc } from "./rpc"
 import { jobFromInfo, type JobInfo } from "./protocol"
@@ -26,6 +27,18 @@ import { joinProcess, type Membership } from "./spoke/singleton"
 import { detectKind, Spoke, SpokeError, type FormAction, type SpokeHost } from "./spoke/spoke"
 
 type Context = Parameters<Parameters<typeof Plugin.define>[0]["setup"]>[0]
+
+/** Plugin.define without importing it (it returns its argument). */
+const definePlugin = (plugin: Plugin.Plugin): Plugin.Plugin => plugin
+
+/** One registration with OpenCode; a failure is logged and never stops the others. */
+async function attempt(what: string, register: () => Promise<unknown> | undefined): Promise<void> {
+  try {
+    await register()
+  } catch (cause) {
+    console.error(`[hub] could not ${what}`, cause)
+  }
+}
 
 const VOICE_STYLE =
   "This message came from a voice conversation and your reply will be read aloud. " +
@@ -207,17 +220,17 @@ async function registerShellEnv(ctx: Context, identity: (sessionID: string) => {
   const injector = envInjector({ correlator: new ShellCorrelator(), binDir, identity })
   const tool = (ctx as any).tool
   const shell = (ctx as any).shell
-  try {
+  await attempt("register the shell environment hooks", async () => {
     if (!tool?.hook || !shell?.hook) throw new Error("this OpenCode has no tool/shell hooks")
-    await tool.hook("execute.before", (event: any) => injector.toolBefore(event))
-    await tool.hook("execute.after", (event: any) => injector.toolAfter(event))
-    await shell.hook("create.before", (invocation: any) => injector.shellBefore(invocation))
-  } catch (cause) {
-    console.error("[hub] could not register the shell environment hooks", cause)
-  }
+    await Promise.all([
+      tool.hook("execute.before", (event: any) => injector.toolBefore(event)),
+      tool.hook("execute.after", (event: any) => injector.toolAfter(event)),
+      shell.hook("create.before", (invocation: any) => injector.shellBefore(invocation)),
+    ])
+  })
 }
 
-export default Plugin.define({
+export default definePlugin({
   id: "hub",
   async setup(ctx) {
     // An OpenCode started from a session's shell must not act as that session (nor hand its token to its shells).
@@ -249,82 +262,69 @@ export default Plugin.define({
       permissionLocation(ctx),
     )
 
-    try {
-      await ctx.agent.transform((editor) => defineVoiceAgent(editor as any))
-    } catch (cause) {
-      console.error("[hub] could not register the voice agent", cause)
-    }
-
-    try {
-      await ctx.session.hook("context", (event) => {
-        const spoke = membership.active()
-        if (spoke?.isVoiceTurn(event.sessionID)) event.system.push({ type: "text", text: VOICE_STYLE })
-        const parts = orchestratorParts({
-          agent: event.agent,
-          conversation: spoke?.inConversation(event.sessionID) ?? false,
-          subagent: spoke?.subagent() ?? DEFAULT_SUBAGENT,
-          workModel: spoke?.workModelFor(event.sessionID),
-          taskBoard: spoke?.taskBoard(event.sessionID),
-        })
-        for (const text of parts) event.system.push({ type: "text", text })
-      })
-    } catch (cause) {
-      console.error("[hub] could not register the context hook", cause)
-    }
-
-    try {
+    // Every registration is independent: they run together, so OpenCode's plugin activation (bounded at ~5 s on a
+    // cold start) waits for about one of them, not their sum.
+    const registrations: Promise<void>[] = [
+      attempt("register the voice agent", () => ctx.agent.transform((editor) => defineVoiceAgent(editor as any))),
+      attempt("register the context hook", () =>
+        ctx.session.hook("context", (event) => {
+          const spoke = membership.active()
+          if (spoke?.isVoiceTurn(event.sessionID)) event.system.push({ type: "text", text: VOICE_STYLE })
+          const parts = orchestratorParts({
+            agent: event.agent,
+            conversation: spoke?.inConversation(event.sessionID) ?? false,
+            subagent: spoke?.subagent() ?? DEFAULT_SUBAGENT,
+            workModel: spoke?.workModelFor(event.sessionID),
+            taskBoard: spoke?.taskBoard(event.sessionID),
+          })
+          for (const text of parts) event.system.push({ type: "text", text })
+        }),
+      ),
       // The voice agent stops one worker ("cancel the deploy one") without stopping itself or the others.
-      await (ctx as any).tool?.transform?.((editor: any) =>
-        editor.add({
-          name: STOP_TOOL,
-          description: STOP_TOOL_DESCRIPTION,
-          input: {
-            type: "object",
-            properties: {
-              sessionID: { type: "string", description: "The worker's sessionID, from your task board or the subagent tool's result." },
-              all: { type: "boolean", description: "true: stop every worker of yours that is still running." },
+      attempt("register the task stop tool", () =>
+        (ctx as any).tool?.transform?.((editor: any) =>
+          editor.add({
+            name: STOP_TOOL,
+            description: STOP_TOOL_DESCRIPTION,
+            input: {
+              type: "object",
+              properties: {
+                sessionID: { type: "string", description: "The worker's sessionID, from your task board or the subagent tool's result." },
+                all: { type: "boolean", description: "true: stop every worker of yours that is still running." },
+              },
+              additionalProperties: false,
             },
-            additionalProperties: false,
-          },
-          options: { codemode: false },
-          execute: async (value: unknown, context: { sessionID: string }) => {
-            const spoke = membership.active()
-            if (!spoke) return { content: "The hub is not running in this OpenCode process; nothing was stopped." }
-            const { stopped, text } = await spoke.stopWorkers(context.sessionID, (value ?? {}) as Record<string, unknown>)
-            return { content: text, metadata: { stopped } }
-          },
-        }),
-      )
-    } catch (cause) {
-      console.error("[hub] could not register the task stop tool", cause)
-    }
-
-    try {
+            options: { codemode: false },
+            execute: async (value: unknown, context: { sessionID: string }) => {
+              const spoke = membership.active()
+              if (!spoke) return { content: "The hub is not running in this OpenCode process; nothing was stopped." }
+              const { stopped, text } = await spoke.stopWorkers(context.sessionID, (value ?? {}) as Record<string, unknown>)
+              return { content: text, metadata: { stopped } }
+            },
+          }),
+        ),
+      ),
       // Agents message and ask other sessions as themselves (the session's own hub token; src/spoke/hub-tool.ts).
-      await (ctx as any).tool?.transform?.((editor: any) =>
-        editor.add({
-          name: HUB_TOOL,
-          description: HUB_TOOL_DESCRIPTION,
-          input: HUB_TOOL_INPUT,
-          options: { codemode: false },
-          execute: (value: unknown, context: { sessionID: string; signal?: AbortSignal }) =>
-            runHubTool(() => membership.active(), value, { sessionID: context.sessionID, ...(context.signal ? { signal: context.signal } : {}) }),
-        }),
-      )
-    } catch (cause) {
-      console.error("[hub] could not register the hub tool", cause)
-    }
-
-    try {
+      attempt("register the hub tool", () =>
+        (ctx as any).tool?.transform?.((editor: any) =>
+          editor.add({
+            name: HUB_TOOL,
+            description: HUB_TOOL_DESCRIPTION,
+            input: HUB_TOOL_INPUT,
+            options: { codemode: false },
+            execute: (value: unknown, context: { sessionID: string; signal?: AbortSignal }) =>
+              runHubTool(() => membership.active(), value, { sessionID: context.sessionID, ...(context.signal ? { signal: context.signal } : {}) }),
+          }),
+        ),
+      ),
       // @name / @@role in a prompt get context from the hub as an attached text file; the text is never changed
       // and the harness's own @ meanings win (src/spoke/prompt-refs.ts, design §2.4).
-      const references = new PromptReferences(() => membership.active())
-      await ctx.session.hook("prompt", (event) => references.onPrompt(event))
-    } catch (cause) {
-      console.error("[hub] could not register the prompt hook", cause)
-    }
-
-    await registerShellEnv(ctx, (sessionID) => membership.active()?.shellIdentity(sessionID))
+      attempt("register the prompt hook", () => {
+        const references = new PromptReferences(() => membership.active())
+        return ctx.session.hook("prompt", (event) => references.onPrompt(event))
+      }),
+      registerShellEnv(ctx, (sessionID) => membership.active()?.shellIdentity(sessionID)),
+    ]
 
     const run = async <T>(rpc: { error: (...args: any[]) => any }, action: (spoke: Spoke) => T | Promise<T>) => {
       const spoke = membership.active()
@@ -376,13 +376,8 @@ export default Plugin.define({
       hubMsg: (value, rpc) => run(rpc, (s) => hubMsg(s, value)),
     } satisfies Parameters<typeof ctx.rpc.register<typeof HubRpc>>[1]
     // "hub", plus the opencode-voice id "voice" for clients built against the old name (see src/rpc.ts).
-    for (const definition of [HubRpc, VoiceRpc]) {
-      try {
-        await ctx.rpc.register(definition, handlers)
-      } catch (cause) {
-        console.error(`[hub] could not register RPC methods (${definition.id})`, cause)
-      }
-    }
+    for (const definition of [HubRpc, VoiceRpc]) registrations.push(attempt(`register RPC methods (${definition.id})`, () => ctx.rpc.register(definition, handlers)))
+    await Promise.all(registrations)
 
     return () => membership.leave()
   },
