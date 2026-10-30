@@ -7,6 +7,10 @@ import { parse, str, UsageError, type CommandSpec, type Parsed } from "./args"
 import { loginFile, readLogin, removeLogin, resolveCredentials, writeLogin, type Credentials, type Env } from "./credentials"
 import { atName, logText, whoamiText, type Actor, roleText, sessionsText, showText, statusText, whoText } from "./format"
 import { CliError, EXIT, withHub } from "./http"
+import { deviceLogin, promptText, scopeNotes } from "./login"
+import { defaultMachineName } from "./bootstrap/enrollment/enroll.ts"
+import { readSpokeCredentials } from "../../node/src/config.ts"
+import { hostname } from "node:os"
 import { serveMcp } from "./mcp"
 import { ASK_EXPIRES_DEFAULT_S, askOutcome, declinedText, durationArg, inboxText, mutedText, repliedText, sentText, textArg } from "./messaging"
 import { watch } from "./watch"
@@ -33,8 +37,12 @@ export interface Io {
   home: string
   stdout(s: string): void
   stderr(s: string): void
-  /** The whole of stdin (login reads the token from it when --token is not given). */
+  /** The whole of stdin (login reads the token from it with `--token -`, or when piped and --token is not given). */
   stdin?: () => Promise<string>
+  /** stdin is a terminal: `hub login` without --token runs the device code instead of reading a token. */
+  stdinIsTerminal?: boolean
+  /** `hub login` device code: test seams (poll interval, the name the approval page shows, fetch). */
+  login?: { readonly intervalMs?: number; readonly clientName?: string; readonly fetch?: typeof fetch }
   /** Ends `watch` and `mcp` (main.ts aborts it on SIGINT/SIGTERM). */
   signal?: AbortSignal
   /** stdin as a stream (`hub mcp` reads JSON-RPC lines from it). */
@@ -173,8 +181,13 @@ Codex (app-server spoke)
 MCP
   hub mcp                             an MCP server on stdio: these verbs as tools, with this CLI's credential
 
-Login (outside a hub session)
-  hub login [--url URL] [--token APP_TOKEN]   store an app token (token read from stdin when not given)
+Login (outside a hub session; a machine enrollment is not a user login)
+  hub login [--url URL] [--scope S]... [--name N]
+                                      device code: approve it in the console as yourself and choose the scopes
+                                      (default sessions:read, messages:send, messages:read; launching needs
+                                      --scope sessions:launch, or tick it on the page, plus a grant with verb launch);
+                                      the URL defaults to HUB_URL, the last login, else this machine's enrollment
+  hub login [--url URL] --token APP_TOKEN|-   store an app token (- or a pipe: read from stdin)
   hub logout
 
 Options: --json (raw responses), --help, --version
@@ -216,6 +229,31 @@ const grantHub = <T>(context: Context, use: (hub: HubClient) => Promise<T>): Pro
   context.hub(use).catch((error) => {
     throw grantError(error)
   })
+
+/** A forbidden launch with an app token (`hub login`): what else it needs. */
+function launchError(error: unknown, source: string): unknown {
+  if (!(error instanceof CliError) || error.exit !== EXIT.forbidden || source !== "login") return error
+  const hint = "an app token launches only under a grant with verb launch covering the repo: create one in the console, or `hub grant request --project <repo> --allow launch --why \"…\"`"
+  return new CliError(error.exit, error.message, [error.hint, hint].filter(Boolean).join("; "), error.envelope)
+}
+
+/** No user credential: says so, and when this machine is enrolled, that its enrollment is not a user login. */
+function notLoggedIn(io: Io, label: string): CliError {
+  let machine: { server: string; machineID?: string } | undefined
+  try {
+    machine = readSpokeCredentials(io.env, io.home)
+  } catch {
+    machine = undefined
+  }
+  if (machine) {
+    return new CliError(
+      EXIT.unauthorized,
+      `this machine is enrolled (${machine.machineID ?? "machine"}), but ${label === "launch" ? "launching" : `\`hub ${label}\``} needs a user login: run \`hub login\``,
+      `the machine credential identifies this machine to ${machine.server}, never you; \`hub login\` opens a device code you approve in the console as yourself`,
+    )
+  }
+  return new CliError(EXIT.unauthorized, "not logged in to a hub", "Run `hub login --url <hub URL>` and approve the code in the console, or run inside a hub session's shell (HUB_URL + HUB_SESSION_TOKEN)")
+}
 
 /** --why as SDK act options. */
 const whyOf = (flags: Parsed["flags"]) => {
@@ -509,7 +547,9 @@ const COMMANDS: Record<string, Command> = {
     flags: LAUNCH_FLAGS,
     async handle(context) {
       const spec = await launchSpecArg(context.parsed.flags, { cwd: context.io.cwd ?? process.cwd(), ...(context.io.stdin ? { stdin: context.io.stdin } : {}) })
-      const body = await context.hub((hub) => hub.launches.create(spec))
+      const body = await context.hub((hub) => hub.launches.create(spec)).catch((error) => {
+        throw launchError(error, context.credentials().source)
+      })
       if (context.json) printJSON(context.io, { launch: body.launch })
       else out(context.io, launchedText(body.launch, body.created, spec.key))
     },
@@ -611,18 +651,48 @@ const COMMANDS: Record<string, Command> = {
     },
   },
   login: {
-    flags: { url: "string", token: "string" },
+    flags: { url: "string", token: "string", scope: "multi", name: "string" },
     async handle(context) {
       const { io, parsed } = context
       const file = loginFile(io.env, io.home)
-      const url = (str(parsed.flags, "url") ?? io.env.HUB_URL ?? readLogin(file)?.url)?.replace(/\/+$/, "")
+      const machine = (() => {
+        try {
+          return readSpokeCredentials(io.env, io.home)
+        } catch {
+          return undefined
+        }
+      })()
+      const url = (str(parsed.flags, "url") ?? io.env.HUB_URL ?? readLogin(file)?.url ?? machine?.server)?.replace(/\/+$/, "")
       if (!url) throw new UsageError("needs --url <hub URL> (or HUB_URL)")
-      const token = (str(parsed.flags, "token") ?? (io.stdin ? await io.stdin() : "")).trim()
-      if (!token) throw new UsageError("needs an app token: --token, or on stdin (create one in the console: Settings → Agents)")
+      const given = str(parsed.flags, "token")
+      // A token: --token, `--token -` or a pipe (stdin); else (a terminal) the device code.
+      const piped = given === undefined && io.stdin !== undefined && io.stdinIsTerminal !== true
+      let token: string
+      let notes: string[] = []
+      let scopes: readonly string[] | undefined
+      if (given !== undefined || piped) {
+        if (parsed.flags.scope !== undefined) throw new UsageError("--scope is for the device code (without --token); an app token's scopes are set when it is created")
+        token = (given !== undefined && given !== "-" ? given : io.stdin ? await io.stdin() : "").trim()
+        if (!token) throw new UsageError("needs an app token: --token, or on stdin (create one in the console: Settings → Agents), or run `hub login` in a terminal for a device code")
+      } else {
+        const requested = ((parsed.flags.scope as string[] | undefined) ?? []).flatMap((s) => s.split(",")).map((s) => s.trim()).filter(Boolean)
+        const login = await deviceLogin({
+          server: url,
+          clientName: str(parsed.flags, "name") ?? io.login?.clientName ?? defaultMachineName(hostname()),
+          scopes: requested,
+          ...(io.signal ? { signal: io.signal } : {}),
+          ...(io.login?.fetch ? { fetch: io.login.fetch } : {}),
+          ...(io.login?.intervalMs !== undefined ? { intervalMs: io.login.intervalMs } : {}),
+          onPrompt: (prompt) => io.stderr(`${promptText(prompt)}\n`),
+        })
+        token = login.token
+        scopes = login.scopes
+        notes = scopeNotes(login.scopes, login.tokenID)
+      }
       const credentials: Credentials = { url, token, source: "login" }
       const body = await withHub(credentials, (hub) => hub.whoami())
       writeLogin(file, { url, token })
-      answer(context, body, (b) => `logged in to ${url}\n${whoamiText(b)}\nsaved in ${file}`)
+      answer(context, body, (b) => [`logged in to ${url}`, whoamiText(b), ...(scopes ? [`scopes: ${scopes.join(", ")}`] : []), `saved in ${file}`, ...notes].join("\n"))
     },
   },
   logout: {
@@ -725,7 +795,7 @@ export async function run(argv: string[], io: Io): Promise<number> {
     json = parsed.flags.json === true
     const credentials = () => {
       const found = resolveCredentials(io.env, io.home)
-      if (!found) throw new CliError(EXIT.unauthorized, "not logged in to a hub", "Run `hub login --url <hub URL>` with an app token, or run inside a hub session's shell (HUB_URL + HUB_SESSION_TOKEN)")
+      if (!found) throw notLoggedIn(io, label)
       return found
     }
     return (await command.handle({ io, parsed, json, credentials, hub: (use) => withHub(credentials(), use) })) ?? EXIT.ok
