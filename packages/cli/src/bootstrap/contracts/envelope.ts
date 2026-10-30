@@ -56,6 +56,8 @@ export const ERROR_CODES = [
   "enrollment_denied",
   "enrollment_expired",
   "cancelled",
+  // v1.3
+  "service_failed",
   "internal",
 ] as const
 export type ErrorCode = (typeof ERROR_CODES)[number]
@@ -95,6 +97,8 @@ const EXIT_OF: Readonly<Record<ErrorCode, number>> = {
   enrollment_denied: EXIT.forbidden,
   enrollment_expired: EXIT.needsUser,
   cancelled: EXIT.needsUser,
+  // v1.3: an activated service that does not stay running (failed, crash-looping, never settles) is not ready.
+  service_failed: BOOTSTRAP_EXIT.notReady,
   internal: EXIT.other,
 }
 

@@ -7,8 +7,10 @@ import { renderServiceUnit, SERVICE_ENVIRONMENT } from "../src/bootstrap/adapter
 import {
   GOLDEN_LAUNCHD_CODEX,
   GOLDEN_LAUNCHD_NODE,
+  GOLDEN_LAUNCHD_NODE_SCRIPT,
   GOLDEN_SYSTEMD_CLAUDE_SCRIPT,
   GOLDEN_SYSTEMD_NODE,
+  SCRIPT_DARWIN,
   SCRIPT_LINUX,
   STANDALONE_DARWIN,
   STANDALONE_LINUX,
@@ -51,6 +53,11 @@ describe("golden units", () => {
     expect(unit.name).toBe("io.github.huynle.hub-node")
   })
 
+  test("launchd: hub node from a script layout runs the runtime as bun (BUN_BE_BUN=1)", () => {
+    const unit = value(renderServiceUnit({ service: "node", manager: "launchd", layout: SCRIPT_DARWIN, home: "/Users/dev" }))
+    expect(unit.text).toBe(GOLDEN_LAUNCHD_NODE_SCRIPT)
+  })
+
   test("launchd: the Codex spoke with its harness binary carried in", () => {
     const unit = value(
       renderServiceUnit({ service: "codex-spoke", manager: "launchd", layout: STANDALONE_DARWIN, home: "/Users/dev", environment: { HUB_CODEX_BIN: "/Users/dev/.local/share/hub/harnesses/codex/current/bin/codex" } }),
@@ -63,6 +70,25 @@ describe("golden units", () => {
     expect(unit.text).toContain("<string>/Users/a&amp;b/&lt;hub&gt;</string>")
     expect(unit.text).toContain("<string>/Users/a&amp;b/.local/state/hub/node.log</string>")
   })
+})
+
+// A compiled hubctl with BUN_BE_BUN=1 behaves as the bun CLI: `hubctl node run` became `bun run` of a missing module
+// and the unit crash-looped (HBS-12 acceptance, Debian). Only a runtime running the script may get it.
+describe("BUN_BE_BUN only for the script layout", () => {
+  const cases = SERVICE_IDS.flatMap((service) => (["launchd", "systemd-user"] as ServiceManagerID[]).map((manager) => ({ service, manager })))
+  for (const { service, manager } of cases) {
+    const home = manager === "launchd" ? "/Users/dev" : "/home/dev"
+    test(`${service} on ${manager}: a standalone hubctl's unit never mentions BUN_BE_BUN`, () => {
+      const unit = value(renderServiceUnit({ service, manager, layout: manager === "launchd" ? STANDALONE_DARWIN : STANDALONE_LINUX, home }))
+      expect(unit.text).not.toContain("BUN_BE_BUN")
+      const byHand = value(renderServiceUnit({ service, manager, layout: manager === "launchd" ? STANDALONE_DARWIN : STANDALONE_LINUX, home, writtenBy: `hub ${service}` }))
+      expect(byHand.text).not.toContain("BUN_BE_BUN")
+    })
+    test(`${service} on ${manager}: a script layout's unit sets BUN_BE_BUN=1`, () => {
+      const unit = value(renderServiceUnit({ service, manager, layout: manager === "launchd" ? SCRIPT_DARWIN : SCRIPT_LINUX, home }))
+      expect(unit.text).toMatch(manager === "launchd" ? /<key>BUN_BE_BUN<\/key>\s*<string>1<\/string>/ : /^Environment=BUN_BE_BUN=1$/m)
+    })
+  }
 })
 
 describe("every embedded template renders", () => {

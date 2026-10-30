@@ -71,6 +71,27 @@ describe("service installs from the embedded templates", () => {
     expect(plist).not.toContain("$bunfs")
   })
 
+  test("a standalone hubctl writes no BUN_BE_BUN into any unit it installs (it would run as the bun CLI)", async () => {
+    const standalone = { execPath: "/home/dev/.local/bin/hubctl", entry: "/$bunfs/root/hubctl" }
+    const installs = [
+      ["node", "io.github.huynle.hub-node.plist", "hub-node.service"],
+      ["claude-code", "io.github.huynle.hub-claude-code.plist", "hub-claude-code.service"],
+      ["codex-spoke", "io.github.huynle.hub-codex-spoke.plist", "hub-codex-spoke.service"],
+    ] as const
+    for (const [command, plist, unit] of installs)
+      for (const [platform, file] of [
+        ["darwin", `Library/LaunchAgents/${plist}`],
+        ["linux", `.config/systemd/user/${unit}`],
+      ] as const) {
+        const dir = home()
+        const r = await cli([command, "install"], dir, { platform, program: standalone })
+        expect({ command, platform, code: r.code }).toEqual({ command, platform, code: 0 })
+        const text = readFileSync(path.join(dir, file), "utf8")
+        expect(text).toContain("/home/dev/.local/bin/hubctl")
+        expect(text).not.toContain("BUN_BE_BUN")
+      }
+  })
+
   test("an unenrolled machine is pointed at hubctl machine enroll", async () => {
     for (const argv of [["node", "install"], ["claude-code", "install"], ["node", "status"]]) {
       const r = await cli(argv, home(false))

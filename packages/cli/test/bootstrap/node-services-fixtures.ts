@@ -9,6 +9,8 @@ export const STANDALONE_DARWIN: ProgramLayout = { kind: "standalone", executable
 export const STANDALONE_LINUX: ProgramLayout = { kind: "standalone", executable: "/home/dev/.local/bin/hubctl" }
 /** A script layout whose entry has a space and a % (quoting and escaping in ExecStart=). */
 export const SCRIPT_LINUX: ProgramLayout = { kind: "script", runtime: "/home/dev/.bun/bin/bun", entry: "/home/dev/hub app/100%/main.ts" }
+/** An OpenCode binary running the bundled CLI as bun (BUN_BE_BUN=1). */
+export const SCRIPT_DARWIN: ProgramLayout = { kind: "script", runtime: "/Users/dev/.opencode/bin/opencode", entry: "/Users/dev/.local/share/hub/hub-cli.js" }
 
 export const GOLDEN_SYSTEMD_NODE = `# Written by hubctl setup from the embedded asset service/systemd-user/node; hubctl removes it only while it is unchanged.
 [Unit]
@@ -20,7 +22,6 @@ Wants=network-online.target
 Type=simple
 ExecStart=/home/dev/.local/bin/hubctl node run
 Environment=PATH=/home/dev/.bun/bin:/usr/local/bin:/usr/bin:/bin
-Environment=BUN_BE_BUN=1
 Restart=on-failure
 RestartSec=30
 RestartPreventExitStatus=78
@@ -72,6 +73,43 @@ export const GOLDEN_LAUNCHD_NODE = `<?xml version="1.0" encoding="UTF-8"?>
   <dict>
     <key>PATH</key>
     <string>/Users/dev/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/dev/.local/state/hub/node.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/dev/.local/state/hub/node.log</string>
+</dict>
+</plist>
+`
+
+/** The same agent from a script layout (an OpenCode binary or bun running hub-cli.js): only this layout runs as bun. */
+export const GOLDEN_LAUNCHD_NODE_SCRIPT = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Written by hubctl setup from the embedded asset service/launchd/node; hubctl removes it only while it is unchanged. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.github.huynle.hub-node</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/dev/.opencode/bin/opencode</string>
+    <string>/Users/dev/.local/share/hub/hub-cli.js</string>
+    <string>node</string>
+    <string>run</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/dev/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     <key>BUN_BE_BUN</key>
     <string>1</string>
   </dict>
@@ -111,8 +149,6 @@ export const GOLDEN_LAUNCHD_CODEX = `<?xml version="1.0" encoding="UTF-8"?>
     <string>/Users/dev/.local/bin:/Users/dev/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     <key>HUB_CODEX_BIN</key>
     <string>/Users/dev/.local/share/hub/harnesses/codex/current/bin/codex</string>
-    <key>BUN_BE_BUN</key>
-    <string>1</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
@@ -194,7 +230,21 @@ export const DISCOVERY_CONTAINER_HOST_UNITS: DiscoverySnapshot = {
   roots: [...DISCOVERY_IN_CONTAINER.roots.filter((r) => r.id !== "systemd-user"), { id: "systemd-user", path: "/srv/dev/.config/systemd/user", containerPath: "/workspace/home/.config/systemd/user" }],
 }
 
-/** A fake launchctl / systemctl --user: records every call and keeps the load and enable state of each service. */
+/** One health sample of a fake service: what `systemctl --user show` or `launchctl print` would report. */
+export type FakeHealth = "running" | "activating" | "auto-restart" | "failed"
+
+const SYSTEMD_SHOW: Readonly<Record<FakeHealth, [string, string]>> = {
+  running: ["active", "running"],
+  activating: ["activating", "start"],
+  "auto-restart": ["activating", "auto-restart"],
+  failed: ["failed", "failed"],
+}
+
+/**
+ * A fake launchctl / systemctl --user: records every call and keeps the load and enable state of each service.
+ * A loaded service reports `running` to health queries unless `health` scripts it: one sample per query, the last
+ * one repeating; each `auto-restart` or `failed` sample counts one restart (NRestarts, launchd runs).
+ */
 export class FakeManager {
   readonly calls: string[] = []
   readonly loaded = new Set<string>()
@@ -203,57 +253,93 @@ export class FakeManager {
   readonly failing = new Map<string, number>()
   /** Services that refuse to come up (activation leaves them unloaded). */
   readonly broken = new Set<string>()
+  /** Scripted health samples per unit or label. */
+  readonly health = new Map<string, FakeHealth[]>()
+  /** Extra text a launchctl print adds (to prove its output never reaches a message). */
+  printExtra = ""
+  private readonly restarts = new Map<string, number>()
 
   constructor(seed: { loaded?: readonly string[]; enabled?: readonly string[] } = {}) {
     for (const s of seed.loaded ?? []) this.loaded.add(s)
     for (const s of seed.enabled ?? []) this.enabled.add(s)
   }
 
-  readonly run = async (call: { readonly program: "systemctl" | "launchctl"; readonly words: readonly string[] }): Promise<{ readonly exitCode: number }> => {
+  readonly run = async (call: { readonly program: "systemctl" | "launchctl"; readonly words: readonly string[] }): Promise<{ readonly exitCode: number; readonly output?: string }> => {
     const line = [call.program, ...call.words].join(" ")
     this.calls.push(line)
     const forced = this.failing.get(line)
     if (forced !== undefined) return { exitCode: forced }
-    return { exitCode: call.program === "systemctl" ? this.systemctl(call.words) : this.launchctl(call.words) }
+    return call.program === "systemctl" ? this.systemctl(call.words) : this.launchctl(call.words)
   }
 
-  private systemctl(words: readonly string[]): number {
+  private sample(name: string): { state: FakeHealth; restarts: number } {
+    const script = this.health.get(name)
+    const state = script ? (script.length > 1 ? script.shift()! : script[0]!) : "running"
+    const restarts = (this.restarts.get(name) ?? 0) + (state === "auto-restart" || state === "failed" ? 1 : 0)
+    this.restarts.set(name, restarts)
+    return { state, restarts }
+  }
+
+  private systemctl(words: readonly string[]): { exitCode: number; output?: string } {
     const [, verb, ...rest] = words
     const unit = rest[rest.length - 1]!
     switch (verb) {
       case "daemon-reload":
-        return 0
+        return { exitCode: 0 }
       case "is-active":
-        return this.loaded.has(unit) ? 0 : 3
+        return { exitCode: this.loaded.has(unit) ? 0 : 3 }
       case "is-enabled":
-        return this.enabled.has(unit) ? 0 : 1
+        return { exitCode: this.enabled.has(unit) ? 0 : 1 }
+      case "show": {
+        if (!this.loaded.has(unit)) return { exitCode: 0, output: "NRestarts=0\nActiveState=inactive\nSubState=dead\n" }
+        const { state, restarts } = this.sample(unit)
+        const [active, sub] = SYSTEMD_SHOW[state]
+        return { exitCode: 0, output: `NRestarts=${restarts}\nActiveState=${active}\nSubState=${sub}\n` }
+      }
       case "enable":
         this.enabled.add(unit)
-        return 0
+        return { exitCode: 0 }
       case "disable":
         this.enabled.delete(unit)
-        return 0
+        return { exitCode: 0 }
       case "start":
       case "restart":
         if (!this.broken.has(unit)) this.loaded.add(unit)
-        return 0
+        this.restarts.delete(unit)
+        return { exitCode: 0 }
       case "stop":
         this.loaded.delete(unit)
-        return 0
+        return { exitCode: 0 }
     }
-    return 1
+    return { exitCode: 1 }
   }
 
-  private launchctl(words: readonly string[]): number {
+  private launchctl(words: readonly string[]): { exitCode: number; output?: string } {
     const [verb, target, file] = words
-    if (verb === "print") return this.loaded.has(target!.split("/").pop()!) ? 0 : 113
-    if (verb === "bootout") return this.loaded.delete(target!.split("/").pop()!) ? 0 : 3
+    if (verb === "print") {
+      const label = target!.split("/").pop()!
+      if (!this.loaded.has(label)) return { exitCode: 113, output: `Could not find service "${label}" in domain for user gui: 501\n` }
+      const { state, restarts } = this.sample(label)
+      const status =
+        state === "running"
+          ? "\tstate = running\n\tpid = 4242\n"
+          : state === "activating"
+            ? "\tstate = spawn scheduled\n"
+            : `\tstate = ${state === "failed" ? "not running" : "spawn scheduled"}\n`
+      const exited = restarts > 0 ? "\tlast exit code = 1\n" : "\tlast exit code = (never exited)\n"
+      return { exitCode: 0, output: `gui/501/${label} = {\n\tactive count = 1\n\ttype = LaunchAgent\n${status}${this.printExtra}\truns = ${restarts + 1}\n${exited}}\n` }
+    }
+    if (verb === "bootout") {
+      const label = target!.split("/").pop()!
+      this.restarts.delete(label)
+      return { exitCode: this.loaded.delete(label) ? 0 : 3 }
+    }
     if (verb === "bootstrap") {
       const label = file!.split("/").pop()!.replace(/\.plist$/, "")
-      if (this.broken.has(label)) return 5
+      if (this.broken.has(label)) return { exitCode: 5 }
       this.loaded.add(label)
-      return 0
+      return { exitCode: 0 }
     }
-    return 1
+    return { exitCode: 1 }
   }
 }

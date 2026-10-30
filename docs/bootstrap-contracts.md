@@ -388,7 +388,7 @@ Exit codes 0–9 are the CLI's existing codes (`http.ts` `EXIT`), unchanged. The
 | 12 | `previewInvalid` | `preview_*` |
 | 13 | `locked` | `locked` |
 | 14 | `recoveryRequired` | `recovery_required` |
-| 15 | `notReady` | `harness_not_ready` |
+| 15 | `notReady` | `harness_not_ready`, `service_failed` (§7.7) |
 
 The other codes map to existing exits: `unsupported_platform`/`offline` → 7, `escalation_required`/`needs_user` →
 4, `revoked`/`unauthorized` → 9, `usage`/`invalid` → 2, `not_found` → 3, `forbidden` → 5, `internal` → 1.
@@ -749,6 +749,21 @@ spoke is. In cluster mode it answers from the pod's registry catalog, like `GET 
   `planSetup` leaves out `state-dir` once `state:hub/bootstrap/state.json` exists (a committed apply wrote it; the
   apply lock creates the directory but never that file, so a fresh preview and apply's locked re-plan still agree).
   A converged session-only host plans only `verify-opencode`.
+- **Standalone service units.** A Bun-compiled executable with `BUN_BE_BUN=1` behaves as the bun CLI, so a unit
+  that started a standalone hubctl with it ran `bun node run` and crash-looped (`Module not found …/run`). The
+  renderer (`renderServiceUnit`) keeps the templates' `BUN_BE_BUN=1` only for the script layout (a runtime running
+  `hub-cli.js`); a standalone layout's unit never mentions it, for all six templates and for both `hubctl setup` and
+  `hub node|claude-code|codex-spoke install`.
+- **Activation checks health (`service_failed`).** Loading is not running: a crash-looping unit was reported
+  `activate-node-service applied` with exit 0. After loading, activation polls the manager's state
+  (`systemctl --user show --property=ActiveState,SubState,NRestarts <unit>`, `launchctl print gui/<uid>/<label>`;
+  only these two fixed queries return output, parsed for those fields and never passed on) and needs the service
+  running, with no restart, for 3 s within 10 s (`HEALTH_WINDOW`). Failed, crash-looping (auto-restart, a respawn
+  after an exit), stopped or never settling fails the step with `service_failed` (exit 15). The executor puts the
+  service back itself (the engine does not undo the failing step): unloaded and disabled when it was not loaded
+  before, so the rollback then removes the unit file. The message names the unit and its state and points at
+  `journalctl --user -u <unit>` or `~/.local/state/hub/<service>.log`. A service that was already loaded stays
+  loaded, as before; its previous unit file is restored, but it is not restarted.
 - **Deferred: plugin diagnostics.** The service-spawned `opencode serve --service` discards stderr, so the plugin's
   `[hub]` errors are invisible. `@opencode/plugin` 2.2's server plugin context has no logger, so they cannot be routed
   into OpenCode's log yet.
