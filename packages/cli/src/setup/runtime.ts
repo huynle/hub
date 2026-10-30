@@ -68,7 +68,7 @@ import { fileDigest } from "../bootstrap/transaction/stream.ts"
 import { txFail, txOk } from "../bootstrap/transaction/result.ts"
 import { TxStore } from "../bootstrap/transaction/store.ts"
 import { checkOpenShell } from "../openshell.ts"
-import { enrollmentContributor, HUBCTL_REF, hubctlContributor, refusing, type InstalledInspector } from "./contributors.ts"
+import { enrollmentContributor, harnessLinkContributor, HUBCTL_REF, hubctlContributor, refusing, type InstalledInspector, type PathInspector } from "./contributors.ts"
 import { dispatchByHarness, dispatchHarnessSource } from "./dispatch.ts"
 import { claudeSpokeProbes, codexSpokeStatus, opencodeSpokeProbe, type PresenceOptions } from "./spoke-probe.ts"
 import type { BootstrapState, SetupChoices } from "./state.ts"
@@ -175,6 +175,28 @@ export function installedInspector(snapshot: DiscoverySnapshot, fs: TxFs): Insta
         return false
       }
     },
+  }
+}
+
+/** Paths and PATH as the probe sees them (read-only), in the snapshot's execution context. */
+export function pathInspector(snapshot: DiscoverySnapshot, probe: DiscoveryProbe): PathInspector {
+  const where = (ref: PathRef) => {
+    const r = resolvePathRef(ref, snapshot.roots, executionContextOf(snapshot))
+    return r.ok ? r.value : undefined
+  }
+  return {
+    where,
+    entry: (ref) => {
+      const p = where(ref)
+      return p ? probe.lstat(p) : "missing"
+    },
+    linkTarget: (ref) => {
+      const p = where(ref)
+      if (!p || probe.lstat(p) !== "symlink") return undefined
+      const text = probe.readlink(p)
+      return text === undefined ? undefined : nodePath.resolve(nodePath.dirname(p), text)
+    },
+    onPath: (name) => which(probe, pathDirs(probe), name),
   }
 }
 
@@ -296,6 +318,7 @@ export function createSetupRuntime(deps: RuntimeDeps): SetupRuntime {
         const change = planProfileChange(before, input.profile, { allowDowngrade: choices.allowDowngrade === true, ...(services ? { services } : {}) })
         return change.ok ? ok(change.value.actions) : change
       }),
+      ...(snap ? [harnessLinkContributor(pathInspector(snap, deps.probe))] : []),
       enrollmentContributor({ ...(choices.server ? { server: choices.server } : {}), machineName: choices.machineName ?? "machine", enrolledWith }),
     ]
     return { sources: { adapters: registry, contributors, ...(choices.enrollment ? { enrollment: choices.enrollment } : {}) }, node: () => nodePlan, history: records }

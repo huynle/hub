@@ -351,8 +351,24 @@ function printMachine(io: SetupIo, json: boolean, e: ResultEnvelope, exit: numbe
 
 // ---------- setup ----------
 
-function previewWarnings(snapshot: DiscoverySnapshot, plan: SetupPlan, notes: readonly string[]): string[] {
+/**
+ * A hint when the plan links commands into user-bin (hub, a harness) but that directory is not on the user's PATH:
+ * the links work, but the commands are not found by name until the user adds it.
+ */
+export function pathHint(snapshot: DiscoverySnapshot, plan: SetupPlan, env: Readonly<Record<string, string | undefined>>): string | undefined {
+  const linked = plan.actions.flatMap((a) => (a.kind === "link-executable" && a.path.root === "user-bin" ? [a.path.rel] : []))
+  if (linked.length === 0) return undefined
+  const bin = snapshot.roots.find((r) => r.id === "user-bin")
+  if (!bin) return undefined
+  const dir = rootPathIn(bin, executionContextOf(snapshot))
+  const onPath = (env.PATH ?? "").split(":").some((d) => d.replace(/\/+$/, "") === dir)
+  return onPath ? undefined : `${dir} is not on your PATH, so ${linked.join(", ")} will not be found by name; add it to PATH (for example in ~/.profile)`
+}
+
+function previewWarnings(snapshot: DiscoverySnapshot, plan: SetupPlan, notes: readonly string[], env: Readonly<Record<string, string | undefined>> = {}): string[] {
   const warnings = [...notes]
+  const hint = pathHint(snapshot, plan, env)
+  if (hint) warnings.push(hint)
   const mcp = plan.actions.some((a) => a.kind === "register-mcp-server")
   const installs = plan.actions.some((a) => a.kind === "install-artifact")
   const bin = resolvePathRef({ root: "user-bin", rel: "hubctl" }, snapshot.roots, executionContextOf(snapshot))
@@ -380,7 +396,7 @@ async function preview(io: SetupIo, flags: Parsed["flags"], json: boolean): Prom
     writeFileSync(tmp, `${JSON.stringify(request, null, 2)}\n`, { mode: 0o600 })
     renameSync(tmp, file)
   }
-  const warnings = previewWarnings(snapshot, r.value.plan, bundle.node()?.notes ?? [])
+  const warnings = previewWarnings(snapshot, r.value.plan, bundle.node()?.notes ?? [], io.env)
   return emit(io, json, envelope("setup preview", true, { data: r.value, warnings }), () =>
     [...renderPreview(r.value, io.home), ...(out ? [`Saved for apply: hubctl setup apply --preview ${out}`] : ["Keep it for apply with --out <file>; then: hubctl setup apply --preview <file>"])].join("\n"),
   )
@@ -525,6 +541,7 @@ async function apply(io: SetupIo, flags: Parsed["flags"], json: boolean): Promis
     ...(bundle.node()?.notes ?? []),
     ...outcome.report.conflicts.map((c) => `${c.actionID}: ${c.reason}`),
     ...harnesses.filter((h) => !h.ready).map((h) => `${h.harness} is installed, not ready: ${h.probes.filter((p) => p.status !== "pass").map((p) => p.kind).join(", ")} waits on you (see the next steps)`),
+    ...[pathHint(snapshot, request.preview.plan, io.env)].filter((h): h is string => h !== undefined),
   ]
   return emit(io, json, envelope("setup apply", true, { data, warnings }), () =>
     [

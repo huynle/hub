@@ -310,15 +310,21 @@ describe("hubctl setup with a signed release manifest (pinned installs)", () => 
     const preview = await with_(["setup", "preview", "--profile", "session-only", "--manifest", manifestFile, "--out", file, "--json"])
     expect(preview.envelope.error).toBeUndefined()
     expect(preview.code).toBe(0)
-    expect(preview.envelope.data.plan.actions.map((a: { id: string }) => a.id)).toEqual(["state-dir", "install-hubctl", "link-hub", "install-opencode", "select-opencode", "opencode-plugin", "opencode-mcp", "verify-opencode"])
+    // HBS-12 (E4, A6): the hub-installed OpenCode goes on PATH through a typed link, and ~/.local/bin is not on this
+    // PATH, so the preview says so.
+    expect(preview.envelope.data.plan.actions.map((a: { id: string }) => a.id)).toEqual(["state-dir", "install-hubctl", "link-hub", "link-opencode", "install-opencode", "select-opencode", "opencode-plugin", "opencode-mcp", "verify-opencode"])
+    expect(preview.envelope.warnings?.join("\n")).toContain(`${path.join(home, ".local", "bin")} is not on your PATH`)
 
     const applied = await with_(["setup", "apply", "--preview", file, "--manifest", manifestFile, "--json"])
     expect(applied.envelope.error).toBeUndefined()
     expect(applied.code).toBe(0)
     expect(downloads).toEqual([pin.url])
+    expect(applied.envelope.warnings?.join("\n")).toContain(`${path.join(home, ".local", "bin")} is not on your PATH`)
     expect(readFileSync(path.join(home, ".local", "bin", "hubctl"))).toEqual(Buffer.from(hubctl))
     expect(lstatSync(path.join(home, ".local", "bin", "hub")).isSymbolicLink()).toBe(true)
     expect(existsSync(path.join(home, ".local", "share", "hub", "harnesses", "opencode", "current", "bin", "opencode"))).toBe(true)
+    expect(lstatSync(path.join(home, ".local", "bin", "opencode")).isSymbolicLink()).toBe(true)
+    expect(realpathSync(path.join(home, ".local", "bin", "opencode"))).toBe(realpathSync(path.join(home, ".local", "share", "hub", "harnesses", "opencode", "current", "bin", "opencode")))
     const state = JSON.parse(readFileSync(path.join(home, ".local", "state", "hub", "bootstrap", "state.json"), "utf8"))
     expect(state).toMatchObject({ profile: { id: "session-only" }, catalogRevision: 1, floors: { hubctl: "0.7.0" } })
 
@@ -336,7 +342,7 @@ describe("hubctl setup with a signed release manifest (pinned installs)", () => 
 
     const rolled = await with_(["setup", "rollback", "--json"])
     expect(rolled.code).toBe(0)
-    for (const p of [".local/bin/hubctl", ".local/bin/hub", ".local/share/hub/harnesses/opencode/current", ".config/opencode/opencode.json"]) expect(existsSync(path.join(home, p))).toBe(false)
+    for (const p of [".local/bin/hubctl", ".local/bin/hub", ".local/bin/opencode", ".local/share/hub/harnesses/opencode/current", ".config/opencode/opencode.json"]) expect(existsSync(path.join(home, p))).toBe(false)
   }, 30_000)
 
   test("a manifest this hubctl's trust root did not sign is refused (exit 11)", async () => {
