@@ -1,6 +1,8 @@
-// Screens outside the console shell: /pair (pairing code or Google sign-in) and /approve?code= (machine approval).
-import { Show, createSignal, onMount } from "solid-js"
+// Screens outside the console shell: /pair (pairing code or Google sign-in) and /approve?code= (machine approval, or
+// a CLI login: `hub login` without a token, approved as the signed-in user with the scopes they tick).
+import { For, Show, createSignal, onMount } from "solid-js"
 import { approveOwner, isAdmin, signInURL } from "../core/account-core"
+import { cliLoginApproveBody, cliLoginChoices, parseCliLogin, type CliLoginView } from "../core/agents-core"
 import { api, enc, errorText, HttpError } from "./api"
 import { enrollments, loadAuth, loadEnrollments, me, setMe } from "./hub"
 import { HubMark } from "./HubMark"
@@ -95,7 +97,100 @@ export function Pair(props: { next: string; error: string }) {
   )
 }
 
+/** A pending CLI login: who asks, the scopes (requested ones ticked; launch flagged), approve or deny. */
+function ApproveCliLogin(props: { login: CliLoginView }) {
+  const choices = cliLoginChoices(props.login)
+  const [scopes, setScopes] = createSignal(choices.filter((c) => c.checked).map((c) => c.scope))
+  const [result, setResult] = createSignal("")
+  const [done, setDone] = createSignal("")
+  const [busy, setBusy] = createSignal(false)
+  const code = () => props.login.userCode
+  const decide = async (action: "approve" | "deny") => {
+    const body = action === "approve" ? cliLoginApproveBody(scopes()) : ({ ok: true, body: {} } as const)
+    if (!body.ok) return setResult(body.error)
+    setBusy(true)
+    try {
+      await api(`/api/cli-logins/${enc(code())}/${action}`, { method: "POST", json: body.body })
+      setDone(
+        action === "approve"
+          ? `The terminal on ${props.login.clientName} is logged in as you, with ${scopes().join(", ")}.${scopes().includes("sessions:launch") ? " To launch, it also needs a grant with verb launch (Settings → Agents)." : ""} You can revoke it in Settings → Agents.`
+          : `Denied the CLI login for ${props.login.clientName}.`,
+      )
+    } catch (e) {
+      setResult(e instanceof HttpError && e.status === 404 ? `No pending request with code ${code()}. It may have expired or been answered already.` : errorText(e))
+      setBusy(false)
+    }
+  }
+  return (
+    <main class="entry">
+      <h1 class="display">CLI login for {props.login.clientName}</h1>
+      <div class="card stack">
+        <Show when={!done()} fallback={<p role="status">{done()}</p>}>
+          <p>
+            A terminal on <strong>{props.login.clientName}</strong> asks to act as you through the hub CLI.
+          </p>
+          <p class="small muted">
+            Code {code()} · requested {ago(props.login.created)}. Approve only if you ran <span class="mono">hub login</span> yourself and this code matches the one in your terminal.
+          </p>
+          <fieldset class="stack">
+            <legend class="small">What it may do</legend>
+            <For each={choices}>
+              {(choice) => (
+                <label class="check">
+                  <input type="checkbox" checked={choice.checked} disabled={busy()} onChange={(e) => setScopes(e.currentTarget.checked ? [...scopes(), choice.scope] : scopes().filter((s) => s !== choice.scope))} />
+                  <span>
+                    <span class="mono">{choice.scope}</span> {choice.label}
+                    {choice.requested ? " (requested)" : ""}
+                  </span>
+                </label>
+              )}
+            </For>
+          </fieldset>
+          <Show when={scopes().includes("sessions:launch")}>
+            <p class="small">Launch is ticked: the terminal can start sessions in a repository once you also create a grant with verb launch for it.</p>
+          </Show>
+          <div class="row">
+            <button type="button" class="btn primary" disabled={busy()} onClick={() => void decide("approve")}>
+              Approve
+            </button>
+            <button type="button" class="btn danger" disabled={busy()} onClick={() => void decide("deny")}>
+              Deny
+            </button>
+          </div>
+          <Show when={result()}>
+            <p role="status">{result()}</p>
+          </Show>
+        </Show>
+        <a class="btn" href="/">
+          Back to sessions
+        </a>
+      </div>
+    </main>
+  )
+}
+
 export function Approve(props: { code: string }) {
+  const [cliLogin, setCliLogin] = createSignal<CliLoginView | undefined>()
+  const [checked, setChecked] = createSignal(!props.code)
+  onMount(async () => {
+    if (!props.code) return
+    try {
+      setCliLogin(parseCliLogin(await (await api(`/api/cli-logins/${enc(props.code.toUpperCase())}`)).json()))
+    } catch {
+      // Not a CLI login (404): a machine enrollment, or nothing pending.
+    }
+    setChecked(true)
+  })
+  return (
+    <Show when={checked()} fallback={<main class="entry"><p class="muted">Loading…</p></main>}>
+      <Show when={cliLogin()} fallback={<ApproveMachine code={props.code} />}>
+        {(login) => <ApproveCliLogin login={login()} />}
+      </Show>
+    </Show>
+  )
+}
+
+function ApproveMachine(props: { code: string }) {
   const code = () => props.code.toUpperCase()
   const [result, setResult] = createSignal("")
   const [done, setDone] = createSignal("")
