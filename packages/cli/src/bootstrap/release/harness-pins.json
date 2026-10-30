@@ -1,5 +1,94 @@
 {
   "schema": "hub.harness-pin-list",
   "version": 1,
-  "pins": []
+  "pins": [
+    {
+      "pin": {
+        "harness": "opencode",
+        "version": "2.2.0",
+        "target": "darwin-arm64",
+        "url": "https://github.com/anomalyco/opencode/releases/download/v2.2.0/opencode-darwin-arm64.zip",
+        "file": "opencode-darwin-arm64.zip",
+        "size": 102507526,
+        "sha256": "sha256:c71b1cd96541539ad38e2a75377d2f43d2a27567289a14371a182e9a0800db3d",
+        "evidence": [],
+        "minimumVersion": "2.0.0"
+      },
+      "review": {
+        "by": "REVIEWER",
+        "on": "2026-10-30",
+        "checked": [
+          "upstream-release",
+          "digest-redownloaded",
+          "evidence-listed"
+        ]
+      }
+    },
+    {
+      "pin": {
+        "harness": "opencode",
+        "version": "2.2.0",
+        "target": "darwin-x64",
+        "url": "https://github.com/anomalyco/opencode/releases/download/v2.2.0/opencode-darwin-x64-baseline.zip",
+        "file": "opencode-darwin-x64-baseline.zip",
+        "size": 107678258,
+        "sha256": "sha256:bda15562402475e891d39de5938de7ce052a245f9fd926ab72d32f55b1e26ac3",
+        "evidence": [],
+        "minimumVersion": "2.0.0"
+      },
+      "review": {
+        "by": "REVIEWER",
+        "on": "2026-10-30",
+        "checked": [
+          "upstream-release",
+          "digest-redownloaded",
+          "evidence-listed"
+        ]
+      }
+    },
+    {
+      "pin": {
+        "harness": "opencode",
+        "version": "2.2.0",
+        "target": "linux-x64",
+        "url": "https://github.com/anomalyco/opencode/releases/download/v2.2.0/opencode-linux-x64-baseline.tar.gz",
+        "file": "opencode-linux-x64-baseline.tar.gz",
+        "size": 115841183,
+        "sha256": "sha256:6d597970a8cc448f1b9a9f645532584b339dd3ab9583bb5f063f13d83e54768f",
+        "evidence": [],
+        "minimumVersion": "2.0.0"
+      },
+      "review": {
+        "by": "REVIEWER",
+        "on": "2026-10-30",
+        "checked": [
+          "upstream-release",
+          "digest-redownloaded",
+          "evidence-listed"
+        ]
+      }
+    },
+    {
+      "pin": {
+        "harness": "opencode",
+        "version": "2.2.0",
+        "target": "linux-arm64",
+        "url": "https://github.com/anomalyco/opencode/releases/download/v2.2.0/opencode-linux-arm64.tar.gz",
+        "file": "opencode-linux-arm64.tar.gz",
+        "size": 114522206,
+        "sha256": "sha256:1f1ce0fc07b9245a815ffa9d652dbb80e6b0f07e5bf74ea87d2b1c0339fbac52",
+        "evidence": [],
+        "minimumVersion": "2.0.0"
+      },
+      "review": {
+        "by": "REVIEWER",
+        "on": "2026-10-30",
+        "checked": [
+          "upstream-release",
+          "digest-redownloaded",
+          "evidence-listed"
+        ]
+      }
+    }
+  ]
 }
