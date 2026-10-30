@@ -21,6 +21,8 @@ import type { AgentRoute } from "./routes"
  */
 export const APP_SCOPES: readonly string[] = ["sessions:read", "sessions:manage", "messages:send", "messages:read", "sessions:act", "sessions:launch", "events:subscribe"]
 export const DEFAULT_APP_SCOPES: readonly string[] = ["sessions:read"]
+/** What `hub login` (the CLI login device code) asks for unless it asks for more: reading sessions and messaging. */
+export const DEFAULT_CLI_LOGIN_SCOPES: readonly string[] = ["sessions:read", "messages:send", "messages:read"]
 export const MAX_APP_TOKENS = 50
 export const MAX_APP_TOKEN_LABEL = 100
 
