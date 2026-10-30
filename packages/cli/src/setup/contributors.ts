@@ -9,7 +9,7 @@
 //                          is not enrolled with it (the device code is approved by a person on the hub).
 //   refusing               a contributor that can refuse: planSetup has no refusal channel for contributors, so a
 //                          Result failure is thrown as a typed PlanRefusal the CLI catches and maps with exitFor.
-import { ERROR_CODES, selectArtifact, type Action, type ErrorCode, type Issue, type PathRef, type PlanInput, type Result, type VerifiedManifest } from "../bootstrap/contracts/index.ts"
+import { ERROR_CODES, harnessCurrentRef, HARNESS_ORDER, selectArtifact, type Action, type ErrorCode, type HarnessID, type Issue, type PathRef, type PlanInput, type Result, type VerifiedManifest } from "../bootstrap/contracts/index.ts"
 import type { PlanContributor } from "../bootstrap/preview/plan.ts"
 
 export const HUBCTL_REF = { root: "user-bin", rel: "hubctl" } as const
@@ -76,6 +76,67 @@ export function hubctlContributor(options: { readonly manifest?: VerifiedManifes
       })
     if (!installed?.linksTo(HUB_ALIAS_REF, HUBCTL_REF))
       actions.push({ id: "link-hub", kind: "link-executable", escalation: "user", summary: "Link hub to hubctl (the same command surface)", path: { ...HUB_ALIAS_REF }, target: { ...HUBCTL_REF } })
+    return actions
+  }
+}
+
+/** Read-only facts about paths a plan would link, and the user's PATH (the CLI reads them through the probe). */
+export interface PathInspector {
+  /** What is at `ref` now, not following a final symlink. */
+  entry(ref: PathRef): "missing" | "file" | "directory" | "symlink" | "other"
+  /** The absolute path a symlink at `ref` points to (resolved against its directory); undefined for anything else. */
+  linkTarget(ref: PathRef): string | undefined
+  /** The absolute path of `ref` on this host. */
+  where(ref: PathRef): string | undefined
+  /** The first `name` on the user's PATH, as found (not followed). */
+  onPath(name: string): string | undefined
+}
+
+/** Each harness's executable: its command name, and where it is inside an install root (the adapters' unpackers). */
+export const HARNESS_EXECUTABLES: Readonly<Record<HarnessID, { readonly name: string; readonly rel: string; readonly label: string }>> = Object.freeze({
+  opencode: { name: "opencode", rel: "bin/opencode", label: "OpenCode" },
+  "claude-code": { name: "claude", rel: "claude", label: "Claude Code" },
+  codex: { name: "codex", rel: "bin/codex", label: "Codex" },
+})
+
+/**
+ * Contract amendment A6 (HBS-12 E4): a hub-installed harness goes on PATH through a typed link in user-bin
+ * (`~/.local/bin/opencode` → `data:hub/harnesses/opencode/current/bin/opencode`), journaled and rolled back like any
+ * link. Only for a harness hub makes current (this plan selects it, or its `current` is already there), and only when
+ * nothing else of that name is on PATH and user-bin holds nothing of that name but a link of hub's own (one into
+ * hub's harness directory): a user's binary is never shadowed or replaced.
+ */
+export function harnessLinkContributor(inspector: PathInspector): PlanContributor {
+  return ({ profile, planned = [] }) => {
+    const actions: Action[] = []
+    for (const harness of HARNESS_ORDER) {
+      if (!profile.harnesses.includes(harness)) continue
+      const exe = HARNESS_EXECUTABLES[harness]
+      const current = harnessCurrentRef(harness)
+      const target: PathRef = { root: current.root, rel: `${current.rel}/${exe.rel}` }
+      const selected = planned.some((a) => a.kind === "select-harness-version" && a.harness === harness)
+      if (!selected && inspector.entry(target) !== "file") continue
+      const link: PathRef = { root: "user-bin", rel: exe.name }
+      const linkPath = inspector.where(link)
+      const targetPath = inspector.where(target)
+      const ownDir = inspector.where({ root: current.root, rel: `hub/harnesses/${harness}` })
+      if (!linkPath || !targetPath || !ownDir) continue
+      const there = inspector.entry(link)
+      const pointsTo = inspector.linkTarget(link)
+      if (there === "symlink" && pointsTo === targetPath) continue
+      const hubOwned = there === "symlink" && pointsTo !== undefined && pointsTo.startsWith(`${ownDir}/`)
+      if (there !== "missing" && !hubOwned) continue
+      const found = inspector.onPath(exe.name)
+      if (found !== undefined && found !== linkPath) continue
+      actions.push({
+        id: `link-${harness}`,
+        kind: "link-executable",
+        escalation: "user",
+        summary: `Put the hub-installed ${exe.label} on PATH: link ~/.local/bin/${exe.name} to its current version`,
+        path: link,
+        target,
+      })
+    }
     return actions
   }
 }

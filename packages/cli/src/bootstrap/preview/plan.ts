@@ -43,8 +43,11 @@ import {
   type SetupPlan,
 } from "../contracts/index.ts"
 
+/** What a contributor plans from: the adapters' input, and the actions planned before it (adapters first). */
+export type ContributorInput = PlanInput & { readonly planned?: readonly Action[] }
+
 /** Proposes actions for a plan; must be deterministic in its input (like HarnessAdapter.plan). */
-export type PlanContributor = (input: PlanInput) => readonly Action[]
+export type PlanContributor = (input: ContributorInput) => readonly Action[]
 
 /** A symlink found between a root and a path the plan would write. */
 export interface LinkFact {
@@ -156,7 +159,7 @@ export function planSetup(
     harnessGroup.set(id, group)
     groups.push(group)
   }
-  for (const contribute of input.contributors ?? []) groups.push([...contribute(planInput)])
+  for (const contribute of input.contributors ?? []) groups.push([...contribute({ ...planInput, planned: groups.flat() })])
   // v1.1: a separate enrollment is its own step; the plan never enrolls.
   if ((input.enrollment ?? enrollmentModeOf(profile)) === "separate") for (const group of groups) group.splice(0, group.length, ...group.filter((a) => a.kind !== "enroll-machine"))
   // Every chosen harness is verified by real probes (presence is never readiness); runtimes are checked, never installed.
