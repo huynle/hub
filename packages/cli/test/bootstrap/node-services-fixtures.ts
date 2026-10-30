@@ -9,6 +9,8 @@ export const STANDALONE_DARWIN: ProgramLayout = { kind: "standalone", executable
 export const STANDALONE_LINUX: ProgramLayout = { kind: "standalone", executable: "/home/dev/.local/bin/hubctl" }
 /** A script layout whose entry has a space and a % (quoting and escaping in ExecStart=). */
 export const SCRIPT_LINUX: ProgramLayout = { kind: "script", runtime: "/home/dev/.bun/bin/bun", entry: "/home/dev/hub app/100%/main.ts" }
+/** An OpenCode binary running the bundled CLI as bun (BUN_BE_BUN=1). */
+export const SCRIPT_DARWIN: ProgramLayout = { kind: "script", runtime: "/Users/dev/.opencode/bin/opencode", entry: "/Users/dev/.local/share/hub/hub-cli.js" }
 
 export const GOLDEN_SYSTEMD_NODE = `# Written by hubctl setup from the embedded asset service/systemd-user/node; hubctl removes it only while it is unchanged.
 [Unit]
@@ -20,7 +22,6 @@ Wants=network-online.target
 Type=simple
 ExecStart=/home/dev/.local/bin/hubctl node run
 Environment=PATH=/home/dev/.bun/bin:/usr/local/bin:/usr/bin:/bin
-Environment=BUN_BE_BUN=1
 Restart=on-failure
 RestartSec=30
 RestartPreventExitStatus=78
@@ -72,6 +73,43 @@ export const GOLDEN_LAUNCHD_NODE = `<?xml version="1.0" encoding="UTF-8"?>
   <dict>
     <key>PATH</key>
     <string>/Users/dev/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/dev/.local/state/hub/node.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/dev/.local/state/hub/node.log</string>
+</dict>
+</plist>
+`
+
+/** The same agent from a script layout (an OpenCode binary or bun running hub-cli.js): only this layout runs as bun. */
+export const GOLDEN_LAUNCHD_NODE_SCRIPT = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Written by hubctl setup from the embedded asset service/launchd/node; hubctl removes it only while it is unchanged. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.github.huynle.hub-node</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/dev/.opencode/bin/opencode</string>
+    <string>/Users/dev/.local/share/hub/hub-cli.js</string>
+    <string>node</string>
+    <string>run</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/dev/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     <key>BUN_BE_BUN</key>
     <string>1</string>
   </dict>
@@ -111,8 +149,6 @@ export const GOLDEN_LAUNCHD_CODEX = `<?xml version="1.0" encoding="UTF-8"?>
     <string>/Users/dev/.local/bin:/Users/dev/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     <key>HUB_CODEX_BIN</key>
     <string>/Users/dev/.local/share/hub/harnesses/codex/current/bin/codex</string>
-    <key>BUN_BE_BUN</key>
-    <string>1</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>

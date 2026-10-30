@@ -5,6 +5,10 @@
 // the service's own settings (where its config, state and harness binary are), each single-line, absolute and
 // never a credential: the machine token stays in the CredentialStore, which the service reads at run time.
 //
+// BUN_BE_BUN=1 (in every template) makes a Bun-compiled executable act as the bun CLI: it is what lets an OpenCode
+// binary run hub-cli.js, so only the script layout keeps it. A standalone hubctl with it would run `bun node run`
+// (a missing module) and crash-loop, so its units never mention it.
+//
 // Rendering is pure: the same input always gives the same bytes, so a plan can pin the unit's digest
 // (install-service.sha256) and apply can render it again and compare.
 import {
@@ -82,6 +86,12 @@ const sd = (word: string) => {
 const SYSTEMD_HOME = /^\/[A-Za-z0-9_./@+,:-]*$/
 const PLACEHOLDER = /__[A-Z]+__/
 
+/** The template's BUN_BE_BUN=1 setting, per manager (removed for the standalone layout). */
+const BUN_BE_BUN: Readonly<Record<ServiceManagerID, RegExp>> = Object.freeze({
+  "systemd-user": /^Environment=BUN_BE_BUN=1\n/m,
+  launchd: /\n[ \t]*<key>BUN_BE_BUN<\/key>\s*<string>1<\/string>/,
+})
+
 const header = (asset: string, by?: string) =>
   by ? `Written by ${by} install from the embedded asset ${asset}; ${by} uninstall removes it.` : `Written by hubctl setup from the embedded asset ${asset}; hubctl removes it only while it is unchanged.`
 
@@ -148,10 +158,13 @@ export function renderServiceUnit(input: RenderInput): Result<RenderedUnit> {
   if (c.issues.length > 0) return c.result(undefined)
 
   const command = SERVICE_COMMANDS[input.service]
-  const text =
+  const raw =
     input.manager === "systemd-user"
       ? renderSystemd(c, asset, template, argv, command, input.home, env, input.writtenBy)
       : renderLaunchd(c, asset, template, argv, command, input.home, env, input.writtenBy)
+  const asBun = input.layout.kind === "script"
+  const text = asBun ? raw : raw.replace(BUN_BE_BUN[input.manager], "")
+  if (!asBun && text.includes("BUN_BE_BUN")) c.add("/asset", "inconsistent", `${asset} sets BUN_BE_BUN, which a standalone hubctl must not get`)
   if (PLACEHOLDER.test(text)) c.add("/asset", "inconsistent", `${asset} has a placeholder this hubctl does not fill`)
   if (isSecretValue(text)) c.add("/environment", "secret", "service units never carry credentials")
   if (c.issues.length > 0) return c.result(undefined)
