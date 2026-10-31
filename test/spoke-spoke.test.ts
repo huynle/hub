@@ -3,7 +3,9 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { defaults, readConfig, writeConfig, type VoiceConfig } from "../src/config"
-import { PROTOCOL_VERSION, SPOKE_FEATURES } from "../src/protocol"
+import { encode, FORWARDED_EVENTS, parseSpokeMessage, PROTOCOL_VERSION, SPOKE_FEATURES, type SpokeMessage } from "../src/protocol"
+import { SpokeConnection } from "../src/spoke/client"
+import { FakeOpenCode } from "./fixtures/fake-opencode"
 import type { HerdrRunner } from "../src/spoke/herdr"
 import { envInjector, ShellCorrelator } from "../src/spoke/env-inject"
 import { detectKind, Spoke, SpokeError, type SpokeHost, type SpokeOptions } from "../src/spoke/spoke"
@@ -1493,6 +1495,122 @@ describe("running detection: forwarding and seeding", () => {
     active = []
     server.sockets.at(-1)!.close()
     await until(() => forwarded(server).some((e) => e.type === "session.seed" && e.data.status.type === "idle"), 3000)
+  })
+})
+
+describe("session errors: retries and failures (OpenCode 2.2)", () => {
+  const AT = 1_900_000_000_000
+  const scheduled = (sessionID: string, attempt = 2): Ev => ({
+    type: "session.retry.scheduled",
+    data: { sessionID, assistantMessageID: "msg_r", attempt, at: AT, error: { type: "provider.rate-limit", message: "Rate limit reached", status: 429, response: { body: "SECRET BODY" }, retryAfterMs: 5000 } },
+  })
+  const failure = (sessionID: string): Ev => ({
+    type: "session.execution.failed",
+    data: { sessionID, error: { type: "provider.quota", message: "Quota exceeded", status: 429, response: { body: "SECRET BODY" }, retryAfterMs: 1 } },
+  })
+  const retryStatus = { type: "retry", attempt: 2, message: "Rate limit reached", next: AT, errorType: "provider.rate-limit", errorStatus: 429 }
+
+  /** Records every frame the spoke sends, encoded as it goes on the wire. */
+  function recordSent(): string[] {
+    const sent: string[] = []
+    const original = SpokeConnection.prototype.send
+    SpokeConnection.prototype.send = function (frame: SpokeMessage) {
+      sent.push(encode(frame))
+      return original.call(this, frame)
+    }
+    cleanups.push(() => {
+      SpokeConnection.prototype.send = original
+    })
+    return sent
+  }
+
+  test("retry.scheduled goes out as a session.status retry with attempt, message, next, errorType and errorStatus", async () => {
+    const { spoke, server, host } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    host.push(scheduled("ses_a"))
+    await until(() => forwarded(server).some((e) => e.type === "session.status"))
+    expect(forwarded(server).find((e) => e.type === "session.status")!.data).toEqual({ sessionID: "ses_a", status: retryStatus })
+    expect(JSON.stringify(server.frames)).not.toContain("SECRET")
+    expect(spoke.status().connection).toBe("connected")
+  })
+
+  test("execution.failed goes out with only the error's message, type and status", async () => {
+    const { spoke, server, host } = setup({ mode: "always", token: "tok" })
+    await until(() => spoke.status().connection === "connected")
+    host.push(created("ses_a"))
+    host.push(failure("ses_a"))
+    await until(() => forwarded(server).some((e) => e.type === "session.execution.failed"))
+    expect(forwarded(server).find((e) => e.type === "session.execution.failed")!.data).toEqual({ sessionID: "ses_a", error: { message: "Quota exceeded", type: "provider.quota", status: 429 } })
+  })
+
+  test("the seed after a reconnect carries a pending retry and the last failure", async () => {
+    const { spoke, server, host } = setup({ mode: "always", token: "tok" })
+    ;(host as any).activity = async () => ({ active: ["ses_a"], jobs: [] })
+    host.push(created("ses_a"))
+    host.push(created("ses_b"))
+    await until(() => spoke.status().connection === "connected")
+    host.push({ type: "session.execution.started", data: { sessionID: "ses_b" } })
+    host.push(failure("ses_b"))
+    host.push(scheduled("ses_a"))
+    await until(() => forwarded(server).some((e) => e.type === "session.status") && forwarded(server).some((e) => e.type === "session.execution.failed"))
+    const before = forwarded(server).length
+    server.sockets.at(-1)!.close()
+    const seeds = () => forwarded(server).slice(before).filter((e) => e.type === "session.seed")
+    await until(() => seeds().some((e) => e.data.sessionID === "ses_a") && seeds().some((e) => e.data.sessionID === "ses_b"), 3000)
+    expect(seeds().find((e) => e.data.sessionID === "ses_a")!.data).toEqual({ sessionID: "ses_a", status: retryStatus, jobs: [] })
+    expect(seeds().find((e) => e.data.sessionID === "ses_b")!.data).toEqual({ sessionID: "ses_b", status: { type: "idle" }, jobs: [], error: { message: "Quota exceeded", type: "provider.quota", status: 429 } })
+  })
+
+  test("a new run clears the failure and output clears the retry, so the next seed carries neither", async () => {
+    const { spoke, server, host } = setup({ mode: "always", token: "tok" })
+    let active: string[] = ["ses_a"]
+    ;(host as any).activity = async () => ({ active, jobs: [] })
+    host.push(created("ses_a"))
+    await until(() => spoke.status().connection === "connected")
+    host.push(failure("ses_a"))
+    host.push({ type: "session.execution.started", data: { sessionID: "ses_a" } })
+    host.push(scheduled("ses_a"))
+    host.push({ type: "session.text.delta", data: { sessionID: "ses_a", delta: "hi" } })
+    await until(() => forwarded(server).some((e) => e.type === "session.text.delta"))
+    const before = forwarded(server).length
+    server.sockets.at(-1)!.close()
+    await until(() => forwarded(server).slice(before).some((e) => e.type === "session.seed"), 3000)
+    expect(forwarded(server).slice(before).find((e) => e.type === "session.seed")!.data).toEqual({ sessionID: "ses_a", status: { type: "busy" }, jobs: [] })
+    active = []
+  })
+
+  test("every frame the spoke sends parses with parseSpokeMessage (no event type outside FORWARDED_EVENTS)", async () => {
+    const sent = recordSent()
+    const dir = mkdtempSync(path.join(tmpdir(), "voice-spoke-"))
+    const file = path.join(dir, "config.json")
+    const server = fakeCentral()
+    writeConfig(file, { ...defaults("box"), server: server.url, mode: "always", token: "tok" })
+    const oc = new FakeOpenCode({ directory: "/work/project", version: "2.2.0" })
+    ;(oc.host as any).activity = async () => ({ active: [...oc.sessions.keys()], jobs: [] })
+    const spoke = new Spoke(oc.host, { configFile: file, machineName: "box", kind: "standalone", processID: "proc_errs", pid: 4242, pluginVersion: "9.9.9", snapshotDebounceMs: 10, seedDebounceMs: 10, pollMs: 20, backoff: { minMs: 10, maxMs: 50 } })
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+    cleanups.push(() => server.stop())
+    cleanups.push(() => spoke.stop())
+    spoke.start()
+    await until(() => spoke.status().connection === "connected")
+    const a = oc.createSession({ title: "A" })
+    const b = oc.createSession({ title: "B" })
+    oc.push("session.tool.progress", { sessionID: a, assistantMessageID: "msg_1", id: "t1", metadata: { sessionID: "ses_child1" } })
+    oc.retry(a, { attempt: 1 })
+    oc.retry(a, { attempt: 2, at: AT })
+    oc.fail(b)
+    await until(() => forwarded(server).some((e) => e.type === "session.execution.failed") && forwarded(server).filter((e) => e.type === "session.status").length >= 2)
+    server.sockets.at(-1)!.close()
+    await until(() => forwarded(server).filter((e) => e.type === "session.seed").length >= 2, 3000)
+    const events = sent.map((raw) => JSON.parse(raw)).filter((f) => f.t === "event")
+    expect(events.length).toBeGreaterThan(0)
+    for (const raw of sent) expect(parseSpokeMessage(raw)).toBeDefined()
+    for (const f of events) expect(FORWARDED_EVENTS.has(f.event.type)).toBe(true)
+    expect(sent.join("\n")).not.toContain("session.retry.scheduled")
+    expect(sent.join("\n")).not.toContain("insufficient_quota")
+    expect(sent.join("\n")).not.toContain("rate_limited")
+    expect(server.closed).toBe(1)
   })
 })
 

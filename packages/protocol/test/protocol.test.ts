@@ -301,7 +301,69 @@ describe("job and status compaction", () => {
   test("session.status keeps the type and a short retry reason", () => {
     expect(compactActivity({ type: "session.status", data: { sessionID: "s", status: { type: "busy" } } })).toEqual({ type: "session.status", data: { sessionID: "s", status: { type: "busy" } } })
     const retry = compactActivity({ type: "session.status", data: { sessionID: "s", status: { type: "retry", attempt: 3, message: "m".repeat(400), next: 9, action: { link: "x" } } } })
-    expect(retry.data.status).toEqual({ type: "retry", attempt: 3, message: "m".repeat(199) + "…" })
+    expect(retry.data.status).toEqual({ type: "retry", attempt: 3, message: "m".repeat(199) + "…", next: 9 })
+  })
+
+  test("session.status retry passes next, errorType and errorStatus through only when valid", () => {
+    const status = (s: Record<string, unknown>) => compactActivity({ type: "session.status", data: { sessionID: "s", status: { type: "retry", ...s } } }).data.status
+    expect(status({ attempt: 2, next: 1_700_000_000_000, errorType: "provider.quota", errorStatus: 429 })).toEqual({ type: "retry", attempt: 2, next: 1_700_000_000_000, errorType: "provider.quota", errorStatus: 429 })
+    expect(status({ next: "soon", errorType: "x".repeat(65), errorStatus: 99 })).toEqual({ type: "retry" })
+    expect(status({ next: Infinity, errorType: "", errorStatus: 600 })).toEqual({ type: "retry" })
+    expect(status({ errorStatus: 429.5 })).toEqual({ type: "retry" })
+  })
+
+  describe("session.retry.scheduled and session.execution.failed (OpenCode 2.2 errors)", () => {
+  const P = require("../src/index.ts")
+  const { compactActivity, COMPACTED_EVENTS, FORWARDED_EVENTS, parseSpokeMessage, encode, isHarnessEvent } = P
+  const scheduled = {
+    type: "session.retry.scheduled",
+    data: {
+      sessionID: "ses_1",
+      assistantMessageID: "msg_1",
+      attempt: 3,
+      at: 1_700_000_000_000,
+      error: { type: "provider.quota", message: "You exceeded your current quota", status: 429, response: { body: "SECRET BODY" }, retryAfterMs: 5000 },
+    },
+  }
+
+  test("retry.scheduled is compacted, never forwarded as its own type (older hubs close on unknown types)", () => {
+    expect(COMPACTED_EVENTS.has("session.retry.scheduled")).toBe(true)
+    expect(FORWARDED_EVENTS.has("session.retry.scheduled")).toBe(false)
+  })
+
+  test("retry.scheduled becomes a session.status retry with attempt, message, next, errorType, errorStatus", () => {
+    const out = compactActivity(scheduled)
+    expect(out).toEqual({
+      type: "session.status",
+      data: { sessionID: "ses_1", status: { type: "retry", attempt: 3, message: "You exceeded your current quota", next: 1_700_000_000_000, errorType: "provider.quota", errorStatus: 429 } },
+    })
+    expect(JSON.stringify(out)).not.toContain("SECRET")
+    expect(parseSpokeMessage(encode({ t: "event", event: out }))).toBeDefined()
+    expect(isHarnessEvent(out)).toBe(true)
+  })
+
+  test("retry.scheduled caps the message and drops invalid fields; without a session it is dropped", () => {
+    const out = compactActivity({ type: "session.retry.scheduled", data: { sessionID: "ses_1", attempt: "x", at: "later", error: { type: 7, message: "m".repeat(500), status: 1000 } } })
+    expect(out.data.status).toEqual({ type: "retry", message: "m".repeat(199) + "…" })
+    expect(compactActivity({ type: "session.retry.scheduled", data: { sessionID: "ses_1" } }).data.status).toEqual({ type: "retry" })
+    expect(compactActivity({ type: "session.retry.scheduled", data: { attempt: 1 } })).toBeUndefined()
+  })
+
+  test("execution.failed keeps only the error's message, type and status, capped", () => {
+    const out = compactActivity({
+      type: "session.execution.failed",
+      data: { sessionID: "ses_1", turnID: "turn_1", extra: "X", error: { type: "provider.auth", message: "Invalid API key", status: 401, response: { body: "SECRET BODY" }, retryAfterMs: 9 } },
+    })
+    expect(out).toEqual({ type: "session.execution.failed", data: { sessionID: "ses_1", turnID: "turn_1", error: { message: "Invalid API key", type: "provider.auth", status: 401 } } })
+    expect(isHarnessEvent(out)).toBe(true)
+    const long = compactActivity({ type: "session.execution.failed", data: { sessionID: "ses_1", error: { message: "e".repeat(5000), type: "t".repeat(65), status: 42 } } })
+    expect(long.data.error.message.length).toBe(P.ERROR_MESSAGE_MAX)
+    expect(P.ERROR_MESSAGE_MAX).toBe(1000)
+    expect(long.data.error).toEqual({ message: expect.any(String) })
+    expect(compactActivity({ type: "session.execution.failed", data: { sessionID: "ses_1" } }).data).toEqual({ sessionID: "ses_1", error: { message: "failed" } })
+    expect(compactActivity({ type: "session.execution.failed", data: { sessionID: "ses_1", error: { message: "  " } } }).data.error).toEqual({ message: "failed" })
+    expect(isHarnessEvent(long)).toBe(true)
+  })
   })
 
   test("shell.created becomes {sessionID, id, kind, command ≤ 200, status, at, background}", () => {
