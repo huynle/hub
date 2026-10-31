@@ -126,7 +126,7 @@ describe("messaging features", () => {
 
 describe("message timeline rows", () => {
   test("timeline rows have a message kind next to the existing ones", () => {
-    expect(P.TIMELINE_KINDS).toEqual(["user", "assistant", "reasoning", "tool", "message"])
+    expect(P.TIMELINE_KINDS).toEqual(["user", "assistant", "reasoning", "tool", "message", "error", "retry"])
   })
 
   test("a message row carries the message's kind, addresses and direction; it is a typed TimelinePage item", () => {

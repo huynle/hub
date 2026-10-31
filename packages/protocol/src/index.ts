@@ -91,7 +91,7 @@ export interface TimelinePage {
 }
 
 /** Timeline row kinds. "message": a hub message (src/spoke/timeline.ts has the others). */
-export const TIMELINE_KINDS = ["user", "assistant", "reasoning", "tool", "message"] as const
+export const TIMELINE_KINDS = ["user", "assistant", "reasoning", "tool", "message", "error", "retry"] as const
 export type TimelineKind = (typeof TIMELINE_KINDS)[number]
 
 /** A message row's direction from the session's point of view: delivered to it (in) or sent by it (out). */
@@ -230,15 +230,21 @@ export interface InboxDeliveredData {
 }
 
 /**
- * OpenCode events the spoke forwards only in another (compact) form: a subagent tool's progress, which names the
- * child session, goes out as a `session.tool.called` with `childSessionID` (a type every hub accepts).
+ * OpenCode events the spoke forwards only in another (compact) form, as a type every hub accepts: a subagent tool's
+ * progress, which names the child session, goes out as a `session.tool.called` with `childSessionID`; a scheduled
+ * retry (OpenCode 2.2 publishes no session.status) goes out as a `session.status` of type retry. Never add these to
+ * FORWARDED_EVENTS: older hubs close the connection on an event type they do not know.
  */
-export const COMPACTED_EVENTS: ReadonlySet<string> = new Set(["session.tool.progress"])
+export const COMPACTED_EVENTS: ReadonlySet<string> = new Set(["session.tool.progress", "session.retry.scheduled"])
 
 /** Longest job command forwarded. */
 export const JOB_COMMAND_MAX = 200
 /** Longest retry reason forwarded. */
 export const RETRY_MESSAGE_MAX = 200
+/** Longest run error message forwarded (session.execution.failed; as HARNESS_ERROR_MAX). */
+export const ERROR_MESSAGE_MAX = 1000
+/** Longest error type forwarded (e.g. "provider.quota"). */
+export const ERROR_TYPE_MAX = 64
 /** Most running jobs one seed event carries. */
 export const SEED_JOBS_MAX = 20
 
@@ -258,7 +264,27 @@ export interface JobInfo {
 }
 
 /** OpenCode's session status, compact. */
-export type CompactSessionStatus = { readonly type: "idle" | "busy" } | { readonly type: "retry"; readonly attempt?: number; readonly message?: string }
+export type CompactSessionStatus =
+  | { readonly type: "idle" | "busy" }
+  | {
+      readonly type: "retry"
+      readonly attempt?: number
+      /** Why it retries (the error's message, ≤ RETRY_MESSAGE_MAX). */
+      readonly message?: string
+      /** When the next attempt runs (epoch ms). */
+      readonly next?: number
+      /** The error's type, e.g. "provider.rate-limit" (≤ ERROR_TYPE_MAX). */
+      readonly errorType?: string
+      /** The error's HTTP status (100–599). */
+      readonly errorStatus?: number
+    }
+
+/** A run's error as forwarded (session.execution.failed, and a seed's last failure): no response body. */
+export interface CompactRunError {
+  readonly message: string
+  readonly type?: string
+  readonly status?: number
+}
 
 // ---------- spoke → server ----------
 
@@ -1097,6 +1123,7 @@ export function summarizeToolInput(input: unknown): string {
 export function compactActivity(event: ForwardedEvent, sessionOf?: (jobID: string) => string | undefined, now: number = Date.now()): ForwardedEvent | undefined {
   const d = event.data
   if (JOB_EVENTS.has(event.type) || event.type === "session.status") return compactJob(event, sessionOf, now)
+  if (event.type === "session.retry.scheduled") return compactRetry(d)
   const base = { sessionID: d.sessionID, assistantMessageID: d.assistantMessageID, id: d.id }
   switch (event.type) {
     case "session.tool.input.started":
@@ -1115,6 +1142,11 @@ export function compactActivity(event: ForwardedEvent, sessionOf?: (jobID: strin
       const message = typeof (d.error as any)?.message === "string" ? String((d.error as any).message).slice(0, ACTIVITY_SUMMARY_MAX) : "failed"
       return { type: event.type, data: { ...base, error: message } }
     }
+    case "session.execution.failed":
+      return {
+        type: event.type,
+        data: { sessionID: d.sessionID, ...(typeof d.turnID === "string" && d.turnID ? { turnID: d.turnID } : {}), error: compactRunError(d.error) ?? { message: "failed" } },
+      }
     case "session.reasoning.started":
     case "session.reasoning.ended":
       return { type: event.type, data: { sessionID: d.sessionID, assistantMessageID: d.assistantMessageID } }
@@ -1146,7 +1178,10 @@ function clipText(value: unknown, max: number): string | undefined {
 
 const finite = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined)
 
-/** OpenCode's SessionStatus reduced to its type and (retry) attempt and short reason. */
+const errorType = (v: unknown): string | undefined => (typeof v === "string" && v.length > 0 && v.length <= ERROR_TYPE_MAX ? v : undefined)
+const httpStatus = (v: unknown): number | undefined => (Number.isInteger(v) && (v as number) >= 100 && (v as number) <= 599 ? (v as number) : undefined)
+
+/** OpenCode's SessionStatus reduced to its type and (retry) attempt, short reason, next try and error kind. */
 export function compactStatus(raw: unknown): CompactSessionStatus | undefined {
   const status = raw as Record<string, unknown> | null
   if (!status || typeof status !== "object") return undefined
@@ -1154,7 +1189,35 @@ export function compactStatus(raw: unknown): CompactSessionStatus | undefined {
   if (status.type !== "retry") return undefined
   const attempt = finite(status.attempt)
   const message = clipText(status.message, RETRY_MESSAGE_MAX)
-  return { type: "retry", ...(attempt !== undefined ? { attempt } : {}), ...(message ? { message } : {}) }
+  const next = finite(status.next)
+  const type = errorType(status.errorType)
+  const code = httpStatus(status.errorStatus)
+  return {
+    type: "retry",
+    ...(attempt !== undefined ? { attempt } : {}),
+    ...(message ? { message } : {}),
+    ...(next !== undefined ? { next } : {}),
+    ...(type ? { errorType: type } : {}),
+    ...(code !== undefined ? { errorStatus: code } : {}),
+  }
+}
+
+/** An OpenCode run error ({type, message, status?, response?, retryAfterMs?}) as its message, type and status only. */
+export function compactRunError(raw: unknown): CompactRunError | undefined {
+  const error = raw as Record<string, unknown> | null
+  if (!error || typeof error !== "object") return undefined
+  const message = typeof error.message === "string" && error.message.trim() ? error.message.trim().slice(0, ERROR_MESSAGE_MAX) : "failed"
+  const type = errorType(error.type)
+  const status = httpStatus(error.status)
+  return { message, ...(type ? { type } : {}), ...(status !== undefined ? { status } : {}) }
+}
+
+/** OpenCode 2.2's session.retry.scheduled as the session.status retry every hub accepts. */
+function compactRetry(d: Record<string, unknown>): ForwardedEvent | undefined {
+  if (typeof d.sessionID !== "string" || !d.sessionID) return undefined
+  const error = (d.error && typeof d.error === "object" ? d.error : {}) as Record<string, unknown>
+  const status = compactStatus({ type: "retry", attempt: d.attempt, message: error.message, next: d.at, errorType: error.type, errorStatus: error.status })
+  return { type: "session.status", data: { sessionID: d.sessionID, status } }
 }
 
 /** A ShellInfo or Pty (OpenCode) as a JobInfo. */
