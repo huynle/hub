@@ -127,6 +127,25 @@ export class FakeOpenCode {
     return { id, decision }
   }
 
+  /**
+   * OpenCode schedules a retry of the session's run (OpenCode 2.2 publishes no session.status: only this, with the
+   * provider's error, response body included, and when the next attempt runs).
+   */
+  retry(sessionID: string, options: { attempt?: number; at?: number; error?: Record<string, unknown> } = {}): void {
+    this.push("session.retry.scheduled", {
+      sessionID,
+      assistantMessageID: nextID("msg"),
+      attempt: options.attempt ?? 1,
+      at: options.at ?? Date.now() + 5000,
+      error: options.error ?? { type: "provider.rate-limit", message: "Rate limit reached", status: 429, response: { body: '{"error":"rate_limited"}' }, retryAfterMs: 5000 },
+    })
+  }
+
+  /** The session's run fails with an OpenCode error (default: an exhausted quota, response body included). */
+  fail(sessionID: string, error: Record<string, unknown> = { type: "provider.quota", message: "You exceeded your current quota", status: 429, response: { body: '{"error":"insufficient_quota"}' } }): void {
+    this.push("session.execution.failed", { sessionID, error })
+  }
+
   private enqueue(sessionID: string, inboxID: string, text: string): void {
     const s = this.session(sessionID)
     if (s.busy) {

@@ -15,6 +15,7 @@ import {
   type DeliverRequest,
   type DeliverResult,
   type DeliveryMode,
+  type CompactSessionStatus,
   type JobInfo,
   type HerdrWorkspace,
   type FormAnswer,
@@ -1571,7 +1572,7 @@ export class Spoke {
     try {
       const snapshot = await activity.call(this.host, this.tracker.directories(SEED_DIRECTORIES))
       const active = new Set(snapshot.active)
-      const ids = new Set([...snapshot.active, ...snapshot.jobs.map((j) => j.sessionID), ...this.tracker.working()])
+      const ids = new Set([...snapshot.active, ...snapshot.jobs.map((j) => j.sessionID), ...this.tracker.working(), ...this.tracker.failed()])
       const now = Date.now()
       for (const id of ids) {
         if (active.has(id)) this.tracker.ensure(id, now)
@@ -1580,9 +1581,12 @@ export class Spoke {
           .filter((j) => j.sessionID === id && j.status === "running")
           .slice(0, SEED_JOBS_MAX)
           .map(({ sessionID: _, ...job }) => job)
-        const status = active.has(id) ? "busy" : "idle"
-        this.tracker.seed(id, { status, jobs })
-        const event = { type: "session.seed", data: { sessionID: id, status: { type: status }, jobs } }
+        // An active session waiting to retry is seeded with its retry (attempt, reason, next try); the last failure
+        // (no run started since) goes along so a reconnected hub still shows it.
+        const status: CompactSessionStatus = active.has(id) ? (this.tracker.retryOf(id) ?? { type: "busy" }) : { type: "idle" }
+        const error = this.tracker.errorOf(id)
+        this.tracker.seed(id, { status: status.type, jobs })
+        const event = { type: "session.seed", data: { sessionID: id, status, jobs, ...(error ? { error } : {}) } }
         if (this.connection?.state === "connected" && shouldForward(this.config, this.tracker, event)) this.connection.send({ t: "event", event })
       }
       void this.fetchInfo()
