@@ -1,6 +1,6 @@
 {
   "name": "@huynle/hub",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "Hub: a harness-agnostic central hub your AI agent harnesses connect to (OpenCode first). Follow, steer and stop sessions from your phone or browser, with notifications, optional hands-free Voice and a self-hostable server.",
   "license": "MIT",
   "author": "Huy Le",

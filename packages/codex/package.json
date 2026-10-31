@@ -1,6 +1,6 @@
 {
   "name": "@huynle/hub-codex",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "private": true,
   "description": "The Codex app-server spoke: attaches to Codex's app-server (its own over stdio, and the shared daemon's socket when present), and the `hub codex` wrapper (internal; shipped inside @huynle/hub, not published on its own).",
   "license": "MIT",

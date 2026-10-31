@@ -1,6 +1,6 @@
 {
   "name": "@huynle/hub-preset",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "private": true,
   "description": "The preset spoke: drives a harness without a spoke of its own through a terminal pane (tmux), described by a data-only preset; official presets in presets/ (internal; shipped inside @huynle/hub, not published on its own).",
   "license": "MIT",

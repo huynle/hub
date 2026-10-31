@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.7.3
+
+Session errors are visible: a quota, auth or rate-limit error in an OpenCode session now shows up in the hub.
+
+- **Retries with OpenCode 2.2**: OpenCode 2.2 no longer sends `session.status`; the plugin translates
+  `session.retry.scheduled` into a `session.status` retry with `next` (time of the next try), `errorType` and
+  `errorStatus`, so older hubs keep working. `session.execution.failed` errors go out as `{message, type, status}` (no
+  provider response body). A pending retry and the last failure are re-sent after a reconnect.
+- **Console**: an alert banner in the session header ("Quota exceeded (HTTP 429): …"), error and retry rows in the
+  transcript (with a live countdown), a "!" badge in session lists; a failed session is listed under Needs you until
+  it runs again or is archived.
+- **Where a session runs**: the session header names machine · project › folder · git branch (a line under the
+  header on phones).
+- **Notifications**: new `providerError` ("Model provider error", on by default) for quota, billing, auth, no-route
+  and unknown provider errors in any session of the tree, once per session per run. Devices with it off still get
+  `failed`. A root's and a subagent's notifications no longer replace each other on the phone.
+
 ## 0.7.2
 
 First release with signed standalone `hubctl` binaries (`hubctl-<target>`, `hubctl-manifest.json` signed by `hub-release-1`, `HUBCTL_SHA256SUMS`) and pinned OpenCode 2.2.0 for `hubctl setup`.
