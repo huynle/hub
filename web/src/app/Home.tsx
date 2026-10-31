@@ -10,7 +10,7 @@ import { Naming, RenameTitle } from "./Rename"
 import { navigate, sessionHref } from "./router"
 import { speechSetup } from "../core/feedback-core"
 import { jobsBadge } from "../core/jobs-core"
-import { Dialog, Icon, Menu, SOURCE_LABEL, STATE_LABEL, StatusIcon, VoiceDot, ago, now } from "./ui"
+import { Dialog, ErrorBadge, Icon, Menu, SOURCE_LABEL, STATE_LABEL, StatusIcon, VoiceDot, ago, now } from "./ui"
 import { voiceState } from "./voice"
 
 const TABLE_KEY = "hub.table"
@@ -20,6 +20,7 @@ export function currentActivity(r: SessionRow): string {
   liveTick()
   const blocker = r.blockers[0]
   if (r.state === "blocked" && blocker) return `${blocker.kind === "permission" ? "Permission" : "Question"}: ${blocker.summary}`
+  if (r.state === "error") return r.error ?? "Error"
   if (r.state !== "working") return ""
   if (r.retry) return r.retry
   const feed = live.has(r.id) ? live.feed(r.id) : undefined
@@ -265,6 +266,7 @@ function SessionTable(props: {
               <td class="col-status">
                 <StatusIcon state={r.state} />
                 <span class="sr-only">{STATE_LABEL[r.state]}</span>
+                <Show when={r.error}>{(text) => <ErrorBadge text={text()} />}</Show>
                 <Show when={r.jobs}>
                   <span class="jobs-badge" title={jobsBadge(r.jobs)} aria-label={jobsBadge(r.jobs)}>
                     {r.jobs}
@@ -291,7 +293,9 @@ function SessionTable(props: {
               </td>
               <td class="col-source">{SOURCE_LABEL[r.source]}</td>
               <td class="col-activity">{ago(r.updated, now())}</td>
-              <td class="col-now muted">{currentActivity(r)}</td>
+              <td class={`col-now ${r.error ? "error" : "muted"}`} title={r.error}>
+                {currentActivity(r)}
+              </td>
               <td class="col-actions">
                 <Menu label={`More actions for ${r.title}`} class="icon-btn small" items={() => sessionMenu(r, { place: "table" })} />
               </td>
@@ -320,6 +324,7 @@ function PhoneRow(props: { row: SessionRow }) {
       >
       <a href={sessionHref(r().id)} class="home-item-link">
         <StatusIcon state={r().state} />
+        <Show when={r().error}>{(text) => <ErrorBadge text={text()} />}</Show>
         <span class="home-item-text">
           <span class="home-item-title">
             <Show when={voiceLive(r(), voiceState())}>
@@ -331,7 +336,7 @@ function PhoneRow(props: { row: SessionRow }) {
               <span class="unread-dot" role="img" aria-label="Unread" />
             </Show>
           </span>
-          <span class="home-item-meta muted">{currentActivity(r()) || `${r().where} · ${r().machineName} · ${ago(r().updated, now())}`}</span>
+          <span class={`home-item-meta ${r().error ? "error" : "muted"}`}>{currentActivity(r()) || `${r().where} · ${r().machineName} · ${ago(r().updated, now())}`}</span>
         </span>
       </a>
       </Show>

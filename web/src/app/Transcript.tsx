@@ -1,13 +1,14 @@
 // The conversation column: user pills, assistant markdown, folded thoughts and tool groups (full tool details
-// load on demand), subagent rows linking to the child session.
+// load on demand), subagent rows linking to the child session, failed turns ("Quota exceeded") and model retries
+// with a live countdown. Provider text renders as text only.
 import { For, Match, Show, Switch, createSignal } from "solid-js"
 import type { TimelineRow } from "../core/timeline-core"
 import { formatElapsed } from "../core/feedback-core"
-import { thoughtView, type Block, type BlockImage } from "../lib/transcript"
+import { retryView, thoughtView, type Block, type BlockImage } from "../lib/transcript"
 import { errorText, getJSON, sessionPath, enc } from "./api"
 import { Markdown } from "./Markdown"
 import { sessionHref } from "./router"
-import { Icon } from "./ui"
+import { Icon, nowSecond } from "./ui"
 
 export type TickState = "pending" | "sent" | "queued" | "heard" | "failed"
 const TICK: Record<TickState, [string, string]> = {
@@ -81,6 +82,35 @@ export function Transcript(props: { sessionID: string; blocks: Block[]; ticks: R
             <Match when={b.type === "thought" && b}>{(t) => <Thought block={t()} expanded={props.expanded} onToggle={props.onToggle} />}</Match>
             <Match when={b.type === "tools" && b}>{(t) => <Tools block={t()} sessionID={props.sessionID} onDetail={props.onDetail} expanded={props.expanded} onToggle={props.onToggle} />}</Match>
             <Match when={b.type === "message" && b}>{(m) => <HubMessage block={m()} expanded={props.expanded} onToggle={props.onToggle} />}</Match>
+            <Match when={b.type === "error" && b}>
+              {(e) => (
+                <div class="msg turn-error" data-key={e().key} role="group" aria-label={`Error: ${e().label}`}>
+                  <span class="turn-error-mark" aria-hidden="true">✕</span>
+                  <div class="turn-error-body">
+                    <div class="turn-error-head">
+                      <strong class="turn-error-label">{e().label}</strong>
+                      <Show when={e().status}>
+                        <span class="turn-error-status">{e().status}</span>
+                      </Show>
+                    </div>
+                    <Show when={e().message}>
+                      <div class="turn-error-message">{e().message}</div>
+                    </Show>
+                  </div>
+                </div>
+              )}
+            </Match>
+            <Match when={b.type === "retry" && b}>
+              {(r) => {
+                const view = () => retryView(r(), nowSecond())
+                return (
+                  <p class={`msg turn-retry${view().waiting ? " waiting" : ""}`} data-key={r().key}>
+                    <span class="turn-retry-mark" aria-hidden="true">↻</span>
+                    <span>{view().text}</span>
+                  </p>
+                )
+              }}
+            </Match>
             <Match when={b.type === "subagent" && b}>
               {(s) => (
                 <a class={`subagent ${s().state}`} href={sessionHref(s().sessionID)} data-key={s().key}>

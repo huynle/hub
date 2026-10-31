@@ -7,8 +7,9 @@ import { hub } from "./hub"
 import { parsePatch } from "../lib/diff"
 import type { Found } from "../lib/store"
 import { enc, getJSON, sessionPath } from "./api"
-import { Icon, IconButton, SOURCE_LABEL, basename, now } from "./ui"
+import { Icon, IconButton, SOURCE_LABEL, basename, now, nowSecond } from "./ui"
 import { jobLabel, retryText, treeJobs } from "../core/jobs-core"
+import { treeError } from "../core/error-core"
 
 export interface Summary {
   directory: string
@@ -62,7 +63,8 @@ export function Rail(props: {
   const source = () => (s()?.open ? (s()?.terminal?.source === "herdr" ? "herdr" : "tui") : "background")
   const jobs = () => treeJobs(s()?.status, now())
   const running = () => jobs().filter((j) => j.status === "running").length
-  const retry = () => (s()?.state === "working" || s()?.status?.some((x) => x.state === "working") ? retryText(s()?.status, s()?.id) : undefined)
+  const retry = () => (s()?.state === "working" || s()?.status?.some((x) => x.state === "working") ? retryText(s()?.status, s()?.id, nowSecond()) : undefined)
+  const failed = () => treeError(s()?.status, s()?.id)
   const connectors = () => {
     const mcp = props.summary?.mcp
     return mcp?.length ? `Connectors · ${mcp.filter((m) => m.status === "connected").length} connected` : "Connectors"
@@ -73,6 +75,15 @@ export function Rail(props: {
         <span class="rail-title">Details</span>
         <IconButton icon="close" label="Close details" onClick={props.onClose} />
       </div>
+      <Show when={failed()}>
+        {(e) => (
+          <p class="rail-error small" title={e().text}>
+            <strong>{e().label}</strong>
+            {e().status ? ` · ${e().status}` : ""}
+            {e().title && e().sessionID !== s()?.id ? ` · ${e().title}` : ""}
+          </p>
+        )}
+      </Show>
       <Card id="environment" title="Environment">
         <Show when={props.found} fallback={<p class="muted small">{hub.machines ? "Not reported by any connected machine." : "Loading…"}</p>}>
           {(f) => (

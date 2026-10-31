@@ -1,6 +1,8 @@
 // Transcript layout of a session: timeline rows (history + live) become display blocks — user pills, assistant
 // markdown, "Thought for Ns", consecutive tools folded into "Used N tools", and subagent rows that link to the
-// child session. Rows nested under a subagent (depth 1) stay in the child's own transcript.
+// child session, and failed or retried model requests ("Quota exceeded", "Retrying (attempt 3) · next in 4m 10s").
+// Rows nested under a subagent (depth 1) stay in the child's own transcript.
+import { countdown, errorLabel, httpStatus, retryLine } from "../core/error-core"
 import { messageDeliveryLabel } from "../core/harness-core"
 import type { TimelineRow } from "../core/timeline-core"
 import { acceptsImage } from "./images"
@@ -19,6 +21,10 @@ export type Block =
   | { type: "thought"; key: string; text: string; running: boolean; seconds?: number }
   | { type: "tools"; key: string; items: TimelineRow[]; failed: number; running: number }
   | { type: "subagent"; key: string; sessionID: string; label: string; state: string }
+  /** A turn that failed: "Quota exceeded" (else the message, else "Error"), the message, "HTTP 429". */
+  | { type: "error"; key: string; label: string; message?: string; status?: string }
+  /** A model request being retried; retryView words it (with a live countdown to `next`). */
+  | { type: "retry"; key: string; attempt?: number; next?: number; errorType?: string; errorStatus?: number; message?: string }
   /** A hub message: `label` "from @y" (in) or "to @@r (→ @x)" (out); the identity primer is a compact note. */
   | { type: "message"; key: string; direction: "in" | "out"; kind: string; label: string; text: string; primer: boolean; state?: string; delivery?: string }
 
@@ -81,12 +87,41 @@ export function transcriptBlocks(rows: readonly TimelineRow[]): Block[] {
       case "message":
         out.push(messageBlock(row))
         break
+      case "error":
+        out.push(errorBlock(row))
+        break
+      case "retry":
+        out.push({
+          type: "retry",
+          key: row.key,
+          ...num("attempt", row.attempt),
+          ...num("next", row.next),
+          ...(typeof row.errorType === "string" ? { errorType: row.errorType } : {}),
+          ...num("errorStatus", row.errorStatus),
+          ...(typeof row.text === "string" && row.text ? { message: row.text } : {}),
+        })
+        break
       case "subagent":
         if (row.sessionID) out.push({ type: "subagent", key: row.key, sessionID: row.sessionID, label: row.label ?? row.sessionID, state: row.state ?? "working" })
         break
     }
   }
   return out
+}
+
+const num = <K extends string>(key: K, value: unknown): { [P in K]?: number } =>
+  (typeof value === "number" && Number.isFinite(value) ? { [key]: value } : {}) as { [P in K]?: number }
+
+function errorBlock(row: TimelineRow): Extract<Block, { type: "error" }> {
+  const text = typeof row.text === "string" && row.text.trim() ? row.text.trim() : undefined
+  const known = errorLabel(row.errorType)
+  const status = httpStatus(row.errorStatus)
+  return { type: "error", key: row.key, label: known ?? text ?? "Error", ...(known && text ? { message: text } : {}), ...(status ? { status } : {}) }
+}
+
+/** The retry row's text at `now`; `waiting` while the next attempt is still ahead (a countdown shows). */
+export function retryView(block: Extract<Block, { type: "retry" }>, now: number): { text: string; waiting: boolean } {
+  return { text: retryLine(block, now), waiting: countdown(block.next, now) !== undefined }
 }
 
 function messageBlock(row: TimelineRow): Extract<Block, { type: "message" }> {

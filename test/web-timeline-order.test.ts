@@ -109,6 +109,23 @@ function replay(timeline: Timeline, messages: readonly Message[], spawned: Recor
   }
 }
 
+describe("Timeline ordering: errors and retries", () => {
+  test("error and retry rows of a failed turn keep their history position", () => {
+    const timeline = new Timeline()
+    timeline.load([
+      { key: "m2:error", kind: "error", messageID: "m2", text: "quota", errorType: "provider.quota", pos: 30 },
+      { key: "u1", kind: "user", text: "go", pos: 10 },
+      { key: "m2:retry:1", kind: "retry", messageID: "m2", text: "Rate limited", attempt: 1, next: 5, pos: 20 },
+    ])
+    expect(timeline.rows().map((r) => [r.key, r.kind])).toEqual([
+      ["u1", "user"],
+      ["m2:retry:1", "retry"],
+      ["m2:error", "error"],
+    ])
+    expect(timeline.rows()[1]).toMatchObject({ attempt: 1, next: 5 })
+  })
+})
+
 describe("Timeline ordering: live events", () => {
   // History up to the turn that spawns S3 and S6 (msg_046: reasoning, text, shell; msg_047: two subagents;
   // msg_048: text), which then runs live.

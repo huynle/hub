@@ -54,4 +54,12 @@ describe("jobs", () => {
     expect(retryText([{ id: "a", state: "working", retry: {} }], "a")).toBe("Retrying")
     expect(retryText(status)).toBeUndefined()
   })
+
+  test("retryText: the error type's label and a countdown to the next attempt (none once it is past)", () => {
+    const now = 1_000_000
+    const retrying = [{ id: "a", state: "working", retry: { attempt: 3, message: "You exceeded your quota", errorType: "provider.quota", errorStatus: 429, next: now + 250_000 } }]
+    expect(retryText(retrying, "a", now)).toBe("Retrying (attempt 3) · next in 4m 10s: Quota exceeded — You exceeded your quota")
+    expect(retryText(retrying, "a", now + 300_000)).toBe("Retrying (attempt 3): Quota exceeded — You exceeded your quota")
+    expect(retryText([{ id: "a", state: "working", retry: { attempt: 1, errorType: "provider.rate-limit" } }], "a", now)).toBe("Retrying (attempt 1): Rate limited")
+  })
 })

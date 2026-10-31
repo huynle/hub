@@ -8,7 +8,7 @@ import { Naming, RenameTitle } from "./Rename"
 import { enrollments, me, rows } from "./hub"
 import { HubMark } from "./HubMark"
 import { route, sessionHref } from "./router"
-import { Icon, IconButton, Menu, StatusIcon, VoiceDot } from "./ui"
+import { ErrorBadge, Icon, IconButton, Menu, StatusIcon, VoiceDot } from "./ui"
 import { jobsBadge } from "../core/jobs-core"
 import { voiceState } from "./voice"
 
@@ -137,13 +137,14 @@ function SideRow(props: { row: SessionRow; active: boolean; onPick: () => void }
           </span>
         }
       >
-      <a href={sessionHref(r().id)} class="side-row-link" aria-current={props.active ? "page" : undefined} onClick={props.onPick} title={`${r().title} · ${r().where} · ${r().machineName}`}>
+      <a href={sessionHref(r().id)} class="side-row-link" aria-current={props.active ? "page" : undefined} onClick={props.onPick} title={`${r().title} · ${r().where} · ${r().machineName}${r().error ? ` · ${r().error}` : ""}`}>
         <StatusIcon state={r().state} />
         <Show when={voiceLive(r(), voiceState())}>
           <VoiceDot />
         </Show>
         <span class="side-title">{r().title}</span>
         <Naming id={r().id} />
+        <Show when={r().error}>{(text) => <ErrorBadge text={text()} />}</Show>
         <Show when={r().jobs}>
           <span class="jobs-badge" title={jobsBadge(r().jobs)} aria-label={jobsBadge(r().jobs)}>
             {r().jobs}

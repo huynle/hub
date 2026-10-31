@@ -1,5 +1,6 @@
 // Background jobs (shells and terminals sessions started, e.g. a `sleep 60 &` or a build script) and model
 // retries of a session tree, from the status tree the hub sends (StatusBoard `jobs` / `retry`). Pure.
+import { retryLine, type RetryInfo } from "./error-core"
 
 export interface JobView {
   readonly id: string
@@ -20,7 +21,7 @@ interface StatusLike {
   readonly id: string
   readonly title?: string
   readonly state?: string
-  readonly retry?: { readonly attempt?: number; readonly message?: string }
+  readonly retry?: RetryInfo
   readonly jobs?: ReadonlyArray<Omit<JobView, "sessionID" | "sessionTitle">>
 }
 
@@ -70,11 +71,12 @@ export function jobsBadge(n: number): string {
   return n <= 0 ? "" : `${n} job${n === 1 ? "" : "s"}`
 }
 
-/** The session's retry ("Retrying (attempt 2): Rate limited"), else the first retrying session's in the tree. */
-export function retryText(status: unknown, sessionID?: string): string | undefined {
+/**
+ * The session's retry ("Retrying (attempt 2) · next in 4m 10s: Rate limited"), else the first retrying session's
+ * in the tree. The countdown to the next attempt shows while it is ahead of `now`.
+ */
+export function retryText(status: unknown, sessionID?: string, now = Date.now()): string | undefined {
   const list = entries(status)
   const entry = (sessionID ? list.find((s) => s.id === sessionID && s.retry) : undefined) ?? list.find((s) => s.retry)
-  if (!entry?.retry) return undefined
-  const attempt = entry.retry.attempt !== undefined ? ` (attempt ${entry.retry.attempt})` : ""
-  return entry.retry.message ? `Retrying${attempt}: ${entry.retry.message}` : `Retrying${attempt}`
+  return entry?.retry ? retryLine(entry.retry, now) : undefined
 }
