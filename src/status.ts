@@ -191,6 +191,15 @@ function formBlocker(form: any): Blocker {
   }
 }
 
+/** A model request OpenCode retries: the attempt, why, when the next one runs (epoch ms) and the error's type. */
+export interface RetryInfo {
+  readonly attempt?: number
+  readonly message?: string
+  readonly next?: number
+  readonly errorType?: string
+  readonly errorStatus?: number
+}
+
 export interface SessionStatus {
   readonly id: string
   readonly parentID?: string
@@ -199,7 +208,10 @@ export interface SessionStatus {
   readonly detail?: string
   readonly blockers: ReadonlyArray<Blocker>
   /** OpenCode is retrying the model request (state stays "working"). */
-  readonly retry?: { readonly attempt?: number; readonly message?: string }
+  readonly retry?: RetryInfo
+  /** state "error": the error's type ("provider.quota", "tool.execution", …) and HTTP status, when known. */
+  readonly errorType?: string
+  readonly errorStatus?: number
   /** Shells and terminals of the session: running ones, then the last few that ended (oldest first). */
   readonly jobs?: readonly JobInfo[]
 }
@@ -216,8 +228,10 @@ interface Entry {
   running: boolean
   /** session.status: busy or retry (OpenCode's own view of the session). */
   busy: boolean
-  retry?: { attempt?: number; message?: string }
+  retry?: RetryInfo
   error?: string
+  errorType?: string
+  errorStatus?: number
   blockers: Blocker[]
   jobs: JobInfo[]
 }
@@ -258,7 +272,8 @@ export class StatusBoard {
       case "session.execution.started":
         return this.update(data.sessionID, (entry) => {
           entry.running = true
-          entry.error = undefined
+          entry.retry = undefined
+          clearError(entry)
         })
       case "session.execution.succeeded":
       case "session.execution.interrupted":
@@ -266,8 +281,18 @@ export class StatusBoard {
       case "session.execution.failed":
         return this.update(data.sessionID, (entry) => {
           endRun(entry)
-          entry.error = String(data.error?.message ?? "failed")
+          setError(entry, data.error)
         })
+      // Output resumed: the retry succeeded (OpenCode sends no status for it).
+      case "session.text.delta":
+      case "session.reasoning.delta":
+      case "session.tool.called":
+      case "session.tool.input.started": {
+        const entry = typeof data.sessionID === "string" ? this.sessions.get(data.sessionID) : undefined
+        if (!entry?.retry) return false
+        entry.retry = undefined
+        return true
+      }
       case "permission.asked":
         return this.update(data.sessionID, (entry) => {
           if (entry.blockers.some((b) => b.id === data.id)) return
@@ -288,6 +313,7 @@ export class StatusBoard {
       case "session.seed":
         return this.update(data.sessionID, (entry) => {
           setStatus(entry, data.status)
+          if (typeof data.error?.message === "string" && data.error.message) setError(entry, data.error)
           entry.jobs = entry.jobs.filter((job) => job.status !== "running")
           for (const job of Array.isArray(data.jobs) ? data.jobs : []) if (isJob(job)) upsertJob(entry, job)
         })
@@ -401,9 +427,34 @@ function setStatus(entry: Entry, status: any): void {
   if (type === "retry") {
     const attempt = num(status.attempt)
     const message = text(status.message, 200)
-    entry.retry = { ...(attempt !== undefined ? { attempt } : {}), ...(message ? { message } : {}) }
+    const next = num(status.next)
+    const errorType = text(status.errorType, ERROR_TYPE_MAX)
+    const errorStatus = num(status.errorStatus)
+    entry.retry = {
+      ...(attempt !== undefined ? { attempt } : {}),
+      ...(message ? { message } : {}),
+      ...(next !== undefined ? { next } : {}),
+      ...(errorType ? { errorType } : {}),
+      ...(errorStatus !== undefined ? { errorStatus } : {}),
+    }
   } else entry.retry = undefined
-  if (type === "busy") entry.error = undefined
+  if (type === "busy") clearError(entry)
+}
+
+const ERROR_TYPE_MAX = 100
+const ERROR_MESSAGE_MAX = 1000
+
+/** A failed run's error: its message, type and status. */
+function setError(entry: Entry, error: any): void {
+  entry.error = typeof error?.message === "string" && error.message ? error.message.slice(0, ERROR_MESSAGE_MAX) : "failed"
+  entry.errorType = text(error?.type, ERROR_TYPE_MAX)
+  entry.errorStatus = num(error?.status)
+}
+
+function clearError(entry: Entry): void {
+  entry.error = undefined
+  entry.errorType = undefined
+  entry.errorStatus = undefined
 }
 
 function view(entry: Entry): SessionStatus {
@@ -418,6 +469,8 @@ function view(entry: Entry): SessionStatus {
     title: entry.title,
     state,
     ...(detail ? { detail } : {}),
+    ...(state === "error" && entry.errorType ? { errorType: entry.errorType } : {}),
+    ...(state === "error" && entry.errorStatus !== undefined ? { errorStatus: entry.errorStatus } : {}),
     blockers: entry.blockers.map((blocker) => structuredClone(blocker)),
     ...(retry ? { retry: { ...retry } } : {}),
     ...(entry.jobs.length ? { jobs: entry.jobs.map((job) => ({ ...job })) } : {}),
