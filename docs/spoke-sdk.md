@@ -117,9 +117,9 @@ bounded and tool data is summarised, never raw input or output.
 | `session.renamed` | `sessionID`, `title` (1–200) |
 | `session.deleted` | `sessionID` |
 | `session.execution.started` / `succeeded` | `sessionID`, `turnID?` |
-| `session.execution.failed` | `sessionID`, `turnID?`, `error?: {message}` (≤ 1000) |
+| `session.execution.failed` | `sessionID`, `turnID?`, `error?: {message, type?, status?}` (message ≤ 1000, type ≤ 64, status 100–599; the OpenCode spoke sends OpenCode's error type, e.g. `provider.quota`) |
 | `session.execution.interrupted` | `sessionID`, `turnID?`, `inferred?: true` (the harness reported none; the spoke found it later) |
-| `session.status` | `sessionID`, `status`: `{type: "idle" \| "busy"}` or `{type: "retry", attempt?, message?}` |
+| `session.status` | `sessionID`, `status`: `{type: "idle" \| "busy"}` or `{type: "retry", attempt?, message?, next?, errorType?, errorStatus?}` (`next`: epoch ms of the next try; the OpenCode spoke builds it from `session.retry.scheduled`) |
 | `session.text.ended` | `sessionID`, `assistantMessageID`, `ordinal` (≥ 0), `text` (≤ 16,000): the turn's reply |
 | `session.inbox.delivered` | `sessionID`, `inboxID`, `origin?: "user" \| "hub"`: a prompt entered the session |
 | `session.tool.called` | `sessionID`, `id`, `assistantMessageID?`, `summary?` (≤ 160), `background?` |

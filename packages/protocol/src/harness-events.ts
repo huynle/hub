@@ -74,10 +74,10 @@ export interface HarnessEventData {
   /** A turn started (the session is busy). `turnID`: the harness's turn, when it has one. */
   "session.execution.started": Turn
   "session.execution.succeeded": Turn
-  "session.execution.failed": Turn & { readonly error?: { readonly message: string } }
+  "session.execution.failed": Turn & { readonly error?: { readonly message: string; readonly type?: string; readonly status?: number } }
   /** `inferred`: the harness reported no interruption; the spoke found it later (see the header). */
   "session.execution.interrupted": Turn & { readonly inferred?: true }
-  "session.status": { readonly sessionID: string; readonly status: { readonly type: "idle" | "busy" } | { readonly type: "retry"; readonly attempt?: number; readonly message?: string } }
+  "session.status": { readonly sessionID: string; readonly status: { readonly type: "idle" | "busy" } | { readonly type: "retry"; readonly attempt?: number; readonly message?: string; readonly next?: number; readonly errorType?: string; readonly errorStatus?: number } }
   /** The turn's reply (e.g. Claude Code's Stop last_assistant_message); `ordinal` counts replies in the message. */
   "session.text.ended": { readonly sessionID: string; readonly assistantMessageID: string; readonly ordinal: number; readonly text: string }
   /** A prompt entered the session: typed by the user, or a message the hub delivered. */

@@ -56,3 +56,21 @@ in their terminals. 0.4.0 lists those first.
 - **New session**: a "+" on each workspace group and in the header: choose workspace (Herdr workspaces
   first, with their directories; or a folder), optional title, "Open in Herdr" (default on when the
   machine has Herdr) → POST → navigate to the session and offer conversation mode.
+
+## Errors and retries
+
+A session whose run failed has state `error`; its status entry carries `detail` (the message), `errorType` (OpenCode's
+type, e.g. `provider.quota`) and `errorStatus` (HTTP status) until the next run starts. A retrying session stays
+`working` with `retry: {attempt, message, next, errorType, errorStatus}` (`next`: epoch ms of the next try). With
+OpenCode 2.2 the spoke builds the retry from `session.retry.scheduled` and reseeds both after a reconnect.
+
+The console shows them as:
+- **Session header**: an alert banner, "Quota exceeded (HTTP 429): *message*" (names the subagent when one failed);
+  while retrying, the working line reads "Retrying (attempt 3) · next in 4m 10s: *reason*".
+- **Transcript** (history): an `error` row after a failed assistant message, a `retry` row with a live countdown while a
+  message waits to retry.
+- **Session lists** (Home, sidebar, rail): a "!" badge with the error. Rows refresh on catalog updates only, so they
+  carry no countdown.
+
+Error types map to labels in `web/src/core/error-core.ts`; unknown types show the message alone. Push: see
+`providerError` in [notifications](notifications.md).

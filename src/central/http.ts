@@ -541,6 +541,7 @@ export function startCentral(options: CentralOptions): Central {
       ...(alert.requestID ? { requestID: alert.requestID } : {}),
       ...(alert.subject ? { subject: alert.subject } : {}),
       ...(alert.key ? { key: alert.key } : {}),
+      ...(alert.unlessPref ? { unlessPref: alert.unlessPref } : {}),
     }
     notifier.notify(alert.kind, alert.sessionID, alert.title, alert.text, alert.owner, extra).catch((cause) => {
       console.error("[hub] push notification failed:", cause instanceof Error ? cause.message : cause)

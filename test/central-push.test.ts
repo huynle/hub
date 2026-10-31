@@ -312,6 +312,14 @@ describe("notify", () => {
     }
   })
 
+  test("a failure covered by providerError reaches only devices that turned providerError off", async () => {
+    await setup()
+    await store.setPushPrefs(tablet, { providerError: false })
+    expect(await push.notify("failed", "ses_q", "t", "Quota", undefined, { unlessPref: "providerError" })).toBe(1)
+    expect(fake.sent.map((s) => s.endpoint)).toEqual([sub(2).endpoint])
+    expect(fake.sent[0]!.raw).not.toContain("unlessPref")
+  })
+
   test("prefs are respected per device and per precise kind", async () => {
     await setup()
     expect(await push.notify("turn", "ses_1", "t")).toBe(0)

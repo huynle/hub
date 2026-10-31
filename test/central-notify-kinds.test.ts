@@ -277,18 +277,20 @@ describe("model provider errors (providerError)", () => {
   const retry = (sessionID: string, attempt: number, errorType: string, message: string) =>
     both("session.status", { sessionID, status: { type: "retry", attempt, message, errorType, errorStatus: 429, next: t + 5000 } })
 
-  test("a root quota failure: providerError once (both processes forward it), no duplicate 'failed'", () => {
+  test("a root quota failure: providerError once (both processes forward it); 'failed' only for devices without providerError", () => {
     both("session.execution.started", { sessionID: "ses_root" })
     fail("ses_root", "provider.quota", "You exceeded your current quota", 429)
     expect(of("providerError")).toEqual([{ kind: "providerError", sessionID: "ses_root", title: "KVM Rewrite", text: "KVM Rewrite: You exceeded your current quota", key: "ses_root" }])
-    expect(of("failed")).toEqual([])
+    expect(of("failed").length).toBeGreaterThan(0)
+    expect(of("failed").every((a: any) => a.unlessPref === "providerError")).toBe(true)
   })
 
   for (const type of ["provider.quota", "provider.free-limit", "provider.auth", "provider.no-route", "provider.unknown", "provider.budget-limit", "provider.spend-limit"]) {
     test(`a root failure of type ${type} raises providerError instead of failed`, () => {
       both("session.execution.started", { sessionID: "ses_root" })
       fail("ses_root", type, "nope")
-      expect(kinds().filter((k) => k === "providerError" || k === "failed")).toEqual(["providerError"])
+      expect(of("providerError")).toHaveLength(1)
+      expect(of("failed").every((a: any) => a.unlessPref === "providerError")).toBe(true)
     })
   }
 
@@ -298,6 +300,7 @@ describe("model provider errors (providerError)", () => {
       fail("ses_root", type, "boom")
       expect(of("providerError")).toEqual([])
       expect(of("failed")).toHaveLength(2)
+      expect(of("failed").some((a: any) => a.unlessPref)).toBe(false)
     })
   }
 
@@ -317,7 +320,7 @@ describe("model provider errors (providerError)", () => {
     expect(of("retry")).toEqual([{ kind: "retry", sessionID: "ses_root", title: "KVM Rewrite", text: "Attempt 1 · Quota exceeded: Quota exceeded" }])
     fail("ses_root", "provider.quota", "Quota exceeded")
     expect(of("providerError")).toHaveLength(1)
-    expect(of("failed")).toEqual([])
+    expect(of("failed").every((a: any) => a.unlessPref === "providerError")).toBe(true)
     both("session.execution.started", { sessionID: "ses_root" })
     fail("ses_root", "provider.quota", "Quota exceeded")
     expect(of("providerError")).toHaveLength(2)

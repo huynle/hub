@@ -48,6 +48,8 @@ export interface PushExtra {
   readonly key?: string
   /** decision: the Decision, so a tap opens its card. */
   readonly decisionID?: string
+  /** Skip devices that have this kind on (they were notified through it instead). Not sent. */
+  readonly unlessPref?: NotificationKind
 }
 
 export interface PushPayload {
@@ -387,7 +389,9 @@ export class Push {
     const targets = this.store.pushSubscriptions().filter((s) => {
       const owner = owners.get(s.deviceID)
       if (ownerID !== undefined && owner !== ownerID) return false
-      if (!this.store.pushPrefs(s.deviceID)[precise]) return false
+      const prefs = this.store.pushPrefs(s.deviceID)
+      if (!prefs[precise]) return false
+      if (extra?.unlessPref && prefs[extra.unlessPref]) return false
       if (precise === "handoff") return true
       const quiet = this.store.quietHours(s.deviceID)
       return !isMuted(owner) && !(quiet && inQuietHours(quiet, at))

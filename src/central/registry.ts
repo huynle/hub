@@ -150,6 +150,8 @@ export interface Alert {
   /** Tenant (user ID) that owns the session; push goes to this user's devices only. */
   readonly owner?: string
   readonly step?: ActivityStep
+  /** Skip devices that have this kind on (they were told through it instead). */
+  readonly unlessPref?: NotificationKind
 }
 
 /** Notifications that reach a session even while some device shows it. */
@@ -1454,7 +1456,8 @@ export class Registry {
     if (ended && root) {
       this.doneWatch.rootEnded(rootID, ended, wasRunning)
       if (ended === "succeeded" && wasRunning && !this.active.has(rootID)) this.alert("turn", rootID)
-      if (ended === "failed" && !providerFailure) this.alert("failed", rootID, error ? { text: error } : {})
+      // Devices with providerError on got that instead; the rest still hear about the failure.
+      if (ended === "failed") this.alert("failed", rootID, { ...(error ? { text: error } : {}), ...(providerFailure ? { unlessPref: "providerError" as const } : {}) })
       const stopped = ended === "interrupted" ? STOP_REASONS[String(data.reason)] : undefined
       if (stopped) this.alert("stopped", rootID, { text: stopped })
       return
@@ -1963,7 +1966,7 @@ export class Registry {
    * Raises a notification for the root of `sessionID`'s tree. Only hand-offs, questions and permissions reach a
    * session some device shows (spoken replies check that themselves: the watching device speaks them).
    */
-  private alert(kind: NotificationKind, sessionID: string, fields: { text?: string; requestID?: string; subject?: string; key?: string } = {}): void {
+  private alert(kind: NotificationKind, sessionID: string, fields: { text?: string; requestID?: string; subject?: string; key?: string; unlessPref?: NotificationKind } = {}): void {
     const entry = [...this.boards].find(([, board]) => board.get(sessionID))
     if (!entry) return
     const [rootID, board] = entry
@@ -1976,6 +1979,7 @@ export class Registry {
       ...(fields.text !== undefined ? { text: fields.text } : {}),
       ...(fields.requestID !== undefined ? { requestID: fields.requestID } : {}),
       ...(fields.key !== undefined ? { key: fields.key } : {}),
+      ...(fields.unlessPref !== undefined ? { unlessPref: fields.unlessPref } : {}),
     }
     const owner = this.sessionTenant(rootID)
     for (const listener of this.alertListeners) listener(owner ? { ...alert, owner } : alert)
