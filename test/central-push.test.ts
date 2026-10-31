@@ -85,6 +85,7 @@ describe("subscriptions and prefs", () => {
     activity: false,
     decision: true,
     message: true,
+    providerError: true,
   }
 
   test("prefs default to needs-you, all done, failed, hand-offs and say; are per device and persist", async () => {
@@ -94,6 +95,15 @@ describe("subscriptions and prefs", () => {
     expect([...PUSH_PREF_KEYS].sort() as string[]).toEqual(Object.keys(defaults).sort())
     await store.setPushPrefs(a.id, { turn: true, subagentDone: true })
     expect(Store.open(dir).pushPrefs(a.id)).toEqual({ ...defaults, turn: true, subagentDone: true })
+  })
+
+  test("devices stored before providerError existed get it on by default", async () => {
+    const a = (await store.addDevice("a")).device
+    const raw = store.data()
+    const { providerError: _, ...before } = defaults
+    raw.devices.find((d) => d.id === a.id)!.pushPrefs = { ...before, failed: false } as any
+    writeFileSync(path.join(dir, "state.json"), JSON.stringify(raw))
+    expect(Store.open(dir).pushPrefs(a.id)).toEqual({ ...defaults, failed: false, providerError: true })
   })
 
   test("the old 'finished' key (every root turn) is accepted and means all done", async () => {
@@ -175,6 +185,7 @@ describe("payloads per kind", () => {
     expect(title("turn")).toBe("KVM Rewrite · Turn finished")
     expect(title("stopped")).toBe("KVM Rewrite · Stopped")
     expect(title("retry")).toBe("KVM Rewrite · Retrying")
+    expect(title("providerError", "explore: Quota exceeded")).toBe("KVM Rewrite · Model provider error")
     expect(title("subagentDone", undefined, "S3 macros")).toBe("KVM Rewrite · Subagent S3 macros finished")
     expect(title("subagentFailed", undefined, "S3 macros")).toBe("KVM Rewrite · Subagent S3 macros failed")
     expect(title("jobDone", undefined, "exited 0")).toBe("KVM Rewrite · Script exited 0")
@@ -208,7 +219,7 @@ describe("payloads per kind", () => {
   })
 
   test("urgency and lifetime per kind", () => {
-    for (const kind of ["question", "permission", "failed", "decision", "message"] as const) expect(sendOptionsFor(kind)).toEqual({ TTL: URGENT_TTL_SECONDS, urgency: "high" })
+    for (const kind of ["question", "permission", "failed", "decision", "message", "providerError"] as const) expect(sendOptionsFor(kind)).toEqual({ TTL: URGENT_TTL_SECONDS, urgency: "high" })
     for (const kind of ["done", "subagentFailed", "jobFailed", "stopped"] as const) expect(sendOptionsFor(kind)).toEqual({ TTL: URGENT_TTL_SECONDS, urgency: "normal" })
     for (const kind of ["turn", "retry", "subagentDone", "jobDone", "longTool", "activity"] as const) expect(sendOptionsFor(kind)).toEqual({ TTL: 300, urgency: "normal" })
     for (const kind of ["say", "handoff", "test"] as const) expect(sendOptionsFor(kind)).toEqual({ TTL: 300, urgency: "high" })

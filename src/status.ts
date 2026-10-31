@@ -191,6 +191,53 @@ function formBlocker(form: any): Blocker {
   }
 }
 
+/** A model request OpenCode retries: the attempt, why, when the next one runs (epoch ms) and the error's type. */
+export interface RetryInfo {
+  readonly attempt?: number
+  readonly message?: string
+  readonly next?: number
+  readonly errorType?: string
+  readonly errorStatus?: number
+}
+
+/** Short labels of OpenCode's provider error types (session.execution.failed, retry status). */
+const PROVIDER_ERROR_LABELS: Readonly<Record<string, string>> = {
+  "provider.quota": "Quota exceeded",
+  "provider.free-limit": "Free limit reached",
+  "provider.auth": "Auth failed",
+  "provider.rate-limit": "Rate limited",
+  "provider.transport": "Network error",
+  "provider.internal": "Provider error",
+  "provider.timeout": "Timed out",
+  "provider.no-route": "No route to model",
+  "provider.unknown": "Unknown provider error",
+  "provider.content-filter": "Content filtered",
+  "provider.invalid-request": "Invalid request",
+  "provider.invalid-output": "Invalid output",
+  "provider.unsupported-operation": "Unsupported operation",
+}
+
+/** A budget or spending limit ("provider.budget-limit", "provider.spend-limit"): like a quota. Not a rate limit. */
+const budgetLike = (type: string): boolean =>
+  type !== "provider.rate-limit" && (type.includes("budget") || (type.startsWith("provider.") && type.includes("limit")))
+
+/** "Quota exceeded" for "provider.quota"; budget-like types read "Budget limit reached"; undefined when unknown. */
+export function errorTypeLabel(type: string | undefined): string | undefined {
+  if (!type) return undefined
+  return PROVIDER_ERROR_LABELS[type] ?? (type.startsWith("provider.") && budgetLike(type) ? "Budget limit reached" : undefined)
+}
+
+/** A failed run's error type the user must act on (quota, budget, auth, routing, unknown provider error). */
+export function providerFailureNeedsUser(type: string | undefined): boolean {
+  if (!type) return false
+  return ["provider.quota", "provider.free-limit", "provider.auth", "provider.no-route", "provider.unknown"].includes(type) || budgetLike(type)
+}
+
+/** A retry whose error the user must act on: retrying will not fix a quota, free tier or auth error. */
+export function providerRetryNeedsUser(type: string | undefined): boolean {
+  return type === "provider.quota" || type === "provider.auth" || type === "provider.free-limit"
+}
+
 export interface SessionStatus {
   readonly id: string
   readonly parentID?: string
@@ -199,7 +246,10 @@ export interface SessionStatus {
   readonly detail?: string
   readonly blockers: ReadonlyArray<Blocker>
   /** OpenCode is retrying the model request (state stays "working"). */
-  readonly retry?: { readonly attempt?: number; readonly message?: string }
+  readonly retry?: RetryInfo
+  /** state "error": the error's type ("provider.quota", "tool.execution", …) and HTTP status, when known. */
+  readonly errorType?: string
+  readonly errorStatus?: number
   /** Shells and terminals of the session: running ones, then the last few that ended (oldest first). */
   readonly jobs?: readonly JobInfo[]
 }
@@ -216,8 +266,10 @@ interface Entry {
   running: boolean
   /** session.status: busy or retry (OpenCode's own view of the session). */
   busy: boolean
-  retry?: { attempt?: number; message?: string }
+  retry?: RetryInfo
   error?: string
+  errorType?: string
+  errorStatus?: number
   blockers: Blocker[]
   jobs: JobInfo[]
 }
@@ -258,7 +310,8 @@ export class StatusBoard {
       case "session.execution.started":
         return this.update(data.sessionID, (entry) => {
           entry.running = true
-          entry.error = undefined
+          entry.retry = undefined
+          clearError(entry)
         })
       case "session.execution.succeeded":
       case "session.execution.interrupted":
@@ -266,8 +319,18 @@ export class StatusBoard {
       case "session.execution.failed":
         return this.update(data.sessionID, (entry) => {
           endRun(entry)
-          entry.error = String(data.error?.message ?? "failed")
+          setError(entry, data.error)
         })
+      // Output resumed: the retry succeeded (OpenCode sends no status for it).
+      case "session.text.delta":
+      case "session.reasoning.delta":
+      case "session.tool.called":
+      case "session.tool.input.started": {
+        const entry = typeof data.sessionID === "string" ? this.sessions.get(data.sessionID) : undefined
+        if (!entry?.retry) return false
+        entry.retry = undefined
+        return true
+      }
       case "permission.asked":
         return this.update(data.sessionID, (entry) => {
           if (entry.blockers.some((b) => b.id === data.id)) return
@@ -288,6 +351,7 @@ export class StatusBoard {
       case "session.seed":
         return this.update(data.sessionID, (entry) => {
           setStatus(entry, data.status)
+          if (typeof data.error?.message === "string" && data.error.message) setError(entry, data.error)
           entry.jobs = entry.jobs.filter((job) => job.status !== "running")
           for (const job of Array.isArray(data.jobs) ? data.jobs : []) if (isJob(job)) upsertJob(entry, job)
         })
@@ -401,9 +465,34 @@ function setStatus(entry: Entry, status: any): void {
   if (type === "retry") {
     const attempt = num(status.attempt)
     const message = text(status.message, 200)
-    entry.retry = { ...(attempt !== undefined ? { attempt } : {}), ...(message ? { message } : {}) }
+    const next = num(status.next)
+    const errorType = text(status.errorType, ERROR_TYPE_MAX)
+    const errorStatus = num(status.errorStatus)
+    entry.retry = {
+      ...(attempt !== undefined ? { attempt } : {}),
+      ...(message ? { message } : {}),
+      ...(next !== undefined ? { next } : {}),
+      ...(errorType ? { errorType } : {}),
+      ...(errorStatus !== undefined ? { errorStatus } : {}),
+    }
   } else entry.retry = undefined
-  if (type === "busy") entry.error = undefined
+  if (type === "busy") clearError(entry)
+}
+
+const ERROR_TYPE_MAX = 100
+const ERROR_MESSAGE_MAX = 1000
+
+/** A failed run's error: its message, type and status. */
+function setError(entry: Entry, error: any): void {
+  entry.error = typeof error?.message === "string" && error.message ? error.message.slice(0, ERROR_MESSAGE_MAX) : "failed"
+  entry.errorType = text(error?.type, ERROR_TYPE_MAX)
+  entry.errorStatus = num(error?.status)
+}
+
+function clearError(entry: Entry): void {
+  entry.error = undefined
+  entry.errorType = undefined
+  entry.errorStatus = undefined
 }
 
 function view(entry: Entry): SessionStatus {
@@ -418,6 +507,8 @@ function view(entry: Entry): SessionStatus {
     title: entry.title,
     state,
     ...(detail ? { detail } : {}),
+    ...(state === "error" && entry.errorType ? { errorType: entry.errorType } : {}),
+    ...(state === "error" && entry.errorStatus !== undefined ? { errorStatus: entry.errorStatus } : {}),
     blockers: entry.blockers.map((blocker) => structuredClone(blocker)),
     ...(retry ? { retry: { ...retry } } : {}),
     ...(entry.jobs.length ? { jobs: entry.jobs.map((job) => ({ ...job })) } : {}),

@@ -191,6 +191,78 @@ describe("StatusBoard: session status, retries and background jobs", () => {
   })
 })
 
+describe("StatusBoard: provider error details (C4)", () => {
+  test("a failed session carries the error type and status; a new run clears them", () => {
+    const board = new StatusBoard("ses_root", "Main")
+    board.observe(ev("session.execution.started", { sessionID: "ses_root" }))
+    board.observe(ev("session.execution.failed", { sessionID: "ses_root", error: { message: "Quota exceeded", type: "provider.quota", status: 429 } }))
+    expect(board.get("ses_root")).toMatchObject({ state: "error", detail: "Quota exceeded", errorType: "provider.quota", errorStatus: 429 })
+    board.observe(ev("session.execution.started", { sessionID: "ses_root" }))
+    const view = board.get("ses_root")!
+    expect(view.state).toBe("working")
+    expect(view).not.toHaveProperty("errorType")
+    expect(view).not.toHaveProperty("errorStatus")
+  })
+
+  test("errorType and errorStatus only when the state is error", () => {
+    const board = new StatusBoard("ses_root", "Main")
+    board.observe(ev("session.execution.failed", { sessionID: "ses_root", error: { message: "x", type: "provider.auth", status: 401 } }))
+    board.observe(ev("shell.created", { sessionID: "ses_root", id: "sh_1", kind: "shell", status: "running" }))
+    expect(board.get("ses_root")?.state).toBe("working")
+    expect(board.get("ses_root")).not.toHaveProperty("errorType")
+  })
+
+  test("retry carries next, errorType and errorStatus", () => {
+    const board = new StatusBoard("ses_root", "Main")
+    const status = { type: "retry", attempt: 3, message: "Rate limited", next: 1_700_000_000_000, errorType: "provider.rate-limit", errorStatus: 429 }
+    board.observe(ev("session.status", { sessionID: "ses_root", status }))
+    expect(board.get("ses_root")).toMatchObject({ state: "working", detail: "Retrying: Rate limited", retry: { attempt: 3, message: "Rate limited", next: 1_700_000_000_000, errorType: "provider.rate-limit", errorStatus: 429 } })
+  })
+
+  const retrying = () => {
+    const board = new StatusBoard("ses_root", "Main")
+    board.observe(ev("session.execution.started", { sessionID: "ses_root" }))
+    board.observe(ev("session.status", { sessionID: "ses_root", status: { type: "retry", attempt: 1, message: "busy" } }))
+    return board
+  }
+
+  for (const type of ["session.text.delta", "session.reasoning.delta", "session.tool.called", "session.tool.input.started"]) {
+    test(`retry clears when output resumes (${type}); the session stays working`, () => {
+      const board = retrying()
+      expect(board.observe(ev(type, { sessionID: "ses_root", delta: "hi" }))).toBe(true)
+      expect(board.get("ses_root")).toMatchObject({ state: "working" })
+      expect(board.get("ses_root")?.retry).toBeUndefined()
+      expect(board.get("ses_root")?.detail).toBeUndefined()
+      // Further output changes nothing visible.
+      expect(board.observe(ev(type, { sessionID: "ses_root", delta: "more" }))).toBe(false)
+    })
+  }
+
+  for (const type of ["session.execution.started", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"]) {
+    test(`retry clears on ${type}`, () => {
+      const board = retrying()
+      board.observe(ev(type, { sessionID: "ses_root", error: { message: "x" } }))
+      expect(board.get("ses_root")?.retry).toBeUndefined()
+      expect(board.snapshot().sessions[0]).not.toHaveProperty("retry")
+    })
+  }
+
+  test("output of a session without a retry changes nothing", () => {
+    const board = new StatusBoard("ses_root", "Main")
+    board.observe(ev("session.execution.started", { sessionID: "ses_root" }))
+    expect(board.observe(ev("session.text.delta", { sessionID: "ses_root", delta: "x" }))).toBe(false)
+  })
+
+  test("seed restores a retry with its details and an error with type and status", () => {
+    const board = new StatusBoard("ses_root", "Main")
+    board.observe(ev("session.created", { sessionID: "ses_child", parentID: "ses_root", title: "explore" }))
+    board.observe(ev("session.seed", { sessionID: "ses_root", status: { type: "retry", attempt: 2, message: "Quota", next: 5000, errorType: "provider.quota", errorStatus: 429 }, jobs: [] }))
+    expect(board.get("ses_root")?.retry).toEqual({ attempt: 2, message: "Quota", next: 5000, errorType: "provider.quota", errorStatus: 429 })
+    board.observe(ev("session.seed", { sessionID: "ses_child", status: { type: "idle" }, jobs: [], error: { message: "No route to model", type: "provider.no-route", status: 404 } }))
+    expect(board.get("ses_child")).toMatchObject({ state: "error", detail: "No route to model", errorType: "provider.no-route", errorStatus: 404 })
+  })
+})
+
 describe("StatusBoard: a seeded busy session goes idle when its run ends", () => {
   test("execution end clears busy/retry (OpenCode v2 sends no idle status)", () => {
     const board = new StatusBoard("ses_root", "Main")

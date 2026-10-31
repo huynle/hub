@@ -38,10 +38,11 @@ fires at most once per settled run: about 32 times for this session.
 | `decision` | Decision | a session or app asked you (`hub ask @me`): a Decision opened, or passed its deadline without a safe `onTimeout` (once more); body generic ("A decision waits for you. Tap to answer."), opens the session it is about at the Decision's card (`?decision=<id>`). An agent's approval outside its grant opens one too (one per agent and request; several within a minute push once): the service worker then fetches it and shows the agent's recommendation ("@orchestrator recommends Approve once: …"), which the permission's blocker also carries. A grant request (an agent asking for a grant, `hub grant request`) opens one as well, always `tap` tier; an escalation's tier is the hub's (`tap` for shell, external directories, MCP and unknown tools and anything near a never rule, else `confirm`). A `decision` notification never has quick answers: it opens the card | on |
 | `message` | Message | agent messaging needs you: a `msg` to `@me`, an ask an idle session left unanswered after every re-wake, or sessions messaging each other past the hop cap; body generic ("Tap to see it.") | on |
 | `done` | All done | the root's last turn succeeded and the whole tree stayed settled for 15 s (see below); once per run | on |
-| `failed` | Failed | `session.execution.failed` of the root; body: the error message | on |
+| `failed` | Failed | `session.execution.failed` of the root; body: the error message. Not for a failure that raises `providerError` | on |
+| `providerError` | Model provider error | a model provider error you must act on, in any session of the tree, once per session per run: `session.execution.failed` with error type `provider.quota`, `provider.free-limit`, `provider.auth`, `provider.no-route`, `provider.unknown` or a budget-like type (contains `budget`, or a `provider.*` type containing `limit` other than `provider.rate-limit`); or a `retry` status whose `errorType` is `provider.quota`, `provider.auth` or `provider.free-limit`. Body: "*session title*: *message*" (the failing session's title, root or subagent). It replaces the root's `failed` for that failure (and for a final failure after a quota/auth retry already raised it in the same run); a subagent still gets `subagentFailed` too | on |
 | `turn` | Turn finished | every `session.execution.succeeded` of the root (0.7's "finished"), except turns the hub runs for the page | off |
 | `stopped` | Stopped | `session.execution.interrupted` of the root with reason `shutdown` or `inactivity` | off |
-| `retry` | Retrying | the root's `session.status` turns `retry` (once per retry streak); body: attempt and reason | off |
+| `retry` | Retrying | the root's `session.status` turns `retry` (once per retry streak); body: attempt, error type label when known, and reason ("Attempt 2 · Rate limited: Slow down") | off |
 | `subagentDone` | Subagent *title* finished | a subagent session's run succeeded; body: its parent session | off |
 | `subagentFailed` | Subagent *title* failed | a subagent session's run failed; body: the error | off |
 | `jobDone` | Script exited 0 | a shell job or terminal (`shell.exited`, `session.shell.ended`, `pty.exited`) exited 0; body: the command | off |
@@ -62,10 +63,10 @@ Titles read "*session* · *label*" (e.g. "KVM Rewrite · All done", "KVM Rewrite
 replaces the older one. Progress kinds (`turn`, `retry`, `subagentDone`, `jobDone`, `longTool`, `activity`) replace
 quietly; the others alert again.
 
-Delivery: `question`, `permission`, `failed`, `decision`, `message` are high urgency with a one-hour TTL; `done`, `stopped`,
+Delivery: `question`, `permission`, `failed`, `providerError`, `decision`, `message` are high urgency with a one-hour TTL; `done`, `stopped`,
 `subagentFailed`, `jobFailed` normal urgency, one hour; the progress kinds normal urgency, 5 minutes; `say` and
 `handoff` high urgency, 5 minutes. At most one notification per session and kind every 30 s (`say`: 10 s);
-subagent, script and long-tool notifications count per subagent / job / tool call.
+subagent, script, long-tool and `providerError` notifications count per subagent / job / tool call / failing session.
 
 A permission an agent escalated keeps its own `permission` notification, but without Allow/Reject when the
 service worker sees it was escalated to a `tap` Decision (or cannot read the Decision): answer it in the console.
@@ -80,7 +81,8 @@ agent-written text.
 ### Migration
 
 Stored prefs are rewritten on start: 0.7's `finished` becomes `done` (all done, not every turn); `failed`,
-`activity` and the rest are kept; the new kinds start off (except `decision` and `message`, on by default). 0.5.0's `blocked` still becomes `question` +
+`activity` and the rest are kept; the new kinds start off (except `decision`, `message` and `providerError`, on by default:
+a device stored before `providerError` existed gets it on, since missing keys take the default). 0.5.0's `blocked` still becomes `question` +
 `permission`. The API keeps accepting `finished` (→ `done`) and `blocked` from older clients.
 
 ## Inventory: OpenCode events and hub sources
@@ -91,11 +93,11 @@ Events the spoke forwards (`FORWARDED_EVENTS` in `src/protocol.ts`) and what the
 |---|---|
 | `session.execution.started` | none; arms/cancels All done |
 | `session.execution.succeeded` | root: `turn`, All done candidate; subagent: `subagentDone` |
-| `session.execution.failed` | root: `failed`; subagent: `subagentFailed` |
+| `session.execution.failed` | root: `failed`, or `providerError` for a quota/budget/auth/no-route/unknown provider error; subagent: `subagentFailed` (+ `providerError` for those types) |
 | `session.execution.interrupted` | root, reason `shutdown`/`inactivity`: `stopped`; `user`/`superseded`: none (you stopped it, or a newer turn replaced it); subagent: none |
 | `permission.asked` / `permission.replied` | `permission` / none (re-checks All done) |
 | `form.created` / `form.replied` / `form.cancelled` | `question` / none (re-checks All done) |
-| `session.status` (busy/retry/idle) | root retry: `retry`; otherwise none |
+| `session.status` (busy/retry/idle) | root retry: `retry`; a retry of any session with `errorType` `provider.quota`/`provider.auth`/`provider.free-limit`: `providerError`; otherwise none. OpenCode 2.2 never publishes it: the spoke translates `session.retry.scheduled` into a `session.status` retry (attempt, message, next, errorType, errorStatus) |
 | `shell.created`, `session.shell.started`, `pty.created`, `pty.updated` | none (job state) |
 | `shell.exited`, `session.shell.ended`, `pty.exited` | `jobDone` / `jobFailed` |
 | `shell.deleted`, `pty.deleted` | none |
@@ -108,7 +110,7 @@ Events the spoke forwards (`FORWARDED_EVENTS` in `src/protocol.ts`) and what the
 OpenCode v2 events the spoke does not forward (from `@opencode/client` types) and why they are not notified:
 `session.idle` (not durable; the hub derives settledness from runs, blockers and jobs), `session.synthetic` (the
 synthetic continuation message: the cause of the false "finished", not itself news), `session.retry.scheduled`
-(covered by `session.status` retry), `session.compaction.*` (housekeeping), `session.step.*` (per model step: far
+(not forwarded as such: the spoke translates it into a `session.status` retry, see above), `session.compaction.*` (housekeeping), `session.step.*` (per model step: far
 too frequent), `session.inbox.*` (queued input), `session.usage.*`, `session.instructions.updated`,
 `session.skill.activated`, `session.revert.*`, `session.forked`, `session.moved`, `session.model.selected`,
 `session.message.content.updated`, `session.tool.input.delta/ended`, `session.tool.progress` (forwarded compact as

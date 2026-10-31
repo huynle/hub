@@ -12,7 +12,7 @@
 // holds the connection; remote state is never re-exported.
 import path from "node:path"
 import { HARNESS_OPENCODE, helloHarness, spokeFeatures, type EvidenceLevel, type ForwardedEvent, type Hello, type HerdrWorkspace, type ProcessKind, type SessionInfo, type SpokeFeature, type SpokeMode, type TerminalInfo, type Terminals } from "../protocol"
-import { StatusBoard, permissionRequest, type Blocker, type BlockerRecommendation, type PermissionRequest, type SessionStatus } from "../status"
+import { StatusBoard, errorTypeLabel, permissionRequest, providerFailureNeedsUser, providerRetryNeedsUser, type Blocker, type BlockerRecommendation, type PermissionRequest, type SessionStatus } from "../status"
 import { sanitizeLabel } from "./agent/envelope"
 import { DoneWatch } from "./done"
 import { SentenceStream } from "./say-stream"
@@ -407,6 +407,8 @@ export class Registry {
   private readonly forms = new Map<string, { connIDs: string[]; sessionID: string }>()
   /** Form IDs already alerted (forms may be forwarded by several processes). */
   private readonly alertedForms = new Set<string>()
+  /** Sessions whose current run raised a providerError notification (once per run; cleared when a run starts). */
+  private readonly providerAlerted = new Set<string>()
   /** Sessions in conversation mode → the connection last told so (re-sent when another one takes over). */
   private readonly conversations = new Map<string, string | undefined>()
   /** `messageID ordinal` of texts already sent as say events (several processes forward the same text). */
@@ -1433,15 +1435,26 @@ export class Registry {
     if (!rootID) return
     const root = rootID === sessionID
     const wasRunning = before?.state === "working" || before?.state === "blocked"
-    if (type === "session.execution.started") return this.doneWatch.started(rootID, root)
+    if (type === "session.execution.started") {
+      this.providerAlerted.delete(sessionID)
+      return this.doneWatch.started(rootID, root)
+    }
     if (type === "session.text.delta" || type === "session.reasoning.delta") return
     const ended = type === "session.execution.succeeded" ? "succeeded" : type === "session.execution.failed" ? "failed" : type === "session.execution.interrupted" ? "interrupted" : undefined
     const reason = (data.error as { message?: unknown } | undefined)?.message
     const error = typeof reason === "string" && reason.trim() ? reason : undefined
+    const errorType = (data.error as { type?: unknown } | undefined)?.type
+    // A provider error the user must act on replaces the root's "failed" (raised once per run).
+    const providerFailure = ended === "failed" && typeof errorType === "string" && providerFailureNeedsUser(errorType)
+    if (providerFailure) this.providerError(rootID, sessionID, error ?? errorTypeLabel(errorType) ?? "Model provider error")
+    if (type === "session.status") {
+      const retry = this.status(rootID)?.find((s) => s.id === sessionID)?.retry
+      if (retry && providerRetryNeedsUser(retry.errorType)) this.providerError(rootID, sessionID, retry.message ?? errorTypeLabel(retry.errorType)!)
+    }
     if (ended && root) {
       this.doneWatch.rootEnded(rootID, ended, wasRunning)
       if (ended === "succeeded" && wasRunning && !this.active.has(rootID)) this.alert("turn", rootID)
-      if (ended === "failed") this.alert("failed", rootID, error ? { text: error } : {})
+      if (ended === "failed" && !providerFailure) this.alert("failed", rootID, error ? { text: error } : {})
       const stopped = ended === "interrupted" ? STOP_REASONS[String(data.reason)] : undefined
       if (stopped) this.alert("stopped", rootID, { text: stopped })
       return
@@ -1456,7 +1469,10 @@ export class Registry {
     }
     if (type === "session.status" && root && !before?.retry) {
       const retry = this.status(rootID)?.find((s) => s.id === rootID)?.retry
-      if (retry) this.alert("retry", rootID, { text: [retry.attempt !== undefined ? `Attempt ${retry.attempt}` : "", retry.message ?? ""].filter(Boolean).join(": ") || "Retrying" })
+      if (retry) {
+        const why = [retry.attempt !== undefined ? `Attempt ${retry.attempt}` : "", errorTypeLabel(retry.errorType) ?? ""].filter(Boolean).join(" · ")
+        this.alert("retry", rootID, { text: [why, retry.message ?? ""].filter(Boolean).join(": ") || "Retrying" })
+      }
       return
     }
     if (type === "shell.exited" || type === "session.shell.ended" || type === "pty.exited") {
@@ -1467,6 +1483,15 @@ export class Registry {
       const failed = data.status === "killed" || data.status === "timeout" || (exit !== undefined && exit !== 0)
       this.alert(failed ? "jobFailed" : "jobDone", rootID, { subject: how, text: job.command ?? (job.kind === "pty" ? "terminal" : "shell"), key: job.id })
     }
+  }
+
+  /** A model provider error of `sessionID` (root or subagent) needs the user: "<session title>: <message>", once per run. */
+  private providerError(rootID: string, sessionID: string, message: string): void {
+    if (this.providerAlerted.has(sessionID)) return
+    this.providerAlerted.add(sessionID)
+    if (this.providerAlerted.size > 1000) this.providerAlerted.delete(this.providerAlerted.values().next().value!)
+    const title = this.status(rootID)?.find((s) => s.id === sessionID)?.title?.trim() || "Session"
+    this.alert("providerError", rootID, { text: `${title}: ${message}`, key: sessionID })
   }
 
   /** Fires when a root's tree stayed settled after its run (DoneWatch). */
