@@ -14,7 +14,8 @@ export interface TimelineItem {
   readonly partID?: string
   readonly sessionID: string
   /** "message": a hub message delivered to the session (TimelineMessageItem). */
-  readonly kind: "user" | "assistant" | "reasoning" | "tool" | "message"
+  /** "error": the turn failed; "retry": the provider call is being retried (until the message completes or fails). */
+  readonly kind: "user" | "assistant" | "reasoning" | "tool" | "message" | "error" | "retry"
   readonly text?: string
   readonly name?: string
   readonly state?: "running" | "done" | "failed"
@@ -39,12 +40,20 @@ export interface TimelineItem {
   readonly direction?: TimelineMessageItem["direction"]
   /** Message rows: who sent it, how it was addressed, what it answers. */
   readonly message?: TimelineMessageItem["message"]
+  /** Error and retry rows: the error's type (bounded) and HTTP status (100–599). */
+  readonly errorType?: string
+  readonly errorStatus?: number
+  /** Retry rows: the attempt number and when the next attempt starts (epoch ms). */
+  readonly attempt?: number
+  readonly next?: number
 }
 
 /** Parts of one message a position leaves room for (later parts share the last slot). */
 const POS_PARTS = 1000
 const SUBAGENT_TOOLS = new Set(["subagent", "task"])
 const TITLE_MAX = 160
+const ERROR_TEXT_MAX = 1000
+const ERROR_TYPE_MAX = 64
 
 const record = (value: unknown): Record<string, any> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : {}
 
@@ -55,7 +64,7 @@ export function timelineItems(sessionID: string, messages: readonly unknown[]): 
   for (const raw of messages) {
     const message = record(raw)
     if (typeof message.id !== "string") continue
-    const at = typeof message.time?.created === "number" ? message.time.created : undefined
+    const at = millis(message.time?.created)
     // Messages keep the session's order even when one was created earlier than the one before it (a queued prompt).
     const start = Math.max(at === undefined ? -Infinity : at * POS_PARTS, previous + POS_PARTS)
     const first = (previous = Number.isFinite(start) ? start : 0)
@@ -71,7 +80,12 @@ export function timelineItems(sessionID: string, messages: readonly unknown[]): 
       if (row) out.push(row)
       continue
     }
-    if (message.type !== "assistant" || !Array.isArray(message.content)) continue
+    if (message.type !== "assistant") continue
+    const status = statusRow(sessionID, message, at, pos(Array.isArray(message.content) ? message.content.length : 0))
+    if (!Array.isArray(message.content)) {
+      if (status) out.push(status)
+      continue
+    }
     let texts = 0
     message.content.forEach((part: any, index: number) => {
       if (!part || typeof part !== "object") return
@@ -98,8 +112,50 @@ export function timelineItems(sessionID: string, messages: readonly unknown[]): 
         })
       }
     })
+    if (status) out.push(status)
   }
   return out
+}
+
+/** Epoch milliseconds of an OpenCode timestamp: a number (ms) or an ISO date string. */
+function millis(value: unknown): number | undefined {
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined
+  if (typeof value !== "string") return undefined
+  const ms = Date.parse(value)
+  return Number.isNaN(ms) ? undefined : ms
+}
+
+/** The bounded type and HTTP status of an OpenCode error, and its trimmed message (else `fallback`). */
+function errorFields(raw: unknown, fallback: string): { text: string; errorType?: string; errorStatus?: number } {
+  const error = record(raw)
+  const message = typeof error.message === "string" ? error.message.trim().slice(0, ERROR_TEXT_MAX) : ""
+  const type = typeof error.type === "string" ? error.type.trim().slice(0, ERROR_TYPE_MAX) : ""
+  const status = error.status
+  return {
+    text: message || fallback,
+    ...(type ? { errorType: type } : {}),
+    ...(Number.isInteger(status) && status >= 100 && status <= 599 ? { errorStatus: status } : {}),
+  }
+}
+
+/**
+ * The status row of an assistant message, after its parts: "error" when the turn failed, "retry" while the
+ * provider call is being retried (no error yet and not completed), else none.
+ */
+function statusRow(sessionID: string, message: Record<string, any>, at: number | undefined, pos: number): TimelineItem | undefined {
+  const base = { messageID: message.id as string, sessionID, ...(at === undefined ? {} : { at }), pos }
+  if (message.error != null) return { key: `${message.id}:error`, kind: "error", ...errorFields(message.error, "failed"), ...base }
+  if (message.retry == null || message.time?.completed != null) return undefined
+  const retry = record(message.retry)
+  const next = millis(retry.at)
+  return {
+    key: `${message.id}:retry`,
+    kind: "retry",
+    ...errorFields(retry.error, "retrying"),
+    ...(Number.isInteger(retry.attempt) && retry.attempt >= 0 ? { attempt: retry.attempt } : {}),
+    ...(next === undefined ? {} : { next }),
+    ...base,
+  }
 }
 
 /** A message the hub delivered (synthetic, with deliverMetadata): a "message" row; other synthetic messages: none. */
