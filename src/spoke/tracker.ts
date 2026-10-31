@@ -1,7 +1,7 @@
 // Sessions this OpenCode process knows about, built from the events it sees, plus which of them
 // are exposed to the central server (by mode). Pure: time is passed in.
 import type { Mode } from "../config"
-import { compactActivity, FORWARDED_EVENTS, type JobInfo, type SessionInfo, type TerminalInfo } from "../protocol"
+import { compactActivity, compactRunError, FORWARDED_EVENTS, type CompactRunError, type CompactSessionStatus, type JobInfo, type SessionInfo, type TerminalInfo } from "../protocol"
 
 /** A session is "owned" by this process while it viewed or ran it within this window. */
 export const OWNED_WINDOW_MS = 30 * 60 * 1000
@@ -63,6 +63,21 @@ const JOBS_KNOWN = 1000
 
 const RUN_END = new Set(["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"])
 
+/** Events that end a pending retry: the run started, ended, or its output resumed. */
+const RETRY_END = new Set([
+  "session.execution.started",
+  ...RUN_END,
+  "session.text.delta",
+  "session.reasoning.delta",
+  "session.tool.called",
+  "session.tool.input.started",
+])
+
+/** Sessions whose pending retry or last failure is remembered (oldest dropped). */
+const ERRORS_KNOWN = 1000
+
+type RetryStatus = Extract<CompactSessionStatus, { type: "retry" }>
+
 export class SessionTracker {
   private readonly entries = new Map<string, Entry>()
   /** Sessions with a run in progress. */
@@ -73,6 +88,10 @@ export class SessionTracker {
   private readonly busy = new Set<string>()
   /** Shell or terminal ID → its session, while known (running or exited, until deleted). */
   private readonly jobs = new Map<string, { sessionID: string; running: boolean }>()
+  /** A session's pending retry (session.retry.scheduled, or a retry status), until its run moves on. */
+  private readonly retries = new Map<string, RetryStatus>()
+  /** A session's last run failure, until its next run starts. */
+  private readonly errors = new Map<string, CompactRunError>()
 
   /** Applies an event seen in this process. Returns true when the snapshot may have changed. */
   observe(event: EventLike, now: number): boolean {
@@ -102,6 +121,8 @@ export class SessionTracker {
       case "session.deleted":
         this.running.delete(id)
         this.busy.delete(id)
+        this.retries.delete(id)
+        this.errors.delete(id)
         for (const [jobID, job] of this.jobs) if (job.sessionID === id) this.jobs.delete(jobID)
         for (const [key, sessionID] of this.waiting) if (sessionID === id) this.waiting.delete(key)
         return this.entries.delete(id)
@@ -217,22 +238,27 @@ export class SessionTracker {
 
   /** Replaces a session's status and running jobs with a snapshot (fetched at startup or after a reconnect). */
   seed(sessionID: string, snapshot: { readonly status: "idle" | "busy" | "retry"; readonly jobs: readonly JobInfo[] }): void {
-    if (snapshot.status === "idle") this.busy.delete(sessionID)
-    else this.busy.add(sessionID)
+    if (snapshot.status === "idle") {
+      this.busy.delete(sessionID)
+      this.retries.delete(sessionID)
+    } else this.busy.add(sessionID)
     for (const [jobID, job] of this.jobs) if (job.sessionID === sessionID && job.running) this.jobs.delete(jobID)
     for (const job of snapshot.jobs) this.setJob(job.id, sessionID, job.status === "running")
   }
 
   /** Session status and shells/terminals (compacted so the session of an exit is resolved). */
   private trackJobs(event: EventLike): void {
-    if (event.type !== "session.status" && !event.type.startsWith("shell.") && !event.type.startsWith("pty.") && !event.type.startsWith("session.shell.")) return
+    if (event.type !== "session.status" && event.type !== "session.retry.scheduled" && !event.type.startsWith("shell.") && !event.type.startsWith("pty.") && !event.type.startsWith("session.shell.")) return
     const compact = compactActivity({ type: event.type, data: record(event.data) }, (id) => this.jobSession(id))
     if (!compact) return
     const data = compact.data as Record<string, any>
     const sessionID = data.sessionID as string
     if (compact.type === "session.status") {
-      if (data.status.type === "idle") this.busy.delete(sessionID)
+      const status = data.status as CompactSessionStatus
+      if (status.type === "idle") this.busy.delete(sessionID)
       else this.busy.add(sessionID)
+      if (status.type === "retry") remember(this.retries, sessionID, status)
+      else this.retries.delete(sessionID)
     } else if (compact.type.endsWith(".deleted")) this.jobs.delete(data.id)
     else if (typeof data.id === "string" && typeof data.status === "string") this.setJob(data.id, sessionID, data.status === "running")
   }
@@ -248,7 +274,12 @@ export class SessionTracker {
     this.trackJobs(event)
     const data = record(event.data)
     const sessionID = eventSessionID(event)
-    if (event.type === "session.execution.started" && sessionID) this.running.add(sessionID)
+    if (sessionID && RETRY_END.has(event.type)) this.retries.delete(sessionID)
+    if (sessionID && event.type === "session.execution.failed") remember(this.errors, sessionID, compactRunError(data.error) ?? { message: "failed" })
+    if (event.type === "session.execution.started" && sessionID) {
+      this.running.add(sessionID)
+      this.errors.delete(sessionID)
+    }
     else if (RUN_END.has(event.type) && sessionID) {
       this.running.delete(sessionID)
       // OpenCode v2 sends no idle status: a run's end ends a busy status (seeded or reported) too.
@@ -265,6 +296,21 @@ export class SessionTracker {
   /** The session itself has a run in progress or OpenCode reports it busy or retrying. */
   isBusy(sessionID: string): boolean {
     return this.running.has(sessionID) || this.busy.has(sessionID)
+  }
+
+  /** The session's pending retry (attempt, reason, next try, error kind), while it waits to retry. */
+  retryOf(sessionID: string): RetryStatus | undefined {
+    return this.retries.get(sessionID)
+  }
+
+  /** The session's last run failure, when no run started since. */
+  errorOf(sessionID: string): CompactRunError | undefined {
+    return this.errors.get(sessionID)
+  }
+
+  /** Sessions whose last run failed (no run started since). */
+  failed(): string[] {
+    return [...this.errors.keys()]
   }
 
   /** A form (question) is open in the session itself. */
@@ -348,6 +394,13 @@ export class SessionTracker {
     }
     return entry
   }
+}
+
+/** Sets a key as the newest, keeping at most ERRORS_KNOWN (oldest dropped). */
+function remember<V>(map: Map<string, V>, key: string, value: V): void {
+  map.delete(key)
+  map.set(key, value)
+  if (map.size > ERRORS_KNOWN) map.delete(map.keys().next().value!)
 }
 
 const workspace = (s: SessionDetails) => ({

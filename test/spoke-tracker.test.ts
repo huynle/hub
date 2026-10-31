@@ -364,3 +364,78 @@ describe("running detection: run end", () => {
     expect(tracker.active()).toEqual([])
   })
 })
+
+describe("session errors: pending retry and last failure (OpenCode 2.2)", () => {
+  const retry = (sessionID: string, attempt = 1, at = T0 + 5000) =>
+    ev("session.retry.scheduled", { sessionID, assistantMessageID: "msg_1", attempt, at, error: { type: "provider.rate-limit", message: "Rate limited", status: 429, response: { body: "BODY" } } })
+  const failed = (sessionID: string) => ev("session.execution.failed", { sessionID, error: { type: "provider.quota", message: "Quota exceeded", status: 429, response: { body: "BODY" } } })
+
+  test("retry.scheduled makes the session busy and remembers the retry, compact", () => {
+    const tracker = new SessionTracker()
+    tracker.observe(created("ses_a"), T0)
+    tracker.observe(retry("ses_a", 2), T0)
+    expect(tracker.isBusy("ses_a")).toBe(true)
+    expect(tracker.working()).toEqual(["ses_a"])
+    expect(tracker.retryOf("ses_a")).toEqual({ type: "retry", attempt: 2, message: "Rate limited", next: T0 + 5000, errorType: "provider.rate-limit", errorStatus: 429 })
+  })
+
+  test("a session.status retry is remembered too; busy or idle status clears it", () => {
+    const tracker = new SessionTracker()
+    tracker.observe(ev("session.status", { sessionID: "ses_a", status: { type: "retry", attempt: 1, message: "x" } }), T0)
+    expect(tracker.retryOf("ses_a")).toEqual({ type: "retry", attempt: 1, message: "x" })
+    tracker.observe(ev("session.status", { sessionID: "ses_a", status: { type: "busy" } }), T0)
+    expect(tracker.retryOf("ses_a")).toBeUndefined()
+  })
+
+  for (const type of ["session.execution.started", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "session.text.delta", "session.reasoning.delta", "session.tool.called", "session.tool.input.started"]) {
+    test(`${type} clears a pending retry`, () => {
+      const tracker = new SessionTracker()
+      tracker.observe(retry("ses_a"), T0)
+      tracker.observe(ev(type, { sessionID: "ses_a", id: "t1", delta: "x" }), T0)
+      expect(tracker.retryOf("ses_a")).toBeUndefined()
+    })
+  }
+
+  test("an unrelated event (permission asked, another session's output) keeps the retry", () => {
+    const tracker = new SessionTracker()
+    tracker.observe(retry("ses_a"), T0)
+    tracker.observe(ev("permission.asked", { sessionID: "ses_a", id: "per_1" }), T0)
+    tracker.observe(ev("session.text.delta", { sessionID: "ses_b", delta: "x" }), T0)
+    expect(tracker.retryOf("ses_a")?.attempt).toBe(1)
+  })
+
+  test("execution.failed remembers the last failure (message, type, status only) until a run starts", () => {
+    const tracker = new SessionTracker()
+    tracker.observe(created("ses_a"), T0)
+    tracker.observe(failed("ses_a"), T0)
+    expect(tracker.errorOf("ses_a")).toEqual({ message: "Quota exceeded", type: "provider.quota", status: 429 })
+    expect(tracker.failed()).toEqual(["ses_a"])
+    tracker.observe(ev("session.text.delta", { sessionID: "ses_a", delta: "x" }), T0)
+    expect(tracker.errorOf("ses_a")).toBeDefined()
+    tracker.observe(ev("session.execution.started", { sessionID: "ses_a" }), T0)
+    expect(tracker.errorOf("ses_a")).toBeUndefined()
+    expect(tracker.failed()).toEqual([])
+  })
+
+  test("deleting a session forgets its retry and failure; an idle seed clears the retry, a busy seed keeps it", () => {
+    const tracker = new SessionTracker()
+    tracker.observe(retry("ses_a"), T0)
+    tracker.seed("ses_a", { status: "busy", jobs: [] })
+    expect(tracker.retryOf("ses_a")).toBeDefined()
+    tracker.seed("ses_a", { status: "idle", jobs: [] })
+    expect(tracker.retryOf("ses_a")).toBeUndefined()
+    tracker.observe(retry("ses_b"), T0)
+    tracker.observe(failed("ses_b"), T0)
+    tracker.observe(retry("ses_b"), T0)
+    tracker.observe(ev("session.deleted", { sessionID: "ses_b" }), T0)
+    expect(tracker.retryOf("ses_b")).toBeUndefined()
+    expect(tracker.errorOf("ses_b")).toBeUndefined()
+  })
+
+  test("the translated retry passes shouldForward (session.status); the raw type would not", () => {
+    const tracker = new SessionTracker()
+    tracker.observe(created("ses_a"), T0)
+    expect(shouldForward({ mode: "always", sessions: [] }, tracker, ev("session.status", { sessionID: "ses_a", status: { type: "retry" } }))).toBe(true)
+    expect(shouldForward({ mode: "always", sessions: [] }, tracker, retry("ses_a"))).toBe(false)
+  })
+})
