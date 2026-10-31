@@ -294,4 +294,13 @@ describe("sessionRows: background jobs and retries", () => {
     expect(b.jobs).toBe(0)
     expect(b.retry).toBeUndefined()
   })
+
+  test("a session in state error carries its error (label and message) until a new run starts", () => {
+    const failed = [{ id: "a", state: "error", detail: "You exceeded your current quota", errorType: "provider.quota", errorStatus: 429 }]
+    const rows = sessionRows([machine("m1", [session("a", { status: failed } as any), session("b", working("b")), session("c", { status: [{ id: "c", state: "error", detail: "Boom" }] } as any)])], normalizePrefs({}), {})
+    const by = Object.fromEntries(rows.map((r) => [r.id, r]))
+    expect(by.a).toMatchObject({ state: "error", running: false, error: "Quota exceeded (HTTP 429): You exceeded your current quota" })
+    expect(by.c!.error).toBe("Boom")
+    expect(by.b!.error).toBeUndefined()
+  })
 })

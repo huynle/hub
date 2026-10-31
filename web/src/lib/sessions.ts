@@ -8,6 +8,7 @@
 import { RANK, fold, matches, type SessionState } from "../core/browser-core"
 import { groupKey, hiddenBy, roots, toRow, type ViewMachine, type ViewPrefs, type ViewRow } from "../core/view-core"
 import { retryText, runningJobs } from "../core/jobs-core"
+import { treeError } from "../core/error-core"
 
 export type Source = "herdr" | "tui" | "background"
 
@@ -28,6 +29,8 @@ export interface SessionRow extends ViewRow {
   readonly jobs: number
   /** The tree is retrying a model request ("Retrying (attempt 2): Rate limited"). */
   readonly retry?: string
+  /** The session failed (state "error"): "Quota exceeded (HTTP 429): <message>", else the message. */
+  readonly error?: string
 }
 
 /** Every root session of every machine, newest first. */
@@ -42,6 +45,7 @@ export function sessionRows(machines: readonly ViewMachine[] | undefined, prefs:
       const source: Source = row.open ? (row.terminal?.source === "herdr" ? "herdr" : "tui") : "background"
       const read = reads[row.id]
       const retry = row.state === "working" ? retryText(s.status) : undefined
+      const error = row.state === "error" ? (treeError(s.status, row.id)?.text ?? "Error") : undefined
       out.push({
         ...row,
         machineName: machine.name,
@@ -54,6 +58,7 @@ export function sessionRows(machines: readonly ViewMachine[] | undefined, prefs:
         group: groupKey(s),
         jobs: runningJobs(s.status),
         ...(retry ? { retry } : {}),
+        ...(error ? { error } : {}),
       })
     }
   }

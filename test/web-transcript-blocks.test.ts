@@ -1,7 +1,7 @@
 // Transcript layout (web/src/lib/transcript.ts), markdown (web/src/lib/markdown.ts) and patch parsing
 // (web/src/lib/diff.ts) for the session view.
 import { describe, expect, test } from "bun:test"
-import { thoughtView, transcriptBlocks } from "../web/src/lib/transcript"
+import { retryView, thoughtView, transcriptBlocks } from "../web/src/lib/transcript"
 import { Timeline } from "../web/src/core/timeline-core"
 import { parseInline, parseMarkdown, safeHref } from "../web/src/lib/markdown"
 import { parsePatch } from "../web/src/lib/diff"
@@ -41,6 +41,30 @@ describe("transcriptBlocks", () => {
       { key: "a", kind: "assistant", text: "" },
     ])
     expect(blocks).toEqual([{ type: "thought", key: "r", text: "", running: true }])
+  })
+})
+
+describe("transcriptBlocks: failed and retried turns", () => {
+  const rows = [
+    { key: "u1", kind: "user", text: "go", pos: 1 },
+    { key: "m1:retry:1", kind: "retry", messageID: "m1", text: "Rate limited", errorType: "provider.rate-limit", errorStatus: 429, attempt: 3, next: 1_250_000, pos: 2 },
+    { key: "m1:error", kind: "error", messageID: "m1", text: "You exceeded your current quota", errorType: "provider.quota", errorStatus: 429, pos: 3 },
+  ]
+  test("error rows: label, message and HTTP status; retry rows keep attempt, reason and next time", () => {
+    const blocks = transcriptBlocks(rows)
+    expect(blocks.map((b) => b.type)).toEqual(["user", "retry", "error"])
+    expect(blocks[2]).toEqual({ type: "error", key: "m1:error", label: "Quota exceeded", message: "You exceeded your current quota", status: "HTTP 429" })
+    expect(blocks[1]).toMatchObject({ type: "retry", key: "m1:retry:1", attempt: 3, next: 1_250_000, errorType: "provider.rate-limit", message: "Rate limited" })
+  })
+  test("an error without a known type shows its message; one without text still shows", () => {
+    expect(transcriptBlocks([{ key: "e", kind: "error", text: "Boom" }])).toEqual([{ type: "error", key: "e", label: "Boom" }])
+    expect(transcriptBlocks([{ key: "e", kind: "error" }])).toEqual([{ type: "error", key: "e", label: "Error" }])
+  })
+  test("retryView: a live countdown that disappears once the time is past", () => {
+    const [retry] = transcriptBlocks([rows[1]!])
+    if (retry?.type !== "retry") throw new Error("not a retry block")
+    expect(retryView(retry, 1_000_000)).toEqual({ text: "Retrying (attempt 3) · next in 4m 10s: Rate limited", waiting: true })
+    expect(retryView(retry, 1_300_000)).toEqual({ text: "Retrying (attempt 3): Rate limited", waiting: false })
   })
 })
 
