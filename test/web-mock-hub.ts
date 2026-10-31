@@ -232,6 +232,13 @@ function fixtures(): Fixture[] {
   add(research, "Paper notes: retrieval", 35, {}, inHerdr("w_res"))
   add(research, "Benchmark harness", 120, {}, inHerdr("w_res"))
   add(research, "Reading list", 60 * 200)
+  // A model provider error (docs/session-view.md → Errors and retries): error banner, list badge, transcript row.
+  add(research, "Quota hit", 6, {
+    state: "error",
+    tree: [{ id: "", title: "Quota hit", state: "error", blockers: [], detail: "You exceeded your current quota, please check your plan and billing details.", errorType: "provider.quota", errorStatus: 429 }],
+  } as Partial<Fixture>)
+  const quotaHit = out[out.length - 1]! as Fixture & { tree: Array<{ id: string }> }
+  quotaHit.tree[0]!.id = quotaHit.id
   return out
 }
 let sessions = fixtures()
@@ -825,6 +832,7 @@ function timelineOf(id: string, title: string) {
     // Claude-style reasoning: only an encrypted signature is stored, no readable text.
     { key: `${m(3)}:0`, messageID: m(3), partID: "0", sessionID: id, kind: "reasoning", text: "", state: "done", at: t0 + 31_000, completed: t0 + 33_000 },
     ...(id === SESSION ? hubMessageRows(id, t0) : []),
+    ...(title === "Quota hit" ? [{ key: `${m(4)}:error`, messageID: m(4), sessionID: id, kind: "error", text: "You exceeded your current quota, please check your plan and billing details.", errorType: "provider.quota", errorStatus: 429, at: t0 + 40_000 }] : []),
   ]
 }
 
