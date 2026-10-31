@@ -200,6 +200,44 @@ export interface RetryInfo {
   readonly errorStatus?: number
 }
 
+/** Short labels of OpenCode's provider error types (session.execution.failed, retry status). */
+const PROVIDER_ERROR_LABELS: Readonly<Record<string, string>> = {
+  "provider.quota": "Quota exceeded",
+  "provider.free-limit": "Free limit reached",
+  "provider.auth": "Auth failed",
+  "provider.rate-limit": "Rate limited",
+  "provider.transport": "Network error",
+  "provider.internal": "Provider error",
+  "provider.timeout": "Timed out",
+  "provider.no-route": "No route to model",
+  "provider.unknown": "Unknown provider error",
+  "provider.content-filter": "Content filtered",
+  "provider.invalid-request": "Invalid request",
+  "provider.invalid-output": "Invalid output",
+  "provider.unsupported-operation": "Unsupported operation",
+}
+
+/** A budget or spending limit ("provider.budget-limit", "provider.spend-limit"): like a quota. Not a rate limit. */
+const budgetLike = (type: string): boolean =>
+  type !== "provider.rate-limit" && (type.includes("budget") || (type.startsWith("provider.") && type.includes("limit")))
+
+/** "Quota exceeded" for "provider.quota"; budget-like types read "Budget limit reached"; undefined when unknown. */
+export function errorTypeLabel(type: string | undefined): string | undefined {
+  if (!type) return undefined
+  return PROVIDER_ERROR_LABELS[type] ?? (type.startsWith("provider.") && budgetLike(type) ? "Budget limit reached" : undefined)
+}
+
+/** A failed run's error type the user must act on (quota, budget, auth, routing, unknown provider error). */
+export function providerFailureNeedsUser(type: string | undefined): boolean {
+  if (!type) return false
+  return ["provider.quota", "provider.free-limit", "provider.auth", "provider.no-route", "provider.unknown"].includes(type) || budgetLike(type)
+}
+
+/** A retry whose error the user must act on: retrying will not fix a quota, free tier or auth error. */
+export function providerRetryNeedsUser(type: string | undefined): boolean {
+  return type === "provider.quota" || type === "provider.auth" || type === "provider.free-limit"
+}
+
 export interface SessionStatus {
   readonly id: string
   readonly parentID?: string

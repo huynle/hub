@@ -32,6 +32,7 @@ export const NOTIFICATION_LABELS: Readonly<Record<NotificationKind, string>> = O
   activity: "Activity",
   decision: "Decision",
   message: "Message",
+  providerError: "Model provider error",
 })
 
 /** True for a known notification kind (API input). */
@@ -229,6 +230,7 @@ export function sendOptionsFor(kind: NotificationKind | "test"): { TTL: number; 
     case "failed":
     case "decision":
     case "message":
+    case "providerError":
       return { TTL: URGENT_TTL_SECONDS, urgency: "high" }
     case "done":
     case "stopped":

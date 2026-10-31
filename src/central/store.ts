@@ -121,6 +121,11 @@ export interface PushPrefs {
   decision: boolean
   /** Agent messaging needs you: a message to @me, an ask left unanswered after every re-wake, or a message loop. */
   message: boolean
+  /**
+   * A model provider error needs you: a quota, free-tier, budget, auth or no-route failure of any session in the tree
+   * (once per run), or a retry for a quota, free-tier or auth error. Replaces the root's "failed" for that failure.
+   */
+  providerError: boolean
 }
 
 export const PUSH_PREF_KEYS = [
@@ -141,6 +146,7 @@ export const PUSH_PREF_KEYS = [
   "activity",
   "decision",
   "message",
+  "providerError",
 ] as const satisfies readonly (keyof PushPrefs)[]
 
 /** Defaults: anything that needs you, all done, failed, hand-offs and spoken replies; the finer kinds are opt-in. */
@@ -163,6 +169,7 @@ export const DEFAULT_PUSH_PREFS: Readonly<PushPrefs> = Object.freeze({
   activity: false,
   decision: true,
   message: true,
+  providerError: true,
 })
 
 /** Default and allowed range of a device's activity update interval, in minutes. */

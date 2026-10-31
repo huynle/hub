@@ -92,6 +92,7 @@ export type NotifyKind =
   | "activity"
   | "decision"
   | "message"
+  | "providerError"
 
 export interface NotifyKindInfo {
   readonly key: NotifyKind
@@ -124,6 +125,7 @@ export const NOTIFY_GROUPS: readonly NotifyGroup[] = [
     kinds: [
       { key: "done", label: "All done", description: "The session and all its subagents and scripts finished; nothing waits on you. Once per run." },
       { key: "failed", label: "Failed", description: "The session's run failed (provider or tool error), with the reason." },
+      { key: "providerError", label: "Model provider error", description: "Quota, budget, auth or model-routing errors of the session or a subagent; once per run." },
       { key: "turn", label: "Turn finished", description: "Every reply of the main session, also the short ones between subagents. Noisy." },
       { key: "stopped", label: "Stopped", description: "A run stopped without you asking (OpenCode shut down, inactivity)." },
       { key: "retry", label: "Retrying", description: "The provider failed and OpenCode is retrying the request." },

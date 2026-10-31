@@ -270,3 +270,66 @@ describe("subagents, scripts and long tools", () => {
     expect(kinds()).toEqual(["permission"])
   })
 })
+
+describe("model provider errors (providerError)", () => {
+  const fail = (sessionID: string, type: string, message: string, status?: number) =>
+    both("session.execution.failed", { sessionID, error: { type, message, ...(status !== undefined ? { status } : {}) } })
+  const retry = (sessionID: string, attempt: number, errorType: string, message: string) =>
+    both("session.status", { sessionID, status: { type: "retry", attempt, message, errorType, errorStatus: 429, next: t + 5000 } })
+
+  test("a root quota failure: providerError once (both processes forward it), no duplicate 'failed'", () => {
+    both("session.execution.started", { sessionID: "ses_root" })
+    fail("ses_root", "provider.quota", "You exceeded your current quota", 429)
+    expect(of("providerError")).toEqual([{ kind: "providerError", sessionID: "ses_root", title: "KVM Rewrite", text: "KVM Rewrite: You exceeded your current quota", key: "ses_root" }])
+    expect(of("failed")).toEqual([])
+  })
+
+  for (const type of ["provider.quota", "provider.free-limit", "provider.auth", "provider.no-route", "provider.unknown", "provider.budget-limit", "provider.spend-limit"]) {
+    test(`a root failure of type ${type} raises providerError instead of failed`, () => {
+      both("session.execution.started", { sessionID: "ses_root" })
+      fail("ses_root", type, "nope")
+      expect(kinds().filter((k) => k === "providerError" || k === "failed")).toEqual(["providerError"])
+    })
+  }
+
+  for (const type of ["provider.internal", "provider.rate-limit", "provider.transport", "provider.content-filter", "tool.execution", "unknown"]) {
+    test(`a root failure of type ${type} stays 'failed'`, () => {
+      both("session.execution.started", { sessionID: "ses_root" })
+      fail("ses_root", type, "boom")
+      expect(of("providerError")).toEqual([])
+      expect(of("failed")).toHaveLength(2)
+    })
+  }
+
+  test("a subagent's auth failure: providerError with the subagent's title, besides subagentFailed", () => {
+    both("session.execution.started", { sessionID: "ses_root" })
+    spawn("ses_s1", "S3 macros")
+    fail("ses_s1", "provider.auth", "Invalid API key", 401)
+    expect(of("providerError")).toEqual([{ kind: "providerError", sessionID: "ses_root", title: "KVM Rewrite", text: "S3 macros: Invalid API key", key: "ses_s1" }])
+    expect(of("subagentFailed")).toHaveLength(1)
+  })
+
+  test("a quota retry raises providerError once per run; the run's final quota failure adds nothing; a new run may raise it again", () => {
+    both("session.execution.started", { sessionID: "ses_root" })
+    retry("ses_root", 1, "provider.quota", "Quota exceeded")
+    retry("ses_root", 2, "provider.quota", "Quota exceeded")
+    expect(of("providerError")).toEqual([{ kind: "providerError", sessionID: "ses_root", title: "KVM Rewrite", text: "KVM Rewrite: Quota exceeded", key: "ses_root" }])
+    expect(of("retry")).toEqual([{ kind: "retry", sessionID: "ses_root", title: "KVM Rewrite", text: "Attempt 1 · Quota exceeded: Quota exceeded" }])
+    fail("ses_root", "provider.quota", "Quota exceeded")
+    expect(of("providerError")).toHaveLength(1)
+    expect(of("failed")).toEqual([])
+    both("session.execution.started", { sessionID: "ses_root" })
+    fail("ses_root", "provider.quota", "Quota exceeded")
+    expect(of("providerError")).toHaveLength(2)
+  })
+
+  test("a subagent's auth retry raises providerError; a rate-limit retry does not (its retry push names the type)", () => {
+    both("session.execution.started", { sessionID: "ses_root" })
+    spawn("ses_s1", "S1")
+    retry("ses_s1", 1, "provider.auth", "Unauthorized")
+    expect(of("providerError")).toEqual([{ kind: "providerError", sessionID: "ses_root", title: "KVM Rewrite", text: "S1: Unauthorized", key: "ses_s1" }])
+    retry("ses_root", 1, "provider.rate-limit", "Slow down")
+    expect(of("providerError")).toHaveLength(1)
+    expect(of("retry")).toEqual([{ kind: "retry", sessionID: "ses_root", title: "KVM Rewrite", text: "Attempt 1 · Rate limited: Slow down" }])
+  })
+})
