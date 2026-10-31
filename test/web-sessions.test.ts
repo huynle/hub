@@ -250,6 +250,20 @@ describe("sidebarSections", () => {
     expect(shape(sidebarSections(list, { query: "arch", groupBy: "project", sortBy: "recent" }))).toEqual([["Results", []]])
   })
 
+  test("a failed session needs you until it runs again or is archived (sidebar and the Needs you filter)", () => {
+    const failed = (id: string) => ({ status: [{ id, state: "error", detail: "Quota", errorType: "provider.quota" }] })
+    const list = sessionRows(
+      [machine("m1", [session("fail", { ...failed("fail"), updated: min(9) }), session("arch-fail", { ...failed("arch-fail"), updated: min(8) }), session("plain", { updated: min(5) })])],
+      normalizePrefs({ hiddenSessions: ["arch-fail"] }),
+      {},
+    )
+    expect(shape(sidebarSections(list, { query: "", groupBy: "project", sortBy: "recent" }))).toEqual([
+      ["Needs you", ["fail"]],
+      ["Recents", ["plain"]],
+    ])
+    expect(tableRows(list, { ...DEFAULT_TABLE, filters: { ...DEFAULT_TABLE.filters, status: "needs" } }).map((r) => r.id)).toEqual(["fail"])
+  })
+
   test("Needs you, Running, Pinned, open-session groups, then Recents; each session once, hidden ones left out", () => {
     expect(shape(sidebarSections(rows, { query: "", groupBy: "project", sortBy: "recent" }))).toEqual([
       ["Needs you", ["need"]],

@@ -207,6 +207,13 @@ describe("payloads per kind", () => {
     expect(pushPayload("message", "ses_1", "t", "secret text")).toEqual({ kind: "message", sessionID: "ses_1", title: "t · Message", body: "Tap to see it." })
   })
 
+  test("per-session kinds carry the failing session as tagKey (a phone keeps the root's and a subagent's apart); others never do", () => {
+    expect(pushPayload("providerError", "ses_root", "KVM", "S1: Quota", { key: "ses_sub1" }).tagKey).toBe("ses_sub1")
+    expect(pushPayload("subagentFailed", "ses_root", "KVM", "x", { key: "ses_sub2", subject: "explore" }).tagKey).toBe("ses_sub2")
+    expect(pushPayload("providerError", "ses_root", "KVM", "x", { key: "not a session id" }).tagKey).toBeUndefined()
+    expect(pushPayload("jobFailed", "ses_root", "KVM", "x", { key: "job_1" }).tagKey).toBeUndefined()
+  })
+
   test("a decision push names its Decision (the tap opens its card); other kinds never carry one", () => {
     expect(pushPayload("decision", "ses_1", "t", undefined, { decisionID: "dec_abc" })).toEqual({
       kind: "decision",

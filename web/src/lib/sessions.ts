@@ -123,10 +123,10 @@ const COMPARE: Record<SortKey, (a: SessionRow, b: SessionRow) => number> = {
 }
 
 function passes(r: SessionRow, f: TableFilters): boolean {
-  // An archived session that needs you also shows under Needs you.
+  // An archived session that waits for an answer also shows under Needs you (a failed one does not: archiving clears it).
   const needsYou = f.status === "needs" && r.state === "blocked"
   if (f.archived ? !r.hidden : r.hidden && !needsYou) return false
-  if (f.status === "needs" && r.state !== "blocked") return false
+  if (f.status === "needs" && !needsYouNow(r)) return false
   if (f.status === "running" && !r.running) return false
   if (f.status === "idle" && r.running) return false
   if (f.source === "open" && r.source === "background") return false
@@ -202,6 +202,9 @@ export interface SidebarSection {
   readonly rows: SessionRow[]
 }
 
+/** Waits for an answer (even archived), or failed (a quota or auth error to fix) until it runs again or is archived. */
+const needsYouNow = (r: SessionRow): boolean => r.state === "blocked" || (r.state === "error" && !r.hidden)
+
 /**
  * The sidebar: Needs you, Running, Pinned, then sessions open in a terminal grouped by workspace (or server),
  * then the most recent others. Each session appears once; hidden sessions do not appear; a search shows one
@@ -212,7 +215,7 @@ export function sidebarSections(
   { query, groupBy, sortBy, recentLimit = 20 }: { query: string; groupBy: GroupBy; sortBy: SidebarSort; recentLimit?: number },
 ): SidebarSection[] {
   const visible = rows.filter((r) => !r.hidden)
-  const needsYou = rows.filter((r) => r.state === "blocked")
+  const needsYou = rows.filter(needsYouNow)
   const order = sortBy === "title" ? (a: SessionRow, b: SessionRow) => text(a.title, b.title) || recent(a, b) : recent
   if (query.trim()) return [{ id: "results", title: "Results", kind: "results", rows: visible.filter((r) => searched(r, query)).sort(recent) }]
   const used = new Set<string>()

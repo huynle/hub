@@ -5,6 +5,7 @@ import { treeError } from "../core/error-core"
 import { sessionHistory } from "../core/session-history"
 import { For, Match, Show, Switch, batch, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack } from "solid-js"
 import { blockersOf } from "../core/browser-core"
+import { sessionPlace } from "../core/view-core"
 import { reconcileSay, statusNotes, type StatusLike } from "../core/conversation-core"
 import { speechSetup, type StatusEntry } from "../core/feedback-core"
 import { storedMessageRow, Timeline } from "../core/timeline-core"
@@ -51,6 +52,11 @@ export function SessionView(props: { id: string }) {
   const id = props.id
   const found = () => lookup(id)
   const row = () => rows().find((r) => r.id === id)
+  /** Where the session runs (machine · project › folder · branch), so it is clear which checkout this is. */
+  const place = () => {
+    const f = found()
+    return f ? sessionPlace(f.machine.name, f.session, summary()?.branch) : undefined
+  }
   const status = () => found()?.session.status as readonly StatusEntry[] | undefined
   /** Something in this session's subtree works or waits (typed input steers, Stop applies). */
   const running = () => treeRunning(isChild() ? status()?.filter((s) => tree().has(s.id)) : status())
@@ -628,14 +634,16 @@ export function SessionView(props: { id: string }) {
               )}
             </Show>
           </div>
-          <Show when={found()}>
-            {(f) => (
-              <span class="chip-server" title={`${f().machine.name}${summary()?.branch ? ` · ${summary()!.branch}` : ""} · ${f().session.directory}`}>
-                <span class={`online-dot${f().machine.online ? " on" : ""}`} aria-hidden="true" />
-                {f().machine.name}
-                <Show when={summary()?.branch}>
+          <Show when={place()}>
+            {(p) => (
+              <span class="chip-server" title={`${p().text} · ${found()!.session.directory}`} aria-label={`Runs on ${p().text}`}>
+                <span class={`online-dot${found()!.machine.online ? " on" : ""}`} aria-hidden="true" />
+                {p().machine}
+                <span class="place-sep" aria-hidden="true">·</span>
+                <span class="place-where">{p().where}</span>
+                <Show when={p().branch}>
                   <Icon name="branch" />
-                  {summary()!.branch}
+                  {p().branch}
                 </Show>
               </span>
             )}
@@ -657,6 +665,20 @@ export function SessionView(props: { id: string }) {
           </Show>
           <IconButton icon="rail" label={railOpen() ? "Hide details" : "Show details"} aria-pressed={railOpen()} onClick={() => setRailOpen(!railOpen())} />
         </header>
+        <Show when={isPhone() && place()}>
+          {(p) => (
+            <div class="session-place" title={found()!.session.directory} aria-label={`Runs on ${p().text}`}>
+              <span class={`online-dot${found()!.machine.online ? " on" : ""}`} aria-hidden="true" />
+              <span class="place-machine">{p().machine}</span>
+              <span class="place-sep" aria-hidden="true">·</span>
+              <span class="place-where">{p().where}</span>
+              <Show when={p().branch}>
+                <Icon name="branch" />
+                <span class="place-branch">{p().branch}</span>
+              </Show>
+            </div>
+          )}
+        </Show>
 
         <Show when={failure()}>
           {(e) => (

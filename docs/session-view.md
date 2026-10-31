@@ -70,7 +70,14 @@ The console shows them as:
 - **Transcript** (history): an `error` row after a failed assistant message, a `retry` row with a live countdown while a
   message waits to retry.
 - **Session lists** (Home, sidebar, rail): a "!" badge with the error. Rows refresh on catalog updates only, so they
-  carry no countdown.
+  carry no countdown. A failed session is listed under **Needs you** (sidebar and the Home filter) until it runs
+  again or is archived; unlike a waiting question, an archived failed session leaves Needs you.
+
+## Where a session runs
+
+The session header names the machine, the project (› folder inside it, e.g. a worktree) and the git branch:
+`laptop · hub › .worktrees/fix · fix/x` (`sessionPlace` in `web/src/core/view-core.ts`). Desktop shows it as the chip
+next to the title; phones show it as a line under the header. The branch appears once OpenCode reports it.
 
 Error types map to labels in `web/src/core/error-core.ts`; unknown types show the message alone. Push: see
 `providerError` in [notifications](notifications.md).

@@ -312,6 +312,13 @@ export function whereOf(s: ViewSession): string {
   return `${s.projectName || basename(root)}${rel ? ` › ${rel}` : ""}`
 }
 
+/** Where a session runs, for the session header: machine, project (› folder inside it), git branch when known. */
+export function sessionPlace(machine: string, s: ViewSession, branch: string | undefined): { machine: string; where: string; branch?: string; text: string } {
+  const where = whereOf(s)
+  const b = branch?.trim() || undefined
+  return { machine, where, ...(b ? { branch: b } : {}), text: [machine, where, b].filter(Boolean).join(" · ") }
+}
+
 export function toRow(s: ViewSession, machine: ViewMachine | undefined, pinned: ReadonlySet<string>): ViewRow {
   const ws = isHerdr(s)
     ? s.terminal!.workspace || herdrWorkspaces(machine).find((w) => w.id === s.terminal!.workspaceID)?.label || s.terminal!.workspaceID

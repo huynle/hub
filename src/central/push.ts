@@ -61,6 +61,8 @@ export interface PushPayload {
   readonly decisionID?: string
   /** A test notification shaped like `kind`. */
   readonly test?: true
+  /** Per-session kinds (providerError, subagentFailed): the session it is about, so the service worker tags each apart. */
+  readonly tagKey?: string
 }
 
 const minutes = (clock: string): number => Number(clock.slice(0, 2)) * 60 + Number(clock.slice(3, 5))
@@ -191,6 +193,8 @@ function kindTitle(kind: NotificationKind, subject: string | undefined): string 
 }
 
 const OPEN = "Tap to open the session."
+/** A session ID: the only key a payload may carry (job and tool IDs stay on the hub). */
+const SESSION_ID = /^ses_[A-Za-z0-9]{1,64}$/
 
 export function pushPayload(kind: NotificationKind, sessionID: string, sessionTitle: string, text?: string, extra: PushExtra = {}): PushPayload {
   const name = shorten(sessionTitle)
@@ -216,6 +220,9 @@ export function pushPayload(kind: NotificationKind, sessionID: string, sessionTi
       return { kind, sessionID, title, body: detail || "Nothing is running or waiting. Tap to open." }
     case "activity":
       return { kind, sessionID, title, body: detail || "New activity." }
+    case "providerError":
+    case "subagentFailed":
+      return { kind, sessionID, title, body: detail || OPEN, ...(extra.key && SESSION_ID.test(extra.key) ? { tagKey: extra.key } : {}) }
     default:
       return { kind, sessionID, title, body: detail || OPEN }
   }

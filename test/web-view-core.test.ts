@@ -1,7 +1,7 @@
 // Session view (0.4.0, docs/session-view.md): open sessions first. Synced view prefs (hide/pin), migration of
 // 0.3 local pins, Open / Recent / Hidden split, Herdr-like grouping and ordering, status dots, new-session targets.
 import { describe, expect, test } from "bun:test"
-import { MAX_ARCHIVED, PendingTitles, createBody, dotState, groupKey, newSessionTargets, hiddenView, homeView as typedHomeView, migratePins, normalizePrefs, recentMachine, renameTitle, retitle, setPref, setPrefs } from "../web/src/core/view-core"
+import { MAX_ARCHIVED, PendingTitles, createBody, dotState, groupKey, newSessionTargets, hiddenView, homeView as typedHomeView, migratePins, normalizePrefs, recentMachine, renameTitle, retitle, setPref, setPrefs, sessionPlace } from "../web/src/core/view-core"
 
 type S = any
 const homeView = (...args: Parameters<typeof typedHomeView>): S => typedHomeView(...args)
@@ -372,5 +372,20 @@ describe("PendingTitles", () => {
     expect(pending.has("ses_p")).toBe(true)
     pending.drop("ses_p", "Two")
     expect(pending.has("ses_p")).toBe(false)
+  })
+})
+
+describe("sessionPlace (where a session runs: machine · project › folder · branch)", () => {
+  test("machine, project with its worktree folder, and branch", () => {
+    expect(sessionPlace("laptop", { id: "s", directory: "/home/u/hub/.worktrees/fix", project: "/home/u/hub", projectName: "hub" }, "fix/x")).toEqual({
+      machine: "laptop",
+      where: "hub › .worktrees/fix",
+      branch: "fix/x",
+      text: "laptop · hub › .worktrees/fix · fix/x",
+    })
+  })
+  test("no branch yet (OpenCode warming up) or no project: what is known", () => {
+    expect(sessionPlace("baruch", { id: "s", directory: "/srv/app/" }, undefined).text).toBe("baruch · app")
+    expect(sessionPlace("baruch", { id: "s", directory: "/srv/app" }, "  ").branch).toBeUndefined()
   })
 })

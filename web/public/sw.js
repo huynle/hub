@@ -17,6 +17,7 @@ const VIBRATE = {
   decision: [200, 100, 200],
   message: [150, 80, 150],
   failed: [300],
+  providerError: [300, 100, 300],
   subagentFailed: [300],
   jobFailed: [300],
   done: [100, 60, 100],
@@ -98,6 +99,8 @@ self.addEventListener("push", (event) => {
   const sessionID = typeof data.sessionID === "string" ? data.sessionID : ""
   const kind = typeof data.kind === "string" ? data.kind : "update"
   const requestID = typeof data.requestID === "string" ? data.requestID : ""
+  // Per-session kinds (a root's and a subagent's provider error) keep one notification each.
+  const tagKey = typeof data.tagKey === "string" && /^ses_[A-Za-z0-9]{1,64}$/.test(data.tagKey) ? data.tagKey : ""
   const decisionID = kind === "decision" && typeof data.decisionID === "string" && /^dec_[A-Za-z0-9]{1,64}$/.test(data.decisionID) ? data.decisionID : ""
   event.waitUntil(
     (async () => {
@@ -125,7 +128,7 @@ self.addEventListener("push", (event) => {
       await self.registration.showNotification(data.title || "Hub", {
         body,
         // One notification per session and kind (a test one does not replace a real one).
-        tag: `${data.test ? "test:" : ""}${sessionID}:${kind}`,
+        tag: `${data.test ? "test:" : ""}${sessionID}:${kind}${tagKey && tagKey !== sessionID ? `:${tagKey}` : ""}`,
         renotify: !QUIET.has(kind),
         requireInteraction: STICKY.has(kind),
         vibrate: VIBRATE[kind] || [100],

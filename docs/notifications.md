@@ -66,7 +66,7 @@ quietly; the others alert again.
 Delivery: `question`, `permission`, `failed`, `providerError`, `decision`, `message` are high urgency with a one-hour TTL; `done`, `stopped`,
 `subagentFailed`, `jobFailed` normal urgency, one hour; the progress kinds normal urgency, 5 minutes; `say` and
 `handoff` high urgency, 5 minutes. At most one notification per session and kind every 30 s (`say`: 10 s);
-subagent, script, long-tool and `providerError` notifications count per subagent / job / tool call / failing session.
+subagent, script, long-tool and `providerError` notifications count per subagent / job / tool call / failing session. On the phone, `providerError` and `subagentFailed` carry the failing session (`tagKey`), so a root's and a subagent's notifications show side by side instead of replacing each other.
 
 A permission an agent escalated keeps its own `permission` notification, but without Allow/Reject when the
 service worker sees it was escalated to a `tap` Decision (or cannot read the Decision): answer it in the console.

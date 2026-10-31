@@ -211,7 +211,12 @@ input[type="text"].rename-field { flex: 1; min-width: 0; width: 100%; min-height
 .topbar .rename-wrap { max-width: 560px; }
 .auto-name-btn { flex: none; font-size: 14px; line-height: 1; }
 .naming { display: inline-flex; align-items: center; gap: 4px; flex: none; margin-left: 6px; white-space: nowrap; font-weight: normal; }
-.chip-server { display: inline-flex; align-items: center; gap: 4px; font-size: 0.75rem; color: var(--muted); border: 1px solid var(--line); border-radius: 13px; padding: 2px 10px; max-width: 260px; overflow: hidden; white-space: nowrap; }
+.chip-server { display: inline-flex; align-items: center; gap: 4px; font-size: 0.75rem; color: var(--muted); border: 1px solid var(--line); border-radius: 13px; padding: 2px 10px; max-width: 420px; overflow: hidden; white-space: nowrap; }
+.chip-server .place-where { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.session-place { display: flex; align-items: center; gap: 4px; padding: 4px 12px; font-size: 0.75rem; color: var(--muted); border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; flex: none; }
+.session-place .place-machine { color: var(--text, inherit); font-weight: 500; }
+.session-place .place-where, .session-place .place-branch { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.session-place .icon { width: 12px; height: 12px; flex: none; margin-left: 4px; }
 .chip-server .icon { width: 12px; height: 12px; margin-left: 6px; }
 /* Evidence badge of a non-OpenCode session (P7-T10): how the hub observes it; the title explains. */
 .chip-evidence { display: inline-flex; align-items: center; font-size: 0.75rem; color: var(--muted); border: 1px dashed var(--line); border-radius: 13px; padding: 2px 10px; white-space: nowrap; cursor: help; }
