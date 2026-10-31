@@ -225,6 +225,20 @@ setInterval(() => setClock(Date.now()), 30_000)
 /** Reactive "now" (30 s resolution) for relative times. */
 export const now = clock
 
+const [second, setSecond] = createSignal(Date.now())
+setInterval(() => setSecond(Date.now()), 1000)
+/** Reactive "now" (1 s resolution) for countdowns (the next model retry). */
+export const nowSecond = second
+
+/** A failed session's marker next to its status: "!" with the error as its tooltip and accessible name. */
+export function ErrorBadge(props: { text: string }) {
+  return (
+    <span class="error-badge" role="img" aria-label={`Error: ${props.text}`} title={props.text}>
+      !
+    </span>
+  )
+}
+
 export function ago(ms: number | undefined, at = clock()): string {
   if (!ms) return ""
   const s = Math.max(0, Math.round((at - ms) / 1000))

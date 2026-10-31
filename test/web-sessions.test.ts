@@ -295,6 +295,12 @@ describe("sessionRows: background jobs and retries", () => {
     expect(b.retry).toBeUndefined()
   })
 
+  test("row retry text has no countdown (rows do not re-render every second; stableRows keeps them identical)", () => {
+    const status = [{ id: "a", state: "working", retry: { attempt: 2, errorType: "provider.rate-limit", next: Date.now() + 600_000 } }]
+    const [row] = sessionRows([machine("m1", [session("a", { status } as any)])], normalizePrefs({}), {})
+    expect(row!.retry).toBe("Retrying (attempt 2): Rate limited")
+  })
+
   test("a session in state error carries its error (label and message) until a new run starts", () => {
     const failed = [{ id: "a", state: "error", detail: "You exceeded your current quota", errorType: "provider.quota", errorStatus: 429 }]
     const rows = sessionRows([machine("m1", [session("a", { status: failed } as any), session("b", working("b")), session("c", { status: [{ id: "c", state: "error", detail: "Boom" }] } as any)])], normalizePrefs({}), {})

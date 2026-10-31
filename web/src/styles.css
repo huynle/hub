@@ -677,3 +677,22 @@ button.link { background: none; border: 0; padding: 0; color: var(--accent, #fab
 @media (pointer: coarse) {
   input[type="search"], input[type="text"], input[type="password"], input[type="number"], select, textarea, .composer textarea, .new-composer textarea { font-size: max(16px, 1rem); }
 }
+/* Failed sessions and model retries: the Session banner, transcript rows, and the "!" badge of session rows. */
+.banner.session-error { justify-content: flex-start; align-items: flex-start; margin: 0; border-radius: 0; border-width: 0 0 1px; border-color: color-mix(in srgb, var(--err) 45%, var(--line)); background: color-mix(in srgb, var(--err) 10%, var(--bg)); color: var(--text); }
+.session-error-mark, .turn-error-mark { color: var(--err); font-weight: 600; flex: none; line-height: 1.4; }
+.session-error-body, .turn-error-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.session-error-head, .turn-error-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; color: var(--err); }
+.session-error-status, .turn-error-status { font-size: 0.75rem; border: 1px solid currentColor; border-radius: 999px; padding: 0 6px; }
+.session-error-where { font-size: 0.8125rem; }
+.session-error-message, .turn-error-message { font-size: 0.8125rem; overflow-wrap: anywhere; white-space: pre-wrap; max-height: 8em; overflow: auto; }
+.msg.turn-error { display: flex; gap: 8px; align-items: flex-start; padding: 8px 12px; border: 1px solid color-mix(in srgb, var(--err) 45%, var(--line)); border-radius: var(--r); background: color-mix(in srgb, var(--err) 8%, transparent); }
+.msg.turn-retry { display: flex; gap: 8px; align-items: baseline; margin: 6px 0; font-size: 0.8125rem; color: var(--muted); overflow-wrap: anywhere; }
+.msg.turn-retry.waiting { color: var(--warn); }
+.turn-retry-mark { flex: none; }
+.error-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px; margin-left: 4px; border-radius: 8px; font-size: 0.75rem; font-weight: 700; line-height: 1; background: var(--err); color: var(--bg); flex: none; }
+.col-now.error, .home-item-meta.error { color: var(--err); }
+.rail-error { color: var(--err); margin: 0 0 10px; padding: 6px 10px; border: 1px solid color-mix(in srgb, var(--err) 45%, var(--line)); border-radius: var(--r); overflow-wrap: anywhere; }
+@media (max-width: 760px) {
+  .banner.session-error { padding: 8px 14px; }
+  .session-error-message { max-height: 5.5em; }
+}

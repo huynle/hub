@@ -1,6 +1,7 @@
 // One session: top bar, transcript (history + live), permission/question cards, Voice bar, composer, right rail
 // and diff viewer. Works whether Voice is on or off; Voice mode turns Voice on first when needed.
 import { jobsBadge, retryText, runningJobs } from "../core/jobs-core"
+import { treeError } from "../core/error-core"
 import { sessionHistory } from "../core/session-history"
 import { For, Match, Show, Switch, batch, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack } from "solid-js"
 import { blockersOf } from "../core/browser-core"
@@ -581,6 +582,8 @@ export function SessionView(props: { id: string }) {
     const jobs = runningJobs(status())
     return `${retrying ?? p.label}${p.since ? ` · ${formatElapsed(Date.now() - p.since)}` : ""}${jobs ? ` · ${jobsBadge(jobs)}` : ""}`
   }
+  /** The session (or a subagent of it) failed, e.g. "Quota exceeded"; gone once a new run starts. */
+  const failure = () => treeError(status(), id)
   const metaLeft = () => {
     const s = found()?.session
     if (!s) return "Not connected"
@@ -654,6 +657,28 @@ export function SessionView(props: { id: string }) {
           </Show>
           <IconButton icon="rail" label={railOpen() ? "Hide details" : "Show details"} aria-pressed={railOpen()} onClick={() => setRailOpen(!railOpen())} />
         </header>
+
+        <Show when={failure()}>
+          {(e) => (
+            <div class="banner session-error" role="alert" data-error-session={e().sessionID}>
+              <span class="session-error-mark" aria-hidden="true">✕</span>
+              <div class="session-error-body">
+                <div class="session-error-head">
+                  <strong>{e().label}</strong>
+                  <Show when={e().status}>
+                    <span class="session-error-status">{e().status}</span>
+                  </Show>
+                  <Show when={e().sessionID !== id && e().title}>
+                    <span class="session-error-where muted">in subagent {e().title}</span>
+                  </Show>
+                </div>
+                <Show when={e().message && e().message !== e().label}>
+                  <div class="session-error-message">{e().message}</div>
+                </Show>
+              </div>
+            </div>
+          )}
+        </Show>
 
         <Show when={offline() && hub.machines}>
           <div class="banner warn">No connected OpenCode process reports this session. It is read-only until its machine reconnects.</div>
